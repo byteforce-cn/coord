@@ -373,6 +373,14 @@ pub fn looks_like_cncf_sw(value: &Value) -> bool {
 
 /// 解析 CNCF SW 文档（serde_json::Value）为内部执行模型
 pub fn parse_cncf_sw_value(root: Value) -> Result<WorkflowDefinition, String> {
+    // 官方 use.extensions 在 states/start 路线同样无执行面；serde 会静默忽略它，
+    // 与 document/do 路线保持一致的 fail-closed（Spike 4 核心发现）。
+    if root.get("use").and_then(|u| u.get("extensions")).is_some() {
+        return Err(
+            "unimplemented construct 'use.extensions': coord does not execute official extension points"
+                .into(),
+        );
+    }
     let doc: SwWorkflowDoc = serde_json::from_value(root)
         .map_err(|e| format!("invalid Serverless Workflow document: {e}"))?;
     convert(doc)
@@ -390,7 +398,7 @@ pub fn parse_cncf_sw(input: &str) -> Result<WorkflowDefinition, String> {
 // ─── 转换 ───
 
 /// 终端任务保留名（SW 状态不得占用）
-const END_TASK: &str = "__end";
+pub(crate) const END_TASK: &str = "__end";
 
 fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
     // ── 1. 基础校验 ──
@@ -1484,7 +1492,7 @@ fn transition_task(state: &str, target: &str) -> NamedTask {
 }
 
 /// JSON 值 → jq 字面量表达式字符串
-fn json_to_jq_literal(v: &Value) -> String {
+pub(crate) fn json_to_jq_literal(v: &Value) -> String {
     match v {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
@@ -1894,6 +1902,9 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            initiator: None,
+            definition_hash: None,
+            engine_version: None,
         };
 
         // 线性推进（不实际派发 call）：走到 check 前（init 的 set/转移）

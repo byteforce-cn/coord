@@ -28,6 +28,10 @@ ignore = [
 ]
 
 [licenses]
+# 私有 workspace 成员（`publish = false`，如冻结的 spike 证据工装）不参与许可证
+# 合规判定：它们不随发布物交付，清单也不要求声明 license（见 spike/2026-10/README.md）。
+private = { ignore = true }
+
 # 默认拒绝未明确列出的许可证；coord 依赖栈常用许可白名单
 #
 # wasmtime（48.x）采用 `Apache-2.0 WITH LLVM-exception` 这个 SPDX 表达式
@@ -59,6 +63,10 @@ exceptions = []
 # 而不是降级为警告。
 multiple-versions = "warn"
 wildcards = "deny"
+# 私有 workspace 成员（`publish = false`）以无版本 path 依赖引用内部 crate：
+# crates.io 不允许公共 crate 这样发布，私有面豁免 wildcard 检查（cargo-deny
+# `allow-wildcard-paths` 语义），避免对冻结证据工装的清单做版本元数据改动。
+allow-wildcard-paths = true
 deny = []
 skip = []
 

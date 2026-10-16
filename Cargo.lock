@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "coord"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "clap",
@@ -589,6 +589,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -602,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "coord-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -656,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "coord-client"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "coord-core",
@@ -675,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "coord-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -699,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "coord-macros"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "coord-core",
  "proc-macro2",
@@ -709,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "coord-proto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "proptest",
  "prost",
@@ -722,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "coord-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -768,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "coord-test"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "coord-core",
  "rand 0.8.6",
@@ -3520,6 +3521,26 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spike-conformance"
+version = "0.1.0"
+dependencies = [
+ "coord-core",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
+name = "spike3-recovery-harness"
+version = "0.1.0"
+dependencies = [
+ "coord-agent",
+ "coord-client",
+ "coord-core",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

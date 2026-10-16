@@ -1,0 +1,11 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: if-condition
+  version: "1.0.0"
+do:
+  - maybe:
+      if: "${ .enabled }"
+      set:
+        ran: true
+      then: exit

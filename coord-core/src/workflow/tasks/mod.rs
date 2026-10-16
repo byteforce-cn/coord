@@ -17,7 +17,9 @@
 // - for_each:集合迭代 → ForEach（Runtime 负责迭代执行）
 // - try_catch:异常处理 → TryBlock（Runtime 负责 try/catch 流程）
 // - run:     子流程 → Suspend(RunSubflow)
+// - approve: 原生审批节点 → Suspend(WaitingForApproval)
 
+pub mod approve;
 pub mod call;
 pub mod do_task;
 pub mod emit;

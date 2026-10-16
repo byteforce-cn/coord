@@ -1,0 +1,111 @@
+   Compiling coord v0.3.0 (/tmp/coord-spike/wt/coord)
+    Finished `test` profile [optimized + debuginfo] target(s) in 15.22s
+     Running tests/spike5_bench.rs (target/debug/deps/spike5_bench-f1fceaa525964a30)
+
+running 5 tests
+test tests::bench_kv_write_throughput ... 
+# Spike 5 · KV 写延迟/吞吐（闭环，单节点 Raft）
+| 并发 | 窗口(s) | 提交 ops | 成功 | 失败 | 成功吞吐(ops/s) | P50(µs) | P95(µs) | P99(µs) | max(µs) |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 100 | 10.0 | 6359 | 6359 | 0 | 636 | 134315 | 159076 | 512205 | 1411922 |
+| 500 | 10.0 | 7236 | 7236 | 0 | 724 | 649029 | 945942 | 969585 | 976411 |
+| 1000 | 10.0 | 6918 | 6918 | 0 | 692 | 1331460 | 2122420 | 2131308 | 2134690 |
+
+原始样本：/tmp/coord-spike/wt/spike/2026-10/spike-5-bench/evidence/raw/kv-write-latency.jsonl
+ok
+test tests::bench_storage_growth ... 
+# Spike 5 · 存储增长（单节点 Raft，20000 次 × 256B Put）
+| 写入数 | data-dir 字节 | 增量 | 字节/写 | 累计耗时(ms) |
+|--:|--:|--:|--:|--:|
+| 1000 | 2748416 | 2129920 | 2129.9 | 2596 |
+| 2000 | 4685824 | 4067328 | 2033.7 | 5275 |
+| 3000 | 7028736 | 6410240 | 2136.7 | 7940 |
+| 4000 | 9269248 | 8650752 | 2162.7 | 10660 |
+| 5000 | 10539008 | 9920512 | 1984.1 | 13395 |
+| 6000 | 17090450 | 16471954 | 2745.3 | 15941 |
+| 7000 | 17090450 | 16471954 | 2353.1 | 18576 |
+| 8000 | 22132626 | 21514130 | 2689.3 | 21245 |
+| 9000 | 22132626 | 21514130 | 2390.5 | 23922 |
+| 10000 | 22132626 | 21514130 | 2151.4 | 26532 |
+| 11000 | 28514868 | 27896372 | 2536.0 | 29163 |
+| 12000 | 36080180 | 35461684 | 2955.1 | 31694 |
+| 13000 | 36080180 | 35461684 | 2727.8 | 34290 |
+| 14000 | 36080180 | 35461684 | 2533.0 | 36896 |
+| 15000 | 36080180 | 35461684 | 2364.1 | 39560 |
+| 16000 | 45662422 | 45043926 | 2815.2 | 42210 |
+| 17000 | 45662422 | 45043926 | 2649.6 | 44794 |
+| 18000 | 57008342 | 56389846 | 3132.8 | 47354 |
+| 19000 | 57008342 | 56389846 | 2967.9 | 49938 |
+| 20000 | 57008342 | 56389846 | 2819.5 | 52585 |
+
+20000 写，值 256B：data-dir 618496 → 57008342（Δ56389846 B，2819.5 B/写）
+原始样本：/tmp/coord-spike/wt/spike/2026-10/spike-5-bench/evidence/raw/storage-growth.jsonl
+ok
+test tests::bench_txn_size_limit ... 
+# Spike 5 · Txn 操作数阶梯（单节点 Raft，默认 max_txn_ops）
+| 场景 | 总操作数 | compare | puts | RPC ok | succeeded | 延迟(µs) | 错误 |
+|:--|--:|--:|--:|:--|:--|--:|:--|
+| puts_only | 1 | 0 | 1 | true | true | 5366 | - |
+| puts_only | 2 | 0 | 2 | true | true | 5634 | - |
+| puts_only | 10 | 0 | 10 | true | true | 5635 | - |
+| puts_only | 50 | 0 | 50 | true | true | 46701 | - |
+| puts_only | 100 | 0 | 100 | true | true | 48842 | - |
+| puts_only | 127 | 0 | 127 | true | true | 50831 | - |
+| puts_only | 128 | 0 | 128 | true | true | 46064 | - |
+| puts_only | 129 | 0 | 129 | false | false | 766 | InvalidArgument: txn ops 129 exceeds max 128 |
+| puts_only | 200 | 0 | 200 | false | false | 739 | InvalidArgument: txn ops 200 exceeds max 128 |
+| puts_only | 500 | 0 | 500 | false | false | 1090 | InvalidArgument: txn ops 500 exceeds max 128 |
+| puts_only | 1000 | 0 | 1000 | false | false | 1756 | InvalidArgument: txn ops 1000 exceeds max 128 |
+| puts_only | 2000 | 0 | 2000 | false | false | 3003 | InvalidArgument: txn ops 2000 exceeds max 128 |
+| cas_compare_plus_puts | 128 | 1 | 127 | true | true | 48460 | - |
+| cas_compare_plus_puts | 129 | 1 | 128 | false | false | 908 | InvalidArgument: txn ops 129 exceeds max 128 |
+
+原始样本：/tmp/coord-spike/wt/spike/2026-10/spike-5-bench/evidence/raw/txn-size-ladder.jsonl
+ok
+test tests::bench_value_size_limit ... 
+# Spike 5 · 单值大小阶梯（单节点 Raft；服务端解码上限 4 MiB）
+| 值字节 | 写 RPC ok | 写 succeeded | 写延迟(µs) | 回读 ok | 回读字节 | 错误 |
+|--:|:--|:--|--:|:--|--:|:--|
+| 1024 | true | true | 5848 | true | 1024 | - |
+| 65536 | true | true | 8297 | true | 65536 | - |
+| 1048576 | true | true | 42747 | true | 1048576 | - |
+| 2097152 | true | true | 66507 | true | 2097152 | - |
+| 4194276 | true | true | 112646 | false | 0 | OutOfRange: Error, decoded message length too large: found 4194318 bytes, the limit is: 4194304 bytes |
+| 4194304 | false | false | 3243 | false | 0 | OutOfRange: Error, decoded message length too large: found 4194331 bytes, the limit is: 4194304 bytes |
+| 8388608 | false | false | 9220 | false | 0 | OutOfRange: Error, decoded message length too large: found 8388635 bytes, the limit is: 4194304 bytes |
+| 16777216 | false | false | 15479 | false | 0 | OutOfRange: Error, decoded message length too large: found 16777244 bytes, the limit is: 4194304 bytes |
+| 33554432 | false | false | 12699 | false | 0 | OutOfRange: Error, decoded message length too large: found 33554460 bytes, the limit is: 4194304 bytes |
+
+原始样本：/tmp/coord-spike/wt/spike/2026-10/spike-5-bench/evidence/raw/value-size-ladder.jsonl
+ok
+test tests::bench_watch_fanout ... 
+# Spike 5 · Watch 扇出（1000 连接，同一 key，20 轮）
+| 轮次 | 期望投递 | 实收 | 丢失 | 写完成(µs) | P50(µs) | P95(µs) | P99(µs) | max(µs) |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 0 | 1000 | 1000 | 0 | 41231 | 15105 | 17272 | 17538 | 17558 |
+| 1 | 1000 | 1000 | 0 | 15358 | 12083 | 15204 | 15474 | 15516 |
+| 2 | 1000 | 1000 | 0 | 11311 | 9485 | 11228 | 11452 | 11491 |
+| 3 | 1000 | 1000 | 0 | 9244 | 7981 | 8996 | 9198 | 9212 |
+| 4 | 1000 | 1000 | 0 | 6416 | 4995 | 6332 | 6379 | 6392 |
+| 5 | 1000 | 1000 | 0 | 6593 | 5510 | 6504 | 6553 | 6565 |
+| 6 | 1000 | 1000 | 0 | 6717 | 5504 | 6635 | 6681 | 6696 |
+| 7 | 1000 | 1000 | 0 | 5878 | 5128 | 6047 | 6122 | 6597 |
+| 8 | 1000 | 1000 | 0 | 5914 | 4560 | 5828 | 5887 | 5905 |
+| 9 | 1000 | 1000 | 0 | 6984 | 5731 | 6789 | 6930 | 6945 |
+| 10 | 1000 | 1000 | 0 | 6946 | 5732 | 6804 | 6893 | 6928 |
+| 11 | 1000 | 1000 | 0 | 6494 | 5393 | 6537 | 6612 | 6761 |
+| 12 | 1000 | 1000 | 0 | 7233 | 5861 | 6948 | 7020 | 7067 |
+| 13 | 1000 | 1000 | 0 | 6989 | 5367 | 6871 | 6930 | 6970 |
+| 14 | 1000 | 1000 | 0 | 7582 | 6089 | 7529 | 7630 | 7649 |
+| 15 | 1000 | 1000 | 0 | 7695 | 6233 | 7600 | 7651 | 7663 |
+| 16 | 1000 | 1000 | 0 | 8857 | 6889 | 8705 | 8783 | 8813 |
+| 17 | 1000 | 1000 | 0 | 9597 | 7712 | 9371 | 9487 | 9522 |
+| 18 | 1000 | 1000 | 0 | 10295 | 7832 | 10207 | 10380 | 10456 |
+| 19 | 1000 | 1000 | 0 | 9709 | 7713 | 9543 | 9644 | 9668 |
+
+原始样本：/tmp/coord-spike/wt/spike/2026-10/spike-5-bench/evidence/raw/watch-fanout.jsonl
+连接成功 1000/1000；RSS 116604→177248 KiB；CPU 累计 1.3s
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 96.73s
+

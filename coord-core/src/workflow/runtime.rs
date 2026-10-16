@@ -10,19 +10,31 @@
 // 实现基本驱动循环，支持 call/do/switch/wait 任务
 // 补充 任务类型（fork/for-each/listen 等）
 // 对接 coord-agent WorkflowService
+//
+// 实例写路径（收口）：
+// - 对**已存在实例**的状态写一律经 [`WorkflowRuntime::commit_instance`]
+//   （CAS/fencing + 状态与伴生事件同事务）；控制面（无租约）另经
+//   [`WorkflowRuntime::commit_control_plane`] 做「线性一致读修订号 + 冲突重放」。
+// - 仅有的裸写点（新键创建，不存在并发写同一键的问题）：
+//   ① `start` 的首次实例写；② `start` 输入校验失败时的 faulted 实例写；
+//   ③ `run` 子流程内联创建子实例的写。
+//   除这三处（及 `commit_instance` 内部的降级分支）外，任何 `save_instance(` 都是回归。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 
+use super::approval::bridge::{ApprovalBridge, BridgeError, NodeOutcome, SYSTEM_ACTOR};
+use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
-    InstanceStatus, StepResult, SuspendReason, SuspensionMeta, TaskFrame, TaskStatus,
-    WorkflowDefinition, WorkflowFault, WorkflowInstance,
+    ApproveTask, EventFilter, InstanceStatus, StepResult, SuspendReason, SuspensionMeta, Task,
+    TaskFrame, TaskStatus, WorkflowDefinition, WorkflowFault, WorkflowInstance,
 };
 use super::ports::{
-    Clock, DispatchResult, EventProvider, ExpressionEval, TaskDispatcher, WorkflowStore,
+    Clock, DispatchResult, EventProvider, ExpressionEval, InstanceLease, LeaseGuard,
+    TaskDispatcher, WorkflowStore,
 };
 use super::retry::{RetryConfig, RetryScheduler};
 
@@ -31,6 +43,26 @@ use super::retry::{RetryConfig, RetryScheduler};
 /// tick 本身不做全量列举（见 `pending_subflows` 字段注释），
 /// 所以固定 5s 不再有实例规模相关的代价。
 const SUBFLOW_SCAN_INTERVAL_SECS: u64 = 5;
+
+/// 持久化定时器扫描器的 tick 间隔（毫秒）。
+///
+/// 进程内快速路径仍由 `schedule_auto_resume`/`schedule_timeout` 的 `sleep` 承担；
+/// 扫描器只负责「进程内定时器随进程消失」之后的那部分（重启补齐），间隔取小值以
+/// 让到期触发足够及时（补偿延迟 = tick 间隔上界）。
+const DURABLE_TIMER_SCAN_INTERVAL_MS: u64 = 200;
+
+/// `call` 的 step 标识（v1 临时口径：任务索引 + 任务名）。
+///
+/// v2 由分支/轮次/席位替换（见 ADR D2）。retry 时任务索引不前移，故重试派发
+/// 派生出的 `step_id`/`token` 逐字相同 —— 这是「重试复用同一幂等键」的依据。
+fn step_id(task_index: usize, task_name: &str) -> String {
+    format!("{task_index}:{task_name}")
+}
+
+/// 由实例 + step 确定性派生的幂等键（跨重试/崩溃重建不变）。
+fn step_token(instance_id: &str, step_id: &str) -> String {
+    format!("wf:{instance_id}:{step_id}")
+}
 
 // ─── 后台任务存活登记（能力死亡必须可观测） ───
 
@@ -221,7 +253,41 @@ pub mod lifecycle {
     pub const TASK_RETRIED: &str = "io.serverlessworkflow.task.retried.v1";
 }
 
+/// 生命周期事件负载（CloudEvents `data`）—— 纯函数，供提交时构造事件记录。
+fn lifecycle_data(inst: &WorkflowInstance) -> Value {
+    serde_json::json!({
+        "workflowId": inst.id,
+        "workflowName": inst.definition_name,
+        "workflowVersion": inst.definition_version,
+        "namespace": inst.definition_ns,
+        "status": format!("{:?}", inst.status).to_lowercase(),
+        "output": inst.output,
+        "fault": inst.fault,
+    })
+}
+
+/// 生命周期事件的 outbox 形态。`id` 由调用方生成（投递面去重键）。
+fn lifecycle_record(
+    inst: &WorkflowInstance,
+    event_type: &str,
+    now_ms: i64,
+    id: String,
+) -> OutboxRecord {
+    OutboxRecord::lifecycle(&inst.id, event_type, lifecycle_data(inst), now_ms, id)
+}
+
 // ─── 运行时错误 ───
+/// 控制面（无租约）CAS 写的重放次数上界；耗尽即 [`RuntimeError::StaleRevision`]。
+const CONTROL_PLANE_CAS_ATTEMPTS: usize = 3;
+
+/// [`WorkflowRuntime::commit_control_plane`] 的重放结果。
+enum ControlPlaneOutcome {
+    /// 变更已提交；携带提交后的实例（供调用方加载定义 / 驱动）。
+    Committed(Box<WorkflowInstance>),
+    /// 守卫未满足（状态已被他人推进 / 挂起原因不再匹配）：本次不写。
+    Skipped,
+}
+
 /// 运行时错误
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeError {
@@ -237,6 +303,14 @@ pub enum RuntimeError {
     GotoTargetNotFound(String),
     /// signal/事件名与挂起实例期望不匹配
     InvalidSignal(String),
+    /// 控制面 CAS 冲突重放耗尽：实例修订号已被并发写者推进，本次写被拒绝
+    StaleRevision(String),
+    /// 定义内容漂移：实例钉死的定义哈希与当前加载的定义不一致（fail-closed）
+    DefinitionDrift {
+        instance_id: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -254,7 +328,74 @@ impl std::fmt::Display for RuntimeError {
                 write!(f, "goto target not found in do_tasks: {target}")
             }
             RuntimeError::InvalidSignal(msg) => write!(f, "invalid signal: {msg}"),
+            RuntimeError::StaleRevision(id) => {
+                write!(f, "stale revision for instance: {id}")
+            }
+            RuntimeError::DefinitionDrift {
+                instance_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "definition drift: instance {instance_id} pinned {expected}, loaded {actual}"
+            ),
         }
+    }
+}
+
+/// 定义钉死守卫 —— 实例钉死的定义内容哈希必须等于当前加载的定义。
+///
+/// `None`（旧快照未钉死）放行：首次成功驱动时回填。返回的 `(expected, actual)` 供
+/// 调用方构造稳定诊断锚点 `definition drift: instance pinned {expected}, loaded {actual}`。
+pub fn assert_definition_pin(
+    inst: &WorkflowInstance,
+    def: &WorkflowDefinition,
+) -> Result<(), RuntimeError> {
+    match definition_content_drift(inst, def) {
+        Some((expected, actual)) => Err(RuntimeError::DefinitionDrift {
+            instance_id: inst.id.clone(),
+            expected,
+            actual,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// 钉死哈希与加载定义不一致时返回 `(expected, actual)`；未钉死则 `None`。
+fn definition_content_drift(
+    inst: &WorkflowInstance,
+    def: &WorkflowDefinition,
+) -> Option<(String, String)> {
+    let expected = inst.definition_hash.as_ref()?;
+    let actual = super::model::definition_hash(def);
+    // 哈希不可计算（类型上不可达）不得放行：按漂移 fail-closed。
+    if actual == super::model::DEFINITION_HASH_UNAVAILABLE {
+        return Some((expected.clone(), actual));
+    }
+    if expected == &actual {
+        None
+    } else {
+        Some((expected.clone(), actual))
+    }
+}
+
+/// 定义漂移 fault —— detail 为跨模块稳定诊断锚点（runbook / 测试逐字断言）。
+fn definition_drift_fault(expected: &str, actual: &str) -> WorkflowFault {
+    crate::workflow::errors::WorkflowFault::conflict(
+        "definition drift",
+        format!("definition drift: instance pinned {expected}, loaded {actual}"),
+    )
+}
+
+/// 审批终态 fault：`error_code` 同时写入 `type`（标准命名空间）与 `title`，使调用方
+/// 能按稳定码定位（reject 无目标场景为 `approval_rejected`）。
+fn approval_fault(error_code: &str, message: &str) -> WorkflowFault {
+    WorkflowFault {
+        r#type: crate::workflow::errors::error_type(error_code),
+        title: error_code.to_string(),
+        status: 409,
+        detail: message.to_string(),
+        instance: None,
     }
 }
 
@@ -289,6 +430,22 @@ where
     /// 没有它，`spawn` 出去的后台任务死亡时**没有任何出口**：`coord-core` 无 supervisor、
     /// 无 `tracing`，调用方也拿不到 join handle。出口由上层（`coord-agent`）周期性拉取。
     workers: Arc<WorkerRegistry>,
+    /// 实例驱动租约（可选注入）：`Some` 时 `spawn_drive` 先取租约，保证一实例一驱动。
+    lease: Option<Arc<dyn InstanceLease>>,
+    /// 因租约被他人持有 / 租约后端不可用而**跳过**驱动的次数（可观测信号）。
+    lease_skipped: Arc<std::sync::atomic::AtomicU64>,
+    /// CAS 写回失败的次数（修订号冲突或 fencing 拒绝，可观测信号，不静默吞掉）。
+    cas_conflicts: Arc<std::sync::atomic::AtomicU64>,
+    /// 持久化能力（outbox + 定时器）。`None` = 进程内语义（旧行为）。
+    ///
+    /// 注入后：生命周期事件 append 进 outbox（实例状态仍只由写路径负责）；
+    /// wait/retry/timeout 的到期时间落 KV，重启后由扫描器补齐进程内定时器丢失的部分。
+    durable: Option<Arc<DurableSupport>>,
+    /// 审批桥（可选注入）：approve 节点挂起前用它开启审批实例。
+    ///
+    /// `None` = 未接线：approve 节点 fail-closed（实例 `Failed` + `workflow.faulted`），
+    /// 绝不静默降级为「无审批继续」。
+    approval: Option<Arc<ApprovalBridge>>,
 }
 
 impl<E, C, S, D, B> WorkflowRuntime<E, C, S, D, B>
@@ -315,10 +472,32 @@ where
             event_provider: Arc::new(event_provider),
             pending_subflows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             workers: Arc::new(WorkerRegistry::default()),
+            lease: None,
+            lease_skipped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cas_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            durable: None,
+            approval: None,
         };
         // 启动后台扫描器，定期检查 RunSubflow 挂起的父流程并恢复
         rt.start_subflow_scanner();
         rt
+    }
+
+    /// 注入持久化能力（outbox + 持久化定时器）。
+    ///
+    /// builder 形态：不改变 [`Self::new`] 的构造签名，内存路径行为逐字不变。
+    pub fn with_durable(mut self, durable: DurableSupport) -> Self {
+        self.durable = Some(Arc::new(durable));
+        self
+    }
+
+    /// 注入审批桥：approve 节点挂起前经它开启审批实例。
+    ///
+    /// 不注入时 approve 节点 fail-closed（见字段说明）。builder 形态：不改变
+    /// [`Self::new`] 的构造签名，非 approve 定义的驱动路径逐字不变。
+    pub fn with_approval_bridge(mut self, bridge: Arc<ApprovalBridge>) -> Self {
+        self.approval = Some(bridge);
+        self
     }
 
     /// 长活后台任务的存活快照（能力死亡必须可观测）。
@@ -330,6 +509,25 @@ where
     /// 遥测依赖，也不该持有。
     pub fn worker_liveness(&self) -> WorkerLiveness {
         self.workers.snapshot()
+    }
+
+    /// 注入实例驱动租约（“一实例一驱动”）。
+    ///
+    /// 不注入时引擎不做租约去重，行为与现状一致。builder 形式不破坏现有
+    /// `new` 构造函数。
+    pub fn with_instance_lease(mut self, lease: Arc<dyn InstanceLease>) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
+    /// 因租约被持有 / 后端不可用而跳过驱动的累计次数。
+    pub fn lease_skipped_total(&self) -> u64 {
+        self.lease_skipped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// CAS 写回失败的累计次数（修订号冲突或 fencing 拒绝）。
+    pub fn cas_conflict_total(&self) -> u64 {
+        self.cas_conflicts.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// 启动后台子流程扫描器
@@ -353,6 +551,463 @@ where
             .register_loop("workflow_subflow_scanner", handle);
     }
 
+    // ─── 持久化定时器 / 重启恢复（Spike 2026-10 Spike 3） ───
+
+    /// 启动持久化定时器扫描器（未注入 [`DurableSupport`] 时是空操作）。
+    ///
+    /// 进程内快速路径仍在 `schedule_auto_resume` / `schedule_timeout` 里；
+    /// 扫描器补的是「进程内定时器随进程消失」那半 —— 重启后按 KV 到期时间重放。
+    pub fn start_durable_workers(&self) {
+        if self.durable.is_none() {
+            return;
+        }
+        let rt = self.clone_runtime();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(DURABLE_TIMER_SCAN_INTERVAL_MS)).await;
+                rt.fire_due_timers().await;
+            }
+        });
+        self.workers
+            .register_loop("workflow_durable_timer_scanner", handle);
+    }
+
+    /// 启动恢复（应在 `start()` 时调用一次）：先触发到期定时器，再对账挂起实例。
+    ///
+    /// 顺序很重要：到期定时器优先，避免同一实例同时被「到期触发」与「对账重订阅」
+    /// 两条路径驱动。两条路径都是幂等的（`auto_resume` 有状态守卫）。
+    pub async fn recover_durable_state(&self) {
+        if self.durable.is_none() {
+            return;
+        }
+        self.fire_due_timers().await;
+        self.reconcile_resumable_instances(Arc::clone(&self.store))
+            .await;
+    }
+
+    /// 派发前登记 step token（幂等键）。
+    ///
+    /// - `Ok(None)`：未注入 [`StepTokenStore`](super::durable::StepTokenStore) ⇒ 本次派发不带幂等键（旧行为）。
+    /// - `Ok(Some(key))`：要透传给 dispatcher 的幂等键。
+    /// - `Err`：存储不可用 ⇒ 调用方折叠为**可重试**的派发失败（由有界重试预算
+    ///   吸收瞬时 KV 抖动）；错误文本带 `step token register failed: ` 前缀，避免
+    ///   被误读为下游调用失败。fail-closed：没有已提交 token 就不派发。
+    async fn register_step(
+        &self,
+        instance_id: &str,
+        task_index: usize,
+        task_name: &str,
+    ) -> Result<Option<String>, String> {
+        let Some(steps) = self.durable.as_ref().and_then(|d| d.steps.as_ref()) else {
+            return Ok(None);
+        };
+        let sid = step_id(task_index, task_name);
+        let token = step_token(instance_id, &sid);
+        steps
+            .register(instance_id, &sid, &token, self.clock.now_ms())
+            .await
+            .map(|(rec, _)| Some(rec.token))
+            .map_err(|e| format!("step token register failed: {e}"))
+    }
+
+    /// 派发成功后把 step token 标 `Done`（未注入 steps 时空操作）。
+    ///
+    /// 标位失败不致命：token 仍为 `Pending` ⇒ 重试复用同一 token，下游按幂等键
+    /// 去重即可（at-least-once）；所以吞掉错误，不把已成功的调用翻成失败。
+    async fn mark_step_done(&self, instance_id: &str, task_index: usize, task_name: &str) {
+        let Some(steps) = self.durable.as_ref().and_then(|d| d.steps.as_ref()) else {
+            return;
+        };
+        let sid = step_id(task_index, task_name);
+        let _ = steps.mark_done(instance_id, &sid).await;
+    }
+
+    /// 建立（或重启后重建）一个 listen 挂起实例的事件等待。
+    ///
+    /// 重启后原订阅随进程消失，必须重订阅 —— 否则实例永远等不到事件。
+    fn spawn_event_wait(
+        &self,
+        instance_id: String,
+        definition: WorkflowDefinition,
+        store: Arc<S>,
+        filter: EventFilter,
+        event_timeout_ms: Option<u64>,
+    ) {
+        let rt = self.clone_runtime();
+        // 多事件类型：event 状态多 onEvents / eventConditions 多条件
+        let filter_types: Vec<String> = if !filter.event_types.is_empty() {
+            filter.event_types.clone()
+        } else if let Some(et) = filter.event_type.clone() {
+            vec![et]
+        } else {
+            vec![]
+        };
+        let filter_source = filter.source.clone();
+        let filter_subject = filter.subject.clone();
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = Arc::clone(&completed);
+        let handle = tokio::spawn(async move {
+            let timeout_ms = event_timeout_ms.unwrap_or(60 * 60 * 1000);
+            let type_refs: Vec<&str> = filter_types.iter().map(|s| s.as_str()).collect();
+            let delivery = rt
+                .event_provider
+                .wait_for_event(
+                    &type_refs,
+                    filter_source.as_deref(),
+                    filter_subject.as_deref(),
+                    timeout_ms,
+                )
+                .await;
+            if let Some(delivery) = delivery {
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+                let _ = rt
+                    .resume_by_event(instance_id, definition, store, delivery.event_type.clone())
+                    .await;
+                // 状态写成功后才提交消费位点：这一步之前崩溃只会重复投递，
+                // 由 `resume_by_event` 的状态守卫（非 `Waiting`/reason 不匹配即返回）
+                // 吸收；反过来（先提交位点）崩溃就是丢投递。守卫 no-op 也照样 ack ——
+                // 那条事件与本实例已无关，位点仍必须推进。
+                rt.event_provider.ack_event(&delivery).await;
+            }
+            // 走到这一行才算正常收尾；中途 panic 则不置位（由 `WorkerLiveness` 报出）。
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        // 一次性 worker：正常结束（事件到达/超时）是预期行为，不记为故障。
+        self.workers
+            .register_oneshot("workflow_event_wait".to_string(), handle, completed);
+    }
+
+    /// 触发所有到期的持久化定时器。
+    async fn fire_due_timers(&self) {
+        let Some(durable) = &self.durable else {
+            return;
+        };
+        let now = self.clock.now_ms();
+        let due = match durable.timers.due(now, 64).await {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        for rec in due {
+            self.fire_timer(rec).await;
+        }
+    }
+
+    /// 根据一条到期定时器记录触发对应处理（状态守卫在 `auto_resume`/`apply_timeout`）。
+    async fn fire_timer(&self, rec: TimerRecord) {
+        let Some(durable) = &self.durable else {
+            return;
+        };
+        let store = Arc::clone(&self.store);
+        match rec.kind.clone() {
+            TimerKind::AutoResume { reason } => {
+                let inst = match store.load_instance(&rec.instance_id).await {
+                    Ok(Some(i)) => i,
+                    // 实例已删除/读不到：定时器成陈旧记录，移除
+                    _ => {
+                        let _ = durable.timers.remove(&rec.id).await;
+                        return;
+                    }
+                };
+                // 陈旧定时器守卫：`fire_at_ms` 必须等于**当前**挂起的 `until_ms`。
+                // 不相等说明这条记录对应的是一个已被取代的挂起（重复键、人工改期、
+                // 时钟回拨）。没有它，retry 会被陈旧定时器多驱动一轮 —— 重试预算
+                // 提前耗尽（RECOVERY.md 记录了修复前的实测）。
+                let current_until = inst.suspension_meta.as_ref().and_then(|m| m.until_ms);
+                let still = inst.status == InstanceStatus::Waiting
+                    && inst.suspension_meta.as_ref().map(|m| m.reason.as_str())
+                        == Some(reason.as_str())
+                    && current_until == Some(rec.fire_at_ms);
+                if !still {
+                    let _ = durable.timers.remove(&rec.id).await;
+                    return;
+                }
+                let def = match store
+                    .load_definition(
+                        &inst.definition_ns,
+                        &inst.definition_name,
+                        &inst.definition_version,
+                    )
+                    .await
+                {
+                    Ok(Some(d)) => d,
+                    // 定义暂读不到：保留定时器，下一 tick 再试
+                    _ => return,
+                };
+                let _ = durable.timers.remove(&rec.id).await;
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+                let _ = self
+                    .auto_resume(rec.instance_id.clone(), def, store, &reason)
+                    .await;
+            }
+            TimerKind::Timeout { expected_index } => {
+                let _ = durable.timers.remove(&rec.id).await;
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+                let _ = self
+                    .apply_timeout(rec.instance_id.clone(), store, expected_index)
+                    .await;
+            }
+            TimerKind::ApprovalDeadline {
+                approval_instance_id,
+            } => {
+                let inst = match store.load_instance(&rec.instance_id).await {
+                    Ok(Some(i)) => i,
+                    // 实例已删除/读不到：定时器成陈旧记录，移除
+                    _ => {
+                        let _ = durable.timers.remove(&rec.id).await;
+                        return;
+                    }
+                };
+                // 陈旧守卫：只有仍挂起在审批上、且审批实例 id 匹配的定时器才驱动过期。
+                // 已恢复 / 取消 / 改期后的挂起留下的记录必须丢弃 —— 否则会误伤下一次挂起。
+                let still = inst.suspension_meta.as_ref().is_some_and(|m| {
+                    m.reason == "approval"
+                        && m.approval_instance_id.as_deref() == Some(approval_instance_id.as_str())
+                });
+                if !still {
+                    let _ = durable.timers.remove(&rec.id).await;
+                    return;
+                }
+                let Some(bridge) = self.approval.as_ref() else {
+                    // 挂起在审批上必有桥（挂起前置 fail-closed）；仍移除避免常驻。
+                    let _ = durable.timers.remove(&rec.id).await;
+                    return;
+                };
+                let now = self.clock.now_ms();
+                let outcome = match bridge.expire_due(&approval_instance_id, now).await {
+                    Ok(o) => o,
+                    // 存储瞬时错误：保留定时器，下一 tick 重试（过期路径幂等）。
+                    Err(_) => return,
+                };
+                let _ = durable.timers.remove(&rec.id).await;
+                // 过期不判终态（Q4 无自动判定）；但过期可能把「已有票 + 过期席」的混合轮次
+                // 收敛为通过/否决 ⇒ 按节点结论恢复/路由/故障，否则保持挂起并重排下一截止。
+                if let Some(node_outcome) = outcome.node_outcome {
+                    let _ = self
+                        .apply_approval_node_outcome(&rec.instance_id, node_outcome)
+                        .await;
+                    return;
+                }
+                // 仍有更晚到期的 open 席位 ⇒ 为下一条到期重排定时器；否则什么都不做。
+                if let Ok(Some(next)) = bridge.next_open_deadline(&approval_instance_id).await {
+                    if next > now {
+                        self.schedule_approval_deadline(rec.instance_id.clone(), next);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 审批节点结论 → 恢复 / 路由 / 故障。
+    ///
+    /// 通过：清挂起并按节点声明的 `on_pass` 路由（未声明则顺序推进）；否决：节点声明了
+    /// `on_reject` 则路由到目标，否则以 `approval_rejected` 置 fault。截止路径与审批命令的
+    /// 服务层共用本映射，故 `on_pass`/`on_reject` 都按挂起帧所在节点的
+    /// [`ApproveTask`](super::model::ApproveTask) 解析。非审批挂起 / 定义漂移由
+    /// [`Self::resume_approval`]、[`Self::fail_approval`] 的前置守卫 fail-closed。
+    pub async fn apply_approval_node_outcome(
+        &self,
+        instance_id: &str,
+        node_outcome: NodeOutcome,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        match node_outcome {
+            NodeOutcome::Passed => {
+                let target = self.suspended_approve_on_pass(instance_id).await?;
+                self.resume_approval(
+                    instance_id,
+                    serde_json::json!({"status": "passed"}),
+                    target.as_deref(),
+                )
+                .await
+            }
+            NodeOutcome::Rejected => match self.suspended_approve_on_reject(instance_id).await? {
+                Some(target) => {
+                    self.resume_approval(
+                        instance_id,
+                        serde_json::json!({"status": "rejected"}),
+                        Some(&target),
+                    )
+                    .await
+                }
+                None => {
+                    self.fail_approval(
+                        instance_id,
+                        "approval_rejected",
+                        "approval rejected without an on_reject target",
+                    )
+                    .await
+                }
+            },
+        }
+    }
+
+    /// 解析挂起实例当前 approve 节点的 `on_pass` 目标：按 `current_task_index` 在钉死定义里
+    /// 定位 [`ApproveTask`](super::model::ApproveTask)（与驱动挂起时的口径一致）；非 approve 节点或未声明返回 `None`。
+    async fn suspended_approve_on_pass(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.suspended_approve_target(instance_id, |task| task.on_pass.clone())
+            .await
+    }
+
+    /// 解析挂起实例当前 approve 节点的 `on_reject` 目标：按 `current_task_index` 在钉死定义里
+    /// 定位 [`ApproveTask`](super::model::ApproveTask)（与驱动挂起时的口径一致）；非 approve 节点或未声明返回 `None`。
+    async fn suspended_approve_on_reject(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.suspended_approve_target(instance_id, |task| task.on_reject.clone())
+            .await
+    }
+
+    /// 读取挂起实例钉死的定义，并对当前 approve 节点取 `select` 选中的跳转目标。
+    async fn suspended_approve_target(
+        &self,
+        instance_id: &str,
+        select: impl FnOnce(&ApproveTask) -> Option<String>,
+    ) -> Result<Option<String>, RuntimeError> {
+        let inst = self
+            .store
+            .load_instance(instance_id)
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
+        let def = self
+            .store
+            .load_definition(
+                &inst.definition_ns,
+                &inst.definition_name,
+                &inst.definition_version,
+            )
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| {
+                RuntimeError::DefinitionNotFound(format!(
+                    "{}/{}@{}",
+                    inst.definition_ns, inst.definition_name, inst.definition_version
+                ))
+            })?;
+        Ok(def
+            .do_tasks
+            .get(inst.current_task_index)
+            .and_then(|named| match &named.task {
+                Task::Approve(task) => select(task),
+                _ => None,
+            }))
+    }
+
+    /// 对账所有非终态可恢复实例：重启后重新驱动/重订阅。
+    ///
+    /// - `Pending` / `Running`：上个进程的 drive 任务随进程消失（进程内任务无跨进程存活，
+    ///   `drivers/` 租约键也无主）⇒ 重驱动一个。**未注入租约时**同进程重叠驱动是可容忍的：
+    ///   每次 drive 都重读最新实例状态，CAS 失败的
+    ///   提交直接退出驱动循环 —— 不会丢更新，只是白跑一轮。注入租约后（经 [`Self::spawn_drive`]
+    ///   先取租约）由租约提供互斥：多进程并发时只有一个真正驱动（其余计入 `lease_skipped`）。
+    /// - `Waiting`：`listen` 重建事件订阅；`wait` / `retry` 补写持久化定时器（已到期立即触发）。
+    /// - `Suspended`（signal / approve 挂起）：人工/审批恢复语义 —— 没有外部 signal 或审批
+    ///   结论就自动重驱动会把人工审批直接跑过去，故**不**自动驱动（ADR 的「所有非终态」在此
+    ///   显式排除挂起）。但 approve 挂起的**截止定时器**必须重建：挂起臂是「先提交 `Suspended`
+    ///   再异步落定时器」，在这个窗口里死亡会让截止驱动永久丢失（重驱 no-op 守卫不会再建）。
+    /// - 终态：跳过。
+    ///
+    /// `coord-core` 无 `tracing`，挂起实例的跳过是设计内非动作（不是故障），故只以注释
+    /// 记录原因、不新增日志/计数出口（观测出口在上层 `WorkerLiveness` 等）。
+    async fn reconcile_resumable_instances(&self, store: Arc<S>) {
+        let Ok((instances, _next)) = store.list_instances(None, None, usize::MAX, None).await
+        else {
+            return;
+        };
+        let Some(durable) = &self.durable else {
+            return;
+        };
+        let now = self.clock.now_ms();
+        for inst in instances {
+            match inst.status {
+                InstanceStatus::Pending | InstanceStatus::Running => {
+                    let def = match store
+                        .load_definition(
+                            &inst.definition_ns,
+                            &inst.definition_name,
+                            &inst.definition_version,
+                        )
+                        .await
+                    {
+                        Ok(Some(d)) => d,
+                        // 定义暂读不到：留待下次启动对账（不在此处造状态）。
+                        _ => continue,
+                    };
+                    self.spawn_drive(inst.id.clone(), def, Arc::clone(&store));
+                }
+                InstanceStatus::Waiting => {
+                    let Some(meta) = inst.suspension_meta.clone() else {
+                        continue;
+                    };
+                    match meta.reason.as_str() {
+                        "listen" => {
+                            let def = match store
+                                .load_definition(
+                                    &inst.definition_ns,
+                                    &inst.definition_name,
+                                    &inst.definition_version,
+                                )
+                                .await
+                            {
+                                Ok(Some(d)) => d,
+                                _ => continue,
+                            };
+                            let filter = meta.event_filter.clone().unwrap_or(EventFilter {
+                                event_type: None,
+                                event_types: vec![],
+                                source: None,
+                                subject: None,
+                            });
+                            self.spawn_event_wait(
+                                inst.id.clone(),
+                                def,
+                                Arc::clone(&store),
+                                filter,
+                                None,
+                            );
+                        }
+                        "wait" | "retry" => {
+                            let due = meta.until_ms.unwrap_or(now);
+                            let rec = TimerRecord::auto_resume(&inst.id, &meta.reason, due, now);
+                            let _ = durable.timers.schedule(&rec).await;
+                        }
+                        _ => {}
+                    }
+                }
+                InstanceStatus::Suspended => {
+                    // 仅审批挂起有可重建的截止定时器；signal 挂起无定时器。
+                    let Some(meta) = inst.suspension_meta.as_ref() else {
+                        continue;
+                    };
+                    if meta.reason != "approval" {
+                        continue;
+                    }
+                    let Some(bridge) = self.approval.as_ref() else {
+                        continue;
+                    };
+                    let approval_id = meta
+                        .approval_instance_id
+                        .as_deref()
+                        .unwrap_or(inst.id.as_str());
+                    // 仍有未到期的 open 席位 ⇒ 重建定时器（确定性 id 幂等覆盖；
+                    // 已到期则由末尾的 `fire_due_timers` 立即驱动）。审批实例不存在
+                    // （`Ok(None)`）或存储错误一律 no-op，不在此处造状态。
+                    if let Ok(Some(d)) = bridge.next_open_deadline(approval_id).await {
+                        let rec = TimerRecord::approval_deadline(&inst.id, approval_id, d, now);
+                        let _ = durable.timers.schedule(&rec).await;
+                    }
+                }
+                // 终态跳过；`Suspended` 的 signal 挂起是人工恢复语义，不自动驱动。
+                _ => {}
+            }
+        }
+        // 补写的定时器里可能已经到期（崩溃窗口 / 恢复耗时），统一再触发一轮。
+        self.fire_due_timers().await;
+    }
+
     /// spawn 一个**一次性** drive 任务，并把它"是否正常收尾"变成可拉取的事实。
     ///
     /// 为什么不用 `is_finished()` 直接判定故障：drive 的**正常**结束（实例挂起 / 终态）
@@ -369,7 +1024,50 @@ where
         let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&completed);
         let handle = tokio::spawn(async move {
-            rt.drive(instance_id, definition, store).await;
+            // 实例租约：一实例一驱动（未注入租约时跳过此段，退化为现状）。
+            // 获取失败（他人持有 / 后端不可用）→ 跳过驱动，**不得**退化为无租约驱动。
+            let guard: Option<Arc<dyn LeaseGuard>> = match rt.lease.as_ref() {
+                Some(lease) => match lease.acquire(&instance_id).await {
+                    Ok(Some(g)) => Some(g),
+                    // 已被其他驱动者持有：跳过（正常收尾，不计为故障）。
+                    Ok(None) => {
+                        rt.lease_skipped
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                    // 后端不可用：fail-closed 跳过，并留下可观测信号。
+                    Err(_) => {
+                        rt.lease_skipped
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                },
+                None => None,
+            };
+            // 租约有效期内的后台续租（drive 期间）；租约丢失时停止。
+            let renewer = guard.as_ref().map(|g| {
+                let g = Arc::clone(g);
+                let interval = g.renew_interval();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        match g.renew().await {
+                            Ok(true) => {}
+                            _ => break,
+                        }
+                    }
+                })
+            });
+            rt.drive(instance_id, definition, store, guard.as_deref())
+                .await;
+            if let Some(h) = renewer {
+                h.abort();
+            }
+            if let Some(g) = guard {
+                g.release().await;
+            }
             // ⚠️ 这一行是判据的一部分：`drive` 中途死亡时它不会被执行，
             // 结算时该 worker 即被判为"未正常收尾"。不要把它移出 async 块。
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -461,7 +1159,7 @@ where
             }
 
             if self
-                .resume_parent_after_subflow(parent, &sub_inst, &store)
+                .resume_parent_after_subflow(&parent_id, &sub_inst, &store)
                 .await
             {
                 self.unregister_pending_subflow(&parent_id);
@@ -475,7 +1173,7 @@ where
     /// 应保留登记、下一 tick 重试。
     async fn resume_parent_after_subflow(
         &self,
-        mut parent: WorkflowInstance,
+        parent_id: &str,
         sub_inst: &WorkflowInstance,
         store: &Arc<S>,
     ) -> bool {
@@ -488,30 +1186,55 @@ where
             }
             _ => Value::Null,
         };
+        let subflow_id = sub_inst.id.clone();
 
-        // 标记 run 任务帧为已完成并推进索引
-        if let Some(last_frame) = parent.task_stack.last_mut() {
-            last_frame.status = TaskStatus::Completed;
-            last_frame.output = Some(signal_payload.clone());
-            last_frame.ended_at = Some(self.clock.now_ms());
-        }
-        parent.current_task_index += 1;
+        let outcome = match self
+            .commit_control_plane(
+                store,
+                parent_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |parent| {
+                    // 仅当父流程仍挂在这条子流程上才恢复（否则已被他人恢复/取消）。
+                    let still_waiting = matches!(
+                        parent.status,
+                        InstanceStatus::Suspended | InstanceStatus::Waiting
+                    ) && parent
+                        .context
+                        .get("_subflow_instance_id")
+                        .and_then(|v| v.as_str())
+                        == Some(subflow_id.as_str());
+                    if !still_waiting {
+                        return Ok(false);
+                    }
+                    // 标记 run 任务帧为已完成并推进索引
+                    if let Some(last_frame) = parent.task_stack.last_mut() {
+                        last_frame.status = TaskStatus::Completed;
+                        last_frame.output = Some(signal_payload.clone());
+                        last_frame.ended_at = Some(self.clock.now_ms());
+                    }
+                    parent.current_task_index += 1;
+                    parent.status = InstanceStatus::Running;
+                    parent.suspension_meta = None;
+                    parent.context["_signal"] = serde_json::json!({
+                        "name": "_subflow_completed",
+                        "payload": signal_payload.clone(),
+                    });
+                    parent.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await
+        {
+            Ok(o) => o,
+            // CAS 冲突耗尽 / 存储错误：保留登记，下一 tick 重试。
+            Err(_) => return false,
+        };
 
-        parent.status = InstanceStatus::Running;
-        parent.suspension_meta = None;
-        parent.context["_signal"] = serde_json::json!({
-            "name": "_subflow_completed",
-            "payload": signal_payload,
-        });
-        parent.updated_at = self.clock.now_ms();
-
-        if store.save_instance(&parent).await.is_err() {
-            return false;
-        }
-        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &parent)
-            .await;
-        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &parent)
-            .await;
+        let parent = match outcome {
+            ControlPlaneOutcome::Committed(parent) => *parent,
+            // 守卫未满足：父流程已不再挂在这条子流程上 —— 视为已处理（可注销登记）。
+            ControlPlaneOutcome::Skipped => return true,
+        };
 
         // 加载父流程定义并重新驱动
         let parent_def = match store
@@ -548,6 +1271,21 @@ where
         definition: &WorkflowDefinition,
         input: Value,
     ) -> Result<WorkflowInstance, RuntimeError> {
+        self.start_as(definition, input, None).await
+    }
+
+    /// [`Self::start`] 的发起人形态：把 CCT 主体钉到实例的 `initiator` 上。
+    ///
+    /// 发起人必须在 `save_instance` **之前**落到实例上：审批节点开启时桥读它做
+    /// 自审判定（`allow_self_approve` 关时发起人不可自批），而 `spawn_drive` 异步
+    /// 拉起驱动，事后回填会与之竞争并可能让审批实例记成 `anonymous`。
+    /// `None` 与旧快照兼容（实例无 `initiator` 字段）。
+    pub async fn start_as(
+        &self,
+        definition: &WorkflowDefinition,
+        input: Value,
+        initiator: Option<&str>,
+    ) -> Result<WorkflowInstance, RuntimeError> {
         let now_ms = self.clock.now_ms();
 
         // 工作流级输入变换/校验
@@ -558,6 +1296,7 @@ where
                 let mut inst = WorkflowInstance::new(definition, Value::Null, now_ms);
                 inst.status = InstanceStatus::Failed;
                 inst.fault = Some(fault);
+                inst.initiator = initiator.map(str::to_string);
                 inst.updated_at = now_ms;
                 self.store
                     .save_instance(&inst)
@@ -567,7 +1306,8 @@ where
             }
         };
 
-        let inst = WorkflowInstance::new(definition, input_val, now_ms);
+        let mut inst = WorkflowInstance::new(definition, input_val, now_ms);
+        inst.initiator = initiator.map(str::to_string);
 
         self.store
             .save_instance(&inst)
@@ -792,38 +1532,69 @@ where
         Ok(value)
     }
 
-    /// 发布生命周期 CloudEvent（标准 Lifecycle Events）
+    /// 发布生命周期 CloudEvent（标准 Lifecycle Events）。
+    ///
+    /// 仅有[`Self::commit_instance`]的 legacy 降级分支（无 outbox / 无同事务能力）
+    /// 复用它：注入持久化 outbox 时只 append（**不**写实例状态），未注入时直发进程内
+    /// `event_provider`。生产路径的生命周期事件与状态在同一提交里落——见
+    /// [`Self::commit_instance`]。
+    ///
+    /// 发布出口只有一个：注入 outbox 时**不**再直发进程内 `event_provider`
+    /// （否则同一事件会有两条 ID 不同的副本，下游按 `event_id` 去重失效）。
     async fn emit_lifecycle(&self, event_type: &str, inst: &WorkflowInstance) {
-        let data = serde_json::json!({
-            "workflowId": inst.id,
-            "workflowName": inst.definition_name,
-            "workflowVersion": inst.definition_version,
-            "namespace": inst.definition_ns,
-            "status": format!("{:?}", inst.status).to_lowercase(),
-            "output": inst.output,
-            "fault": inst.fault,
-        });
-        self.event_provider
-            .emit(event_type, Some("coord/workflow"), &data)
-            .await;
+        let data = lifecycle_data(inst);
+        if let Some(durable) = &self.durable {
+            let record = lifecycle_record(
+                inst,
+                event_type,
+                self.clock.now_ms(),
+                format!("evt-{}", uuid::Uuid::new_v4()),
+            );
+            // 只 append，**不**写实例状态：emit 若另行写实例会绕过调用方的
+            // CAS/fencing，并推进 mod_revision 使随后的 CAS 失配。
+            let _ = durable.outbox.append(&record).await;
+            // 注入 outbox 后**不再**直发进程内事件总线：发布职责归 relay 一个出口，
+            // 否则同一生命周期事件会出现两条 ID 不同的副本（去重失效）。
+        } else {
+            self.event_provider
+                .emit(event_type, Some("coord/workflow"), &data)
+                .await;
+        }
     }
 
-    /// 调度自动恢复：delay 后按 reason 恢复挂起实例
+    /// 调度自动恢复：`due_ms` 到期后按 reason 恢复挂起实例
     ///
     /// - reason="wait"：完成当前 wait 帧并推进到下一任务
     /// - reason="retry"：重新执行当前任务（重试）
+    ///
+    /// `due_ms` 必须是**写进 `suspension_meta.until_ms` 的同一个值**。用
+    /// 「当前时间 + delay」重新推导会让持久化定时器的主键（含到期时间）与
+    /// 挂起元信息里的到期时间错开几毫秒 —— 重启对账就会再写一个**同语义不同键**
+    /// 的定时器，同一挂起被触发两次（retry 会因此多跑一轮，见 RECOVERY.md）。
     fn schedule_auto_resume(
         &self,
         instance_id: String,
         definition: WorkflowDefinition,
         store: Arc<S>,
-        delay_ms: u64,
+        due_ms: i64,
         reason: String,
     ) {
+        let now_ms = self.clock.now_ms();
+        let delay_ms = (due_ms - now_ms).max(0) as u64;
+        if let Some(durable) = &self.durable {
+            // 先落 KV：进程内定时器随进程消失，持久化定时器才是重启后能补上的那半。
+            let timers = Arc::clone(&durable.timers);
+            let rec = TimerRecord::auto_resume(&instance_id, &reason, due_ms, now_ms);
+            tokio::spawn(async move {
+                let _ = timers.schedule(&rec).await;
+            });
+        }
         let rt = self.clone_runtime();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            rt.auto_resume(instance_id, definition, store, &reason)
+            // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+            let _ = rt
+                .auto_resume(instance_id, definition, store, &reason)
                 .await;
         });
     }
@@ -835,42 +1606,75 @@ where
         definition: WorkflowDefinition,
         store: Arc<S>,
         reason: &str,
-    ) {
-        let mut inst = match store.load_instance(&instance_id).await {
-            Ok(Some(i)) => i,
-            _ => return,
-        };
-        // 仅当仍处于同一挂起原因才恢复（避免竞态覆盖已完成的实例）
-        if inst.status != InstanceStatus::Waiting {
-            return;
-        }
-        let meta = match &inst.suspension_meta {
-            Some(m) => m.clone(),
-            None => return,
-        };
-        if meta.reason != reason {
-            return;
+    ) -> Result<(), RuntimeError> {
+        // 定义漂移守卫：自动恢复不得在新语义下推进/重试（fail-closed）。
+        self.fail_closed_on_definition_drift(&store, &instance_id, &definition)
+            .await?;
+
+        if reason == "retry" {
+            // 重试：直接重新 drive（重新执行当前任务），本路径**不写实例**；
+            // 保留「仅当仍处于同一挂起原因才驱动」的守卫（陈旧定时器不得多驱动一轮）。
+            //
+            // 守卫必须走**线性一致读**（`load_instance_with_rev`）：durable 写路径
+            // 绕过本地读缓存，若 Watch 滞后，cache-first 的 `load_instance` 会把已推进/
+            // 已取消的实例读成陈旧快照，本次重试于是被错误地放弃——定时器已在触发前
+            // 移除，实例就永久停在 Waiting 而没有任何驱动者。
+            let still = {
+                let is_still = |inst: &WorkflowInstance| {
+                    inst.status == InstanceStatus::Waiting
+                        && inst.suspension_meta.as_ref().map(|m| m.reason.as_str()) == Some(reason)
+                };
+                match store.load_instance_with_rev(&instance_id).await {
+                    Ok(Some((inst, _))) => is_still(&inst),
+                    // 存储不提供修订号：回退普通读（与 [`Self::commit_control_plane`] 同口径）。
+                    Ok(None) => match store.load_instance(&instance_id).await {
+                        Ok(Some(inst)) => is_still(&inst),
+                        _ => false,
+                    },
+                    // 线性一致读失败：不驱动（fail-closed，不回退到可能陈旧的缓存）。
+                    Err(_) => false,
+                }
+            };
+            if still {
+                self.spawn_drive(instance_id, definition, store);
+            }
+            return Ok(());
         }
 
-        if reason == "wait" {
-            // 完成 wait 帧并推进
-            if let Some(last) = inst.task_stack.last_mut() {
-                last.status = TaskStatus::Completed;
-                last.ended_at = Some(self.clock.now_ms());
-            }
-            inst.current_task_index += 1;
-            inst.status = InstanceStatus::Running;
-            inst.suspension_meta = None;
-            inst.updated_at = self.clock.now_ms();
-            let _ = store.save_instance(&inst).await;
-            self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
-            self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst)
-                .await;
-            self.drive(instance_id, definition, store).await;
-        } else if reason == "retry" {
-            // 重试：直接重新 drive（重新执行当前任务）
-            self.drive(instance_id, definition, store).await;
+        let outcome = self
+            .commit_control_plane(
+                &store,
+                &instance_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    // 仅当仍处于同一挂起原因才恢复（避免竞态覆盖已完成的实例）
+                    if inst.status != InstanceStatus::Waiting {
+                        return Ok(false);
+                    }
+                    let Some(meta) = inst.suspension_meta.as_ref() else {
+                        return Ok(false);
+                    };
+                    if meta.reason != reason {
+                        return Ok(false);
+                    }
+                    // 完成 wait 帧并推进
+                    if let Some(last) = inst.task_stack.last_mut() {
+                        last.status = TaskStatus::Completed;
+                        last.ended_at = Some(self.clock.now_ms());
+                    }
+                    inst.current_task_index += 1;
+                    inst.status = InstanceStatus::Running;
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+
+        if matches!(outcome, ControlPlaneOutcome::Committed(_)) {
+            self.spawn_drive(instance_id, definition, store);
         }
+        Ok(())
     }
 
     /// 事件驱动的自动恢复（标准 Events：listen 主动订阅，事件到达 → 恢复）
@@ -882,42 +1686,50 @@ where
         definition: WorkflowDefinition,
         store: Arc<S>,
         arrived_event_type: String,
-    ) {
-        let mut inst = match store.load_instance(&instance_id).await {
-            Ok(Some(i)) => i,
-            _ => return,
-        };
-        if inst.status != InstanceStatus::Waiting {
-            return;
-        }
-        let meta = match &inst.suspension_meta {
-            Some(m) => m.clone(),
-            None => return,
-        };
-        if meta.reason != "listen" {
-            return;
-        }
-        // 事件到达：完成 listen 帧、推进、注入事件上下文
-        if let Some(last) = inst.task_stack.last_mut() {
-            last.status = TaskStatus::Completed;
-            last.ended_at = Some(self.clock.now_ms());
-        }
-        inst.current_task_index += 1;
-        inst.context["_event"] = serde_json::json!({
-            "arrived": true,
-            "eventType": arrived_event_type,
-        });
-        inst.status = InstanceStatus::Running;
-        inst.suspension_meta = None;
-        inst.updated_at = self.clock.now_ms();
-        let _ = store.save_instance(&inst).await;
-        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
-        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst)
-            .await;
+    ) -> Result<(), RuntimeError> {
+        // 定义漂移守卫：事件恢复不得在新语义下推进（fail-closed）。
+        self.fail_closed_on_definition_drift(&store, &instance_id, &definition)
+            .await?;
+
+        let outcome = self
+            .commit_control_plane(
+                &store,
+                &instance_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    if inst.status != InstanceStatus::Waiting {
+                        return Ok(false);
+                    }
+                    let Some(meta) = inst.suspension_meta.as_ref() else {
+                        return Ok(false);
+                    };
+                    if meta.reason != "listen" {
+                        return Ok(false);
+                    }
+                    // 事件到达：完成 listen 帧、推进、注入事件上下文
+                    if let Some(last) = inst.task_stack.last_mut() {
+                        last.status = TaskStatus::Completed;
+                        last.ended_at = Some(self.clock.now_ms());
+                    }
+                    inst.current_task_index += 1;
+                    inst.context["_event"] = serde_json::json!({
+                        "arrived": true,
+                        "eventType": arrived_event_type,
+                    });
+                    inst.status = InstanceStatus::Running;
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
 
         // 后台 drive（与子流程扫描器同模式，避免在事件等待任务内嵌套 drive；
         // 受监督：见 [`Self::spawn_drive`]）
-        self.spawn_drive(instance_id, definition, store);
+        if matches!(outcome, ControlPlaneOutcome::Committed(_)) {
+            self.spawn_drive(instance_id, definition, store);
+        }
+        Ok(())
     }
 
     /// 调度超时：after_ms 后若实例仍非终端 → faulted（timeout 错误 408）
@@ -932,10 +1744,42 @@ where
         after_ms: u64,
         expected_index: Option<usize>,
     ) {
+        if let Some(durable) = &self.durable {
+            let timers = Arc::clone(&durable.timers);
+            let now_ms = self.clock.now_ms();
+            let rec = TimerRecord::timeout(
+                &instance_id,
+                expected_index,
+                now_ms + after_ms as i64,
+                now_ms,
+            );
+            tokio::spawn(async move {
+                let _ = timers.schedule(&rec).await;
+            });
+        }
         let rt = self.clone_runtime();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(after_ms)).await;
-            rt.apply_timeout(instance_id, store, expected_index).await;
+            // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+            let _ = rt.apply_timeout(instance_id, store, expected_index).await;
+        });
+    }
+
+    /// 落一条审批截止定时器。
+    ///
+    /// 只写持久化记录、**不** spawn 进程内 sleep：审批过期由扫描器经
+    /// [`ApprovalBridge::expire_due`] 外部驱动（`Engine::expire` 设计为外部驱动、
+    /// 不依赖进程内定时器）。
+    fn schedule_approval_deadline(&self, instance_id: String, due_ms: i64) {
+        let Some(durable) = &self.durable else {
+            return;
+        };
+        let timers = Arc::clone(&durable.timers);
+        let now_ms = self.clock.now_ms();
+        // 审批实例 id 恒等于 workflow 实例 id（见 `SuspensionMeta.approval_instance_id`）。
+        let rec = TimerRecord::approval_deadline(&instance_id, &instance_id, due_ms, now_ms);
+        tokio::spawn(async move {
+            let _ = timers.schedule(&rec).await;
         });
     }
 
@@ -945,44 +1789,138 @@ where
         instance_id: String,
         store: Arc<S>,
         expected_index: Option<usize>,
-    ) {
-        let mut inst = match store.load_instance(&instance_id).await {
-            Ok(Some(i)) => i,
-            _ => return,
-        };
-        if inst.status.is_terminal() {
-            return;
-        }
-        // 任务级超时：仅当实例仍停留同一任务索引才 fault
-        if let Some(idx) = expected_index {
-            if inst.current_task_index != idx {
-                return;
-            }
-        }
-        let fault = crate::workflow::errors::WorkflowFault::timeout(
-            "workflow timeout",
-            "the workflow exceeded its configured timeout",
-        );
-        inst.status = InstanceStatus::Failed;
-        inst.fault = Some(fault);
-        inst.updated_at = self.clock.now_ms();
-        let _ = store.save_instance(&inst).await;
-        self.emit_lifecycle(lifecycle::WORKFLOW_FAULTED, &inst)
-            .await;
+    ) -> Result<(), RuntimeError> {
+        self.commit_control_plane(
+            &store,
+            &instance_id,
+            &[lifecycle::WORKFLOW_FAULTED],
+            |inst| {
+                if inst.status.is_terminal() {
+                    return Ok(false);
+                }
+                // 任务级超时：仅当实例仍停留同一任务索引才 fault
+                if let Some(idx) = expected_index {
+                    if inst.current_task_index != idx {
+                        return Ok(false);
+                    }
+                }
+                let fault = crate::workflow::errors::WorkflowFault::timeout(
+                    "workflow timeout",
+                    "the workflow exceeded its configured timeout",
+                );
+                inst.status = InstanceStatus::Failed;
+                inst.fault = Some(fault);
+                inst.updated_at = self.clock.now_ms();
+                Ok(true)
+            },
+        )
+        .await
+        .map(|_| ())
     }
 
-    /// 将实例置为 faulted（Failed + fault + 生命周期事件）
+    /// 将实例置为 faulted（Failed + fault + 生命周期事件）。
+    ///
+    /// 仅在 [`Self::drive`] 内调用：复用 drive 当轮的 `rev`/`guard`，与状态 + 事件
+    /// 走同一次 CAS/fencing 提交（不另起无 CAS 的裸写）。
+    ///
+    /// 有界重试：首次提交失败常是并发控制面已推进修订号（CAS 冲突）。失败后以
+    /// `load_instance_with_rev` 重取最新修订号并重放，至多 [`CONTROL_PLANE_CAS_ATTEMPTS`]
+    /// 次 —— 不重试会让一次冲突静默丢掉终态 fault 写、把实例留在 Running。
+    /// 耗尽仍未提交：实例保持非终态，由启动对账重新驱动；失败已计入
+    /// `cas_conflict_total`，drop 非静默。
     async fn fail_instance(
         &self,
         inst: &mut WorkflowInstance,
-        store: Arc<S>,
+        store: &Arc<S>,
+        rev: &mut Option<i64>,
+        guard: Option<&dyn LeaseGuard>,
         fault: WorkflowFault,
     ) {
-        inst.status = InstanceStatus::Failed;
-        inst.fault = Some(fault);
-        inst.updated_at = self.clock.now_ms();
-        let _ = store.save_instance(inst).await;
-        self.emit_lifecycle(lifecycle::WORKFLOW_FAULTED, inst).await;
+        for _ in 0..CONTROL_PLANE_CAS_ATTEMPTS {
+            inst.status = InstanceStatus::Failed;
+            inst.fault = Some(fault.clone());
+            inst.updated_at = self.clock.now_ms();
+            if self
+                .commit_instance(store, inst, rev, guard, &[lifecycle::WORKFLOW_FAULTED])
+                .await
+            {
+                // 工作流 fault 是权威结论：审批聚合收口最佳努力，失败不阻断 fault
+                // （聚合留给管理员 `Terminate`）。
+                let _ = self
+                    .finalize_approval_aggregate(&inst.id, "workflow_faulted")
+                    .await;
+                return;
+            }
+            // 重取最新修订号：下一次 CAS 以新值为期望。
+            match store.load_instance_with_rev(&inst.id).await {
+                // 只在实例仍非终态时重放：并发控制面已提交终态则不覆盖。
+                Ok(Some((latest, r))) if !latest.status.is_terminal() => {
+                    *inst = latest;
+                    *rev = Some(r);
+                }
+                // 实例已终态 / 读不到 / 存储无修订号：重放无意义，停止。
+                _ => break,
+            }
+        }
+    }
+
+    /// 定义漂移 fail-closed（控制面）：置实例 Failed + 伴生 `workflow.faulted`（有界 CAS），
+    /// 并把漂移报成 [`RuntimeError::DefinitionDrift`]。
+    ///
+    /// 控制面没有 drive 当轮的 `rev`/`guard`，故复用 [`Self::commit_control_plane`] 的
+    /// 「线性一致读修订号 + 冲突重放」；fault 提交耗尽也不掩盖返回的漂移错误
+    /// （失败已计入 `cas_conflict_total`，实例保持非终态，由启动对账重新驱动）。
+    async fn definition_drift_error(
+        &self,
+        store: &Arc<S>,
+        instance_id: &str,
+        expected: String,
+        actual: String,
+    ) -> RuntimeError {
+        let fault = definition_drift_fault(&expected, &actual);
+        let _ = self
+            .commit_control_plane(store, instance_id, &[lifecycle::WORKFLOW_FAULTED], |inst| {
+                if inst.status.is_terminal() {
+                    return Ok(false);
+                }
+                inst.status = InstanceStatus::Failed;
+                inst.fault = Some(fault.clone());
+                inst.updated_at = self.clock.now_ms();
+                Ok(true)
+            })
+            .await;
+        RuntimeError::DefinitionDrift {
+            instance_id: instance_id.to_string(),
+            expected,
+            actual,
+        }
+    }
+
+    /// 控制面入口的定义钉死校验：读回实例 → [`assert_definition_pin`] → 漂移时置 Failed
+    /// 并返回 [`RuntimeError::DefinitionDrift`]。
+    ///
+    /// 实例不存在时放行：后续路径会按 NotFound / 状态守卫处理，守卫不在此造状态。
+    /// 读失败是存储错误，不得回退成「实例不存在」——那会让守卫静默失效。
+    async fn fail_closed_on_definition_drift(
+        &self,
+        store: &Arc<S>,
+        instance_id: &str,
+        definition: &WorkflowDefinition,
+    ) -> Result<(), RuntimeError> {
+        let inst = match store.load_instance(instance_id).await {
+            Ok(Some(inst)) => inst,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(RuntimeError::StoreError(e.to_string())),
+        };
+        match assert_definition_pin(&inst, definition) {
+            Ok(()) => Ok(()),
+            Err(RuntimeError::DefinitionDrift {
+                expected, actual, ..
+            }) => Err(self
+                .definition_drift_error(store, instance_id, expected, actual)
+                .await),
+            Err(other) => Err(other),
+        }
     }
 
     /// 恢复挂起的实例
@@ -1018,90 +1956,408 @@ where
                     .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()));
             }
         }
-        let mut inst = self
+        // 定义漂移守卫必须在**任何状态写之前**：先读实例 + 加载定义 + 校验钉死哈希。
+        // 先提交 Waiting→Running 再发现漂移会留下一次无效果的状态转换与 `workflow.resumed`。
+        let pre = self
             .store
             .load_instance(instance_id)
             .await
             .map_err(|e| RuntimeError::StoreError(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
-
-        if !inst.status.is_resumable() {
-            return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+        let def = self
+            .store
+            .load_definition(
+                &pre.definition_ns,
+                &pre.definition_name,
+                &pre.definition_version,
+            )
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| {
+                RuntimeError::DefinitionNotFound(format!(
+                    "{}/{}@{}",
+                    pre.definition_ns, pre.definition_name, pre.definition_version
+                ))
+            })?;
+        if let Err(drift) = assert_definition_pin(&pre, &def) {
+            let (expected, actual) = match drift {
+                RuntimeError::DefinitionDrift {
+                    expected, actual, ..
+                } => (expected, actual),
+                other => return Err(other),
+            };
+            return Err(self
+                .definition_drift_error(&self.store, instance_id, expected, actual)
+                .await);
         }
 
-        // signal/事件校验（标准 3.4 节）：signal 名必须匹配挂起实例的期望
-        if let Some(meta) = inst.suspension_meta.as_ref() {
-            // 人工审批挂起（expected_signal）：必须精确匹配
-            if let Some(exp) = meta.expected_signal.as_deref() {
-                let got = signal_name.unwrap_or("");
-                if got != exp {
-                    return Err(RuntimeError::InvalidSignal(format!(
-                        "instance '{}' is waiting for signal '{exp}', got '{got}'",
-                        instance_id
-                    )));
-                }
-            }
-            // 事件监听挂起（listen）：signal 名应匹配事件过滤器（支持多事件类型）
-            if meta.reason == "listen" {
-                if let Some(filter) = meta.event_filter.as_ref() {
-                    let accepted: Vec<&str> = if !filter.event_types.is_empty() {
-                        filter.event_types.iter().map(|s| s.as_str()).collect()
-                    } else {
-                        filter.event_type.iter().map(|s| s.as_str()).collect()
-                    };
-                    if !accepted.is_empty() {
-                        if let Some(name) = signal_name {
-                            if !accepted.contains(&name) {
+        let outcome = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    if !inst.status.is_resumable() {
+                        return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+                    }
+
+                    // signal/事件校验（标准 3.4 节）：signal 名必须匹配挂起实例的期望
+                    if let Some(meta) = inst.suspension_meta.as_ref() {
+                        // 人工审批挂起（expected_signal）：必须精确匹配
+                        if let Some(exp) = meta.expected_signal.as_deref() {
+                            let got = signal_name.unwrap_or("");
+                            if got != exp {
                                 return Err(RuntimeError::InvalidSignal(format!(
-                                    "instance '{}' is listening for event types {:?}, got signal '{name}'",
-                                    instance_id, accepted
+                                    "instance '{}' is waiting for signal '{exp}', got '{got}'",
+                                    instance_id
                                 )));
                             }
                         }
+                        // 事件监听挂起（listen）：signal 名应匹配事件过滤器（支持多事件类型）
+                        if meta.reason == "listen" {
+                            if let Some(filter) = meta.event_filter.as_ref() {
+                                let accepted: Vec<&str> = if !filter.event_types.is_empty() {
+                                    filter.event_types.iter().map(|s| s.as_str()).collect()
+                                } else {
+                                    filter.event_type.iter().map(|s| s.as_str()).collect()
+                                };
+                                if !accepted.is_empty() {
+                                    if let Some(name) = signal_name {
+                                        if !accepted.contains(&name) {
+                                            return Err(RuntimeError::InvalidSignal(format!(
+                                                "instance '{}' is listening for event types {:?}, got signal '{name}'",
+                                                instance_id, accepted
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
+
+                    // 注入 signal 数据到 context
+                    if let Some(name) = signal_name {
+                        inst.context["_signal"] = serde_json::json!({
+                            "name": name,
+                            "payload": payload.clone().unwrap_or(Value::Null),
+                        });
+                        // 手动 signal 同时注入 `_event`，使 switch+eventConditions /
+                        // 多 onEvents 路由对「事件总线自动恢复」与「手动 signal」双路径一致生效
+                        inst.context["_event"] = serde_json::json!({
+                            "arrived": true,
+                            "eventType": name,
+                        });
+                    }
+
+                    // 完成当前挂起任务帧并推进（与 resume_by_event 一致）：
+                    // 否则 drive 会重新执行已挂起的 listen/signal 任务，实例回到挂起态——
+                    // 这是「signal 推进审批」端到端生效的必要一步（端到端验证发现）
+                    if let Some(last) = inst.task_stack.last_mut() {
+                        last.status = TaskStatus::Completed;
+                        last.ended_at = Some(self.clock.now_ms());
+                        if let Some(p) = &payload {
+                            last.output = Some(p.clone());
+                        }
+                    }
+                    inst.current_task_index += 1;
+
+                    inst.status = InstanceStatus::Running;
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+
+        let inst = match outcome {
+            ControlPlaneOutcome::Committed(inst) => *inst,
+            // resume 的守卫不产生 Skip（非可恢复状态走 Err(AlreadyCompleted)）；
+            // 为完整匹配仍按「已不可恢复」返回。
+            ControlPlaneOutcome::Skipped => {
+                return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
             }
-        }
+        };
 
-        // 注入 signal 数据到 context
-        if let Some(name) = signal_name {
-            inst.context["_signal"] = serde_json::json!({
-                "name": name,
-                "payload": payload.clone().unwrap_or(Value::Null),
-            });
-            // 手动 signal 同时注入 `_event`，使 switch+eventConditions /
-            // 多 onEvents 路由对「事件总线自动恢复」与「手动 signal」双路径一致生效
-            inst.context["_event"] = serde_json::json!({
-                "arrived": true,
-                "eventType": name,
-            });
-        }
+        // 后台 drive（受监督：见 [`Self::spawn_drive`]）
+        self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
 
-        // 完成当前挂起任务帧并推进（与 resume_by_event 一致）：
-        // 否则 drive 会重新执行已挂起的 listen/signal 任务，实例回到挂起态——
-        // 这是「signal 推进审批」端到端生效的必要一步（端到端验证发现）
-        if let Some(last) = inst.task_stack.last_mut() {
-            last.status = TaskStatus::Completed;
-            last.ended_at = Some(self.clock.now_ms());
-            if let Some(p) = &payload {
-                last.output = Some(p.clone());
-            }
-        }
-        inst.current_task_index += 1;
+        Ok(inst)
+    }
 
-        inst.status = InstanceStatus::Running;
-        inst.suspension_meta = None;
-        inst.updated_at = self.clock.now_ms();
-
-        self.store
-            .save_instance(&inst)
+    /// 从审批终态恢复工作流实例。
+    ///
+    /// `outcome` = 审批终态负载：作为 approve 帧输出写入并注入 `context["_approval"]`。
+    /// `next_target`：`Some(target)` = 按节点的 `on_pass`/`on_reject` 路由到目标任务；
+    /// `None` = 顺序推进到下一任务（审批正常通过）。目标必须与定义解析期的
+    /// `check_task_refs` 同口径（顶层任务名），未知目标 fail-closed。
+    ///
+    /// 前置：实例必须挂起在审批上（`suspension_meta.reason == "approval"`），否则
+    /// fail-closed —— 不得把 signal/listen 挂起当作审批恢复。
+    ///
+    /// CAS 语义复用 [`Self::resume`]：线性一致读修订号 + 冲突重放（≤3），
+    /// 提交 `task.completed` + `workflow.resumed` 后重新驱动。挂起必须在同一次变更里
+    /// 清掉（`status=Running` + `suspension_meta=None`），否则 drive 的同节点 no-op
+    /// 守卫会静默跳过驱动。
+    pub async fn resume_approval(
+        &self,
+        instance_id: &str,
+        outcome: Value,
+        next_target: Option<&str>,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        let pre = self
+            .store
+            .load_instance(instance_id)
             .await
-            .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
+        let def = self
+            .store
+            .load_definition(
+                &pre.definition_ns,
+                &pre.definition_name,
+                &pre.definition_version,
+            )
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| {
+                RuntimeError::DefinitionNotFound(format!(
+                    "{}/{}@{}",
+                    pre.definition_ns, pre.definition_name, pre.definition_version
+                ))
+            })?;
 
-        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst)
-            .await;
+        // 定义漂移守卫必须在**任何状态写之前**（ADR-0013 D6）：先读实例 + 加载定义 +
+        // 校验钉死哈希。漂移 ⇒ 置 `Failed` + `workflow.faulted` 并报 `DefinitionDrift`，
+        // 绝不提交 `WORKFLOW_RESUMED`（与 [`Self::resume`] 同口径）。
+        if let Err(drift) = assert_definition_pin(&pre, &def) {
+            let (expected, actual) = match drift {
+                RuntimeError::DefinitionDrift {
+                    expected, actual, ..
+                } => (expected, actual),
+                other => return Err(other),
+            };
+            return Err(self
+                .definition_drift_error(&self.store, instance_id, expected, actual)
+                .await);
+        }
 
-        // 需要加载 definition
+        let cp = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    // 前置守卫：只有挂起在审批上的实例才可由审批终态恢复。
+                    let on_approval = inst
+                        .suspension_meta
+                        .as_ref()
+                        .is_some_and(|m| m.reason == "approval");
+                    if !on_approval {
+                        return Err(RuntimeError::InvalidSignal(format!(
+                            "instance '{instance_id}' is not suspended on an approval"
+                        )));
+                    }
+                    // 未知目标在写之前拒绝：`mutate` 返回 Err 时 `commit_control_plane`
+                    // 直接传播，实例保持原状（本地改动的副本被丢弃）。
+                    let next_index = match next_target {
+                        Some(target) => find_task_index(&def.do_tasks, target)
+                            .ok_or_else(|| RuntimeError::GotoTargetNotFound(target.to_string()))?,
+                        None => inst.current_task_index + 1,
+                    };
+
+                    // 完成挂起的 approve 帧：审批终态即帧输出。
+                    if let Some(last) = inst.task_stack.last_mut() {
+                        last.status = TaskStatus::Completed;
+                        last.output = Some(outcome.clone());
+                        last.ended_at = Some(self.clock.now_ms());
+                    }
+                    inst.current_task_index = next_index;
+                    inst.context["_approval"] = outcome.clone();
+                    inst.status = InstanceStatus::Running;
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+
+        let inst = match cp {
+            ControlPlaneOutcome::Committed(inst) => *inst,
+            // 守卫不产生 Skip（非审批挂起走 Err）；为完整匹配按「已不可恢复」返回。
+            ControlPlaneOutcome::Skipped => {
+                return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
+            }
+        };
+
+        // 后台 drive（受监督：见 [`Self::spawn_drive`]）
+        self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
+
+        Ok(inst)
+    }
+
+    /// 把挂起在审批上的实例置为 `Failed`（有界 CAS，冲突重放）。
+    ///
+    /// 审批终态（rejected/cancelled/terminated）没有可用恢复目标时由服务层调用：
+    /// fault 携带 `error_code`（reject 无 `on_reject` 场景为 `approval_rejected`）。
+    /// 复用控制面 CAS 写路径（同 [`Self::definition_drift_error`]），不新开无 CAS 写路径。
+    ///
+    /// 前置与 [`Self::resume_approval`] 同口径：仅挂起在审批上的实例可被处置；
+    /// 已终态则 Skip（返回 [`RuntimeError::AlreadyCompleted`]），不覆盖他人终态。
+    pub async fn fail_approval(
+        &self,
+        instance_id: &str,
+        error_code: &str,
+        message: &str,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        let fault = approval_fault(error_code, message);
+        let cp = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::WORKFLOW_FAULTED],
+                |inst| {
+                    if inst.status.is_terminal() {
+                        return Ok(false);
+                    }
+                    let on_approval = inst
+                        .suspension_meta
+                        .as_ref()
+                        .is_some_and(|m| m.reason == "approval");
+                    if !on_approval {
+                        return Err(RuntimeError::InvalidSignal(format!(
+                            "instance '{instance_id}' is not suspended on an approval"
+                        )));
+                    }
+                    inst.status = InstanceStatus::Failed;
+                    inst.fault = Some(fault.clone());
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+        match cp {
+            ControlPlaneOutcome::Committed(inst) => {
+                // 工作流 fault 是权威结论：审批聚合收口最佳努力，失败不阻断 fault
+                // （聚合留给管理员 `Terminate`）。
+                let _ = self
+                    .finalize_approval_aggregate(instance_id, "workflow_faulted")
+                    .await;
+                Ok(*inst)
+            }
+            // 已终态：不覆盖他人终态，与 resume/cancel 的 AlreadyCompleted 同口径。
+            ControlPlaneOutcome::Skipped => {
+                Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
+            }
+        }
+    }
+
+    /// 取消实例：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
+    ///
+    /// 非终态实例先经 [`Self::finalize_approval_aggregate`] 收口审批聚合（内部生命周期
+    /// 权威 actor，不受节点 `sign_admins` 约束，聚合不存在时为 no-op）：只有收口成功才
+    /// 继续取消，失败 fail-closed 传播 —— 绝不留下「工作流已取消、审批仍 open 可投票」
+    /// 的孤儿。
+    ///
+    /// 控制面路径（[`Self::commit_control_plane`]）：线性一致读修订号后在 CAS 提交里
+    /// 重新校验状态。一次「取消 vs 完成」的竞态里，若完成先提交则取消读到的是终态
+    /// 而拒绝写入 —— 不会用 `Cancelled` 覆盖已提交的 `Completed`（消费者已见
+    /// `workflow.completed`，再发 `workflow.cancelled` 会撕裂终态）。
+    ///
+    /// 终态 ⇒ [`RuntimeError::AlreadyCompleted`]（服务层映射为 FailedPrecondition），
+    /// 与「实例不存在」的 [`RuntimeError::NotFound`] 区分。
+    ///
+    /// 生命周期事件与状态写同一次提交（durable 装配下同 Txn/同事务；legacy 分步，
+    /// 见 [`Self::commit_instance`]）。
+    pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+        // 取消即工作流终态：先收口审批聚合（完成或在途终止），失败 fail-closed 传播——
+        // 绝不留下「工作流已取消、审批仍 open 可投票」的孤儿。收口覆盖**所有非终态实例**
+        // （不止挂起在审批上的）：审批节点通过后工作流可能在下游 Running/Suspended，其聚合
+        // 仍是 `RUNNING`。终态实例由下方 commit 的守卫处理（`AlreadyCompleted`）。
+        if self.approval.is_some() {
+            let inst = self
+                .store
+                .load_instance(instance_id)
+                .await
+                .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
+            if inst.as_ref().is_some_and(|i| !i.status.is_terminal()) {
+                self.finalize_approval_aggregate(instance_id, "workflow_cancelled")
+                    .await?;
+            }
+        }
+        let outcome = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::WORKFLOW_CANCELLED],
+                |inst| {
+                    if inst.status.is_terminal() {
+                        return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+                    }
+                    inst.status = InstanceStatus::Cancelled;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+        match outcome {
+            ControlPlaneOutcome::Committed(_) => Ok(()),
+            // 取消守卫不产生 Skip（非终态即提交）；为完整匹配仍按成功处理。
+            ControlPlaneOutcome::Skipped => Ok(()),
+        }
+    }
+
+    /// 工作流进入终态时收口审批聚合实例（完成或终止在途）。
+    ///
+    /// 审批聚合是独立文档（id = workflow id），只在工作流 `Completed` 分支经
+    /// [`ApprovalBridge::finish_if_complete`] 收口；工作流因下游 fault/cancel 提前
+    /// 终结时聚合会残留 `RUNNING`（甚至仍有 open 分支）。本 helper 弥合该缝隙：
+    /// 1. 无审批桥 ⇒ no-op（legacy / 内存装配无聚合）；
+    /// 2. 已收口（`Some`）或聚合不存在（`NotFound`）⇒ `Ok`；
+    /// 3. 仍未收口（`None`）⇒ 以内部生命周期权威 [`SYSTEM_ACTOR`] 终止在途聚合，终止目标
+    ///    已终态（`NotFound` / `InvalidTransition`）视为成功。
+    ///
+    /// 错误处置由调用方决定：`cancel_instance` fail-closed 传播（宁可不取消也不留孤儿），
+    /// `fail_instance` / `fail_approval` 最佳努力（工作流 fault 是权威结论，收口失败不阻断
+    /// fault，聚合留给管理员 `Terminate`）。
+    async fn finalize_approval_aggregate(
+        &self,
+        workflow_id: &str,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        let Some(bridge) = &self.approval else {
+            return Ok(());
+        };
+        match bridge.finish_if_complete(workflow_id).await {
+            // 已收口（`Some`）或聚合不存在（`NotFound`）：终止目标已达成。
+            Ok(Some(_)) | Err(BridgeError::NotFound(_)) => Ok(()),
+            Ok(None) => match bridge.terminate(workflow_id, SYSTEM_ACTOR, reason).await {
+                // 无聚合可终止 / 已终态：终止目标已达成。
+                Ok(()) | Err(BridgeError::NotFound(_)) | Err(BridgeError::InvalidTransition(_)) => {
+                    Ok(())
+                }
+                Err(e) => Err(RuntimeError::StoreError(format!(
+                    "approval finalize terminate failed: {e}"
+                ))),
+            },
+            Err(e) => Err(RuntimeError::StoreError(format!(
+                "approval finalize failed: {e}"
+            ))),
+        }
+    }
+
+    /// 对一个**已存在**的实例（重）启动驱动 —— 恢复/对账入口。
+    ///
+    /// 与 `start`/`resume` 的区别：不创建实例、不改变实例状态，只加载定义并
+    /// 经 [`Self::spawn_drive`] 受监督地驱动（受同一实例租约约束）。
+    /// 上游 supervisor 在进程重启后重驱动挂起/在飞实例时使用。
+    pub async fn drive_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+        let inst = self
+            .store
+            .load_instance(instance_id)
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
         let def = self
             .store
             .load_definition(
@@ -1117,29 +2373,170 @@ where
                     inst.definition_ns, inst.definition_name, inst.definition_version
                 ))
             })?;
-
-        // 后台 drive（受监督：见 [`Self::spawn_drive`]）
+        // 定义漂移守卫：驱动前先校验钉死哈希（fail-closed），不得在新语义下驱动。
+        self.fail_closed_on_definition_drift(&self.store, &inst.id, &def)
+            .await?;
         self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
+        Ok(())
+    }
 
-        Ok(inst)
+    /// 写回实例状态 + 伴生事件 —— 运行时对**已存在实例**的唯一状态写路径。
+    ///
+    /// 除模块头列出的三处新键创建（`start` 首写/校验失败写、`run` 子流程内联建子实例）
+    /// 与下方的降级分支外，任何对已存在实例的状态写都必须经此路径，以保证 CAS/fencing
+    /// 与「状态 + 事件同事务」不被绕过。
+    ///
+    /// 选择顺序：① 有租约 guard ⇒ `fenced_commit`（状态 + 事件同一 Txn，fencing 三重比较）；
+    /// ② 有 `durable.atomic_commit` ⇒ `commit_state_and_outbox_batch`（状态 + 事件同一事务）；
+    /// ③ 否则 legacy 分步（仅内存 / 无 KV 装配）：CAS/普通写 + 逐条发事件。
+    ///
+    /// 返回 `true` = 写入生效（并刷新 `rev` 供后续 CAS 使用）；`false` = CAS 冲突 /
+    /// fencing 拒绝 / 原子提交未通过 —— 计入 [`Self::cas_conflict_total`]，
+    /// 调用方不得静默吞掉。
+    async fn commit_instance(
+        &self,
+        store: &Arc<S>,
+        inst: &WorkflowInstance,
+        rev: &mut Option<i64>,
+        guard: Option<&dyn LeaseGuard>,
+        events: &[&str],
+    ) -> bool {
+        let now_ms = self.clock.now_ms();
+        let records: Vec<OutboxRecord> = events
+            .iter()
+            .map(|event_type| {
+                lifecycle_record(
+                    inst,
+                    event_type,
+                    now_ms,
+                    format!("evt-{}", uuid::Uuid::new_v4()),
+                )
+            })
+            .collect();
+
+        let ok = if let Some(g) = guard {
+            matches!(
+                g.fenced_commit(inst, rev.unwrap_or(-1), &records).await,
+                Ok(true)
+            )
+        } else if let Some(atomic) = self.durable.as_ref().and_then(|d| d.atomic_commit.as_ref()) {
+            matches!(
+                atomic
+                    .commit_state_and_outbox_batch(inst, &records, *rev)
+                    .await,
+                Ok(true)
+            )
+        } else {
+            // legacy：无 fencing / 无同事务能力的内存与降级路径；
+            // 状态与事件分两步写（生产路径不走这里）。
+            let saved = match *rev {
+                Some(r) => matches!(store.save_instance_atomic(inst, r).await, Ok(true)),
+                None => store.save_instance(inst).await.is_ok(),
+            };
+            if saved {
+                match self.durable.as_ref() {
+                    // 有 outbox 但无同事务提交：尽力逐条 append（事件不丢，但非原子）。
+                    Some(d) => {
+                        for rec in &records {
+                            let _ = d.outbox.append(rec).await;
+                        }
+                    }
+                    None => {
+                        // 先落状态再发事件（非原子，仅降级路径）：发布口复用统一的
+                        // [`Self::emit_lifecycle`]（`durable` 为 `None` 时它直发进程内总线）。
+                        for event_type in events {
+                            self.emit_lifecycle(event_type, inst).await;
+                        }
+                    }
+                }
+            }
+            saved
+        };
+        if ok {
+            // 刷新修订号：后续 CAS 必须以写入后的新值为期望。
+            if let Ok(Some((_, r))) = store.load_instance_with_rev(&inst.id).await {
+                *rev = Some(r);
+            }
+        } else if guard.is_some() || rev.is_some() {
+            self.cas_conflicts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        ok
+    }
+
+    /// 控制面（无租约）CAS 写：线性一致读修订号 → 施加变更 → 提交。
+    ///
+    /// `mutate` 在**每次**尝试里对刚读到的实例重新求值：`Ok(true)` = 应用并提交；
+    /// `Ok(false)` = 守卫未满足、放弃本次（不写）；`Err` = 致命错误（状态/信号校验等）。
+    ///
+    /// CAS 冲突（[`Self::commit_instance`] 返回 `false`）至多重放
+    /// [`CONTROL_PLANE_CAS_ATTEMPTS`] 次，耗尽返回 [`RuntimeError::StaleRevision`]——
+    /// 绝不盲写覆盖并发写者。
+    async fn commit_control_plane<F>(
+        &self,
+        store: &Arc<S>,
+        instance_id: &str,
+        events: &[&str],
+        mut mutate: F,
+    ) -> Result<ControlPlaneOutcome, RuntimeError>
+    where
+        F: FnMut(&mut WorkflowInstance) -> Result<bool, RuntimeError>,
+    {
+        for _ in 0..CONTROL_PLANE_CAS_ATTEMPTS {
+            let (mut inst, mut rev) = match store.load_instance_with_rev(instance_id).await {
+                Ok(Some((i, r))) => (i, Some(r)),
+                // 存储不提供修订号（内存/降级）：回退普通读，`rev = None`。
+                Ok(None) => match store.load_instance(instance_id).await {
+                    Ok(Some(i)) => (i, None),
+                    Ok(None) => return Err(RuntimeError::NotFound(instance_id.to_string())),
+                    Err(e) => return Err(RuntimeError::StoreError(e.to_string())),
+                },
+                Err(e) => return Err(RuntimeError::StoreError(e.to_string())),
+            };
+            if !mutate(&mut inst)? {
+                return Ok(ControlPlaneOutcome::Skipped);
+            }
+            if self
+                .commit_instance(store, &inst, &mut rev, None, events)
+                .await
+            {
+                return Ok(ControlPlaneOutcome::Committed(Box::new(inst)));
+            }
+            if rev.is_none() {
+                // 无 CAS 能力的存储：提交失败是普通写错误，不是并发冲突；
+                // 重放无意义，也不得谎报成 StaleRevision。
+                return Err(RuntimeError::StoreError(format!(
+                    "instance write failed: {instance_id}"
+                )));
+            }
+        }
+        Err(RuntimeError::StaleRevision(instance_id.to_string()))
     }
 
     /// 执行驱动循环 —— 在 spawn 后独立运行
     ///
     /// 以 BoxFuture 返回（而非 async fn），避免递归异步造成的 opaque 类型循环。
-    pub(crate) fn drive(
-        &self,
+    ///
+    /// `guard` 为调用方持有的实例驱动租约（未注入租约时为 `None`）；非空时状态 +
+    /// 伴生事件经 [`LeaseGuard::fenced_commit`]（三重 compare）同一次提交，
+    /// 并拒绝失去租约的迟到写。
+    pub(crate) fn drive<'a>(
+        &'a self,
         instance_id: String,
         definition: WorkflowDefinition,
         store: Arc<S>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        guard: Option<&'a dyn LeaseGuard>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             'drive_loop: loop {
-                // 加载最新实例状态
-                let mut inst = match store.load_instance(&instance_id).await {
-                    Ok(Some(i)) => i,
-                    Ok(None) => break,
-                    Err(_) => break,
+                // 加载最新实例状态；存储支持 CAS 时同时取存储修订号（线性一致读）。
+                let (mut inst, mut rev) = match store.load_instance_with_rev(&instance_id).await {
+                    Ok(Some((i, r))) => (i, Some(r)),
+                    _ => match store.load_instance(&instance_id).await {
+                        Ok(Some(i)) => (i, None),
+                        Ok(None) => break,
+                        Err(_) => break,
+                    },
                 };
 
                 // 终端状态则退出
@@ -1147,13 +2544,42 @@ where
                     break;
                 }
 
-                // 标准相位：Pending → Running（start 后首步推进）
+                // 定义钉死守卫（fail-closed）：钉死的定义内容与本次加载的定义不一致
+                // ⇒ 不再在新语义上推进，置 Failed + 伴生 workflow.faulted（同一次提交），
+                // 由上层控制面/启动对账以 `DefinitionDrift` 报出。
+                if let Some((expected, actual)) = definition_content_drift(&inst, &definition) {
+                    let fault = definition_drift_fault(&expected, &actual);
+                    self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                        .await;
+                    break 'drive_loop;
+                }
+
+                // 未钉死的旧快照：
+                // 驱动成功即视作「认下这份定义」，在内存回填，随后下一次提交随之落库。
+                if inst.definition_hash.is_none() {
+                    inst.definition_hash = Some(super::model::definition_hash(&definition));
+                }
+                if inst.engine_version.is_none() {
+                    inst.engine_version = Some(super::model::ENGINE_VERSION.to_string());
+                }
+
+                // 标准相位：Pending → Running（start 后首步推进）。
+                // 首写走 CAS/fencing：两个驱动者并发时恰一个赢，输者退出 drive。
                 if inst.status == InstanceStatus::Pending {
                     inst.status = InstanceStatus::Running;
                     inst.updated_at = self.clock.now_ms();
-                    let _ = store.save_instance(&inst).await;
-                    self.emit_lifecycle(lifecycle::WORKFLOW_STARTED, &inst)
-                        .await;
+                    if !self
+                        .commit_instance(
+                            &store,
+                            &inst,
+                            &mut rev,
+                            guard,
+                            &[lifecycle::WORKFLOW_STARTED],
+                        )
+                        .await
+                    {
+                        break 'drive_loop;
+                    }
                     continue;
                 }
 
@@ -1172,20 +2598,25 @@ where
                             }
                         }
                         // 已完成帧：应用 output.as/export.as 数据流管线（Skipped 帧跳过）
-                        if frame.status == TaskStatus::Completed {
+                        let events: &[&str] = if frame.status == TaskStatus::Completed {
                             if let Err(fault) =
                                 self.apply_task_output(&mut inst, &definition, &mut frame)
                             {
                                 inst.task_stack.push(frame);
-                                self.fail_instance(&mut inst, store.clone(), fault).await;
+                                self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                    .await;
                                 break;
                             }
-                            self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
-                        }
+                            &[lifecycle::TASK_COMPLETED]
+                        } else {
+                            &[]
+                        };
                         inst.task_stack.push(frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
+                        let _ = self
+                            .commit_instance(&store, &inst, &mut rev, guard, events)
+                            .await;
                     }
 
                     StepResult::Goto { target, frame } => {
@@ -1194,7 +2625,9 @@ where
                             Some(idx) => {
                                 inst.current_task_index = idx;
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                             }
                             None => {
                                 inst.status = InstanceStatus::Failed;
@@ -1203,27 +2636,33 @@ where
                                 "The switch condition referenced a task that does not exist in do_tasks",
                             ));
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                                 break;
                             }
                         }
                     }
 
                     StepResult::Suspend { reason, frame } => {
-                        // 任务级 timeout 接线（超时 → timeout 错误 408 → faulted，仅当仍停留该任务）
+                        // 任务级 timeout 接线（超时 → timeout 错误 408 → faulted，仅当仍停留该任务）。
+                        // approve 节点由自身 `deadline` 策略治理（见下方 WaitingForApproval 臂）：
+                        // 定义级任务超时不得在审批等待期把实例 fault 掉，故不挂通用超时。
                         let task_index = inst.current_task_index;
-                        if let Some(meta) = definition.task_meta.get(&frame.task_name) {
-                            if let Some(t) = meta.timeout.as_ref() {
-                                if let Some(ms) =
-                                    crate::workflow::engine::parse_iso8601_duration_ms(&t.after)
-                                {
-                                    self.schedule_timeout(
-                                        inst.id.clone(),
-                                        definition.clone(),
-                                        store.clone(),
-                                        ms.max(0) as u64,
-                                        Some(task_index),
-                                    );
+                        if !matches!(&reason, SuspendReason::WaitingForApproval { .. }) {
+                            if let Some(meta) = definition.task_meta.get(&frame.task_name) {
+                                if let Some(t) = meta.timeout.as_ref() {
+                                    if let Some(ms) =
+                                        crate::workflow::engine::parse_iso8601_duration_ms(&t.after)
+                                    {
+                                        self.schedule_timeout(
+                                            inst.id.clone(),
+                                            definition.clone(),
+                                            store.clone(),
+                                            ms.max(0) as u64,
+                                            Some(task_index),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1235,13 +2674,26 @@ where
                                 with,
                                 input,
                             } => {
-                                let result = self
-                                    .dispatcher
-                                    .dispatch(service, with.as_ref(), input)
-                                    .await;
+                                let task_index = inst.current_task_index;
+                                let task_name = frame.task_name.clone();
+                                let result = match self
+                                    .register_step(&inst.id, task_index, &task_name)
+                                    .await
+                                {
+                                    Ok(key) => {
+                                        self.dispatcher
+                                            .dispatch(service, with.as_ref(), input, key.as_deref())
+                                            .await
+                                    }
+                                    Err(error) => DispatchResult::Failure {
+                                        error,
+                                        retryable: true,
+                                    },
+                                };
 
                                 match result {
                                     DispatchResult::Success { data } => {
+                                        self.mark_step_done(&inst.id, task_index, &task_name).await;
                                         // 派发成功 —— 不挂起，直接推进
                                         let mut completed_frame = frame;
                                         completed_frame.status = TaskStatus::Completed;
@@ -1261,16 +2713,25 @@ where
                                             &mut completed_frame,
                                         ) {
                                             inst.task_stack.push(completed_frame);
-                                            self.fail_instance(&mut inst, store.clone(), fault)
-                                                .await;
+                                            self.fail_instance(
+                                                &mut inst, &store, &mut rev, guard, fault,
+                                            )
+                                            .await;
                                             break 'drive_loop;
                                         }
                                         inst.task_stack.push(completed_frame);
                                         inst.current_task_index += 1;
                                         inst.updated_at = self.clock.now_ms();
                                         inst.suspension_meta = None;
-                                        let _ = store.save_instance(&inst).await;
-                                        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
+                                        let _ = self
+                                            .commit_instance(
+                                                &store,
+                                                &inst,
+                                                &mut rev,
+                                                guard,
+                                                &[lifecycle::TASK_COMPLETED],
+                                            )
+                                            .await;
                                         continue;
                                     }
                                     DispatchResult::Failure { error, retryable } => {
@@ -1278,13 +2739,16 @@ where
                                             // 不可重试的错误 → 直接 faulted
                                             inst.task_stack.push(frame);
                                             self.fail_instance(
-                                            &mut inst,
-                                            store.clone(),
-                                            crate::workflow::errors::WorkflowFault::communication(
-                                                format!("call to '{}' failed: {}", service, error),
-                                                error,
-                                            ),
-                                        ).await;
+                                                &mut inst,
+                                                &store,
+                                                &mut rev,
+                                                guard,
+                                                crate::workflow::errors::WorkflowFault::communication(
+                                                    format!("call to '{}' failed: {}", service, error),
+                                                    error,
+                                                ),
+                                            )
+                                            .await;
                                             break 'drive_loop;
                                         }
                                         // 可重试的错误 → retry 策略接线（标准 Fault Tolerance）
@@ -1304,16 +2768,19 @@ where
                                             // 重试耗尽 → faulted（communication）
                                             inst.task_stack.push(frame);
                                             self.fail_instance(
-                                            &mut inst,
-                                            store.clone(),
-                                            crate::workflow::errors::WorkflowFault::communication(
-                                                format!(
-                                                    "call to '{}' failed after {} retries: {}",
-                                                    service, prev_retries, error
+                                                &mut inst,
+                                                &store,
+                                                &mut rev,
+                                                guard,
+                                                crate::workflow::errors::WorkflowFault::communication(
+                                                    format!(
+                                                        "call to '{}' failed after {} retries: {}",
+                                                        service, prev_retries, error
+                                                    ),
+                                                    error,
                                                 ),
-                                                error,
-                                            ),
-                                        ).await;
+                                            )
+                                            .await;
                                             break 'drive_loop;
                                         }
                                         // 计算下次重试延迟
@@ -1334,18 +2801,26 @@ where
                                             payload: Some(input.clone()),
                                             event_filter: None,
                                             expected_signal: None,
+                                            approval_instance_id: None,
                                             retry_count: Some(prev_retries + 1),
                                             error: Some(error),
                                         });
                                         inst.status = InstanceStatus::Waiting;
                                         inst.updated_at = self.clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
-                                        self.emit_lifecycle(lifecycle::TASK_RETRIED, &inst).await;
+                                        let _ = self
+                                            .commit_instance(
+                                                &store,
+                                                &inst,
+                                                &mut rev,
+                                                guard,
+                                                &[lifecycle::TASK_RETRIED],
+                                            )
+                                            .await;
                                         self.schedule_auto_resume(
                                             inst.id.clone(),
                                             definition.clone(),
                                             store.clone(),
-                                            delay,
+                                            until,
                                             "retry".to_string(),
                                         );
                                         break 'drive_loop;
@@ -1378,7 +2853,9 @@ where
                                         "The referenced sub-workflow definition does not exist",
                                     ));
                                         inst.updated_at = self.clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
+                                        let _ = self
+                                            .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                            .await;
                                         break 'drive_loop;
                                     }
                                     Err(e) => {
@@ -1390,7 +2867,9 @@ where
                                                 e.to_string(),
                                             ));
                                         inst.updated_at = self.clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
+                                        let _ = self
+                                            .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                            .await;
                                         break 'drive_loop;
                                     }
                                 };
@@ -1411,7 +2890,9 @@ where
                                             e.to_string(),
                                         ));
                                     inst.updated_at = self.clock.now_ms();
-                                    let _ = store.save_instance(&inst).await;
+                                    let _ = self
+                                        .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                        .await;
                                     break 'drive_loop;
                                 }
 
@@ -1429,12 +2910,18 @@ where
                                 inst.context["_subflow_instance_id"] =
                                     Value::String(sub_id.clone());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_WAITING],
+                                    )
+                                    .await;
                                 // 登记父子对，交给 per-tick 的登记表扫描
                                 // （不再依赖每 5 秒的全量列举）。
                                 self.register_pending_subflow(inst.id.clone(), sub_id.clone());
-                                self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
-                                    .await;
 
                                 // 子流程监控由后台扫描器 (start_subflow_scanner) 负责，
                                 // 父流程挂起后会在子流程完成时由扫描器自动恢复。
@@ -1446,17 +2933,22 @@ where
                                 inst.status = InstanceStatus::Waiting;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
-                                self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_WAITING],
+                                    )
                                     .await;
 
                                 // 自动恢复定时器（wait 到期后完成帧并推进）
-                                let wait_ms = (until_ms - self.clock.now_ms()).max(0) as u64;
                                 self.schedule_auto_resume(
                                     inst.id.clone(),
                                     definition.clone(),
                                     store.clone(),
-                                    wait_ms,
+                                    *until_ms,
                                     "wait".to_string(),
                                 );
                                 break 'drive_loop;
@@ -1469,8 +2961,14 @@ where
                                 inst.status = InstanceStatus::Waiting;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
-                                self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_WAITING],
+                                    )
                                     .await;
 
                                 // 任务级 timeout：事件超时 → faulted（仅当仍停留该任务）
@@ -1498,37 +2996,13 @@ where
 
                                 // 主动事件等待（标准 Events：listen 升级为主动订阅 + correlation）：
                                 // 每个挂起实例持有独立订阅，事件到达 → 自动恢复该实例。
-                                let rt = self.clone_runtime();
-                                let wait_store = store.clone();
-                                let wait_def = definition.clone();
-                                let wait_id = inst.id.clone();
-                                // 多事件类型：event 状态多 onEvents / eventConditions 多条件
-                                let filter_types: Vec<String> = if !filter.event_types.is_empty() {
-                                    filter.event_types.clone()
-                                } else if let Some(et) = filter.event_type.clone() {
-                                    vec![et]
-                                } else {
-                                    vec![]
-                                };
-                                let filter_source = filter.source.clone();
-                                let filter_subject = filter.subject.clone();
-                                tokio::spawn(async move {
-                                    let timeout_ms = event_timeout_ms.unwrap_or(60 * 60 * 1000);
-                                    let type_refs: Vec<&str> =
-                                        filter_types.iter().map(|s| s.as_str()).collect();
-                                    let arrived_type = rt
-                                        .event_provider
-                                        .wait_for_event(
-                                            &type_refs,
-                                            filter_source.as_deref(),
-                                            filter_subject.as_deref(),
-                                            timeout_ms,
-                                        )
-                                        .await;
-                                    if let Some(et) = arrived_type {
-                                        rt.resume_by_event(wait_id, wait_def, wait_store, et).await;
-                                    }
-                                });
+                                self.spawn_event_wait(
+                                    inst.id.clone(),
+                                    definition.clone(),
+                                    Arc::clone(&store),
+                                    filter.clone(),
+                                    event_timeout_ms,
+                                );
                                 break 'drive_loop;
                             }
                             SuspendReason::WaitingForSignal { .. } => {
@@ -1537,9 +3011,125 @@ where
                                 inst.status = InstanceStatus::Suspended;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
-                                self.emit_lifecycle(lifecycle::WORKFLOW_SUSPENDED, &inst)
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_SUSPENDED],
+                                    )
                                     .await;
+                                break 'drive_loop;
+                            }
+                            SuspendReason::WaitingForApproval { node, .. } => {
+                                // 已挂起在同一审批节点上的再驱动是零写入无动作：挂起点与审批
+                                // 实例都已落库，再走一遍只会重复入栈 approve 帧、重复提交
+                                // workflow.suspended。恢复路径在驱动前推进状态 / 清空挂起元数据
+                                // （同 `resume`），因此不会落到此守卫。
+                                if inst.status == InstanceStatus::Suspended
+                                    && inst.suspension_meta.as_ref().is_some_and(|m| {
+                                        m.reason == "approval"
+                                            && m.approval_instance_id.as_deref()
+                                                == Some(inst.id.as_str())
+                                    })
+                                {
+                                    break 'drive_loop;
+                                }
+
+                                // approve 节点：先经审批桥开启审批实例（幂等），再按人工恢复
+                                // 语义挂起 —— 不 spawn 任何自动恢复（审批完成由恢复路径驱动）。
+                                //
+                                // 开不出审批必须 fault-closed：挂起却没开审批会让实例永远
+                                // 等不到「有席可批」，而静默继续执行等于跳过审批。
+                                let approve_task = definition
+                                    .do_tasks
+                                    .get(inst.current_task_index)
+                                    .and_then(|named| match &named.task {
+                                        Task::Approve(task) => Some(task),
+                                        _ => None,
+                                    });
+                                // approve 节点由自身 `deadline` 策略治理：声明了 deadline
+                                // 却换算不出到期时刻（非法 duration）必须 fault-closed ——
+                                // 绝不把「无期限」当默认继续挂着。
+                                let approval_deadline = match approve_task {
+                                    Some(task) if task.deadline.is_some() => {
+                                        match task.deadline_ms(self.clock.now_ms()) {
+                                            Some(d) => Some(d),
+                                            None => {
+                                                let fault = crate::workflow::errors::WorkflowFault::internal(
+                                                    "approve node has an invalid deadline",
+                                                    format!(
+                                                        "approve node '{node}' declares a deadline that cannot be resolved to an instant"
+                                                    ),
+                                                );
+                                                self.fail_instance(
+                                                    &mut inst, &store, &mut rev, guard, fault,
+                                                )
+                                                .await;
+                                                break 'drive_loop;
+                                            }
+                                        }
+                                    }
+                                    _ => None,
+                                };
+                                let opened = match (self.approval.as_ref(), approve_task) {
+                                    (Some(bridge), Some(task)) => bridge
+                                        .ensure_node_open(&inst, node, task)
+                                        .await
+                                        .map_err(|e| e.to_string()),
+                                    (None, _) => Err(format!(
+                                        "task '{}' suspended for approval, but this runtime has \
+                                         no approval bridge to open an approval instance",
+                                        frame.task_name
+                                    )),
+                                    (Some(_), None) => Err(format!(
+                                        "task '{}' suspended for approval, but the pinned \
+                                         definition has no approve node at index {}",
+                                        frame.task_name, inst.current_task_index
+                                    )),
+                                };
+                                if let Err(error) = opened {
+                                    let fault = crate::workflow::errors::WorkflowFault::internal(
+                                        "approve node has no approval instance",
+                                        format!(
+                                            "approve node '{}' could not be opened: {error}",
+                                            node
+                                        ),
+                                    );
+                                    self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                        .await;
+                                    break 'drive_loop;
+                                }
+
+                                // 同节点的 Running approve 帧已存在（引擎已提交 Suspend 但实例
+                                // 尚未写成 Suspended 的崩溃窗口内再驱动）⇒ 就地替换；否则入栈。
+                                if matches!(
+                                    inst.task_stack.last(),
+                                    Some(last) if last.task_name == frame.task_name
+                                        && last.task_type == "approve"
+                                        && last.status == TaskStatus::Running
+                                ) {
+                                    inst.task_stack.pop();
+                                }
+                                inst.task_stack.push(frame);
+                                inst.status = InstanceStatus::Suspended;
+                                inst.suspension_meta = Some(reason.to_meta());
+                                inst.updated_at = self.clock.now_ms();
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_SUSPENDED],
+                                    )
+                                    .await;
+                                // 开节点成功后落持久化截止定时器（到期由扫描器外部驱动
+                                // `expire_due`；无更晚 deadline 时不重排）。
+                                if let Some(d) = approval_deadline {
+                                    self.schedule_approval_deadline(inst.id.clone(), d);
+                                }
                                 break 'drive_loop;
                             }
                         }
@@ -1556,14 +3146,22 @@ where
                             self.apply_task_output(&mut inst, &definition, &mut frame)
                         {
                             inst.task_stack.push(frame);
-                            self.fail_instance(&mut inst, store.clone(), fault).await;
+                            self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                .await;
                             break;
                         }
                         inst.task_stack.push(frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
-                        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
+                        let _ = self
+                            .commit_instance(
+                                &store,
+                                &inst,
+                                &mut rev,
+                                guard,
+                                &[lifecycle::TASK_COMPLETED],
+                            )
+                            .await;
                     }
 
                     StepResult::Fork {
@@ -1607,7 +3205,9 @@ where
                                         inst.status = InstanceStatus::Failed;
                                         inst.fault = fault;
                                         inst.updated_at = clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
+                                        let _ = self
+                                            .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                            .await;
                                         continue 'drive_loop;
                                     }
                                     let output = results
@@ -1627,7 +3227,9 @@ where
                                 inst.task_stack.push(completed_frame);
                                 inst.current_task_index += 1;
                                 inst.updated_at = clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                             }
                         } else {
                             // 非 compete 模式：等待所有分支完成
@@ -1686,14 +3288,18 @@ where
                                 inst.status = InstanceStatus::Failed;
                                 inst.fault = fork_fault;
                                 inst.updated_at = clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                                 break;
                             }
 
                             inst.task_stack.push(completed_frame);
                             inst.current_task_index += 1;
                             inst.updated_at = clock.now_ms();
-                            let _ = store.save_instance(&inst).await;
+                            let _ = self
+                                .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                .await;
                         }
                     }
 
@@ -1765,14 +3371,18 @@ where
                             inst.status = InstanceStatus::Failed;
                             inst.fault = foreach_fault;
                             inst.updated_at = self.clock.now_ms();
-                            let _ = store.save_instance(&inst).await;
+                            let _ = self
+                                .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                .await;
                             break;
                         }
 
                         inst.task_stack.push(completed_frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
+                        let _ = self
+                            .commit_instance(&store, &inst, &mut rev, guard, &[])
+                            .await;
                     }
 
                     StepResult::TryBlock {
@@ -1835,12 +3445,31 @@ where
                                         },
                                     frame: call_frame,
                                 } => {
-                                    let result = self
-                                        .dispatcher
-                                        .dispatch(&service, with.as_ref(), &input)
-                                        .await;
+                                    let task_index = inst.current_task_index;
+                                    let task_name = call_frame.task_name.clone();
+                                    let result = match self
+                                        .register_step(&inst.id, task_index, &task_name)
+                                        .await
+                                    {
+                                        Ok(key) => {
+                                            self.dispatcher
+                                                .dispatch(
+                                                    &service,
+                                                    with.as_ref(),
+                                                    &input,
+                                                    key.as_deref(),
+                                                )
+                                                .await
+                                        }
+                                        Err(error) => DispatchResult::Failure {
+                                            error,
+                                            retryable: true,
+                                        },
+                                    };
                                     match result {
                                         DispatchResult::Success { data } => {
+                                            self.mark_step_done(&inst.id, task_index, &task_name)
+                                                .await;
                                             let mut done = call_frame;
                                             done.status = TaskStatus::Completed;
                                             done.output = Some(data);
@@ -1848,9 +3477,9 @@ where
                                             try_ctx = apply_frame_output(try_ctx, &done);
                                         }
                                         DispatchResult::Failure { error, .. } => {
-                                            // 可重试与否由 catch 子句的 `errors` 匹配决定：
-                                            // 这里统一建模为 communication fault，交给
-                                            // catch 路由（catch-all 会接住它）。
+                                            // 有意**不使用**折叠出的 `retryable`：try 体内的路由
+                                            // 由 catch 子句的 `errors` 匹配决定（catch-all 会接住）；
+                                            // 这里统一建模为 communication fault 再交 catch 路由。
                                             try_failed = true;
                                             try_fault = Some(
                                                 crate::workflow::errors::WorkflowFault::communication(
@@ -1918,7 +3547,9 @@ where
                                 inst.status = InstanceStatus::Failed;
                                 inst.fault = try_fault;
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                                 break;
                             }
 
@@ -1939,7 +3570,9 @@ where
                             inst.current_task_index += 1;
                         }
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
+                        let _ = self
+                            .commit_instance(&store, &inst, &mut rev, guard, &[])
+                            .await;
                     }
 
                     StepResult::Completed { output } => {
@@ -1948,21 +3581,39 @@ where
                             match self.apply_workflow_output(&definition, &inst, output) {
                                 Ok(v) => v,
                                 Err(fault) => {
-                                    self.fail_instance(&mut inst, store.clone(), fault).await;
+                                    self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                        .await;
                                     break;
                                 }
                             };
+                        // 定义走到末端：收口审批实例（幂等；非 approve 定义无审批实例时为
+                        // no-op）。分支通过与实例收口解耦，工作流完成是驱动方唯一的收口时机。
+                        // 失败不得阻塞工作流完成：审批侧自身有 CAS/定时器兜底。
+                        if let Some(bridge) = &self.approval {
+                            let _ = bridge.finish_if_complete(&inst.id).await;
+                        }
                         inst.status = InstanceStatus::Completed;
                         inst.output = Some(final_output);
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
-                        self.emit_lifecycle(lifecycle::WORKFLOW_COMPLETED, &inst)
-                            .await;
+                        // 终态写回不得因 CAS 冲突而“卡住”：冲突则重读重试（下一轮重算）。
+                        if !self
+                            .commit_instance(
+                                &store,
+                                &inst,
+                                &mut rev,
+                                guard,
+                                &[lifecycle::WORKFLOW_COMPLETED],
+                            )
+                            .await
+                        {
+                            continue 'drive_loop;
+                        }
                         break;
                     }
 
                     StepResult::Failed { fault } => {
-                        self.fail_instance(&mut inst, store.clone(), fault).await;
+                        self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                            .await;
                         break;
                     }
                 }
@@ -1980,6 +3631,11 @@ where
             event_provider: Arc::clone(&self.event_provider),
             pending_subflows: Arc::clone(&self.pending_subflows),
             workers: Arc::clone(&self.workers),
+            lease: self.lease.clone(),
+            lease_skipped: Arc::clone(&self.lease_skipped),
+            cas_conflicts: Arc::clone(&self.cas_conflicts),
+            durable: self.durable.clone(),
+            approval: self.approval.clone(),
         }
     }
 }
@@ -2069,6 +3725,7 @@ mod tests {
     use crate::workflow::ports::test_utils::{
         MemoryWorkflowStore, NoopEventProvider, NoopTaskDispatcher, TestClock,
     };
+    use crate::workflow::ports::{StoreError, WorkflowStore};
 
     fn make_runtime() -> WorkflowRuntime<
         ExpressionEvaluator,
@@ -2280,6 +3937,479 @@ mod tests {
         assert_eq!(inst.status, InstanceStatus::Pending);
         assert_eq!(inst.definition_name, "test-wf");
         assert_eq!(inst.context, serde_json::json!({"key": "value"}));
+    }
+
+    /// 负控制：legacy 降级发布口 `emit_lifecycle` 只 append 事件到 outbox，
+    /// **不得**调用会写实例状态的 `AtomicOutboxCommit`（那是一条无 CAS/fencing 的
+    /// 实例写通道，并会推进 mod_revision 使调用方随后的 CAS 失配）。
+    #[tokio::test]
+    async fn durable_emit_appends_without_writing_instance_state() {
+        use crate::workflow::durable::{
+            AtomicOutboxCommit, DurableSupport, MemoryOutboxStore, MemoryTimerStore, OutboxRecord,
+        };
+        use crate::workflow::model::WorkflowInstance;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Default)]
+        struct RecordingCommit {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AtomicOutboxCommit for RecordingCommit {
+            async fn commit_state_and_outbox_batch(
+                &self,
+                _inst: &WorkflowInstance,
+                _recs: &[OutboxRecord],
+                _expected_mod_rev: Option<i64>,
+            ) -> Result<bool, crate::workflow::ports::StoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(true)
+            }
+        }
+
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let commit = Arc::new(RecordingCommit::default());
+        let durable = DurableSupport::new(Arc::new(MemoryTimerStore::new()), outbox.clone())
+            .with_atomic_commit(commit.clone());
+
+        let rt = make_runtime().with_durable(durable);
+        let def = make_simple_definition();
+        let inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        rt.emit_lifecycle(lifecycle::WORKFLOW_STARTED, &inst).await;
+
+        assert_eq!(
+            commit.calls.load(Ordering::SeqCst),
+            0,
+            "emit 不得调用会写实例状态的 AtomicOutboxCommit（无 CAS/fencing 的写通道）"
+        );
+        assert!(
+            !outbox.snapshot().is_empty(),
+            "生命周期事件必须仍然写入 outbox（事件不丢）"
+        );
+    }
+
+    /// 正控制：drive 的唯一写路径把状态 + 伴生事件经同一个 `AtomicOutboxCommit` 落库。
+    ///
+    /// 注入 `MemoryAtomicCommit` 的**计数代理**后驱动一个空工作流，断言实例到终态、
+    /// outbox 拿到 started / completed 两个生命周期事件，且确实调用了原子提交
+    /// （计数 ≥ 1）——若走成裸写，测试便能区分出来。
+    #[tokio::test]
+    async fn durable_drive_commits_state_and_events_atomically() {
+        use crate::workflow::durable::{
+            AtomicOutboxCommit, DurableSupport, MemoryAtomicCommit, MemoryOutboxStore,
+            MemoryTimerStore, OutboxStore,
+        };
+        use crate::workflow::ports::{MemoryWorkflowStore, StoreError, WorkflowStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        /// 计数代理：委托给 `MemoryAtomicCommit`，同时记录被调用次数，
+        /// 以区分「走原子提交」与「走裸写」。
+        struct CountingAtomicCommit {
+            inner: MemoryAtomicCommit,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AtomicOutboxCommit for CountingAtomicCommit {
+            async fn commit_state_and_outbox_batch(
+                &self,
+                inst: &WorkflowInstance,
+                recs: &[OutboxRecord],
+                expected_mod_rev: Option<i64>,
+            ) -> Result<bool, StoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner
+                    .commit_state_and_outbox_batch(inst, recs, expected_mod_rev)
+                    .await
+            }
+        }
+
+        let instances = Arc::new(MemoryWorkflowStore::new());
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let counting = Arc::new(CountingAtomicCommit {
+            inner: MemoryAtomicCommit::new(Arc::clone(&instances), Arc::clone(&outbox)),
+            calls: AtomicUsize::new(0),
+        });
+        let commit: Arc<dyn AtomicOutboxCommit> = counting.clone();
+        let durable = DurableSupport::new(
+            Arc::new(MemoryTimerStore::new()),
+            Arc::clone(&outbox) as Arc<dyn OutboxStore>,
+        )
+        .with_atomic_commit(commit);
+
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let rt = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&instances),
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        )
+        .with_durable(durable);
+
+        let def = make_simple_definition();
+        let inst = rt.start(&def, serde_json::json!({})).await.unwrap();
+
+        // drive 是 spawn 的后台任务：等实例走到终态。
+        for _ in 0..200 {
+            if let Ok(Some(cur)) = instances.load_instance(&inst.id).await {
+                if cur.status.is_terminal() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let stored = instances.load_instance(&inst.id).await.unwrap().unwrap();
+        assert!(
+            stored.status.is_terminal(),
+            "drive 必须把实例状态经原子提交落库"
+        );
+        let types: Vec<String> = outbox
+            .snapshot()
+            .into_iter()
+            .map(|r| r.event_type)
+            .collect();
+        assert!(
+            types.iter().any(|t| t.ends_with("workflow.started.v1")),
+            "同一提交里必须含 started 事件: {types:?}"
+        );
+        assert!(
+            types.iter().any(|t| t.ends_with("workflow.completed.v1")),
+            "同一提交里必须含 completed 事件: {types:?}"
+        );
+        assert!(
+            counting.calls.load(Ordering::SeqCst) >= 1,
+            "drive 的状态写必须经 AtomicOutboxCommit（否则状态与事件可分离落库）"
+        );
+    }
+
+    /// 取消必须把状态写与 `workflow.cancelled` 放进**同一次**提交：durable 装配下走
+    /// `AtomicOutboxCommit`（状态 + outbox 同事务），而不是「先盲写状态、再补发事件」。
+    ///
+    /// 反（负控制）：旧实现（cache-first `load_instance` + 无条件 `save_instance`，且
+    /// 不发事件）两条都不过：事件缺失，且无 CAS 的写会在并发下覆盖终态。本测试断言
+    /// 事件随原子提交落地。
+    #[tokio::test]
+    async fn cancel_commits_state_and_cancelled_event_atomically() {
+        use crate::workflow::durable::{
+            AtomicOutboxCommit, DurableSupport, MemoryAtomicCommit, MemoryOutboxStore,
+            MemoryTimerStore, OutboxRecord, OutboxStore,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingAtomicCommit {
+            inner: MemoryAtomicCommit,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AtomicOutboxCommit for CountingAtomicCommit {
+            async fn commit_state_and_outbox_batch(
+                &self,
+                inst: &WorkflowInstance,
+                recs: &[OutboxRecord],
+                expected_mod_rev: Option<i64>,
+            ) -> Result<bool, StoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner
+                    .commit_state_and_outbox_batch(inst, recs, expected_mod_rev)
+                    .await
+            }
+        }
+
+        let instances = Arc::new(MemoryWorkflowStore::new());
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let counting = Arc::new(CountingAtomicCommit {
+            inner: MemoryAtomicCommit::new(Arc::clone(&instances), Arc::clone(&outbox)),
+            calls: AtomicUsize::new(0),
+        });
+        let durable = DurableSupport::new(
+            Arc::new(MemoryTimerStore::new()),
+            Arc::clone(&outbox) as Arc<dyn OutboxStore>,
+        )
+        .with_atomic_commit(counting.clone() as Arc<dyn AtomicOutboxCommit>);
+
+        let expr = ExpressionEvaluator::new();
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let rt = WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            Arc::clone(&instances),
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        )
+        .with_durable(durable);
+
+        // 非终态（Running）实例；扫描器只驱动 Suspended/Waiting，不会介入。
+        let def = make_simple_definition();
+        let mut inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        inst.status = InstanceStatus::Running;
+        instances.save_instance(&inst).await.unwrap();
+
+        let before = counting.calls.load(Ordering::SeqCst);
+        rt.cancel_instance(&inst.id).await.unwrap();
+
+        let stored = instances.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, InstanceStatus::Cancelled);
+        let types: Vec<String> = outbox
+            .snapshot()
+            .into_iter()
+            .map(|r| r.event_type)
+            .collect();
+        assert!(
+            types.iter().any(|t| t.ends_with("workflow.cancelled.v1")),
+            "取消必须经同一原子提交发出 workflow.cancelled：{types:?}"
+        );
+        assert!(
+            counting.calls.load(Ordering::SeqCst) > before,
+            "取消的状态写必须经 AtomicOutboxCommit（状态与事件同一次提交）"
+        );
+    }
+
+    /// 取消与完成的存储替身：`load_instance`（cache-first）返回陈旧快照，
+    /// `load_instance_with_rev`（线性一致）返回真值。取消若走 cache-first 读，
+    /// 就会用陈旧的非终态快照盲写，覆盖已提交的终态。
+    struct StaleCacheStore {
+        inner: Arc<MemoryWorkflowStore>,
+        stale: std::sync::Mutex<Option<WorkflowInstance>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStore for StaleCacheStore {
+        async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+            self.inner.save_definition(def).await
+        }
+        async fn load_definition(
+            &self,
+            namespace: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<Option<WorkflowDefinition>, StoreError> {
+            self.inner.load_definition(namespace, name, version).await
+        }
+        async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
+            self.inner.save_instance(inst).await
+        }
+        async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError> {
+            if let Some(stale) = self.stale.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return Ok(Some(stale));
+            }
+            self.inner.load_instance(id).await
+        }
+        async fn load_instance_with_rev(
+            &self,
+            id: &str,
+        ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+            match self.inner.load_instance(id).await? {
+                Some(inst) => Ok(Some((inst, 1))),
+                None => Ok(None),
+            }
+        }
+        async fn list_definitions(
+            &self,
+            namespace: &str,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+            self.inner
+                .list_definitions(namespace, page_size, page_token)
+                .await
+        }
+        async fn list_instances(
+            &self,
+            namespace: Option<&str>,
+            definition_name: Option<&str>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
+            self.inner
+                .list_instances(namespace, definition_name, page_size, page_token)
+                .await
+        }
+        async fn save_resume_idempotency_key(
+            &self,
+            instance_id: &str,
+            key: &str,
+        ) -> Result<bool, StoreError> {
+            self.inner
+                .save_resume_idempotency_key(instance_id, key)
+                .await
+        }
+    }
+
+    /// 反（负控制）：取消不得覆盖已提交的终态。
+    ///
+    /// 确定性复现「取消 vs 完成」竞态：完成先提交（线性一致真值 = Completed），
+    /// 而读缓存仍滞后在 Running。取消若走 cache-first `load_instance` 并盲写，就会把
+    /// 已提交的 `Completed` 改成 `Cancelled`（消费者却已看到 `workflow.completed`）。
+    /// 新实现经 `load_instance_with_rev` 读到真值并拒绝 ⇒ 状态不变、无事件。
+    ///
+    /// 反（负控制）：本测试的 store 故意让 `load_instance` 返回陈旧 Running；若取消改回
+    /// cache-first 读，`inner` 会变成 Cancelled，断言失败。
+    #[tokio::test]
+    async fn cancel_cannot_clobber_committed_terminal_state() {
+        use std::sync::Arc;
+
+        let inner = Arc::new(MemoryWorkflowStore::new());
+        let def = make_simple_definition();
+        let mut running = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        running.status = InstanceStatus::Running;
+        inner.save_instance(&running).await.unwrap();
+
+        // 完成已提交（线性一致真值 = Completed），但读缓存仍滞后在 Running。
+        let mut completed = running.clone();
+        completed.status = InstanceStatus::Completed;
+        completed.updated_at = 2000;
+        inner.save_instance(&completed).await.unwrap();
+
+        let store = StaleCacheStore {
+            inner: Arc::clone(&inner),
+            stale: std::sync::Mutex::new(Some(running.clone())),
+        };
+
+        let events = Arc::new(RecordingEventProvider::new());
+        let expr = ExpressionEvaluator::new();
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let rt = WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            store,
+            NoopTaskDispatcher,
+            Arc::clone(&events),
+        );
+
+        let err = rt.cancel_instance(&running.id).await.unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::AlreadyCompleted(_)),
+            "已终态实例的取消必须拒绝（AlreadyCompleted ⇒ 服务层 FailedPrecondition）：{err:?}"
+        );
+        let stored = inner.load_instance(&running.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            InstanceStatus::Completed,
+            "取消不得用陈旧缓存快照覆盖已提交的终态"
+        );
+        assert_eq!(
+            events.emitted_count(),
+            0,
+            "取消被拒绝时不得发出任何生命周期事件：{:?}",
+            events.emitted_events.lock().unwrap()
+        );
+    }
+
+    /// `register_step` 瞬时失败折叠为**可重试**失败：任务进 retry 而非立即 faulted；
+    /// token 恢复后同一任务重试派发成功。
+    ///
+    /// fail-closed 不变量：register 未成功前不派发。
+    #[tokio::test]
+    async fn register_step_error_is_retried_not_faulted() {
+        use crate::workflow::durable::{
+            DurableSupport, MemoryOutboxStore, MemoryTimerStore, OutboxStore, StepRecord,
+            StepState, StepTokenStore,
+        };
+        use crate::workflow::model::{CallTask, CallType, RetryPolicy, TaskMeta};
+        use crate::workflow::ports::StoreError;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Default)]
+        struct RecoveringStepStore {
+            attempts: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl StepTokenStore for RecoveringStepStore {
+            async fn register(
+                &self,
+                _instance_id: &str,
+                _step_id: &str,
+                token: &str,
+                now_ms: i64,
+            ) -> Result<(StepRecord, bool), StoreError> {
+                // 首次瞬时失败，之后恢复（模拟 KV 抖动）。
+                if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(StoreError::IoError("kv blip".into()));
+                }
+                Ok((
+                    StepRecord {
+                        token: token.to_string(),
+                        state: StepState::Pending,
+                        at_ms: now_ms,
+                    },
+                    true,
+                ))
+            }
+            async fn mark_done(&self, _i: &str, _s: &str) -> Result<(), StoreError> {
+                Ok(())
+            }
+            async fn get(&self, _i: &str, _s: &str) -> Result<Option<StepRecord>, StoreError> {
+                Ok(None)
+            }
+        }
+
+        let steps = Arc::new(RecoveringStepStore::default());
+        let durable = DurableSupport::new(
+            Arc::new(MemoryTimerStore::new()),
+            Arc::new(MemoryOutboxStore::new()) as Arc<dyn OutboxStore>,
+        )
+        .with_steps(steps.clone());
+
+        let rt = make_runtime().with_durable(durable);
+        let mut def = make_simple_definition();
+        def.do_tasks = vec![NamedTask {
+            name: "call".into(),
+            task: Task::Call(CallTask {
+                call: CallType::Function("svc".into()),
+                with: None,
+            }),
+        }];
+        def.task_meta.insert(
+            "call".into(),
+            TaskMeta {
+                retry: Some(RetryPolicy {
+                    delay: "PT0.1S".into(),
+                    backoff: None,
+                    limit: 2,
+                    jitter: None,
+                }),
+                ..Default::default()
+            },
+        );
+        rt.store.save_definition(&def).await.unwrap();
+
+        let mut inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        inst.status = InstanceStatus::Running;
+        rt.store.save_instance(&inst).await.unwrap();
+
+        rt.drive_instance(&inst.id).await.unwrap();
+
+        // 第一次 register 失败 ⇒ retry（不 fault）；恢复后重试成功。
+        for _ in 0..300 {
+            if let Ok(Some(cur)) = rt.store.load_instance(&inst.id).await {
+                if cur.status.is_terminal() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let cur = rt.store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(
+            cur.status,
+            InstanceStatus::Completed,
+            "register 瞬时失败必须重试后成功，而不是立即 faulted: {:?}",
+            cur.fault
+        );
+        assert!(
+            steps.attempts.load(Ordering::SeqCst) >= 2,
+            "重试必须再次调用 register"
+        );
     }
 
     #[tokio::test]
@@ -2795,6 +4925,7 @@ mod tests {
             _service: &str,
             _with: Option<&Value>,
             _input: &Value,
+            _idempotency_key: Option<&str>,
         ) -> DispatchResult {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_times {
@@ -3871,6 +6002,1584 @@ mod tests {
         assert_eq!(loaded.status, InstanceStatus::Waiting);
     }
 
+    // ─── approve 节点 → Suspended 接线（v2 审批） ───
+
+    use crate::workflow::approval::bridge::{ApprovalBridge, ApprovalCommand, SYSTEM_ACTOR};
+    use crate::workflow::approval::model::{
+        BranchStatus, InstanceStatus as ApprovalStatus, JoinPolicy,
+    };
+    use crate::workflow::approval::store::{
+        ApprovalInstanceEntry, ApprovalStore, ExpectedRev, IdemRecord, MemoryApprovalStore,
+    };
+    use crate::workflow::durable::DurableTimerStore;
+    use crate::workflow::model::{ApproveTask, EndTask};
+
+    /// approve 节点的席位（具体审批人，保证节点有可批的席位）。
+    fn approve_task(approvers: &[&str]) -> ApproveTask {
+        ApproveTask {
+            approvers: approvers.iter().map(|s| s.to_string()).collect(),
+            pool: vec![],
+            readers: vec![],
+            roles: vec![],
+            mode: JoinPolicy::All,
+            veto: true,
+            deadline: None,
+            on_pass: None,
+            on_reject: None,
+            sign_admins: vec![],
+            allow_self_approve: false,
+        }
+    }
+
+    /// approve 节点 + 后继节点：后继节点用于断言挂起/故障时**未**继续执行。
+    fn approve_definition(name: &str) -> WorkflowDefinition {
+        make_definition_ext(
+            name,
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(approve_task(&["alice"])),
+                },
+                NamedTask {
+                    name: "after".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"after-approve\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        )
+    }
+
+    /// 审批桥 + 其内存存储（固定时钟）。
+    fn approval_bridge() -> (Arc<ApprovalBridge>, Arc<MemoryApprovalStore>) {
+        let store = Arc::new(MemoryApprovalStore::new());
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1000));
+        let bridge = Arc::new(ApprovalBridge::new(store.clone(), clock, None));
+        (bridge, store)
+    }
+
+    /// 轮询等待实例进入期望相位（drive 由 `start` spawn，等待有界）。
+    async fn await_status(
+        store: &MemoryWorkflowStore,
+        id: &str,
+        want: InstanceStatus,
+    ) -> WorkflowInstance {
+        for _ in 0..200 {
+            let inst = store.load_instance(id).await.unwrap().expect("instance");
+            if inst.status == want {
+                return inst;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("instance {id} never reached {want:?}");
+    }
+
+    /// approve 节点：开审批实例 → 挂起为 `Suspended`（审批元数据 + 审批引擎落库）。
+    #[tokio::test]
+    async fn approve_node_suspends_with_approval_meta_and_engine_persisted() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
+        let def = approve_definition("approve-suspend-wf");
+
+        let started = runtime
+            .start(&def, serde_json::json!({"amount": 100}))
+            .await
+            .unwrap();
+        let suspended =
+            await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        // 标准相位 Suspended + 审批挂起元数据（恢复信号 / 审批实例 id 恒等于 workflow 实例 id）
+        let meta = suspended.suspension_meta.as_ref().expect("suspension meta");
+        assert_eq!(meta.reason, "approval");
+        assert_eq!(meta.expected_signal.as_deref(), Some("approval.completed"));
+        assert_eq!(
+            meta.approval_instance_id.as_deref(),
+            Some(started.id.as_str())
+        );
+
+        // 挂起帧：approve 节点仍在执行中，且未推进到后继节点
+        let frame = suspended.task_stack.last().expect("approve frame");
+        assert_eq!(frame.task_name, "review");
+        assert_eq!(frame.task_type, "approve");
+        assert_eq!(frame.status, TaskStatus::Running);
+        assert_eq!(suspended.current_task_index, 0);
+        assert!(
+            suspended.context.get("done").is_none(),
+            "approve 挂起后不得执行后继节点"
+        );
+
+        // 审批实例已持久化：一条 open 分支 + 一个可批席位
+        let (engine, mod_rev) = approval_store
+            .load(&started.id)
+            .await
+            .unwrap()
+            .expect("approval instance persisted");
+        assert_eq!(mod_rev, 1);
+        assert_eq!(
+            engine.instance.status,
+            crate::workflow::approval::model::InstanceStatus::Running
+        );
+        // 实例未注入发起人 ⇒ 审批实例以 anonymous 起算（自审策略据此判定）
+        assert_eq!(engine.instance.initiator, "anonymous");
+        assert_eq!(engine.branches.len(), 1);
+        let branch = engine.branches.values().next().unwrap();
+        assert_eq!(branch.node, "review");
+        assert_eq!(branch.status, BranchStatus::Open);
+        assert_eq!(engine.rounds.len(), 1);
+        let seat = engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some("alice"))
+            .expect("seat for alice");
+        assert!(seat.status.is_open());
+    }
+
+    /// 挂起后强制再驱动：既不得重复开审批分支/轮次，也不得重复入栈 approve 帧或重写实例。
+    #[tokio::test]
+    async fn re_drive_after_suspend_does_not_double_open() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_definition("approve-redrive-wf");
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        let suspended =
+            await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+        assert_eq!(suspended.task_stack.len(), 1, "挂起恰一帧（approve）");
+
+        // 逻辑时钟前进：再驱动若真的写了实例，`updated_at` 会跟着变（零写入可观测）。
+        runtime.clock.advance(50);
+        let events_before = approval_store.events(&started.id).await.len();
+        let (before, rev_before) = approval_store.load(&started.id).await.unwrap().unwrap();
+
+        runtime
+            .drive(
+                started.id.clone(),
+                def.clone(),
+                Arc::clone(store_of(&runtime)),
+                None,
+            )
+            .await;
+
+        let (after, rev_after) = approval_store.load(&started.id).await.unwrap().unwrap();
+        assert_eq!(rev_after, rev_before, "复用既有分支 ⇒ 审批实例零写入");
+        assert_eq!(after.branches.len(), before.branches.len());
+        assert_eq!(after.rounds.len(), before.rounds.len());
+        assert_eq!(after.tasks.len(), before.tasks.len());
+        assert_eq!(
+            approval_store.events(&started.id).await.len(),
+            events_before,
+            "重驱动不得新发审批事件"
+        );
+
+        // workflow 实例零写入：仍 Suspended、恰一帧 approve、索引 0、updated_at 未变
+        let reloaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Suspended);
+        assert_eq!(reloaded.current_task_index, 0);
+        assert!(reloaded.context.get("done").is_none());
+        assert_eq!(
+            reloaded.task_stack.len(),
+            1,
+            "重驱动不得重复入栈 approve 帧"
+        );
+        assert_eq!(reloaded.task_stack[0].task_name, "review");
+        assert_eq!(reloaded.task_stack[0].task_type, "approve");
+        assert_eq!(reloaded.task_stack[0].status, TaskStatus::Running);
+        assert_eq!(
+            reloaded.updated_at, suspended.updated_at,
+            "无动作重驱动不得写实例（updated_at 不变）"
+        );
+    }
+
+    /// 崩溃窗口内的再驱动（approve 帧已在栈上置 Running，实例尚未写成 Suspended）：
+    /// 同节点的 Running approve 帧必须就地替换，不得压成两帧。
+    #[tokio::test]
+    async fn crash_window_re_drive_replaces_running_approve_frame() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_definition("approve-crash-window-wf");
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let mut inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        inst.status = InstanceStatus::Running;
+        inst.task_stack.push(TaskFrame {
+            task_name: "review".into(),
+            task_type: "approve".into(),
+            status: TaskStatus::Running,
+            input: Some(inst.context.clone()),
+            output: None,
+            started_at: Some(1000),
+            ended_at: None,
+            retry_count: 0,
+            pending_branches: None,
+        });
+        store_of(&runtime).save_instance(&inst).await.unwrap();
+
+        runtime
+            .drive(
+                inst.id.clone(),
+                def.clone(),
+                Arc::clone(store_of(&runtime)),
+                None,
+            )
+            .await;
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Suspended);
+        assert_eq!(
+            reloaded.task_stack.len(),
+            1,
+            "同节点的 Running approve 帧必须就地替换"
+        );
+        assert_eq!(reloaded.task_stack[0].task_name, "review");
+        assert_eq!(reloaded.task_stack[0].task_type, "approve");
+        assert_eq!(reloaded.task_stack[0].status, TaskStatus::Running);
+        assert_eq!(reloaded.current_task_index, 0);
+    }
+
+    /// 未注入审批桥：approve 节点没有可开的审批实例 ⇒ fault-closed，不得静默继续。
+    #[tokio::test]
+    async fn approve_node_without_bridge_faults_closed() {
+        let runtime = make_runtime();
+        let def = approve_definition("approve-no-bridge-wf");
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        let failed = await_status(store_of(&runtime), &started.id, InstanceStatus::Failed).await;
+
+        let fault = failed.fault.as_ref().expect("fault");
+        assert_eq!(
+            fault.r#type,
+            crate::workflow::errors::error_type(crate::workflow::errors::kind::INTERNAL)
+        );
+        assert!(
+            fault.detail.contains("approval"),
+            "fault 必须点明审批未开启：{fault:?}"
+        );
+        assert_eq!(failed.current_task_index, 0);
+        assert!(
+            failed.context.get("done").is_none(),
+            "faulted 后不得执行后继节点"
+        );
+    }
+
+    /// v1 回归：注入审批桥不改变非 approve 定义的语义（仍跑到 Completed）。
+    #[tokio::test]
+    async fn non_approve_definition_completes_with_bridge_injected() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = make_definition_ext(
+            "v1-unaffected-wf",
+            vec![NamedTask {
+                name: "finish".into(),
+                task: Task::Set(SetTask {
+                    variable: "done".into(),
+                    value: "\"v1\"".into(),
+                }),
+            }],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        let done = await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+
+        assert_eq!(done.context["done"], "v1");
+        assert!(
+            done.suspension_meta.is_none(),
+            "非 approve 定义不受审批接线影响"
+        );
+        assert!(
+            approval_store.load(&started.id).await.unwrap().is_none(),
+            "非 approve 定义不得开出审批实例"
+        );
+    }
+
+    // ─── 审批终态 → workflow 恢复 / 故障 / 收口（v2 返回路径） ───
+
+    /// approve 节点（可配 `on_reject` / `sign_admins`）—— 恢复与取消路径测试用。
+    fn approve_task_with(
+        approvers: &[&str],
+        on_reject: Option<&str>,
+        sign_admins: &[&str],
+    ) -> ApproveTask {
+        let mut task = approve_task(approvers);
+        task.on_reject = on_reject.map(str::to_string);
+        task.sign_admins = sign_admins.iter().map(|s| s.to_string()).collect();
+        task
+    }
+
+    /// 定义：`review(approve)` → `after` → `rework`；`on_reject` 可指向 `rework`。
+    fn approve_resume_definition(
+        name: &str,
+        on_reject: Option<&str>,
+        sign_admins: &[&str],
+    ) -> WorkflowDefinition {
+        make_definition_ext(
+            name,
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(approve_task_with(&["alice"], on_reject, sign_admins)),
+                },
+                NamedTask {
+                    name: "after".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"after-approve\"".into(),
+                    }),
+                },
+                NamedTask {
+                    name: "rework".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"rework-done\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        )
+    }
+
+    /// 取出审批实例中某审批人的未决席位 id（恢复 / 收口测试辅助）。
+    async fn seat_id_for(
+        approval_store: &MemoryApprovalStore,
+        approval_id: &str,
+        assignee: &str,
+    ) -> String {
+        let (engine, _) = approval_store
+            .load(approval_id)
+            .await
+            .unwrap()
+            .expect("approval instance persisted");
+        engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some(assignee))
+            .map(|t| t.id.clone())
+            .expect("seat for assignee")
+    }
+
+    /// 手工构造一个挂起在审批上的实例（绕过 drive；取消 / 漂移测试用）。
+    fn suspended_approval_instance(id: &str, def: &WorkflowDefinition) -> WorkflowInstance {
+        let mut inst = running_instance(id);
+        inst.definition_ns = def.document.namespace.clone();
+        inst.definition_name = def.document.name.clone();
+        inst.definition_version = def.document.version.clone();
+        inst.status = InstanceStatus::Suspended;
+        inst.suspension_meta = Some(SuspensionMeta {
+            reason: "approval".into(),
+            until_ms: None,
+            service: None,
+            payload: None,
+            event_filter: None,
+            expected_signal: Some("approval.completed".into()),
+            approval_instance_id: Some(id.to_string()),
+            retry_count: None,
+            error: None,
+        });
+        inst
+    }
+
+    /// 带事件记录的运行时：断言生命周期事件的有/无（无 durable 时直发事件总线）。
+    #[allow(clippy::type_complexity)]
+    fn recording_runtime() -> (
+        WorkflowRuntime<
+            ExpressionEvaluator,
+            TestClock,
+            MemoryWorkflowStore,
+            NoopTaskDispatcher,
+            Arc<RecordingEventProvider>,
+        >,
+        Arc<RecordingEventProvider>,
+    ) {
+        let executor = WorkflowExecutor::new(ExpressionEvaluator::new(), TestClock::new(1000));
+        let events = Arc::new(RecordingEventProvider::new());
+        let runtime = WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            MemoryWorkflowStore::new(),
+            NoopTaskDispatcher,
+            Arc::clone(&events),
+        );
+        (runtime, events)
+    }
+
+    /// 审批存储替身：所有读写恒失败（验证 cancel 对非 `NotFound` 错误的 fail-closed 传播）。
+    struct FailingApprovalStore;
+
+    #[async_trait::async_trait]
+    impl ApprovalStore for FailingApprovalStore {
+        async fn load(
+            &self,
+            _instance_id: &str,
+        ) -> Result<Option<(crate::workflow::approval::engine::Engine, i64)>, StoreError> {
+            Err(StoreError::SerializationError("approval store down".into()))
+        }
+
+        async fn load_idem(
+            &self,
+            _instance_id: &str,
+            _key: &str,
+        ) -> Result<Option<Value>, StoreError> {
+            Err(StoreError::SerializationError("approval store down".into()))
+        }
+
+        async fn commit_with_idem(
+            &self,
+            _engine: &crate::workflow::approval::engine::Engine,
+            _events: &[OutboxRecord],
+            _expected: ExpectedRev,
+            _idem: Option<&IdemRecord>,
+        ) -> Result<bool, StoreError> {
+            Err(StoreError::SerializationError("approval store down".into()))
+        }
+
+        async fn scan(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<ApprovalInstanceEntry>, StoreError> {
+            Err(StoreError::SerializationError("approval store down".into()))
+        }
+    }
+
+    /// 审批通过：`next_target=None` ⇒ 顺序推进到下一任务并最终 `Completed`。
+    #[tokio::test]
+    async fn approve_completed_resumes_to_next_task() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_definition("approve-resume-next-wf");
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let outcome = serde_json::json!({"outcome": "completed", "actor": "alice"});
+        let resumed = runtime
+            .resume_approval(&started.id, outcome.clone(), None)
+            .await
+            .unwrap();
+
+        // 同一处变更里清挂起：否则 drive 的同节点 no-op 守卫会静默跳过驱动。
+        assert_eq!(resumed.status, InstanceStatus::Running);
+        assert!(resumed.suspension_meta.is_none());
+        assert_eq!(resumed.current_task_index, 1, "None ⇒ 顺序推进到下一任务");
+        assert_eq!(resumed.context["_approval"], outcome);
+        let frame = resumed.task_stack.last().expect("approve frame");
+        assert_eq!(frame.status, TaskStatus::Completed);
+        assert_eq!(frame.output.as_ref(), Some(&outcome));
+
+        let done = await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(done.context["done"], "after-approve");
+    }
+
+    /// 审批驳回：恢复后路由到节点 `on_reject` 目标任务。
+    #[tokio::test]
+    async fn approve_rejected_resumes_to_on_reject_target() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("approve-reject-wf", Some("rework"), &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let outcome = serde_json::json!({"outcome": "rejected", "actor": "alice"});
+        let resumed = runtime
+            .resume_approval(&started.id, outcome.clone(), Some("rework"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resumed.current_task_index, 2,
+            "on_reject ⇒ 跳到目标任务索引"
+        );
+        assert_eq!(resumed.context["_approval"], outcome);
+
+        let done = await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(done.context["done"], "rework-done");
+    }
+
+    /// 审批取消：与驳回同口径，恢复后路由到 `on_reject` 目标任务。
+    #[tokio::test]
+    async fn approve_cancelled_resumes_to_on_reject_target() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("approve-cancel-wf", Some("rework"), &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let outcome = serde_json::json!({"outcome": "cancelled"});
+        let resumed = runtime
+            .resume_approval(&started.id, outcome.clone(), Some("rework"))
+            .await
+            .unwrap();
+        assert_eq!(resumed.current_task_index, 2);
+        assert_eq!(resumed.context["_approval"], outcome);
+
+        let done = await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(done.context["done"], "rework-done");
+    }
+
+    /// 非审批挂起：`resume_approval` fail-closed（仍 Waiting，索引不变）。
+    #[tokio::test]
+    async fn resume_approval_without_approval_suspension_rejected() {
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "approve-resume-wrong-reason-wf",
+            vec![NamedTask {
+                name: "pause".into(),
+                task: Task::Wait(WaitTask {
+                    wait: "PT10S".into(),
+                }),
+            }],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Waiting).await;
+
+        let err = runtime
+            .resume_approval(
+                &started.id,
+                serde_json::json!({"outcome": "completed"}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::InvalidSignal(_)),
+            "非审批挂起必须被拒：{err:?}"
+        );
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Waiting, "拒绝后状态不变");
+        assert_eq!(reloaded.current_task_index, 0);
+        assert_eq!(
+            reloaded.suspension_meta.as_ref().map(|m| m.reason.as_str()),
+            Some("wait")
+        );
+    }
+
+    /// 未知 `next_target`：fail-closed，且状态零变更（不写实例）。
+    #[tokio::test]
+    async fn resume_approval_unknown_target_rejected_and_state_unchanged() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("approve-unknown-target-wf", Some("rework"), &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        let suspended =
+            await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let err = runtime
+            .resume_approval(
+                &started.id,
+                serde_json::json!({"outcome": "rejected"}),
+                Some("nope"),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::GotoTargetNotFound(ref t) if t == "nope"),
+            "未知目标必须 fail-closed：{err:?}"
+        );
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Suspended);
+        assert_eq!(reloaded.current_task_index, 0);
+        assert_eq!(reloaded.updated_at, suspended.updated_at, "拒绝不得写实例");
+        assert_eq!(
+            reloaded.suspension_meta.as_ref().map(|m| m.reason.as_str()),
+            Some("approval")
+        );
+    }
+
+    /// 工作流完成时收口审批实例：分支已通过 ⇒ 审批实例随之 `Completed`。
+    #[tokio::test]
+    async fn workflow_completion_finishes_approval_instance() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
+        let def = approve_definition("approve-finish-wf");
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        // 唯一席位通过 → 审批分支通过（审批实例尚未收口）
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .resume_approval(
+                &started.id,
+                serde_json::json!({"outcome": "completed"}),
+                None,
+            )
+            .await
+            .unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+
+        let (engine, _) = approval_store
+            .load(&started.id)
+            .await
+            .unwrap()
+            .expect("approval instance");
+        assert_eq!(
+            engine.instance.status,
+            ApprovalStatus::Completed,
+            "工作流完成后必须收口审批实例"
+        );
+    }
+
+    /// 工作流取消：挂起在审批上 ⇒ 以内部系统 actor 终止审批实例（**默认空**
+    /// `sign_admins` 下也生效），再取消工作流。
+    #[tokio::test]
+    async fn workflow_cancel_terminates_open_approval() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
+        let def = approve_resume_definition("approve-cancel-terminate-wf", None, &[]);
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        runtime.cancel_instance(&started.id).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Cancelled).await;
+
+        let (engine, _) = approval_store
+            .load(&started.id)
+            .await
+            .unwrap()
+            .expect("approval instance");
+        assert_eq!(
+            engine.instance.status,
+            ApprovalStatus::Terminated,
+            "取消工作流必须终止未决审批实例"
+        );
+    }
+
+    /// 挂起在审批上但审批实例不存在（从未开启/已被清除）：terminate 返回 `NotFound` ⇒
+    /// no-op，取消照常提交。
+    #[tokio::test]
+    async fn cancel_without_approval_instance_is_noop_then_cancels() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("cancel-no-approval-instance-wf", None, &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let inst = suspended_approval_instance("cancel-noop-inst", &def);
+        store_of(&runtime).save_instance(&inst).await.unwrap();
+
+        runtime.cancel_instance(&inst.id).await.unwrap();
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Cancelled);
+        assert!(
+            approval_store.load(&inst.id).await.unwrap().is_none(),
+            "无审批实例可终止"
+        );
+    }
+
+    /// 审批存储不可用：terminate 返回非 `NotFound` 错误 ⇒ fail-closed 传播，取消中止
+    /// （不得留下仍可投票的 open 审批孤儿）。
+    #[tokio::test]
+    async fn cancel_aborts_when_approval_store_errors() {
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1000));
+        let bridge = Arc::new(ApprovalBridge::new(
+            Arc::new(FailingApprovalStore),
+            clock,
+            None,
+        ));
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("cancel-failing-approval-wf", None, &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let inst = suspended_approval_instance("cancel-failing-inst", &def);
+        store_of(&runtime).save_instance(&inst).await.unwrap();
+
+        let err = runtime.cancel_instance(&inst.id).await.unwrap_err();
+        assert!(matches!(err, RuntimeError::StoreError(_)), "{err:?}");
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reloaded.status,
+            InstanceStatus::Suspended,
+            "审批终止失败 ⇒ 不得取消（无孤儿）"
+        );
+    }
+
+    /// 审批已终态（外部终止 / 上次取消部分完成）后取消工作流：`terminate` 返回
+    /// `InvalidTransition` ⇒ no-op，取消照常；二次取消为干净 no-op（不毒化）。
+    #[tokio::test]
+    async fn cancel_after_approval_already_terminated_still_cancels() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
+        let def = approve_resume_definition("cancel-already-terminated-wf", None, &[]);
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        // 审批先被直接终止（模拟外部终止 / 上次取消在 terminate 后提交失败）
+        bridge
+            .terminate(&started.id, SYSTEM_ACTOR, "external")
+            .await
+            .unwrap();
+        let (engine, _) = approval_store
+            .load(&started.id)
+            .await
+            .unwrap()
+            .expect("approval instance");
+        assert_eq!(engine.instance.status, ApprovalStatus::Terminated);
+
+        // 取消不得被「审批已终态」阻塞
+        runtime.cancel_instance(&started.id).await.unwrap();
+        let reloaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Cancelled);
+
+        // 二次取消：工作流已终态 ⇒ 干净 no-op（不 panic、不毒化）
+        let second = runtime.cancel_instance(&started.id).await.unwrap_err();
+        assert!(
+            matches!(second, RuntimeError::AlreadyCompleted(_)),
+            "{second:?}"
+        );
+    }
+
+    /// 定义漂移：`resume_approval` 在任何状态写之前 fail-closed（同 `resume`）——
+    /// 报 `DefinitionDrift`、不落 `workflow.resumed`；实例被漂移 fault 置 `Failed`，
+    /// 既不恢复也不推进（挂起点/索引不变）。
+    #[tokio::test]
+    async fn resume_approval_fails_closed_on_definition_drift() {
+        let (bridge, _approval_store) = approval_bridge();
+        let (runtime, events) = recording_runtime();
+        let runtime = runtime.with_approval_bridge(bridge);
+        let def = approve_definition("approve-drift-wf");
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        // 同版本、同键重部署，但内容变了（改文档标题即改变内容哈希）。
+        let mut redeployed = def.clone();
+        redeployed.document.title = Some("redeployed-content".into());
+        store_of(&runtime)
+            .save_definition(&redeployed)
+            .await
+            .unwrap();
+
+        let err = runtime
+            .resume_approval(
+                &started.id,
+                serde_json::json!({"outcome": "completed"}),
+                None,
+            )
+            .await
+            .expect_err("定义漂移时 resume_approval 必须 fail-closed");
+        let (expected, actual) = match err {
+            RuntimeError::DefinitionDrift {
+                instance_id,
+                expected,
+                actual,
+            } => {
+                assert_eq!(instance_id, started.id);
+                (expected, actual)
+            }
+            other => panic!("期望 DefinitionDrift，实际: {other:?}"),
+        };
+        assert_eq!(expected, crate::workflow::model::definition_hash(&def));
+        assert_ne!(expected, actual, "漂移的 expected/actual 必须不同");
+
+        // 未被恢复：漂移 fault 置 Failed；索引与挂起元数据保持原状（未走 resume 变更）。
+        let loaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Failed);
+        assert_eq!(loaded.current_task_index, 0);
+        assert_eq!(
+            loaded.suspension_meta.as_ref().map(|m| m.reason.as_str()),
+            Some("approval"),
+            "漂移未走 resume，挂起元数据不得被清除"
+        );
+
+        // 事件：落漂移 fault，绝不落 `workflow.resumed`（钉死校验在状态写之前）。
+        let emitted: Vec<String> = events
+            .emitted_events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(t, _, _)| t.clone())
+            .collect();
+        assert!(
+            emitted.iter().any(|t| t == lifecycle::WORKFLOW_FAULTED),
+            "漂移必须落 workflow.faulted：{emitted:?}"
+        );
+        assert!(
+            !emitted.iter().any(|t| t == lifecycle::WORKFLOW_RESUMED),
+            "漂移不得落 workflow.resumed：{emitted:?}"
+        );
+    }
+
+    /// 控制面 CAS：`resume_approval` 冲突后重读重放，不得盲写。
+    #[tokio::test]
+    async fn resume_approval_is_cas_safe_under_replay() {
+        let rt = runtime_with_conflict_store(1);
+        let def = approve_resume_definition("approve-resume-cas-wf", None, &[]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let mut inst = running_instance("approve-resume-cas-inst");
+        inst.definition_name = "approve-resume-cas-wf".into();
+        inst.status = InstanceStatus::Suspended;
+        inst.suspension_meta = Some(SuspensionMeta {
+            reason: "approval".into(),
+            until_ms: None,
+            service: None,
+            payload: None,
+            event_filter: None,
+            expected_signal: Some("approval.completed".into()),
+            approval_instance_id: Some("approve-resume-cas-inst".into()),
+            retry_count: None,
+            error: None,
+        });
+        inst.task_stack.push(TaskFrame {
+            task_name: "review".into(),
+            task_type: "approve".into(),
+            status: TaskStatus::Running,
+            input: None,
+            output: None,
+            started_at: Some(0),
+            ended_at: None,
+            retry_count: 0,
+            pending_branches: None,
+        });
+        store_of(&rt).save_instance(&inst).await.unwrap();
+
+        let resumed = rt
+            .resume_approval(&inst.id, serde_json::json!({"outcome": "completed"}), None)
+            .await
+            .unwrap();
+
+        assert_eq!(resumed.status, InstanceStatus::Running);
+        assert_eq!(resumed.current_task_index, 1);
+        assert_eq!(rt.cas_conflict_total(), 1, "一次冲突只计一次并成功重放");
+    }
+
+    /// 无可用恢复目标：`fail_approval` 以稳定错误码置 fault（复用 CAS 写路径）。
+    #[tokio::test]
+    async fn fail_approval_faults_with_stable_error_code() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_definition("approve-fail-wf");
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let failed = runtime
+            .fail_approval(
+                &started.id,
+                "approval_rejected",
+                "approval rejected without an on_reject target",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(failed.status, InstanceStatus::Failed);
+        assert!(
+            failed.suspension_meta.is_none(),
+            "fault 后不得残留挂起元数据"
+        );
+        let fault = failed.fault.as_ref().expect("fault");
+        assert_eq!(
+            fault.r#type,
+            crate::workflow::errors::error_type("approval_rejected")
+        );
+        assert_eq!(fault.title, "approval_rejected");
+        assert_eq!(
+            fault.detail,
+            "approval rejected without an on_reject target"
+        );
+    }
+
+    // ─── 审批 deadline 持久化定时器（外部驱动过期） ───
+
+    /// 定义：`review(approve, deadline?)` → `after`；挂起后由自身 `deadline` 驱动过期。
+    fn approve_deadline_definition(
+        name: &str,
+        deadline: Option<&str>,
+        approvers: &[&str],
+    ) -> WorkflowDefinition {
+        let mut task = approve_task(approvers);
+        task.deadline = deadline.map(str::to_string);
+        make_definition_ext(
+            name,
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(task),
+                },
+                NamedTask {
+                    name: "after".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"after-approve\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        )
+    }
+
+    /// 定义：`review(approve, deadline PT60S)` → `end`(End) → `rework`(Set)。
+    /// 通过路径顺序推进到 `end` 即收口（不落 `done`）；`on_reject="rework"` 时否决路径跳过
+    /// `end` 直达 `rework`（落 `done`）—— 二者的可区分证据。`veto=false` 时一票否决不立即
+    /// 收口，使「先投一票、余席过期」能在过期时形成混合判定。
+    fn approve_deadline_verdict_definition(
+        name: &str,
+        on_reject: Option<&str>,
+        veto: bool,
+        approvers: &[&str],
+    ) -> WorkflowDefinition {
+        let mut task = approve_task(approvers);
+        task.deadline = Some("PT60S".into());
+        task.veto = veto;
+        task.on_reject = on_reject.map(str::to_string);
+        make_definition_ext(
+            name,
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(task),
+                },
+                NamedTask {
+                    name: "end".into(),
+                    task: Task::End(EndTask {}),
+                },
+                NamedTask {
+                    name: "rework".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"rework-done\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        )
+    }
+
+    /// 审批截止测试用运行时：注入持久化定时器（内存实现）+ 审批桥。
+    ///
+    /// 运行时与桥的时钟都从 1000 起，使 `schedule_approval_deadline` 的
+    /// `deadline_ms(now)` 与 `ensure_node_open` 落到席位上的截止时刻一致。
+    #[allow(clippy::type_complexity)]
+    fn approval_deadline_runtime() -> (
+        WorkflowRuntime<
+            ExpressionEvaluator,
+            TestClock,
+            MemoryWorkflowStore,
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        >,
+        Arc<ApprovalBridge>,
+        Arc<MemoryApprovalStore>,
+        Arc<crate::workflow::durable::MemoryTimerStore>,
+    ) {
+        use crate::workflow::durable::{
+            DurableSupport, DurableTimerStore, MemoryOutboxStore, MemoryTimerStore, OutboxStore,
+        };
+
+        let approval_store = Arc::new(MemoryApprovalStore::new());
+        let bridge_clock: Arc<dyn Clock> = Arc::new(TestClock::new(1000));
+        let bridge = Arc::new(ApprovalBridge::new(
+            Arc::clone(&approval_store) as Arc<dyn ApprovalStore>,
+            bridge_clock,
+            None,
+        ));
+        let timers = Arc::new(MemoryTimerStore::new());
+        let durable = DurableSupport::new(
+            Arc::clone(&timers) as Arc<dyn DurableTimerStore>,
+            Arc::new(MemoryOutboxStore::new()) as Arc<dyn OutboxStore>,
+        );
+        let rt = make_runtime()
+            .with_durable(durable)
+            .with_approval_bridge(Arc::clone(&bridge));
+        (rt, bridge, approval_store, timers)
+    }
+
+    /// 轮询等待指定到期时刻的审批截止定时器写入
+    /// （`schedule_approval_deadline` 异步落库，不阻塞驱动）。
+    async fn await_approval_deadline_timer(
+        timers: &crate::workflow::durable::MemoryTimerStore,
+        fire_at_ms: i64,
+    ) -> TimerRecord {
+        for _ in 0..200 {
+            let found = timers.list_all().await.unwrap().into_iter().find(|r| {
+                matches!(r.kind, TimerKind::ApprovalDeadline { .. }) && r.fire_at_ms == fire_at_ms
+            });
+            if let Some(rec) = found {
+                return rec;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("approval deadline timer at {fire_at_ms} was never scheduled");
+    }
+
+    /// 审批截止到期：过期席位，但工作流保持挂起（Q4 无自动判定）。
+    #[tokio::test]
+    async fn deadline_timer_expires_seat_and_keeps_workflow_suspended() {
+        let (rt, _bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_definition("approve-deadline-wf", Some("PT60S"), &["alice"]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+
+        // 挂起时按节点 deadline 落一条持久化定时器（1000 + 60000）。
+        let _rec = await_approval_deadline_timer(&timers, 61_000).await;
+
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        // 席位过期……
+        let (engine, _) = approval_store.load(&started.id).await.unwrap().unwrap();
+        let seat = engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some("alice"))
+            .expect("seat for alice");
+        assert_eq!(
+            seat.status,
+            crate::workflow::approval::model::TaskStatus::Expired
+        );
+
+        // ……但工作流仍挂起（无自动通过/驳回），且定时器已移除。
+        let suspended = store_of(&rt)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suspended.status, InstanceStatus::Suspended);
+        assert!(suspended.context.get("done").is_none());
+        assert!(
+            timers.list_all().await.unwrap().is_empty(),
+            "已触发的截止定时器必须移除"
+        );
+    }
+
+    /// 陈旧截止定时器：审批已恢复（挂起元数据清空）后不得驱动过期。
+    #[tokio::test]
+    async fn stale_deadline_timer_after_resume_is_dropped() {
+        let (rt, _bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_definition("approve-stale-wf", Some("PT60S"), &["alice"]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let rec = await_approval_deadline_timer(&timers, 61_000).await;
+
+        // 审批通过 → 恢复并清空挂起元数据，工作流随后完成。
+        rt.resume_approval(
+            &started.id,
+            serde_json::json!({"outcome": "completed"}),
+            None,
+        )
+        .await
+        .unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Completed).await;
+
+        rt.clock.advance(60_000);
+        rt.fire_timer(rec).await;
+
+        let (engine, _) = approval_store.load(&started.id).await.unwrap().unwrap();
+        let seat = engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some("alice"))
+            .expect("seat for alice");
+        assert!(
+            seat.status.is_open(),
+            "陈旧定时器不得触发过期：{:?}",
+            seat.status
+        );
+        assert!(
+            timers.list_all().await.unwrap().is_empty(),
+            "陈旧定时器必须被静默丢弃"
+        );
+    }
+
+    /// 仍有更晚到期的 open 席位 ⇒ 为下一截止重排定时器。
+    #[tokio::test]
+    async fn later_deadline_reschedules_timer() {
+        let (rt, _bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_definition("approve-resched-wf", Some("PT60S"), &["alice"]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _first = await_approval_deadline_timer(&timers, 61_000).await;
+
+        // 手工追加一个更晚到期的 open 席位（模拟改期后的下一截止）。
+        let (mut engine, rev) = approval_store.load(&started.id).await.unwrap().unwrap();
+        let (round_id, branch_id) = engine
+            .rounds
+            .values()
+            .next()
+            .map(|r| (r.id.clone(), r.branch_id.clone()))
+            .expect("open round");
+        let later = 91_000i64;
+        let mut bob = engine.tasks.values().next().expect("existing seat").clone();
+        bob.id = "seat-bob".into();
+        bob.round_id = round_id;
+        bob.branch_id = branch_id;
+        bob.assignee = Some("bob".into());
+        bob.status = crate::workflow::approval::model::TaskStatus::Created;
+        bob.deadline = Some(later);
+        engine.tasks.insert(bob.id.clone(), bob);
+        assert!(approval_store
+            .commit(&engine, &[], ExpectedRev::Exact(rev))
+            .await
+            .unwrap());
+
+        // 第一条定时器到期：alice 过期，bob 仍 open ⇒ 为 91000 重排。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let (after, _) = approval_store.load(&started.id).await.unwrap().unwrap();
+        let alice = after
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some("alice"))
+            .expect("alice seat");
+        assert_eq!(
+            alice.status,
+            crate::workflow::approval::model::TaskStatus::Expired
+        );
+        assert!(after
+            .tasks
+            .get("seat-bob")
+            .expect("bob seat")
+            .status
+            .is_open());
+        let _next = await_approval_deadline_timer(&timers, 91_000).await;
+
+        let suspended = store_of(&rt)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suspended.status, InstanceStatus::Suspended);
+    }
+
+    /// 全部席位过期、轮次仍 Open ⇒ 不恢复、不重排（无自动判定）。
+    #[tokio::test]
+    async fn all_expired_never_auto_passes_and_never_resumes() {
+        let (rt, _bridge, approval_store, timers) = approval_deadline_runtime();
+        let def =
+            approve_deadline_definition("approve-all-expired-wf", Some("PT60S"), &["alice", "bob"]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let (engine, _) = approval_store.load(&started.id).await.unwrap().unwrap();
+        let expired = engine
+            .tasks
+            .values()
+            .filter(|t| t.status == crate::workflow::approval::model::TaskStatus::Expired)
+            .count();
+        assert_eq!(expired, 2, "全部席位过期");
+        assert_eq!(
+            engine.rounds.values().next().expect("round").status,
+            crate::workflow::approval::model::RoundStatus::Open,
+            "全员过期保持轮次 Open"
+        );
+        assert_eq!(
+            engine.instance.status,
+            ApprovalStatus::Running,
+            "过期不产生终态"
+        );
+
+        let suspended = store_of(&rt)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            suspended.status,
+            InstanceStatus::Suspended,
+            "无自动判定：不得恢复"
+        );
+        assert!(suspended.context.get("done").is_none());
+        assert!(
+            timers.list_all().await.unwrap().is_empty(),
+            "无更晚 deadline ⇒ 不得重排"
+        );
+    }
+
+    /// 过期把「一票通过 + 余席过期」收敛为通过 ⇒ 工作流恢复并推进到后继节点。
+    #[tokio::test]
+    async fn expire_triggered_pass_resumes_workflow_to_next_task() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_verdict_definition(
+            "approve-expire-pass-wf",
+            None,
+            true,
+            &["alice", "bob"],
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        // 会签：alice 先通过，bob 未决 ⇒ 轮次仍 Open，工作流保持挂起。
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let suspended = store_of(&rt)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            suspended.status,
+            InstanceStatus::Suspended,
+            "一票未定不恢复"
+        );
+
+        // bob 到期 ⇒ 混合判定为通过 ⇒ 恢复，驱动到后继节点。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let done = await_status(store_of(&rt), &started.id, InstanceStatus::Completed).await;
+        assert!(
+            done.context.get("done").is_none(),
+            "通过路径顺序推进到 end，不执行 rework"
+        );
+        assert_eq!(done.context["_approval"]["status"], "passed");
+    }
+
+    /// 审批节点声明 `on_pass` ⇒ 截止路径的通过也必须路由到该目标，而不是顺序推进
+    ///（命令路径与截止路径共用 helper，两条入口不得分叉）。
+    #[tokio::test]
+    async fn expire_triggered_pass_routes_to_on_pass_target() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let mut task = approve_task(&["alice", "bob"]);
+        task.deadline = Some("PT60S".into());
+        task.on_pass = Some("rework".into());
+        let def = make_definition_ext(
+            "approve-expire-onpass-wf",
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(task),
+                },
+                NamedTask {
+                    name: "end".into(),
+                    task: Task::End(EndTask {}),
+                },
+                NamedTask {
+                    name: "rework".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"rework-done\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // bob 到期 ⇒ 混合判定为通过 ⇒ 按 on_pass 路由到 rework（跳过 end）。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let done = await_status(store_of(&rt), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(
+            done.context["done"], "rework-done",
+            "on_pass 目标必须生效，不得顺序推进到 end"
+        );
+        assert_eq!(done.context["_approval"]["status"], "passed");
+    }
+
+    /// 过期把「一票驳回 + 余席过期」收敛为否决 ⇒ 路由到节点 `on_reject` 目标任务。
+    #[tokio::test]
+    async fn expire_triggered_reject_routes_to_on_reject_target() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_verdict_definition(
+            "approve-expire-reject-wf",
+            Some("rework"),
+            false,
+            &["alice", "bob"],
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        // 非一票否决：alice 驳回后轮次仍 Open（bob 未决）。
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Reject {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let suspended = store_of(&rt)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suspended.status, InstanceStatus::Suspended, "未收敛不收口");
+
+        // bob 到期 ⇒ completed(0)+rejected(1) >= total(1) ⇒ 否决 ⇒ 路由到 on_reject。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let done = await_status(store_of(&rt), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(
+            done.context["done"], "rework-done",
+            "否决 ⇒ 跳到 on_reject 目标任务"
+        );
+        assert_eq!(done.context["_approval"]["status"], "rejected");
+    }
+
+    /// 过期收敛为否决但节点未声明 `on_reject` ⇒ 以 `approval_rejected` 置 fault。
+    #[tokio::test]
+    async fn expire_triggered_reject_without_target_faults_with_approval_rejected() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_verdict_definition(
+            "approve-expire-reject-fault-wf",
+            None,
+            false,
+            &["alice", "bob"],
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Reject {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let failed = await_status(store_of(&rt), &started.id, InstanceStatus::Failed).await;
+        let fault = failed.fault.expect("fault");
+        assert_eq!(fault.title, "approval_rejected");
+        assert_eq!(
+            fault.detail,
+            "approval rejected without an on_reject target"
+        );
+        assert!(
+            failed.suspension_meta.is_none(),
+            "fault 后不得残留挂起元数据"
+        );
+    }
+
+    /// 裁定（Task 8 carry）：定义级 `task_meta.timeout` 不得作用于 approve 节点的
+    /// 审批等待 —— 审批由自身 `deadline` 治理，通用任务超时不得 fault 挂起的实例。
+    #[tokio::test]
+    async fn definition_level_timeout_does_not_fault_approval_wait() {
+        use crate::workflow::model::{TaskMeta, TimeoutConfig};
+
+        let (rt, _bridge, _approval_store, timers) = approval_deadline_runtime();
+        let mut def = approve_deadline_definition("approve-timeout-wf", Some("PT60S"), &["alice"]);
+        def.task_meta.insert(
+            "review".into(),
+            TaskMeta {
+                timeout: Some(TimeoutConfig {
+                    after: "PT1H".into(),
+                }),
+                ..Default::default()
+            },
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        // 审批节点不挂通用 task timeout。
+        assert!(
+            !timers
+                .list_all()
+                .await
+                .unwrap()
+                .into_iter()
+                .any(|r| matches!(r.kind, TimerKind::Timeout { .. })),
+            "approve 节点不得挂定义级 task timeout"
+        );
+
+        // 推进过 timeout 并触发扫描：实例仍 Suspended（不得被通用超时 fault）。
+        rt.clock.advance(3_600_000);
+        rt.fire_due_timers().await;
+        let suspended = store_of(&rt)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suspended.status, InstanceStatus::Suspended);
+    }
+
+    /// 重启对账：`Suspended` 的审批挂起在「实例已写 Suspended、截止定时器尚未落 KV」
+    /// 崩溃窗口后必须按审批引擎里仍 open 的席位重建定时器（重驱守卫不会再建）。
+    #[tokio::test]
+    async fn reconcile_reschedules_missing_approval_deadline_timer() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_definition("approve-reconcile-wf", Some("PT60S"), &["alice"]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let mut inst = suspended_approval_instance("approve-reconcile-inst", &def);
+        inst.definition_hash = Some(crate::workflow::model::definition_hash(&def));
+        store_of(&rt).save_instance(&inst).await.unwrap();
+
+        // 审批引擎已开节点（open 席位 deadline = 61_000），但定时器 KV 缺失。
+        let approve = match &def.do_tasks[0].task {
+            Task::Approve(t) => t.clone(),
+            _ => panic!("approve node"),
+        };
+        bridge
+            .ensure_node_open(&inst, "review", &approve)
+            .await
+            .unwrap();
+        assert!(
+            timers.list_all().await.unwrap().is_empty(),
+            "崩溃窗口后的起始态：无截止定时器"
+        );
+
+        // 重启对账重建定时器。
+        rt.reconcile_resumable_instances(Arc::clone(store_of(&rt)))
+            .await;
+        let rec = await_approval_deadline_timer(&timers, 61_000).await;
+        assert_eq!(rec.instance_id, inst.id);
+
+        // 到期后过期席位，证明重建的定时器确实可驱动。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+        let (engine, _) = approval_store.load(&inst.id).await.unwrap().unwrap();
+        let seat = engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some("alice"))
+            .expect("seat for alice");
+        assert_eq!(
+            seat.status,
+            crate::workflow::approval::model::TaskStatus::Expired
+        );
+    }
+
     /// 从 runtime 中取出 store（测试辅助）
     fn store_of<E, C, S, D, B>(runtime: &WorkflowRuntime<E, C, S, D, B>) -> &Arc<S>
     where
@@ -3881,5 +7590,221 @@ mod tests {
         B: EventProvider,
     {
         &runtime.store
+    }
+
+    // ─── fail_instance 有界 CAS 重试（可控冲突的假存储） ───
+
+    /// 可控 CAS 冲突的存储：期望修订号匹配时，前 `conflicts_remaining` 次返回冲突并推进
+    /// 存储修订号（模拟并发写者抢先提交）；其余读写转发给内存存储。
+    struct ConflictOnceStore {
+        inner: MemoryWorkflowStore,
+        rev: std::sync::atomic::AtomicI64,
+        conflicts_remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ConflictOnceStore {
+        fn new(conflicts: usize) -> Self {
+            Self {
+                inner: MemoryWorkflowStore::new(),
+                rev: std::sync::atomic::AtomicI64::new(0),
+                conflicts_remaining: std::sync::atomic::AtomicUsize::new(conflicts),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStore for ConflictOnceStore {
+        async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+            self.inner.save_definition(def).await
+        }
+
+        async fn load_definition(
+            &self,
+            namespace: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<Option<WorkflowDefinition>, StoreError> {
+            self.inner.load_definition(namespace, name, version).await
+        }
+
+        async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
+            self.inner.save_instance(inst).await
+        }
+
+        async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError> {
+            self.inner.load_instance(id).await
+        }
+
+        async fn list_definitions(
+            &self,
+            namespace: &str,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+            self.inner
+                .list_definitions(namespace, page_size, page_token)
+                .await
+        }
+
+        async fn list_instances(
+            &self,
+            namespace: Option<&str>,
+            definition_name: Option<&str>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
+            self.inner
+                .list_instances(namespace, definition_name, page_size, page_token)
+                .await
+        }
+
+        async fn save_resume_idempotency_key(
+            &self,
+            instance_id: &str,
+            key: &str,
+        ) -> Result<bool, StoreError> {
+            self.inner
+                .save_resume_idempotency_key(instance_id, key)
+                .await
+        }
+
+        async fn load_instance_with_rev(
+            &self,
+            id: &str,
+        ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+            use std::sync::atomic::Ordering;
+            match self.inner.load_instance(id).await? {
+                Some(inst) => Ok(Some((inst, self.rev.load(Ordering::SeqCst)))),
+                None => Ok(None),
+            }
+        }
+
+        async fn save_instance_atomic(
+            &self,
+            inst: &WorkflowInstance,
+            expected_mod_rev: i64,
+        ) -> Result<bool, StoreError> {
+            use std::sync::atomic::Ordering;
+            if expected_mod_rev != self.rev.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            if self
+                .conflicts_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                // 模拟并发写者抢先提交：修订号前进，本次 CAS 失去写权。
+                self.rev.fetch_add(1, Ordering::SeqCst);
+                return Ok(false);
+            }
+            self.inner.save_instance(inst).await?;
+            self.rev.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    fn runtime_with_conflict_store(
+        conflicts: usize,
+    ) -> WorkflowRuntime<
+        ExpressionEvaluator,
+        TestClock,
+        ConflictOnceStore,
+        NoopTaskDispatcher,
+        NoopEventProvider,
+    > {
+        let executor = WorkflowExecutor::new(ExpressionEvaluator::new(), TestClock::new(1000));
+        WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            ConflictOnceStore::new(conflicts),
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        )
+    }
+
+    fn running_instance(id: &str) -> WorkflowInstance {
+        WorkflowInstance {
+            id: id.into(),
+            definition_ns: "test".into(),
+            definition_name: "wf".into(),
+            definition_version: "1.0".into(),
+            status: InstanceStatus::Running,
+            context: serde_json::json!({}),
+            task_stack: vec![],
+            current_task_index: 0,
+            created_at: 0,
+            updated_at: 0,
+            output: None,
+            fault: None,
+            suspension_meta: None,
+            initiator: None,
+            definition_hash: None,
+            engine_version: None,
+        }
+    }
+
+    /// 一次 CAS 冲突后 `fail_instance` 重读修订号并重提 ⇒ 终态写落地，冲突计数为 1。
+    #[tokio::test]
+    async fn fail_instance_recommits_after_one_cas_conflict() {
+        let rt = runtime_with_conflict_store(1);
+        let mut inst = running_instance("inst-cas-retry");
+        store_of(&rt).save_instance(&inst).await.unwrap();
+        let mut rev = Some(0);
+
+        rt.fail_instance(
+            &mut inst,
+            store_of(&rt),
+            &mut rev,
+            None,
+            WorkflowFault::timeout("t", "d"),
+        )
+        .await;
+
+        let saved = store_of(&rt)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            InstanceStatus::Failed,
+            "冲突重提后终态写必须落地"
+        );
+        assert!(saved.fault.is_some());
+        assert_eq!(rt.cas_conflict_total(), 1, "一次冲突只计一次");
+    }
+
+    /// 冲突耗尽 ⇒ 实例保持非终态（由启动对账重新驱动），冲突全部计入 `cas_conflict_total`。
+    #[tokio::test]
+    async fn fail_instance_exhaustion_leaves_instance_non_terminal() {
+        let rt = runtime_with_conflict_store(usize::MAX);
+        let mut inst = running_instance("inst-cas-exhausted");
+        store_of(&rt).save_instance(&inst).await.unwrap();
+        let mut rev = Some(0);
+
+        rt.fail_instance(
+            &mut inst,
+            store_of(&rt),
+            &mut rev,
+            None,
+            WorkflowFault::timeout("t", "d"),
+        )
+        .await;
+
+        let saved = store_of(&rt)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            InstanceStatus::Running,
+            "耗尽后不得留下伪终态"
+        );
+        assert_eq!(
+            rt.cas_conflict_total(),
+            CONTROL_PLANE_CAS_ATTEMPTS as u64,
+            "每次失败尝试都必须计数"
+        );
     }
 }

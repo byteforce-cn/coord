@@ -4,6 +4,7 @@
 // 服务由 `PluginManager` 统一托管：注册进插件表（内建插件）、由其驱动生命周期、
 // 并由 `Plugin::grpc_service()` 暴露 gRPC 面。
 
+pub mod approval_store;
 pub mod cache;
 pub mod circuit_breaker;
 pub mod config_center;
@@ -16,14 +17,18 @@ pub mod lock;
 pub mod mq;
 pub mod mq_event_provider;
 pub mod opa;
+pub mod outbox_kv;
+pub mod outbox_relay;
 pub mod policy;
 pub mod rate_limiter;
 pub mod registry;
 pub mod replication;
 pub mod scheduler;
 pub mod scheduler_store;
+pub mod step_kv;
 pub mod transit;
 pub mod transit_store;
 pub mod workflow;
+pub mod workflow_lease;
 pub mod workflow_scheduler;
 pub mod workflow_store;

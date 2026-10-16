@@ -9,8 +9,11 @@
 // - tasks:   任务执行模块（每种任务类型独立子模块，纯函数）
 // - engine:  WorkflowExecutor（纯状态机，无 I/O，委托 tasks/）
 // - runtime: WorkflowRuntime（异步驱动循环）
+// - approval: v2 审批模型与状态机（独立于 v1 引擎，默认关闭、未接线）
 
+pub mod approval;
 pub mod cron;
+pub mod durable;
 pub mod engine;
 pub mod errors;
 pub mod expression;

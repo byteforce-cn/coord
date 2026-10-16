@@ -1,6 +1,6 @@
 # 消费方契约页（Consumer Contract）
 
-> Owner: maintainers ｜ Last verified: 2026-10-12
+> Owner: maintainers ｜ Last verified: 2026-10-15
 
 面向**接入方**的聚合页：按服务给出「一致性 / 路由 / 失败语义 + 推荐消费范式」，
 并把每 RPC 的能力名与已接受的边界汇总为可检索的表。
@@ -213,6 +213,8 @@
 | `Workflow/Start` / `Signal` / `Cancel` | `coord:workflow:execute` |
 | `Workflow/GetStatus` / `ListDefinitions` / `GetDefinition` / `ListDefinitionVersions` / `ListInstances` | `coord:workflow:read` |
 | `Workflow/Deploy` / `RollbackDefinition` | `coord:workflow:define` |
+| `Workflow/Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` / `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate` | `coord:workflow:execute` |
+| `Workflow/ListPendingTasks` / `GetInstanceDetail` | `coord:workflow:read` |
 
 - 调度：认领式（`ClaimJob` 带租约，`Heartbeat` 续约），worker 崩溃由租约过期
   重派；**任务完成结果随完成持久化**（G-SC-1）——`CompleteJob` 携带 `result`
@@ -220,6 +222,17 @@
   **`GetJob` 回读**（只读、幂等；未注册 ⇒ `found=false`，不是错误码；重启 /
   换 agent 后仍可读，状态在 Server KV）。
 - 工作流：**保留策略已落地（G-WF-1）**——`DeleteInstance`（仅终态）/`DeleteDefinition`（无实例引用才可删）；删除**不可回滚**、**无自动 TTL/归档**（`boundaries.md` B-WF-1；完整语义见 `workflow-semantics.md`）；子流程恢复为周期扫描（B-WF-2/B-WF-3）。
+- **人工审批 v2（原生 `approve` 节点，ADR-0013）**：走到该节点的工作流实例进入 `SUSPENDED`
+  （`expected_signal = "approval.completed"`，审批实例 id = workflow 实例 id）；外部经 10 个命令
+  RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/Delegate/Withdraw/Terminate`）
+  操作席位、经 2 个查询 RPC（`ListPendingTasks`/`GetInstanceDetail`）读待办与实例详情。命令携带
+  `idempotency_key`，重放返回首次响应（不重复执行）；主体身份取自 CCT（请求体无 actor）。审批事件
+  写 `com.china-workflow.*` 命名空间、带 `.v1` 后缀：实例级 `instance.returned|cancelled|terminated|
+  completed|rejected.v1`、轮次级 `approval.round.passed|rejected.v1`；**消费者按
+  `(instance_id, sequence)` 去重**，每个类型的 JSON Schema 在 `apis/contracts/schemas/events/`。
+  审批面依赖 durable 装配（`workflow_durable`，**默认关闭**）：默认部署未启用时审批 RPC 返回
+  `FAILED_PRECONDITION`，且 `approve` 节点在驱动时 fault（实例 `FAILED`）。
+  授权矩阵、deadline 无自动处置、幂等与分页口径见 `workflow-semantics.md` §7 / ADR-0013。
 - **补偿（saga）已落地**：`sw.rs` 编译 DSL 的 `CompensatedBy`，实例失败/取消
   时按序执行补偿步骤（端到端判据
   `coord-agent/src/services/workflow.rs::test_sw_compensated_by_runs_compensation_end_to_end`）。
@@ -339,6 +352,11 @@
 |:--|:--|:--|
 | B-WF-1 | 工作流有显式保留 API（`DeleteInstance` 仅终态 / `DeleteDefinition` 无实例引用才可删），但**无自动 TTL/归档/删除审计** | 保留节奏由调用方显式管理；删除不可回滚（无归档副本） |
 | B-WF-2 / B-WF-3 | 子流程恢复为周期轮询；父定义暂读不到时暂停接管 | 恢复有秒级延迟，不是事件驱动 |
+| B-WF-5 | 审批 deadline 到期只置席位置过期，**不自动通过/驳回**；全员过期/被减签保持 `Open` | 超时处置由人（`AddSign` 补席 / `Terminate` 终止） |
+| B-WF-6 | `ListPendingTasks` 为全 v4 实例前缀扫描 + 分页（无按 actor/年龄的索引） | 待办查询随实例规模线性增长；自行分页 |
+| B-WF-8 | 无 UI 审批面、无 REST facade（`coord-ui` 仅影响评估） | 审批面仅 gRPC；Web 接入需另行立项建 facade |
+| B-WF-9 | `ReturnToNode` 重开席位不设 deadline | 重开后无自动提醒；靠 `AddSign`/`Terminate` 兜底 |
+| B-WF-10 | 审批命令不产生审批实例 `Faulted`；只收口 `Completed/Rejected/Cancelled/Terminated` | 版本/定义漂移故障落在工作流实例 `FAULTED`，不从命令返回 |
 | B-RG-1 / B-RG-2 | 不支持动态增删 region；region 模式 watch 拒绝跨 region | 静态拓扑规划；watch 前缀受限 |
 | B-CX-1 / B-CX-2 | 连接数上限但无寿命回收；客户端连接池机会式回收 | 容量规划考虑长连接占坑 |
 | B-SE-1..B-SE-8 | TLS fail-closed / KEK 注入 / dev 例外等安全边界 | 生产接入按 TLS+注入材料配置 |

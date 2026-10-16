@@ -1,0 +1,14 @@
+       0 BOOT           mode=start scenario=wait server=127.0.0.1:13933 relay=false
+    2154 DEPLOYED       definition_id=spike3-6ace5515
+    2199 STARTED        instance=9f4b27a6-226b-4cd8-83b2-d3a4e27a9162
+    2522 READY          instance=9f4b27a6-226b-4cd8-83b2-d3a4e27a9162 status=Some(Waiting) timer=00000001791907098390:9f4b27a6-226b-4cd8-83b2-d3a4e27a9162:resume:wait kv_state_written=true
+       0 KILL9          pid=488197 signal=SIGKILL wait_status=137 ts=2026-10-13T15:58:13.722Z
+       0 BOOT           mode=recover scenario=wait server=127.0.0.1:13933 relay=true
+       5 RECOVER_START  instance=9f4b27a6-226b-4cd8-83b2-d3a4e27a9162
+     222 RECOVER_SCAN   durable recovery completed
+     263 TIMERS_AT_RECOVER 00000001791907098390:9f4b27a6-226b-4cd8-83b2-d3a4e27a9162:resume:wait@1791907098390
+     305 STATUS         status=Some(Waiting) reason=wait retry_count=0 until_ms=1791907098390
+    6088 STATUS         status=Some(Running) susp=null
+   10910 STATUS         status=Some(Completed) susp=null
+   14108 OUTBOX_DRAINED pending=0
+   14193 SUMMARY        {"delivered_unique":6,"duplicate_event_ids":0,"final_status":"completed","generated_at_ms":1791907107924,"instance":"9f4b27a6-226b-4cd8-83b2-d3a4e27a9162","missing_event_ids":0,"mq_messages_total":6,"outbox_delivered":6,"outbox_pending":0,"outbox_records":6,"remaining_timers_for_instance":0,"scenario":"wait","timers_total":0}

@@ -1,0 +1,33 @@
+{
+  "bytes_per_million_writes": 2819492300.0,
+  "bytes_per_write": 2819.4923,
+  "dir_bytes_base": 618496,
+  "dir_bytes_delta": 56389846,
+  "dir_bytes_final": 57008342,
+  "elapsed_secs": 52.585376981,
+  "errors": 0,
+  "final_per_file": [
+    {
+      "bytes": 19153110,
+      "dir": true,
+      "name": "snapshots"
+    },
+    {
+      "bytes": 34041856,
+      "dir": false,
+      "name": "store.db"
+    },
+    {
+      "bytes": 3813376,
+      "dir": true,
+      "name": "raft-log"
+    }
+  ],
+  "loadavg": "1.53 1.89 2.21 2/997 271833",
+  "notes": "data-dir 增量按递归文件大小求和；含 raft log + redb + changelog 等全部文件",
+  "ops_per_sec": 380.33387128186496,
+  "sample_every": 1000,
+  "scenario": "storage_growth",
+  "value_bytes": 256,
+  "writes": 20000
+}

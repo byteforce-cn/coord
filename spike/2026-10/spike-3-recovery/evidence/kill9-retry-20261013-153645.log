@@ -1,0 +1,13 @@
+       0 BOOT           mode=start scenario=retry server=127.0.0.1:59677 relay=false
+     148 DEPLOYED       definition_id=spike3-6ace501a
+     193 STARTED        instance=6611c7be-a31c-4d4d-8255-51674a79c47a
+     470 READY          instance=6611c7be-a31c-4d4d-8255-51674a79c47a status=Some(Waiting) timer=00000001791905823810:6611c7be-a31c-4d4d-8255-51674a79c47a:resume:retry kv_state_written=true
+       0 KILL9          pid=463346 signal=SIGKILL wait_status=137 ts=2026-10-13T15:36:59.145Z
+       0 BOOT           mode=recover scenario=retry server=127.0.0.1:59677 relay=true
+       7 RECOVER_START  instance=6611c7be-a31c-4d4d-8255-51674a79c47a
+     225 RECOVER_SCAN   durable recovery completed
+     268 TIMERS_AT_RECOVER 00000001791905823810:6611c7be-a31c-4d4d-8255-51674a79c47a:resume:retry@1791905823810
+     310 STATUS         status=Some(Waiting) reason=retry retry_count=1 until_ms=1791905823810
+    9950 STATUS         status=Some(Failed) reason=retry retry_count=2 until_ms=1791905829047
+   12001 OUTBOX_DRAINED pending=0
+   12047 SUMMARY        {"delivered_unique":4,"duplicate_event_ids":0,"final_status":"failed","generated_at_ms":1791905831198,"instance":"6611c7be-a31c-4d4d-8255-51674a79c47a","missing_event_ids":0,"mq_messages_total":4,"outbox_delivered":4,"outbox_pending":0,"outbox_records":4,"remaining_timers_for_instance":0,"scenario":"retry","timers_total":0}

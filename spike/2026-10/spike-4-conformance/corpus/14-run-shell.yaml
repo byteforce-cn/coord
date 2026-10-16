@@ -1,0 +1,11 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: run-shell
+  version: "1.0.0"
+do:
+  - exec:
+      run:
+        shell:
+          command: "echo hi"
+      then: exit

@@ -130,6 +130,32 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub workflow: bool,
 
+    /// Workflow durable 装配（KV outbox + MQ 事件 + 持久化定时器 + 实例驱动租约 +
+    /// step token）。
+    ///
+    /// **默认关闭**：durable 承诺「事件不丢、一实例一驱动、外部副作用不重」，
+    /// 其生产端到端验收尚未闭合（见 ADR-0001）——默认开启即把未验收的持久化语义
+    /// 变成缺省行为。显式 `true` 的前置条件缺一即**拒绝启动**（fail-closed，不静默
+    /// 降级）：`services.workflow = true`、到 Server 的连接（KV 持久化）、以及
+    /// `services.mq = true`（outbox 投递 / listen 订阅的投递面）。
+    /// 关闭时装配路径与未引入本开关时逐字一致，且**不要求 MQ 存在**。
+    #[serde(default)]
+    pub workflow_durable: bool,
+
+    /// 工作流事件 topic（durable 装配的 outbox 投递与 listen 订阅共用）。
+    ///
+    /// 仅在 `workflow_durable = true` 时读取；缺省口径与既有 spike 装配一致。
+    #[serde(default = "default_workflow_events_topic")]
+    pub workflow_events_topic: String,
+
+    /// 审批节点 `roles` 的角色解析映射（角色名 → 审批人）。
+    ///
+    /// `approve` 节点的 `roles` 在节点开启时经 `MapApproverResolver` 展开为具体审批人；
+    /// 未映射的角色 fail-closed（不静默当空席位，否则无人可批的节点会被引擎立即判通过）。
+    /// 缺省为空映射 = 既有配置文件不写本段照常加载（未使用 `roles` 的节点不受影响）。
+    #[serde(default)]
+    pub workflow_approval_roles: std::collections::HashMap<String, Vec<String>>,
+
     /// 权限策略引擎（OPA）
     #[serde(default)]
     pub policy: bool,
@@ -218,6 +244,9 @@ impl Default for ServiceConfig {
             cache: false,
             mq: false,
             workflow: false,
+            workflow_durable: false,
+            workflow_events_topic: default_workflow_events_topic(),
+            workflow_approval_roles: std::collections::HashMap::new(),
             policy: false,
             scheduler: false,
             circuit_breaker: false,
@@ -260,6 +289,11 @@ impl ServiceConfig {
             cache: true,
             mq: true,
             workflow: true,
+            // durable 是 workflow 的持久化增强（非独立服务）：其端到端验收未闭合，
+            // dev 保持与生产默认相同的现有装配路径；开启须显式。
+            workflow_durable: false,
+            workflow_events_topic: default_workflow_events_topic(),
+            workflow_approval_roles: std::collections::HashMap::new(),
             policy: true,
             scheduler: true,
             circuit_breaker: true,
@@ -282,6 +316,11 @@ impl ServiceConfig {
 /// ID 生成器默认实现模式（雪花，决策）
 fn default_idgen_mode() -> String {
     "snowflake".to_string()
+}
+
+/// durable 装配的默认事件 topic。
+fn default_workflow_events_topic() -> String {
+    "com.china-workflow.events".to_string()
 }
 
 // ──── tests ────
@@ -355,6 +394,16 @@ mod tests {
             !config.workflow,
             "workflow must NOT be on by default: persistence/compensation e2e acceptance is open"
         );
+        // durable 装配默认关：其「不丢 / 一实例一驱动」承诺的生产端到端验收未闭合；
+        // 在 workflow 之上再叠一层默认关（见 ADR-0001）。
+        assert!(
+            !config.workflow_durable,
+            "workflow_durable must NOT be on by default: its no-loss/single-writer e2e acceptance is open"
+        );
+        assert_eq!(
+            config.workflow_events_topic, "com.china-workflow.events",
+            "default workflow events topic must match the existing spike assembly"
+        );
         // 其他服务保持默认关闭
         assert!(!config.leader_election);
         assert!(!config.event_notification);
@@ -380,6 +429,18 @@ mod tests {
         assert_eq!(from_empty_toml.idgen_node_id, code_default.idgen_node_id);
         assert_eq!(from_empty_toml.cache, code_default.cache);
         assert_eq!(from_empty_toml.workflow, code_default.workflow);
+        assert_eq!(
+            from_empty_toml.workflow_durable,
+            code_default.workflow_durable
+        );
+        assert_eq!(
+            from_empty_toml.workflow_events_topic,
+            code_default.workflow_events_topic
+        );
+        assert_eq!(
+            from_empty_toml.workflow_approval_roles,
+            code_default.workflow_approval_roles
+        );
         assert_eq!(from_empty_toml.transit, code_default.transit);
         assert_eq!(from_empty_toml.pki, code_default.pki);
         assert_eq!(from_empty_toml.policy, code_default.policy);
@@ -479,6 +540,27 @@ policy = false
         assert!(!config.policy);
     }
 
+    /// durable 开关与 topic 的默认值：`workflow_durable=false` ⇒ 装配走现有非 durable
+    /// 路径、不要求 MQ；topic 缺省与既有 spike 装配一致。
+    #[test]
+    fn test_workflow_durable_defaults_off_with_stable_topic() {
+        let from_toml: ServiceConfig = toml::from_str("").unwrap();
+        assert!(!from_toml.workflow_durable);
+        assert_eq!(from_toml.workflow_events_topic, "com.china-workflow.events");
+
+        // 显式开启的解析面：布尔开关 + 自定义 topic 可被 TOML 覆盖。
+        let enabled: ServiceConfig = toml::from_str(
+            r#"
+workflow = true
+workflow_durable = true
+workflow_events_topic = "com.example.wf"
+"#,
+        )
+        .unwrap();
+        assert!(enabled.workflow_durable);
+        assert_eq!(enabled.workflow_events_topic, "com.example.wf");
+    }
+
     #[test]
     fn test_service_config_toml_partial() {
         // 仅指定部分字段，其余应为默认 false
@@ -507,6 +589,13 @@ policy = false
         assert!(dev.cache, "dev must enable cache");
         assert!(dev.mq, "dev must enable mq");
         assert!(dev.workflow, "dev must enable workflow");
+        // durable 是 workflow 的持久化增强而非独立服务：dev 保持现有装配路径
+        // （验收未闭合），开启须显式。
+        assert!(
+            !dev.workflow_durable,
+            "dev must NOT enable workflow_durable: it is an opt-in persistence enhancement"
+        );
+        assert_eq!(dev.workflow_events_topic, default_workflow_events_topic());
         assert!(dev.policy, "dev must enable policy");
         assert!(dev.scheduler, "dev must enable scheduler");
         assert!(dev.circuit_breaker, "dev must enable circuit_breaker");

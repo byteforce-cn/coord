@@ -2,6 +2,7 @@ package cn.byteforce.coord.sdk.workflow;
 
 import cn.byteforce.coord.sdk.CoordException;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -224,6 +225,154 @@ public interface WorkflowClient {
      */
     java.util.List<WorkflowInstanceSummary> listInstances(
             String namespace, String workflowId, String statusFilter, int pageSize, String pageToken);
+
+    // ──── 人工审批 v2（ADR-0013 D7）────
+
+    /**
+     * Approve the current seat of an approval task.
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the decision twice
+     * @return the instance status after the command (uppercase, e.g. {@code RUNNING}, {@code COMPLETED})
+     * @throws CoordException on communication or guard violation
+     */
+    String approve(String workflowId, String taskId, String comment, String idempotencyKey);
+
+    /**
+     * Reject the current seat of an approval task.
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the decision twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String reject(String workflowId, String taskId, String comment, String idempotencyKey);
+
+    /**
+     * Acknowledge (read receipt) an approval task, advancing it without a decision.
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param idempotencyKey unique key so retries do not apply the ack twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String acknowledge(String workflowId, String taskId, String idempotencyKey);
+
+    /**
+     * Add approvers / pool members / readers to an approval branch (加签).
+     *
+     * @param workflowId     the workflow instance ID
+     * @param branchId       the approval branch ID
+     * @param approvers      explicit approver identities to add (may be null/empty)
+     * @param pool           pool identities to add (may be null/empty)
+     * @param readers        reader identities to add (may be null/empty)
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the change twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String addSign(String workflowId, String branchId, List<String> approvers,
+                   List<String> pool, List<String> readers, String comment, String idempotencyKey);
+
+    /**
+     * Remove seats from an approval branch (减签).
+     *
+     * @param workflowId     the workflow instance ID
+     * @param branchId       the approval branch ID
+     * @param taskIds        the seat IDs to remove
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the change twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String removeSign(String workflowId, String branchId, List<String> taskIds,
+                      String comment, String idempotencyKey);
+
+    /**
+     * Return the approval flow to a previous node (驳回返回到目标节点).
+     *
+     * @param workflowId     the workflow instance ID
+     * @param branchId       the approval branch ID
+     * @param targetNode     the node to return to
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the return twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String returnToNode(String workflowId, String branchId, String targetNode,
+                        String comment, String idempotencyKey);
+
+    /**
+     * Transfer an approval seat to another assignee.
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param to             the target assignee
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the transfer twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String transfer(String workflowId, String taskId, String to, String comment, String idempotencyKey);
+
+    /**
+     * Delegate an approval seat to another assignee.
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param to             the target assignee
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the delegation twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String delegate(String workflowId, String taskId, String to, String comment, String idempotencyKey);
+
+    /**
+     * Withdraw the whole approval instance (申请人撤回).
+     *
+     * @param workflowId     the workflow instance ID
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the withdrawal twice
+     * @return the instance status after the command (uppercase, e.g. {@code CANCELLED})
+     * @throws CoordException on communication or guard violation
+     */
+    String withdraw(String workflowId, String comment, String idempotencyKey);
+
+    /**
+     * Terminate the whole approval instance.
+     *
+     * @param workflowId     the workflow instance ID
+     * @param reason         the termination reason
+     * @param idempotencyKey unique key so retries do not apply the termination twice
+     * @return the instance status after the command (uppercase, e.g. {@code TERMINATED})
+     * @throws CoordException on communication or guard violation
+     */
+    String terminate(String workflowId, String reason, String idempotencyKey);
+
+    /**
+     * List pending approval seats (待办) for the current principal.
+     *
+     * @param pageSize  max results per page (1-200; server caps at 200)
+     * @param pageToken pagination token from previous response (empty for first page)
+     * @return list of pending approval seats
+     * @throws CoordException on communication failure
+     */
+    List<PendingApprovalTask> listPendingTasks(int pageSize, String pageToken);
+
+    /**
+     * Get the full approval detail (branches / tasks / rounds) of an instance.
+     *
+     * @param workflowId the workflow instance ID
+     * @return the approval detail (includes revision for optimistic concurrency)
+     * @throws CoordException on not found or communication failure
+     */
+    ApprovalInstanceDetail getInstanceDetail(String workflowId);
 
     // ──── 异步回调 ────
 

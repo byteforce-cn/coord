@@ -1347,6 +1347,7 @@ mod tests {
 // TDD: 先写 phase4_tests，再实现本模块。
 
 pub mod phase4 {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -1354,7 +1355,7 @@ pub mod phase4 {
 
     use coord_core::workflow::{
         expression::ExpressionEvaluator,
-        model::{InstanceStatus, WorkflowDefinition, WorkflowInstance},
+        model::{WorkflowDefinition, WorkflowInstance},
         parser,
         ports::{
             Clock, DispatchResult, EventProvider, MemoryEventProvider, MemoryWorkflowStore,
@@ -1364,8 +1365,18 @@ pub mod phase4 {
         sw,
     };
 
+    use coord_core::workflow::approval::bridge::{
+        ApprovalBridge, ApprovalCommand, ApprovalOutcome, BridgeError, CommandOutcome,
+        MapApproverResolver, NodeOutcome,
+    };
+    use coord_core::workflow::approval::model::{
+        Branch as ApprovalBranch, Round as ApprovalRound, Task as ApprovalTask,
+    };
+    use coord_core::workflow::approval::store::ApprovalStore;
+
     use crate::proxy::AgentInner;
     use crate::service::WorkflowDispatchConfig;
+    use crate::services::approval_store::KvApprovalStore;
     use crate::services::workflow_store::KvWorkflowStore;
 
     // NoopEventProvider 仅在测试中使用
@@ -1389,6 +1400,7 @@ pub mod phase4 {
             _service: &str,
             _with: Option<&Value>,
             _input: &Value,
+            _idempotency_key: Option<&str>,
         ) -> DispatchResult {
             DispatchResult::Success { data: Value::Null }
         }
@@ -1554,6 +1566,7 @@ pub mod phase4 {
             service: &str,
             with: Option<&Value>,
             input: &Value,
+            idempotency_key: Option<&str>,
         ) -> DispatchResult {
             // 先解析 secrets/constants 占位符；残留未命中 key ⇒ fail-closed，
             // 绝不把字面量 `${ $secrets.x }` 当凭据发出去（远端 401/403 看不出
@@ -1575,7 +1588,10 @@ pub mod phase4 {
                 None => None,
             };
             match service {
-                "http" => self.dispatch_http(resolved_with.as_ref(), input).await,
+                "http" => {
+                    self.dispatch_http(resolved_with.as_ref(), input, idempotency_key)
+                        .await
+                }
                 "grpc" => self.dispatch_grpc(resolved_with.as_ref(), input).await,
                 _ => {
                     // function call — 从 use.functions 解析后 fallback 到 http/grpc 语义
@@ -1625,7 +1641,12 @@ pub mod phase4 {
         /// - `headers`: 请求头映射
         /// - `body`: 显式请求体（缺省用工作流输入）
         /// - `auth`: 认证（basic/bearer）
-        async fn dispatch_http(&self, with: Option<&Value>, input: &Value) -> DispatchResult {
+        async fn dispatch_http(
+            &self,
+            with: Option<&Value>,
+            input: &Value,
+            idempotency_key: Option<&str>,
+        ) -> DispatchResult {
             let (method, endpoint, query, body, headers, auth) = match with {
                 Some(w) => {
                     // endpoint 对象形式 { uri, method } 或字符串
@@ -1697,6 +1718,12 @@ pub mod phase4 {
                         req = req.header(k.as_str(), val);
                     }
                 }
+            }
+
+            // 幂等键：派发前已在 step token store 登记的确定性 token。
+            // 在自定义 headers 之后注入，使去重键来自运行时派生而非调用方 config。
+            if let Some(key) = idempotency_key {
+                req = req.header("Idempotency-Key", key);
             }
 
             // 请求体：显式 body 优先，其次工作流输入
@@ -1941,6 +1968,16 @@ pub mod phase4 {
                 RuntimeError::AlreadyCompleted(id) => WorkflowEngineError::FailedPrecondition(
                     format!("instance already in terminal state: {id}"),
                 ),
+                RuntimeError::StaleRevision(id) => WorkflowEngineError::FailedPrecondition(
+                    format!("stale revision for instance: {id}"),
+                ),
+                RuntimeError::DefinitionDrift {
+                    instance_id,
+                    expected,
+                    actual,
+                } => WorkflowEngineError::FailedPrecondition(format!(
+                    "definition drift: instance {instance_id} pinned {expected}, loaded {actual}"
+                )),
                 RuntimeError::InvalidSignal(msg) => WorkflowEngineError::InvalidArgument(msg),
                 RuntimeError::DefinitionNotFound(id) => {
                     WorkflowEngineError::NotFound(format!("workflow definition not found: {id}"))
@@ -1994,6 +2031,129 @@ pub mod phase4 {
         runtime: Option<Arc<EngineRuntime>>,
         expression: ExpressionEvaluator,
         clock: SystemClock,
+        /// Spike 3：KV outbox/定时器存储（Some = durable 装配）
+        durable_store: Option<Arc<crate::services::outbox_kv::KvOutboxStore>>,
+        /// Spike 3：outbox relay（Some 且 `relay_enabled` = 启动后持续投递）
+        outbox_relay: Option<Arc<coord_core::workflow::durable::OutboxRelay>>,
+        /// Spike 3：relay 是否由 `start()` 拉起
+        relay_enabled: bool,
+        /// Spike 3：relay 轮询间隔（毫秒）
+        relay_interval_ms: u64,
+        /// durable 装配的 MQ 句柄 + 事件 topic（仅 durable 构造设置）。
+        ///
+        /// 装配期构造早于 `PluginManager::start_all()`（MQ 的 redb 尚未打开），
+        /// 构造时 `create_topic` 必然失败；因此 topic 的创建推迟到 `start()`——
+        /// 等 MQ 就绪后在第一个产出/订阅之前建 topic。
+        durable_mq: Option<Arc<crate::services::mq::MessageQueueService>>,
+        durable_topic: String,
+        /// v2 审批桥（仅 durable 装配注入）。
+        ///
+        /// `None` ⇒ 审批命令 / 查询 fail-closed（`FailedPrecondition`），绝不退化为
+        /// 内存审批：无桥就无审批实例，静默成功会比报错更坏。
+        approval: Option<Arc<ApprovalBridge>>,
+    }
+
+    /// durable 装配的实例驱动租约 TTL（秒）。
+    ///
+    /// 续租间隔由 TTL 推导（`ttl/3`，见 `KvInstanceLease`）——30s TTL ⇒ 10s 续租，
+    /// 单次 KV 抖动或 GC 停顿不会立即丢失租约，同时驱动者在崩溃后 ≤30s 内可被
+    /// 其他进程接管。取值与 Task 3 的 spike2 并发判据一致。
+    const DURABLE_INSTANCE_LEASE_TTL_SECS: i64 = 30;
+
+    /// Spike 3：持久化 outbox / 定时器接线选项。
+    ///
+    /// 只在 [`WorkflowEngineService::new_with_kv_store_durable`] 使用；
+    /// 内存路径（`new` / `new_with_dispatch` / `new_for_test`）行为逐字不变。
+    pub struct DurableEngineOptions {
+        /// 事件投递面（MQ 服务实例，agent 内 redb 持久化）
+        pub mq: Arc<crate::services::mq::MessageQueueService>,
+        /// 事件 topic
+        pub topic: String,
+        /// 是否由 `start()` 拉起 relay：
+        /// `false` 时事件只落 outbox（崩溃恢复证据刻意拆开「写」与「投递」两段）
+        pub relay_enabled: bool,
+        /// relay 轮询间隔（毫秒）
+        pub relay_interval_ms: u64,
+        /// 审批节点 `roles` 的角色解析映射（角色名 → 审批人）。
+        ///
+        /// 来自 `ServicesConfig::workflow_approval_roles`；空映射时使用 `roles` 的节点
+        /// 在开启时 fail-closed（未映射角色不得静默当空席位）。
+        pub approval_roles: HashMap<String, Vec<String>>,
+    }
+
+    /// 待办审批席位（`ListPendingTasks` 查询投影；`kind`/`status` 为模型 JSON 口径）。
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct PendingTaskView {
+        pub instance_id: String,
+        pub task_id: String,
+        pub node: String,
+        pub branch_id: String,
+        pub round_id: String,
+        pub kind: String,
+        pub status: String,
+        pub assignee: String,
+        /// 超时阈值（Unix ms）；0 = 无超时
+        pub deadline_ms: i64,
+        pub created_at_ms: i64,
+    }
+
+    /// 审批实例详情（`GetInstanceDetail` 查询投影）。
+    ///
+    /// `status` 为大写实例状态；`branches`/`tasks`/`rounds` 为引擎快照的原始实体。
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct InstanceDetailView {
+        pub instance_id: String,
+        pub status: String,
+        pub initiator: String,
+        pub revision: u64,
+        pub definition_name: String,
+        pub branches: Vec<ApprovalBranch>,
+        pub tasks: Vec<ApprovalTask>,
+        pub rounds: Vec<ApprovalRound>,
+    }
+
+    /// 审批实体枚举的 JSON 标签（serde snake_case，与模型持久化口径一致）。
+    pub(crate) fn json_label<T: serde::Serialize>(value: &T) -> String {
+        serde_json::to_value(value)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    /// 桥命令响应 `{"instance_id", "status"}` → `(instance_id, status)` 元组。
+    fn approval_response_status(response: &Value) -> Result<(String, String), BridgeError> {
+        let instance_id = response
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                BridgeError::Serialization("approval response missing instance_id".into())
+            })?;
+        let status = response
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::Serialization("approval response missing status".into()))?;
+        Ok((instance_id.to_string(), status.to_string()))
+    }
+
+    /// 运行时错误 → 桥错误族（服务层审批方法的统一外部口径）。
+    fn map_runtime_to_bridge(e: coord_core::workflow::runtime::RuntimeError) -> BridgeError {
+        use coord_core::workflow::runtime::RuntimeError;
+        match e {
+            RuntimeError::NotFound(id) => BridgeError::NotFound(id),
+            RuntimeError::DefinitionNotFound(id) => BridgeError::NotFound(id),
+            RuntimeError::StoreError(msg) => BridgeError::Store(msg),
+            RuntimeError::StaleRevision(id) => BridgeError::Stale(id),
+            RuntimeError::AlreadyCompleted(id) => {
+                BridgeError::InvalidTransition(format!("instance already terminal: {id}"))
+            }
+            RuntimeError::GotoTargetNotFound(target) => {
+                BridgeError::InvalidTransition(format!("goto target not found: {target}"))
+            }
+            RuntimeError::InvalidSignal(msg) => BridgeError::InvalidTransition(msg),
+            RuntimeError::DefinitionDrift { instance_id, .. } => {
+                BridgeError::InvalidTransition(format!("definition drift: {instance_id}"))
+            }
+        }
     }
 
     impl WorkflowEngineService {
@@ -2045,11 +2205,195 @@ pub mod phase4 {
             )
         }
 
-        /// 共享装配：store + dispatcher 决定 runtime，其余字段相同。
+        /// 创建「KV 持久化 + Outbox + 持久化定时器」的引擎（Spike 2026-10 Spike 3）。
+        ///
+        /// 与 [`Self::new_with_kv_store_and_dispatch`] 的差别仅在注入面：
+        /// - 事件先落 KV outbox（`AtomicOutboxCommit` 时与状态同事务），
+        ///   由 relay 投递到 MQ；
+        /// - `wait`/`retry`/超时写持久化定时器，重启后扫描到期项；
+        /// - `listen` 用 MQ 订阅 + KV 持久化游标（重启续读）；
+        /// - 实例驱动租约（`KvInstanceLease`，构造传入同一 outbox store）保证
+        ///   「一实例一驱动」；
+        /// - step token 存储（`KvStepStore`）为 `call` 派发登记幂等键。
+        pub fn new_with_kv_store_durable(
+            inner: Arc<AgentInner>,
+            dispatch: &WorkflowDispatchConfig,
+            opts: DurableEngineOptions,
+        ) -> Self {
+            use crate::services::mq_event_provider::{CursorStore, MqEventProvider};
+            use crate::services::outbox_kv::{KvCursorStore, KvOutboxStore};
+            use crate::services::outbox_relay::MqOutboxSink;
+            use crate::services::step_kv::KvStepStore;
+            use crate::services::workflow_lease::KvInstanceLease;
+            use coord_core::workflow::durable::{
+                AtomicOutboxCommit, DurableSupport, DurableTimerStore, OutboxRelay, OutboxSink,
+                OutboxStore, RelayPolicy, StepTokenStore,
+            };
+            use coord_core::workflow::ports::InstanceLease;
+
+            let kv_store = Arc::new(KvWorkflowStore::new(Arc::clone(&inner)));
+            let store: Arc<dyn WorkflowStore + Send + Sync> =
+                Arc::clone(&kv_store) as Arc<dyn WorkflowStore + Send + Sync>;
+
+            let durable_kv = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+            let sink: Arc<dyn OutboxSink> =
+                Arc::new(MqOutboxSink::new(Arc::clone(&opts.mq), opts.topic.clone()));
+            let relay = Arc::new(OutboxRelay::new(
+                Arc::clone(&durable_kv) as Arc<dyn OutboxStore>,
+                sink,
+                RelayPolicy::default(),
+            ));
+
+            let cursors: Arc<dyn CursorStore> = Arc::new(KvCursorStore::new(Arc::clone(&inner)));
+            let event_provider: Arc<dyn EventProvider + Send + Sync> =
+                Arc::new(MqEventProvider::new_with_cursor_store(
+                    Arc::clone(&opts.mq),
+                    opts.topic.clone(),
+                    cursors,
+                ));
+
+            // step token 存储：`call` 派发前的幂等键（去重外部副作用），与 outbox
+            // 同在 `/_workflow/v3/` 键空间；注入后重试/恢复复用同一 token。
+            let support = DurableSupport::new(
+                Arc::clone(&durable_kv) as Arc<dyn DurableTimerStore>,
+                Arc::clone(&durable_kv) as Arc<dyn OutboxStore>,
+            )
+            .with_atomic_commit(Arc::clone(&durable_kv) as Arc<dyn AtomicOutboxCommit>)
+            .with_steps(Arc::new(KvStepStore::new(Arc::clone(&inner))) as Arc<dyn StepTokenStore>);
+
+            // 实例驱动租约：一实例一驱动；fenced_commit 复用同一 outbox store 的
+            // 键布局（见 `KvInstanceLease`）。
+            let instance_lease: Arc<dyn InstanceLease> = Arc::new(KvInstanceLease::new(
+                Arc::clone(&inner),
+                DURABLE_INSTANCE_LEASE_TTL_SECS,
+                Arc::clone(&durable_kv),
+            ));
+
+            // v2 审批桥：审批存储与 outbox 共库（同 `inner`），席位角色经配置映射解析。
+            // 只有 durable 路径注入；非 durable / 内存路径 `approval = None` ⇒ 审批命令 fail-closed。
+            let approval_store: Arc<dyn ApprovalStore> = Arc::new(KvApprovalStore::new(
+                Arc::clone(&inner),
+                Arc::clone(&durable_kv),
+            ));
+            let approval_bridge = Arc::new(ApprovalBridge::new(
+                approval_store,
+                Arc::new(SystemClock) as Arc<dyn Clock>,
+                Some(Arc::new(MapApproverResolver::new(
+                    opts.approval_roles.clone(),
+                ))),
+            ));
+
+            let mut svc = Self::assemble(
+                store,
+                Some(kv_store),
+                Arc::new(HttpTaskDispatcher::from_config(dispatch)),
+                event_provider,
+                Some(instance_lease),
+                Some(support),
+                Some(Arc::clone(&durable_kv)),
+                Some(relay),
+                opts.relay_enabled,
+                opts.relay_interval_ms,
+                Some(approval_bridge),
+            );
+            // topic 创建推迟到 `start()`（届时 MQ 已就绪）；此处只留句柄。
+            svc.durable_mq = Some(opts.mq);
+            svc.durable_topic = opts.topic;
+            svc
+        }
+
+        /// 共享装配：store + dispatcher 决定 runtime，其余字段相同（内存路径）。
         fn with_dispatcher(
             store: Arc<dyn WorkflowStore + Send + Sync>,
             kv_store: Option<Arc<KvWorkflowStore>>,
             dispatcher: Arc<dyn TaskDispatcher + Send + Sync>,
+        ) -> Self {
+            Self::assemble(
+                store,
+                kv_store,
+                dispatcher,
+                Arc::new(MemoryEventProvider::new()) as Arc<dyn EventProvider + Send + Sync>,
+                None,
+                None,
+                None,
+                None,
+                false,
+                1000,
+                None,
+            )
+        }
+
+        /// 确保 durable 事件 topic 已创建（create-if-absent）。
+        ///
+        /// 只能在 MQ 就绪后调用：`create_topic` 要求 MQ 已 `start()`（redb 打开），
+        /// 而 durable 引擎的构造早于 `start_all()`。因此先**有界**等 `is_started`，
+        /// 超时则 fail-closed 报错（不静默不投递）。已存在时跳过——构造期若 MQ
+        /// 已启动（如测试先起 MQ），当时的 `create_topic` 已建过。
+        async fn ensure_durable_topic(
+            mq: &crate::services::mq::MessageQueueService,
+            topic: &str,
+        ) -> Result<(), String> {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !mq.is_started() {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "workflow durable: MQ service not started within 30s; cannot ensure \
+                         events topic '{topic}'"
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            if mq
+                .get_topic_config(topic)
+                .map_err(|e| format!("workflow durable: read topic '{topic}' failed: {e}"))?
+                .is_none()
+            {
+                // 与 `MqOutboxSink` / `MqEventProvider` 的建 topic 参数逐字一致。
+                if let Err(create_err) = mq.create_topic(
+                    topic,
+                    crate::services::mq::TopicConfig {
+                        partitions: 1,
+                        retention_secs: 7 * 24 * 3600,
+                        max_message_size: 1024 * 1024,
+                    },
+                ) {
+                    // 只在并发创建竞争（另一驱动者已建同名 topic）下容忍失败：
+                    // 回读确认存在则不报错；仍不存在（或回读也失败）则 fail-closed，
+                    // 否则投递会在无 topic 下静默停摆。
+                    match mq.get_topic_config(topic) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return Err(format!(
+                                "workflow durable: failed to create events topic '{topic}': \
+                                 {create_err}"
+                            ));
+                        }
+                        Err(read_err) => {
+                            return Err(format!(
+                                "workflow durable: create topic '{topic}' failed ({create_err}); \
+                                 re-read failed: {read_err}"
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        /// 装配入口（内存路径与 durable 路径共用；不破坏既有构造签名）。
+        #[allow(clippy::too_many_arguments)]
+        fn assemble(
+            store: Arc<dyn WorkflowStore + Send + Sync>,
+            kv_store: Option<Arc<KvWorkflowStore>>,
+            dispatcher: Arc<dyn TaskDispatcher + Send + Sync>,
+            event_provider: Arc<dyn EventProvider + Send + Sync>,
+            instance_lease: Option<Arc<dyn coord_core::workflow::ports::InstanceLease>>,
+            durable: Option<coord_core::workflow::durable::DurableSupport>,
+            durable_store: Option<Arc<crate::services::outbox_kv::KvOutboxStore>>,
+            outbox_relay: Option<Arc<coord_core::workflow::durable::OutboxRelay>>,
+            relay_enabled: bool,
+            relay_interval_ms: u64,
+            approval: Option<Arc<ApprovalBridge>>,
         ) -> Self {
             let expression = ExpressionEvaluator::new();
             let clock = SystemClock;
@@ -2057,13 +2401,23 @@ pub mod phase4 {
                 expression.clone(),
                 clock.clone(),
             );
-            let runtime = WorkflowRuntime::new(
+            let mut runtime = WorkflowRuntime::new(
                 executor,
                 clock.clone(),
                 Arc::clone(&store),
                 dispatcher,
-                Arc::new(MemoryEventProvider::new()) as Arc<dyn EventProvider + Send + Sync>,
+                event_provider,
             );
+            if let Some(lease) = instance_lease {
+                runtime = runtime.with_instance_lease(lease);
+            }
+            if let Some(durable) = durable {
+                runtime = runtime.with_durable(durable);
+            }
+            // 审批桥双注入：runtime 用它开启/恢复审批节点，service 用它执行命令/查询。
+            if let Some(bridge) = approval.as_ref() {
+                runtime = runtime.with_approval_bridge(Arc::clone(bridge));
+            }
 
             Self {
                 store,
@@ -2071,14 +2425,28 @@ pub mod phase4 {
                 runtime: Some(Arc::new(runtime)),
                 expression,
                 clock,
+                durable_store,
+                outbox_relay,
+                relay_enabled,
+                relay_interval_ms,
+                durable_mq: None,
+                durable_topic: String::new(),
+                approval,
             }
         }
 
         /// 创建测试用 WorkflowEngineService（使用 NoopTaskDispatcher + NoopEventProvider）
         ///
-        /// 测试中不使用真实 HTTP 调用和事件总线，避免外部依赖。
+        /// 测试中不使用真实 HTTP 调用和事件总线，避免外部依赖。内存路径无审批桥
+        /// （`approval = None`），审批命令/查询 fail-closed。
         #[cfg(test)]
         pub fn new_for_test() -> Self {
+            Self::new_for_test_with_approval(None)
+        }
+
+        /// 内存路径 + 可选审批桥（测试用）：驱动路径需要桥时经它注入 `runtime`。
+        #[cfg(test)]
+        pub fn new_for_test_with_approval(approval: Option<Arc<ApprovalBridge>>) -> Self {
             let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(MemoryWorkflowStore::new());
             let expression = ExpressionEvaluator::new();
             let clock = SystemClock;
@@ -2086,13 +2454,16 @@ pub mod phase4 {
                 expression.clone(),
                 clock.clone(),
             );
-            let runtime = WorkflowRuntime::new(
+            let mut runtime = WorkflowRuntime::new(
                 executor,
                 clock.clone(),
                 Arc::clone(&store),
                 Arc::new(NoopTaskDispatcher) as Arc<dyn TaskDispatcher + Send + Sync>,
                 Arc::new(NoopEventProvider) as Arc<dyn EventProvider + Send + Sync>,
             );
+            if let Some(bridge) = approval.as_ref() {
+                runtime = runtime.with_approval_bridge(Arc::clone(bridge));
+            }
 
             Self {
                 store,
@@ -2100,6 +2471,13 @@ pub mod phase4 {
                 runtime: Some(Arc::new(runtime)),
                 expression,
                 clock,
+                durable_store: None,
+                outbox_relay: None,
+                relay_enabled: false,
+                relay_interval_ms: 1000,
+                durable_mq: None,
+                durable_topic: String::new(),
+                approval,
             }
         }
 
@@ -2291,6 +2669,20 @@ pub mod phase4 {
             definition_id: &str,
             input: Value,
         ) -> Result<WorkflowInstance, WorkflowEngineError> {
+            self.start_instance_as(definition_id, input, None).await
+        }
+
+        /// 启动实例并把发起人（CCT `sub`）钉到实例上。
+        ///
+        /// `initiator` 必须经本参数注入（而非启动后回填）：审批节点开启时桥读实例的
+        /// `initiator` 做自审判定，事后回填会与异步驱动竞争并可能让审批实例记成
+        /// `anonymous`。`None` = 未认证路径（旧快照兼容）。
+        pub async fn start_instance_as(
+            &self,
+            definition_id: &str,
+            input: Value,
+            initiator: Option<&str>,
+        ) -> Result<WorkflowInstance, WorkflowEngineError> {
             let def = self
                 .get_definition(definition_id)
                 .await
@@ -2302,7 +2694,7 @@ pub mod phase4 {
                 })?;
 
             self.runtime()?
-                .start(&def, input)
+                .start_as(&def, input, initiator)
                 .await
                 .map_err(WorkflowEngineError::from)
         }
@@ -2340,31 +2732,218 @@ pub mod phase4 {
                 .map_err(WorkflowEngineError::from)
         }
 
-        pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), WorkflowEngineError> {
-            let mut inst = self
-                .store
-                .load_instance(instance_id)
-                .await
-                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
-                .ok_or_else(|| {
-                    WorkflowEngineError::NotFound(format!("instance not found: {instance_id}"))
-                })?;
+        // ─── 审批 v2（ADR-0013 D7）命令 / 查询 ───
 
-            if inst.status.is_terminal() {
-                return Err(WorkflowEngineError::FailedPrecondition(format!(
-                    "instance already in terminal state: {:?}",
-                    inst.status
-                )));
+        /// 审批桥（`None` ⇒ 非 durable 装配）。
+        fn approval_bridge(&self) -> Result<&Arc<ApprovalBridge>, BridgeError> {
+            self.approval.as_ref().ok_or_else(|| {
+                BridgeError::InvalidTransition("workflow durable engine disabled".into())
+            })
+        }
+
+        /// 执行审批命令并按其节点结论驱动工作流。
+        ///
+        /// `Duplicate`（幂等键命中）原样返回首次响应，不重复驱动；`Applied` 时按分支
+        /// 结论 / 实例终态恢复或故障工作流（与截止路径共用 `apply_approval_node_outcome`）。
+        ///
+        /// `ReturnToNode` 例外：桥只重开目标节点分支、工作流仍挂在返回节点上，故命令
+        /// 生效后额外 `resume_approval(.., Some(target_node))` 把实例重新驱动到目标节点
+        /// （否则目标分支通过时会按返回节点的 `onPass` 恢复，跳过中间审批节点）。
+        pub async fn approval_command(
+            &self,
+            workflow_id: &str,
+            actor: &str,
+            cmd: ApprovalCommand<'_>,
+            idempotency_key: Option<&str>,
+        ) -> Result<(String, String), BridgeError> {
+            let bridge = self.approval_bridge()?;
+            // `ReturnToNode` 的恢复目标须在命令被桥消费前取出：桥只重开**目标节点**的
+            // 分支，工作流仍挂在**返回节点**上。若不把实例重新驱动到目标节点，目标分支
+            // 通过时 `apply_approval_node_outcome` 会用返回节点的 `onPass` 恢复，跳过
+            // 二者之间的所有审批节点。
+            let return_target = match &cmd {
+                ApprovalCommand::ReturnToNode { target_node, .. } => {
+                    Some((*target_node).to_string())
+                }
+                _ => None,
+            };
+            match bridge
+                .command(workflow_id, actor, cmd, idempotency_key)
+                .await?
+            {
+                CommandOutcome::Duplicate(response) => approval_response_status(&response),
+                CommandOutcome::Applied {
+                    response,
+                    node_outcome,
+                    terminal,
+                } => {
+                    match return_target {
+                        Some(target) => {
+                            // 重新驱动到目标节点：其重开分支已是 `Open`，`ensure_node_open`
+                            // 复用并重新挂起（attempt 已递增）。恢复失败即命令失败——绝不
+                            // 静默返回成功却停在错误的节点上。
+                            let runtime = self.runtime.as_ref().ok_or_else(|| {
+                                BridgeError::Store("runtime not initialized".into())
+                            })?;
+                            runtime
+                                .resume_approval(
+                                    workflow_id,
+                                    serde_json::json!({"status": "returned"}),
+                                    Some(&target),
+                                )
+                                .await
+                                .map_err(map_runtime_to_bridge)?;
+                        }
+                        None => {
+                            self.drive_approval_outcome(workflow_id, node_outcome, terminal)
+                                .await?;
+                        }
+                    }
+                    approval_response_status(&response)
+                }
             }
+        }
 
-            inst.status = InstanceStatus::Cancelled;
-            inst.updated_at = SystemClock.now_ms();
-            self.store
-                .save_instance(&inst)
-                .await
-                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?;
-
+        /// 审批结论 → 工作流恢复 / 路由 / 故障。
+        ///
+        /// 通过（分支本轮 `Passed`）优先：经共享 helper 恢复（honor 节点 `on_pass`）。
+        /// 实例终态 `Rejected` 同样走 helper（`on_reject` 路由或 `approval_rejected` 故障）；
+        /// `Cancelled`/`Terminated` 按既有口径置 fault。`Completed` 由工作流驱动收尾
+        /// （`finish_if_complete`）达成，命令路径无额外动作。
+        async fn drive_approval_outcome(
+            &self,
+            workflow_id: &str,
+            node_outcome: Option<NodeOutcome>,
+            terminal: Option<ApprovalOutcome>,
+        ) -> Result<(), BridgeError> {
+            let runtime = self
+                .runtime
+                .as_ref()
+                .ok_or_else(|| BridgeError::Store("runtime not initialized".into()))?;
+            if node_outcome == Some(NodeOutcome::Passed) {
+                runtime
+                    .apply_approval_node_outcome(workflow_id, NodeOutcome::Passed)
+                    .await
+                    .map_err(map_runtime_to_bridge)?;
+                return Ok(());
+            }
+            match terminal {
+                Some(ApprovalOutcome::Rejected) => {
+                    runtime
+                        .apply_approval_node_outcome(workflow_id, NodeOutcome::Rejected)
+                        .await
+                        .map_err(map_runtime_to_bridge)?;
+                }
+                Some(ApprovalOutcome::Cancelled) => {
+                    runtime
+                        .fail_approval(
+                            workflow_id,
+                            "approval_cancelled",
+                            "approval cancelled without an on_reject target",
+                        )
+                        .await
+                        .map_err(map_runtime_to_bridge)?;
+                }
+                Some(ApprovalOutcome::Terminated) => {
+                    runtime
+                        .fail_approval(workflow_id, "approval_terminated", "approval terminated")
+                        .await
+                        .map_err(map_runtime_to_bridge)?;
+                }
+                Some(ApprovalOutcome::Completed) | None => {}
+            }
             Ok(())
+        }
+
+        /// 待办审批席位查询（`open_tasks_for(actor)` 跨实例投影 + 实例 id 分页）。
+        ///
+        /// `page_size == 0 ⇒ DEFAULT_LIST_PAGE_SIZE`；`page_token` = 上一页最后
+        /// 扫描到的实例 id。返回 `(tasks, next_page_token)`，`None` 表示已到末页。
+        pub async fn list_pending_tasks(
+            &self,
+            actor: &str,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<PendingTaskView>, Option<String>), BridgeError> {
+            let bridge = self.approval_bridge()?;
+            let requested = if page_size == 0 {
+                coord_core::workflow::ports::DEFAULT_LIST_PAGE_SIZE
+            } else {
+                page_size
+            };
+            let limit = coord_core::workflow::approval::store::clamp_scan_limit(requested);
+            let entries = bridge
+                .store()
+                .scan(page_token, limit)
+                .await
+                .map_err(BridgeError::from)?;
+            let scanned = entries.len();
+            let mut tasks = Vec::new();
+            for entry in &entries {
+                let engine = &entry.engine;
+                for task in engine.open_tasks_for(actor) {
+                    let node = engine
+                        .branches
+                        .get(&task.branch_id)
+                        .map(|b| b.node.clone())
+                        .unwrap_or_default();
+                    tasks.push(PendingTaskView {
+                        instance_id: entry.id.clone(),
+                        task_id: task.id.clone(),
+                        node,
+                        branch_id: task.branch_id.clone(),
+                        round_id: task.round_id.clone(),
+                        kind: json_label(&task.kind),
+                        status: json_label(&task.status),
+                        assignee: task.assignee.clone().unwrap_or_default(),
+                        deadline_ms: task.deadline.unwrap_or(0),
+                        created_at_ms: task.created_at,
+                    });
+                }
+            }
+            let next = if scanned < limit {
+                None
+            } else {
+                entries.last().map(|e| e.id.clone())
+            };
+            Ok((tasks, next))
+        }
+
+        /// 审批实例详情（引擎快照投影）。
+        pub async fn get_instance_detail(
+            &self,
+            workflow_id: &str,
+        ) -> Result<InstanceDetailView, BridgeError> {
+            let bridge = self.approval_bridge()?;
+            let engine = bridge
+                .store()
+                .load(workflow_id)
+                .await
+                .map_err(BridgeError::from)?
+                .map(|(engine, _rev)| engine)
+                .ok_or_else(|| BridgeError::NotFound(workflow_id.to_string()))?;
+            Ok(InstanceDetailView {
+                instance_id: engine.instance.id.clone(),
+                status: json_label(&engine.instance.status).to_uppercase(),
+                initiator: engine.instance.initiator.clone(),
+                revision: engine.instance.revision,
+                definition_name: engine.instance.definition_name.clone(),
+                branches: engine.branches.values().cloned().collect(),
+                tasks: engine.tasks.values().cloned().collect(),
+                rounds: engine.rounds.values().cloned().collect(),
+            })
+        }
+
+        /// 取消实例（控制面）：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
+        ///
+        /// 经 [`WorkflowRuntime::cancel_instance`] 的 CAS 写路径：线性一致读修订号 +
+        /// 冲突重放，并发完成的终态不会被取消覆盖。终态 ⇒ `FailedPrecondition`，
+        /// 实例不存在 ⇒ `NotFound`。
+        pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), WorkflowEngineError> {
+            self.runtime()?
+                .cancel_instance(instance_id)
+                .await
+                .map_err(WorkflowEngineError::from)
         }
 
         /// 列出工作流实例（过滤 + 分页）——契约见 [`WorkflowStore::list_instances`]。
@@ -2486,6 +3065,13 @@ pub mod phase4 {
                 runtime: self.runtime.clone(),
                 expression: self.expression.clone(),
                 clock: self.clock.clone(),
+                durable_store: self.durable_store.clone(),
+                outbox_relay: self.outbox_relay.clone(),
+                relay_enabled: self.relay_enabled,
+                relay_interval_ms: self.relay_interval_ms,
+                durable_mq: self.durable_mq.clone(),
+                durable_topic: self.durable_topic.clone(),
+                approval: self.approval.clone(),
             }
         }
     }
@@ -2507,6 +3093,39 @@ pub mod phase4 {
                     .map_err(|e| format!("workflow KvWorkflowStore init failed: {e}"))?;
                 tracing::info!("Workflow engine started with KvWorkflowStore (raft-persisted)");
             }
+
+            // durable 装配：此刻 MQ 插件已 start()（装配期构造早于 start_all，构造时
+            // 建 topic 必失败）。在拉起 relay / 恢复驱动之前确保事件 topic 存在，
+            // 否则产出与订阅都会报 topic not found。
+            //
+            // 顺序不变式：`PluginManager::start_all()` 按插件名 BTreeMap 序启动，
+            // MQ 插件名 `"mq"` < 本引擎名 `"workflow-engine"` ⇒ MQ 先启动。此处
+            // 的 30s 有界等待只是防该命名/排序变化的保险，不能替代它。
+            if let Some(mq) = &self.durable_mq {
+                Self::ensure_durable_topic(mq, &self.durable_topic).await?;
+            }
+
+            // Spike 3：持久化恢复 —— 到期定时器先触发，再对账挂起实例（重订阅 listen、
+            // 补写 wait/retry 定时器），最后拉起周期扫描与 relay。
+            // 恢复必须先于投递：relay 一启动就会把崩溃前遗留的 outbox 事件投出去，
+            // 而此刻实例尚未重建驱动/重订阅 —— 先投递会让消费者看到「无人在驱动」的实例。
+            if let (Some(runtime), Some(_durable)) = (&self.runtime, &self.durable_store) {
+                runtime.recover_durable_state().await;
+                runtime.start_durable_workers();
+                tracing::info!("Workflow engine durable recovery done (outbox + persisted timers)");
+            }
+            if self.relay_enabled {
+                if let Some(relay) = &self.outbox_relay {
+                    let _handle = crate::services::outbox_relay::spawn_outbox_relay(
+                        Arc::clone(relay),
+                        std::time::Duration::from_millis(self.relay_interval_ms.max(1)),
+                    );
+                    tracing::info!(
+                        interval_ms = self.relay_interval_ms,
+                        "Workflow outbox relay started"
+                    );
+                }
+            }
             Ok(())
         }
 
@@ -2525,6 +3144,16 @@ mod phase4_tests {
     use super::phase4::*;
     use coord_core::workflow::model::{InstanceStatus, Task, WorkflowInstance};
     use coord_core::workflow::ports::{DispatchResult, TaskDispatcher};
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use coord_core::workflow::approval::bridge::{
+        ApprovalBridge, ApprovalCommand, BridgeError, MapApproverResolver,
+    };
+    use coord_core::workflow::approval::model::JoinPolicy;
+    use coord_core::workflow::approval::store::{ApprovalStore, MemoryApprovalStore};
+    use coord_core::workflow::ports::{Clock, SystemClock};
 
     fn sample_linear_yaml() -> String {
         r#"
@@ -2753,6 +3382,9 @@ do:
             output: None,
             fault: None,
             suspension_meta: None,
+            initiator: None,
+            definition_hash: None,
+            engine_version: None,
         };
         store.save_instance(&inst).await.unwrap();
 
@@ -3591,7 +4223,7 @@ events:
         });
 
         let result = dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({"x": 1}))
+            .dispatch("http", Some(&with), &serde_json::json!({"x": 1}), None)
             .await;
         match result {
             DispatchResult::Success { data } => {
@@ -3628,7 +4260,7 @@ events:
             "auth": {"scheme": "bearer", "token": "${ $secrets.approvalToken }"},
         });
         match dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await
         {
             DispatchResult::Success { data } => {
@@ -3657,7 +4289,7 @@ events:
             "query": {"region": "${ $constants.region }", "retries": "${ $constants.retries }"},
         });
         match dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await
         {
             DispatchResult::Success { data } => {
@@ -3687,7 +4319,7 @@ events:
             "headers": {"X-Region": "${ $constants.region }"},
         });
         match dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await
         {
             DispatchResult::Failure { error, retryable } => {
@@ -3712,7 +4344,7 @@ events:
             "headers": {"X-Test": "yes"},
         });
         match dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await
         {
             DispatchResult::Success { data } => {
@@ -3877,7 +4509,7 @@ events:
             "endpoint": format!("http://{addr}"),
         });
         let result = dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await;
         match result {
             DispatchResult::Success { data } => {
@@ -3895,7 +4527,7 @@ events:
         // 缺少 method → 配置错误（非重试）
         let with = serde_json::json!({"endpoint": {"uri": "http://127.0.0.1:1"}});
         let result = dispatcher
-            .dispatch("grpc", Some(&with), &serde_json::json!({}))
+            .dispatch("grpc", Some(&with), &serde_json::json!({}), None)
             .await;
         assert!(matches!(
             result,
@@ -3904,5 +4536,322 @@ events:
                 ..
             }
         ));
+    }
+
+    // ─── 审批 v2 服务面（命令 / 查询 / 身份） ───
+
+    fn sample_approve_yaml(name: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+"#
+        )
+    }
+
+    fn sample_approve_role_yaml(name: &str, role: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        roles: ["{role}"]
+"#
+        )
+    }
+
+    fn sample_approve_quorum_yaml(name: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice", "bob"]
+        mode: "quorum:2"
+"#
+        )
+    }
+
+    /// 内存审批存储 + 桥的测试服务（驱动路径与命令/查询路径共用同一桥）。
+    fn approve_service(
+        roles: HashMap<String, Vec<String>>,
+    ) -> (WorkflowEngineService, Arc<MemoryApprovalStore>) {
+        let store = Arc::new(MemoryApprovalStore::new());
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let bridge = Arc::new(ApprovalBridge::new(
+            store.clone(),
+            clock,
+            Some(Arc::new(MapApproverResolver::new(roles))),
+        ));
+        (
+            WorkflowEngineService::new_for_test_with_approval(Some(bridge)),
+            store,
+        )
+    }
+
+    /// 轮询直到 approval 实例出现某审批人的 open 席位，返回席位 id。
+    async fn await_open_seat(
+        store: &MemoryApprovalStore,
+        instance_id: &str,
+        assignee: &str,
+    ) -> String {
+        for _ in 0..500 {
+            if let Some((engine, _)) = store.load(instance_id).await.unwrap() {
+                if let Some(t) = engine
+                    .tasks
+                    .values()
+                    .find(|t| t.assignee.as_deref() == Some(assignee) && t.status.is_open())
+                {
+                    return t.id.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("approval seat for '{assignee}' on '{instance_id}' never opened");
+    }
+
+    /// 轮询直到 approval 存储里至少有 `n` 个实例。
+    async fn await_approval_entries(store: &MemoryApprovalStore, n: usize) {
+        for _ in 0..500 {
+            if store.scan(None, 200).await.unwrap().len() >= n {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("fewer than {n} approval instances opened");
+    }
+
+    /// 发起人经 `start_instance_as` 注入实例（`initiator` 为 `Some`）。
+    #[tokio::test]
+    async fn start_instance_as_records_initiator() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc
+            .deploy_definition("test", &sample_linear_yaml())
+            .await
+            .unwrap();
+
+        let with_initiator = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        let loaded = svc.get_instance(&with_initiator.id).await.unwrap().unwrap();
+        assert_eq!(loaded.initiator.as_deref(), Some("zhangsan"));
+
+        // 无发起人：字段为 None（旧快照兼容）。
+        let anonymous = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+        let loaded = svc.get_instance(&anonymous.id).await.unwrap().unwrap();
+        assert_eq!(loaded.initiator, None);
+    }
+
+    /// 非 durable（无桥）⇒ 审批命令 fail-closed（`FailedPrecondition` 语义），不退化为内存审批。
+    #[tokio::test]
+    async fn approval_command_without_bridge_fails_closed() {
+        let svc = WorkflowEngineService::new_for_test();
+        let err = svc
+            .approval_command(
+                "whatever",
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: "t1",
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            BridgeError::InvalidTransition("workflow durable engine disabled".into())
+        );
+
+        // 查询面同样 fail-closed。
+        let err = svc.list_pending_tasks("alice", 10, None).await.unwrap_err();
+        assert!(matches!(err, BridgeError::InvalidTransition(_)), "{err:?}");
+        let err = svc.get_instance_detail("whatever").await.unwrap_err();
+        assert!(matches!(err, BridgeError::InvalidTransition(_)), "{err:?}");
+    }
+
+    /// 节点 `roles` 无解析映射 ⇒ fail-closed：驱动把实例置 Failed（不静默开节点）。
+    #[tokio::test]
+    async fn approve_with_unmapped_role_faults_closed() {
+        let (svc, _store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition(
+                "test",
+                &sample_approve_role_yaml("unmapped-role-wf", "ghost"),
+            )
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+
+        let mut final_status = None;
+        for _ in 0..500 {
+            let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            if cur.status.is_terminal() {
+                final_status = Some(cur.status);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            final_status,
+            Some(InstanceStatus::Failed),
+            "未解析角色必须 fault 工作流，不得静默开节点"
+        );
+    }
+
+    /// 幂等键重放：第二次调用命中缓存响应，状态与首次一致且不再驱动。
+    #[tokio::test]
+    async fn idem_key_replay_returns_same_status() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("idem-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        let task_id = await_open_seat(&store, &inst.id, "alice").await;
+
+        let first = svc
+            .approval_command(
+                &inst.id,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &task_id,
+                    comment: None,
+                },
+                Some("idem-approve-1"),
+            )
+            .await
+            .unwrap();
+        let second = svc
+            .approval_command(
+                &inst.id,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &task_id,
+                    comment: None,
+                },
+                Some("idem-approve-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, second, "幂等重放必须返回同一 (instance_id, status)");
+        assert_eq!(first.0, inst.id);
+    }
+
+    /// 待办查询：按实例 id 分页，只返回请求 actor 的 open 席位。
+    #[tokio::test]
+    async fn list_pending_tasks_paginates_and_filters_actor() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("pending-wf"))
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let inst = svc
+                .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+                .await
+                .unwrap();
+            ids.push(inst.id);
+        }
+        await_approval_entries(&store, 3).await;
+
+        // 非审批人：无待办。
+        let (none, _) = svc.list_pending_tasks("mallory", 10, None).await.unwrap();
+        assert!(none.is_empty(), "只返回请求 actor 的席位");
+
+        // 分页 1：3 个实例各 1 席 ⇒ 需 3 页，且不重叠不遗漏。
+        let mut seen = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let (page, next) = svc
+                .list_pending_tasks("alice", 1, token.as_deref())
+                .await
+                .unwrap();
+            for t in &page {
+                assert_eq!(t.assignee, "alice");
+                seen.push(t.instance_id.clone());
+            }
+            match next {
+                Some(t) => token = Some(t),
+                None => break,
+            }
+        }
+        seen.sort();
+        ids.sort();
+        assert_eq!(seen, ids, "分页必须覆盖全部 3 个实例，不重叠不遗漏");
+    }
+
+    /// 实例详情：返回快照字段（大写状态、发起人、修订号、分支/席位/轮次）。
+    #[tokio::test]
+    async fn get_instance_detail_returns_snapshot_fields() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("detail-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &inst.id, "alice").await;
+
+        let detail = svc.get_instance_detail(&inst.id).await.unwrap();
+        assert_eq!(detail.instance_id, inst.id);
+        assert_eq!(detail.status, "RUNNING");
+        assert_eq!(detail.initiator, "zhangsan");
+        assert_eq!(detail.definition_name, "detail-wf");
+        assert!(detail.revision >= 1, "修订号应每次变更 +1");
+        assert_eq!(detail.branches.len(), 1);
+        assert_eq!(detail.tasks.len(), 1);
+        assert_eq!(detail.rounds.len(), 1);
+        // 缺省 `mode` = 会签（All）。
+        assert_eq!(detail.branches[0].join, JoinPolicy::All);
+
+        // 参数化策略（quorum）必须原样穿过服务投影，不得退化成缺省。
+        // 定义 id 为 `{namespace}-{unix_secs}`：同名前缀会在一秒内碰撞，用不同
+        // namespace 保证两个定义 id 不同。
+        let quorum_def = svc
+            .deploy_definition(
+                "test-quorum",
+                &sample_approve_quorum_yaml("detail-quorum-wf"),
+            )
+            .await
+            .unwrap();
+        assert_ne!(quorum_def, def_id, "不同定义必须得到不同 id");
+        let quorum_inst = svc
+            .start_instance_as(&quorum_def, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &quorum_inst.id, "alice").await;
+        let quorum_detail = svc.get_instance_detail(&quorum_inst.id).await.unwrap();
+        assert_eq!(quorum_detail.branches[0].join, JoinPolicy::Quorum(2));
     }
 }

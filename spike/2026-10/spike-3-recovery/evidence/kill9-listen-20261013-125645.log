@@ -1,0 +1,17 @@
+       0 BOOT           mode=start scenario=listen server=127.0.0.1:44993 relay=false
+     144 DEPLOYED       definition_id=spike3-6ace2a96
+     190 STARTED        instance=0fb3a447-c9ca-484c-8e74-171ba2c81708
+     327 READY          instance=0fb3a447-c9ca-484c-8e74-171ba2c81708 status=Some(Waiting) timer=none kv_state_written=true
+       0 KILL9          pid=288977 signal=SIGKILL wait_status=137 ts=2026-10-13T12:56:54.463Z
+       0 BOOT           mode=recover scenario=listen server=127.0.0.1:44993 relay=true
+       7 RECOVER_START  instance=0fb3a447-c9ca-484c-8e74-171ba2c81708
+     136 RECOVER_SCAN   durable recovery completed
+     137 TIMERS_AT_RECOVER 
+     137 SUBSCRIBED     instance=0fb3a447-c9ca-484c-8e74-171ba2c81708
+       0 TRIGGER        event source fires (touch /tmp/coord-spike-spike3/run-20261013-125645/trigger-listen)
+     242 EVENT_EMITTED  type=com.china-workflow.spike3.go-ahead
+     243 STATUS         status=Some(Waiting) reason=listen retry_count=0 until_ms=0
+     337 STATUS         status=Some(Running) susp=null
+     483 STATUS         status=Some(Completed) susp=null
+    2534 OUTBOX_DRAINED pending=0
+    2618 SUMMARY        {"delivered_unique":7,"duplicate_event_ids":0,"final_status":"completed","generated_at_ms":1791896217087,"instance":"0fb3a447-c9ca-484c-8e74-171ba2c81708","missing_event_ids":0,"mq_messages_total":7,"outbox_delivered":6,"outbox_pending":0,"outbox_records":6,"remaining_timers_for_instance":0,"scenario":"listen","timers_total":0}

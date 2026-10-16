@@ -1,0 +1,19 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: try-catch
+  version: "1.0.0"
+do:
+  - guarded:
+      try:
+        - risky:
+            call: http
+            with:
+              method: get
+              endpoint: "https://example.com/risky"
+      catch:
+        do:
+          - fallback:
+              set:
+                recovered: true
+      then: exit

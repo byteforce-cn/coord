@@ -133,7 +133,7 @@ impl KvWorkflowStore {
         format!("/_workflow/v3/defs/{namespace}/").into_bytes()
     }
 
-    fn instance_key(id: &str) -> Vec<u8> {
+    pub(crate) fn instance_key(id: &str) -> Vec<u8> {
         format!("/_workflow/v3/instances/{id}").into_bytes()
     }
 
@@ -529,6 +529,11 @@ impl WorkflowStore for KvWorkflowStore {
         }
     }
 
+    /// 普通写入（**无 CAS**）：先写 KV，成功后更新本地缓存。
+    ///
+    /// 缓存更新语义只在**写入生效后**发生；需要防丢更新的路径必须走
+    /// [`WorkflowStore::save_instance_atomic`] / 租约的 `fenced_save`（两者在 CAS
+    /// 失败时不更新缓存，避免把未生效的写落进读缓存）。
     async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
         let key = Self::instance_key(&inst.id);
         let value =
@@ -544,6 +549,31 @@ impl WorkflowStore for KvWorkflowStore {
         // 更新本地缓存
         self.cache.save_instance(inst).await?;
         Ok(())
+    }
+
+    /// 线性一致读实例及其 `mod_revision`（**绕过本地缓存**：缓存不保存修订号）。
+    ///
+    /// 供驱动循环的 CAS 写回取期望修订号（见 `WorkflowStore::load_instance_with_rev`）。
+    async fn load_instance_with_rev(
+        &self,
+        id: &str,
+    ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+        let key = Self::instance_key(id);
+        let rows = self
+            .inner
+            .client
+            .kv()
+            .range_with_rev(&key, &key, 1, 0)
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+        match rows.into_iter().next() {
+            Some((_k, v, mod_revision)) => {
+                let inst: WorkflowInstance = serde_json::from_slice(&v)
+                    .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+                Ok(Some((inst, mod_revision)))
+            }
+            None => Ok(None),
+        }
     }
 
     async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError> {
@@ -968,6 +998,9 @@ mod tests {
             output: Some(serde_json::json!({"result": "ok"})),
             fault: None,
             suspension_meta: None,
+            initiator: None,
+            definition_hash: None,
+            engine_version: None,
         };
 
         let json = serde_json::to_vec(&inst).unwrap();

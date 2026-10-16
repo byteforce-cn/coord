@@ -1,0 +1,16 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: call-grpc
+  version: "1.0.0"
+do:
+  - rpc:
+      call: grpc
+      with:
+        proto:
+          endpoint: "https://example.com/svc.proto"
+        service:
+          name: ExampleService
+          host: example.com
+        method: Get
+      then: exit

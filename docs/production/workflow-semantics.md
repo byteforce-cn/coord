@@ -1,6 +1,6 @@
 # 工作流语义（补偿 / 重试 / 信号 / 保留）
 
-> Owner: maintainers ｜ Last verified: 2026-10-13
+> Owner: maintainers ｜ Last verified: 2026-10-15
 
 面向接入方的语义单一归属页（G-WF-1）。事实源：`coord.workflow.v1` 的 proto 声明
 （wire 字段）、`coord-core/src/workflow/`（sw 编译器 + runtime）与
@@ -106,3 +106,67 @@ retries = 3
   `test_http_dispatcher_missing_placeholders_fail_closed`、
   `test_engine_new_with_dispatch_injects_secret_end_to_end`、
   `test_engine_new_with_dispatch_missing_secret_fails_closed_end_to_end`。
+
+## 7. v2 人工审批（原生 `approve` 节点）
+
+面向接入方的当前态口径。定案（决策、DSL 语法、授权矩阵、边界）单一归属
+`docs/adr/0013-workflow-approval-v2.md`（D2/D7/D8/D9/D11），本页不复述定案，只给
+接入所需的可消费面。
+
+- **RPC（12 个，`coord.workflow.v1`）**：
+  - 命令 10 个——`Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` /
+    `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate`，能力
+    `coord:workflow:execute`；
+  - 查询 2 个——`ListPendingTasks` / `GetInstanceDetail`，能力 `coord:workflow:read`。
+  - 命令请求末字段 `idempotency_key`；主体身份取自认证上下文（CCT），请求体不携带 actor。
+    错误码映射：`StaleRevision → ABORTED`、`NotAuthorized → PERMISSION_DENIED`、
+    `InvalidTransition → FAILED_PRECONDITION`。能力与错误码事实源见
+    `coord-core/src/grpc_auth.rs` 与 `consumer-contract.md` §0.2 / §7。
+- **DSL**：定义里用原生 `approve` 节点声明席位与策略（camelCase 键：`approvers / pool / readers /
+  roles / mode / veto / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
+  非法 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed；语法逐字见 ADR-0013 D2。
+- **挂起 / 恢复**：走到 `approve` 节点 ⇒ 实例 `SUSPENDED`，`SuspensionMeta` 给出
+  `reason="approval"`、`expected_signal="approval.completed"`、`approval_instance_id` 与节点名
+  （审批实例 id = workflow 实例 id）。分支本轮通过 ⇒ 按节点 `onPass` 恢复（缺省顺序推进下一
+  任务）；实例级否决 ⇒ 有 `onReject` 则路由，否则以 `approval_rejected` 置 fault；取消/终止
+  **不**按 `onReject` 路由，分别以 `approval_cancelled`/`approval_terminated` 置 fault
+  （映射事实源 ADR-0013 D11）。重启对账**不**重驱动挂起实例，但重建 deadline 定时器。
+- **授权**：引擎 `actor_can_act`（席位责任人/候选/被委派人）叠加桥的职责分离——默认发起人
+  不可自批（`allowSelfApprove` 可开，匿名发起豁免）、加签/减签 = `signAdmins` ∪ 发起人、
+  驳回至节点 = 未决席位持有人 ∪ `signAdmins` ∪ 发起人、终止 = `signAdmins`（内部
+  `SYSTEM_ACTOR="system"` 恒可，用于运行时收口）。矩阵逐行见 ADR-0013 D7。
+- **幂等**：命令按 `idempotency_key` 去重，记录键
+  `/_workflow/v4/idempotency/{instance}/{key}`，与状态、本批事件**同一次 CAS 提交**写入；
+  命中即原样返回首次响应，不重复执行（重放/重启后仍成立）。
+- **事件（已固化）**：7 个类型，带 `.v1` 版本后缀——实例级
+  `com.china-workflow.instance.returned|cancelled|terminated|completed|rejected.v1`、
+  轮次级 `com.china-workflow.approval.round.passed|rejected.v1`。每个类型在
+  `apis/contracts/schemas/events/<type>.json` 有 JSON Schema（`$id` =
+  `https://schemas.coord.dev/events/<type>.json`），由 `scripts/check-event-schemas.sh`
+  门禁（catalog ↔ schema 双向一致）。事件仍写 v3 outbox 传输设施；消费者按
+  `(instance_id, sequence)` 去重（`sequence` 每实例单调）。
+- **deadline**：节点 `deadline` 换算为席位的绝对截止，由**持久化定时器**驱动过期；到期只把
+  席位置 `Expired` 并从计票分母剔除，**绝不自动通过/驳回**——全员过期或被减签的轮次保持
+  `Open`，处置由人（`AddSign` 或 `Terminate`）决定。**混合轮次**（部分席位已批、部分过期）里
+  过期席位从 `total` 剔除；剔除后剩余席位全部通过 ⇒ 本轮**判通过**（与「全员过期保持
+  `Open`」区分）。重开（`ReturnToNode`）的席位不设 deadline。
+- **启用条件（`workflow_durable` 默认关闭）**：审批桥与审批聚合仅在 durable 工作流引擎装配时
+  注入。默认部署未开 `workflow_durable` 时审批 RPC 返回 `FAILED_PRECONDITION`（例外：保留
+  actor `system` 的 `Terminate` 先被授权拒绝为 `PERMISSION_DENIED`），且 `approve`
+  节点在驱动时 fail-closed（实例 `Failed` + `workflow.faulted`）——绝不静默降级为无审批继续。
+- **存储与写路径**：状态单文档 `/_workflow/v4/instances/{instance_id}`，与 v1 的
+  `/_workflow/v3/instances/` 扫描面互不可见；唯一写路径带 CAS
+  （`ExpectedRev::{CreateOnly, Exact(mod_rev)}`，无无守卫写入形态），状态与本批事件同一
+  KV Txn 提交。布局与谓词见 ADR-0013 D3/D8。
+- **查询与分页**：`ListPendingTasks(actor)` 按实例 id 字典序跨实例扫描 + 分页
+  （`page_size` 0 ⇒ 默认 50；`page_token` = 上一页最后实例 id；硬上限 200）；
+  `GetInstanceDetail` 返回实例快照（branches / tasks / rounds + `revision`，`revision` 为
+  CAS 守卫值）。
+
+**已知未落地（当前口径）**：
+
+- 未实现 D8 的 watch 驱动按实例有界缓存：KV 实现按实例做线性一致单键读，无缓存/淘汰；
+- 无 UI 审批面、无 REST facade（`coord-ui` 仅影响评估）；
+- `roles` 仅支持启动/命令路径注入的静态映射 `ApproverResolver`，外部解析服务未接线；
+- `ListPendingTasks` 为全 v4 前缀扫描（无按年龄/actor 的索引），规模上界见 `ops/boundaries.md`
+  的 `B-WF-*`。
