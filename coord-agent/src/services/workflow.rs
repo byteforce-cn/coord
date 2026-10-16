@@ -1411,6 +1411,21 @@ pub mod phase4 {
     // 真实 HTTP 任务派发器：通过 reqwest 执行 HTTP 调用。
     // gRPC 和 function 调用暂返回 Failure（需后续扩展）。
 
+    /// OAuth2 令牌缓存键：`client_secret` 不进键（不引入长驻凭据副本）。
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct OAuth2CacheKey {
+        token_url: String,
+        client_id: String,
+        scope: Option<String>,
+    }
+
+    /// 已取 OAuth2 令牌（`expires_at` 为提前刷新后的失效时刻）。
+    #[derive(Debug, Clone)]
+    struct CachedToken {
+        token: String,
+        expires_at: std::time::Instant,
+    }
+
     /// HTTP 任务派发器 —— 通过 reqwest 执行真实 HTTP 调用
     #[derive(Debug, Clone)]
     pub struct HttpTaskDispatcher {
@@ -1419,6 +1434,10 @@ pub mod phase4 {
         secrets: std::collections::HashMap<String, String>,
         /// 常量映射（${ $constants.x } 占位符解析）
         constants: serde_json::Map<String, Value>,
+        /// OAuth2 client_credentials 令牌缓存（进程内；按 tokenUrl/clientId/scope 分桶）
+        oauth2_tokens: std::sync::Arc<
+            tokio::sync::Mutex<std::collections::HashMap<OAuth2CacheKey, CachedToken>>,
+        >,
     }
 
     impl HttpTaskDispatcher {
@@ -1438,6 +1457,9 @@ pub mod phase4 {
                 client,
                 secrets: std::collections::HashMap::new(),
                 constants: serde_json::Map::new(),
+                oauth2_tokens: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
             }
         }
 
@@ -1447,6 +1469,9 @@ pub mod phase4 {
                 client,
                 secrets: std::collections::HashMap::new(),
                 constants: serde_json::Map::new(),
+                oauth2_tokens: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
             }
         }
 
@@ -1512,6 +1537,235 @@ pub mod phase4 {
                 Err(missing)
             }
         }
+
+        /// 递归求值 `with` 中的整串 `${ ... }` 运行时表达式（#96）。
+        ///
+        /// 绑定白名单：`$context`（= 实例上下文，即 dispatch 的 `input`）与 `$input`。
+        /// `${ $secrets.x }` / `${ $constants.x }` 是配置注入占位符（非运行时表达式）——
+        /// 独立语义、支持内嵌，原样留给后续注入；同一字符串出现其他 `${...}` 或
+        /// 独立表达式中混入 `$secrets`/`$constants` ⇒ fail-closed，绝不静默把字面量
+        /// 发出去。错误只含 JSON 路径与绑定名，不含值。
+        fn evaluate_runtime_expressions(
+            &self,
+            value: &Value,
+            context: &Value,
+        ) -> Result<Value, String> {
+            self.evaluate_runtime_expressions_at(value, context, "with")
+        }
+
+        fn evaluate_runtime_expressions_at(
+            &self,
+            value: &Value,
+            context: &Value,
+            path: &str,
+        ) -> Result<Value, String> {
+            match value {
+                Value::String(s) => {
+                    let trimmed = s.trim();
+                    if !trimmed.contains("${") {
+                        return Ok(value.clone());
+                    }
+                    let standalone = trimmed.starts_with("${")
+                        && trimmed.ends_with('}')
+                        && trimmed.matches("${").count() == 1;
+                    if !standalone {
+                        // 非整串：仅当 `${...}` 全部是纯配置占位符时才放行（支持
+                        // `Bearer ${ $secrets.token }` 这类既有内嵌注入）。
+                        if strip_plain_config_placeholders(s).contains("${") {
+                            return Err(format!(
+                                "{path} 含内嵌表达式——with 仅支持整串单段表达式（无字符串插值）"
+                            ));
+                        }
+                        return Ok(value.clone());
+                    }
+                    let inner = trimmed[2..trimmed.len() - 1].trim();
+                    if is_plain_config_placeholder(inner) {
+                        return Ok(value.clone());
+                    }
+                    self.evaluate_expression_string(inner, context, path)
+                }
+                Value::Array(arr) => arr
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        self.evaluate_runtime_expressions_at(v, context, &format!("{path}[{i}]"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Value::Array),
+                Value::Object(obj) => obj
+                    .iter()
+                    .map(|(k, v)| {
+                        self.evaluate_runtime_expressions_at(v, context, &format!("{path}.{k}"))
+                            .map(|v| (k.clone(), v))
+                    })
+                    .collect::<Result<serde_json::Map<_, _>, _>>()
+                    .map(Value::Object),
+                other => Ok(other.clone()),
+            }
+        }
+
+        /// 求值单个已剥壳的表达式字符串（`inner` 为 `${ ... }` 内层文本）。
+        fn evaluate_expression_string(
+            &self,
+            inner: &str,
+            context: &Value,
+            path: &str,
+        ) -> Result<Value, String> {
+            if inner.is_empty() {
+                return Err(format!("{path} 的运行时表达式为空"));
+            }
+            // 首字符闸门：求值器对无法识别的裸 token 会回退为「整个 context」，这里
+            // 只放行确定是表达式的形态，避免把 `hello` 这类文本静默换成上下文。
+            let first = inner.chars().next().unwrap_or('\0');
+            let literal = matches!(inner, "true" | "false" | "null");
+            let supported = literal
+                || first == '$'
+                || first == '.'
+                || first == '"'
+                || first == '('
+                || first == '{'
+                || first == '-'
+                || first.is_ascii_digit();
+            if !supported {
+                return Err(format!(
+                    "{path} 的运行时表达式不受支持（无法识别起始 token '{first}'）"
+                ));
+            }
+            for binding in expression_bindings(inner) {
+                if !matches!(binding.as_str(), "context" | "input") {
+                    return Err(format!(
+                        "{path} 引用了未知运行时绑定 ${binding}（仅支持 $context / $input；\
+                         $secrets / $constants 仅支持整串占位符形式）"
+                    ));
+                }
+            }
+            let mut vars = HashMap::new();
+            vars.insert("input".to_string(), context.clone());
+            ExpressionEvaluator::new()
+                .evaluate_with_vars(inner, context, &vars)
+                .map_err(|e| format!("{path} 运行时表达式求值失败：{e}"))
+        }
+    }
+
+    /// `${ $secrets.<key> }` / `${ $constants.<key> }` 的纯占位符判定（键为标识符形）。
+    fn is_plain_config_placeholder(inner: &str) -> bool {
+        ["$secrets.", "$constants."].iter().any(|prefix| {
+            inner
+                .strip_prefix(prefix)
+                .map(|key| {
+                    !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    /// 去掉字符串中的纯配置占位符片段（残留检测用）；非配置的 `${...}` 原样保留。
+    fn strip_plain_config_placeholders(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(pos) = rest.find("${") {
+            out.push_str(&rest[..pos]);
+            let after = &rest[pos + 2..];
+            match after.find('}') {
+                Some(end) => {
+                    if !is_plain_config_placeholder(after[..end].trim()) {
+                        out.push_str("${");
+                        out.push_str(&after[..=end]);
+                    }
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    out.push_str("${");
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// 提取表达式中的 `$name` 绑定（忽略字符串字面量）。
+    fn expression_bindings(expr: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut chars = expr.chars().peekable();
+        let mut in_string = false;
+        let mut escape = false;
+        while let Some(c) = chars.next() {
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '$' => {
+                    let mut name = String::new();
+                    while let Some(&n) = chars.peek() {
+                        if n.is_ascii_alphanumeric() || n == '_' {
+                            name.push(n);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if !name.is_empty() && !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        names
+    }
+
+    /// oauth2 配置缺失：非重试失败，只点名字段名（不回声任何值）。
+    fn oauth2_config_failure(field: &str) -> DispatchResult {
+        DispatchResult::Failure {
+            error: format!("oauth2 auth missing required field 'auth.{field}'"),
+            retryable: false,
+        }
+    }
+
+    /// 令牌端点错误体的安全摘要：只取 OAuth2 `error` / `error_description`（截断），
+    /// 并把 `client_secret` 的字面出现替换为 `[redacted]`；不回显原始响应体。
+    fn oauth2_error_detail(body: &str, client_secret: &str) -> String {
+        let detail = serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|v| {
+                let error = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                let description = v
+                    .get("error_description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                let joined = match (error.is_empty(), description.is_empty()) {
+                    (false, false) => format!("{error}: {description}"),
+                    (false, true) => error.to_string(),
+                    (true, false) => description.to_string(),
+                    (true, true) => String::new(),
+                };
+                (!joined.is_empty()).then_some(joined)
+            })
+            .unwrap_or_else(|| "(no OAuth2 error detail)".to_string());
+        redact_secret(&detail, client_secret)
+            .chars()
+            .take(300)
+            .collect()
+    }
+
+    /// 把 `secret` 的每个非空字面出现替换为 `[redacted]`。
+    fn redact_secret(text: &str, secret: &str) -> String {
+        if secret.is_empty() {
+            return text.to_string();
+        }
+        text.replace(secret, "[redacted]")
     }
 
     /// 占位符前缀与错误信息里的标签（两者必须一致）。
@@ -1568,23 +1822,35 @@ pub mod phase4 {
             input: &Value,
             idempotency_key: Option<&str>,
         ) -> DispatchResult {
-            // 先解析 secrets/constants 占位符；残留未命中 key ⇒ fail-closed，
-            // 绝不把字面量 `${ $secrets.x }` 当凭据发出去（远端 401/403 看不出
-            // 是本地配置缺失）。错误只含 key 名，不含任何凭据值。
+            // 先求值运行时表达式（$context/$input），再解析 secrets/constants 配置
+            // 占位符；残留未命中 key ⇒ fail-closed，绝不把字面量 `${ $secrets.x }`
+            // 当凭据发出去（远端 401/403 看不出是本地配置缺失）。
+            // 错误只含 key 名/路径与绑定名，不含任何凭据值。
             let resolved_with = match with {
-                Some(w) => match self.resolve_placeholders_checked(w) {
-                    Ok(v) => Some(v),
-                    Err(missing) => {
-                        return DispatchResult::Failure {
-                            error: format!(
-                                "workflow dispatch blocked: unresolved placeholder(s) {} — \
-                                 缺失的 key 未配置于 agent 的 [services.workflow_dispatch]",
-                                missing.join(", ")
-                            ),
-                            retryable: false,
+                Some(w) => {
+                    let evaluated = match self.evaluate_runtime_expressions(w, input) {
+                        Ok(v) => v,
+                        Err(msg) => {
+                            return DispatchResult::Failure {
+                                error: format!("workflow dispatch blocked: {msg}"),
+                                retryable: false,
+                            }
+                        }
+                    };
+                    match self.resolve_placeholders_checked(&evaluated) {
+                        Ok(v) => Some(v),
+                        Err(missing) => {
+                            return DispatchResult::Failure {
+                                error: format!(
+                                    "workflow dispatch blocked: unresolved placeholder(s) {} — \
+                                     缺失的 key 未配置于 agent 的 [services.workflow_dispatch]",
+                                    missing.join(", ")
+                                ),
+                                retryable: false,
+                            }
                         }
                     }
-                },
+                }
                 None => None,
             };
             match service {
@@ -1606,11 +1872,16 @@ pub mod phase4 {
 
     impl HttpTaskDispatcher {
         /// 应用认证配置（basic / bearer / oauth2）
-        fn apply_auth(
+        ///
+        /// oauth2 走 client_credentials：向 `tokenUrl` 取短 TTL 令牌后作 Bearer 发出。
+        /// 令牌按过期时间缓存并在过期前刷新；取用失败按 `DispatchResult` 的可重试
+        /// 语义映射（连接/超时/5xx 可重试，4xx/缺 access_token/非 JSON 不可重试），
+        /// 错误信息不含 `client_secret`。
+        async fn apply_auth(
             &self,
             req: reqwest::RequestBuilder,
             auth: &Value,
-        ) -> reqwest::RequestBuilder {
+        ) -> Result<reqwest::RequestBuilder, DispatchResult> {
             let scheme = auth
                 .get("scheme")
                 .or_else(|| auth.get("type"))
@@ -1624,14 +1895,126 @@ pub mod phase4 {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     let pass = auth.get("password").and_then(|v| v.as_str()).unwrap_or("");
-                    req.basic_auth(user, Some(pass))
+                    Ok(req.basic_auth(user, Some(pass)))
                 }
                 "bearer" => {
                     let token = auth.get("token").and_then(|v| v.as_str()).unwrap_or("");
-                    req.bearer_auth(token)
+                    Ok(req.bearer_auth(token))
                 }
-                _ => req,
+                "oauth2" => {
+                    let field = |names: &[&str]| {
+                        names
+                            .iter()
+                            .find_map(|n| auth.get(*n).and_then(|v| v.as_str()))
+                            .filter(|v| !v.is_empty())
+                    };
+                    let token_url = field(&["tokenUrl", "token_url"])
+                        .ok_or_else(|| oauth2_config_failure("tokenUrl"))?;
+                    let client_id = field(&["clientId", "client_id"])
+                        .ok_or_else(|| oauth2_config_failure("clientId"))?;
+                    let client_secret = field(&["clientSecret", "client_secret"])
+                        .ok_or_else(|| oauth2_config_failure("clientSecret"))?;
+                    let scope = field(&["scope"]);
+                    let token = self
+                        .oauth2_token(token_url, client_id, client_secret, scope)
+                        .await?;
+                    Ok(req.bearer_auth(token))
+                }
+                _ => Ok(req),
             }
+        }
+
+        /// 取（或复用缓存中的）OAuth2 client_credentials 令牌。
+        async fn oauth2_token(
+            &self,
+            token_url: &str,
+            client_id: &str,
+            client_secret: &str,
+            scope: Option<&str>,
+        ) -> Result<String, DispatchResult> {
+            let key = OAuth2CacheKey {
+                token_url: token_url.to_string(),
+                client_id: client_id.to_string(),
+                scope: scope.map(String::from),
+            };
+            // 单飞：持锁跨令牌请求，并发派发不会重复取令牌（同一 dispatcher 实例）。
+            let mut cache = self.oauth2_tokens.lock().await;
+            if let Some(cached) = cache.get(&key) {
+                if cached.expires_at > std::time::Instant::now() {
+                    return Ok(cached.token.clone());
+                }
+            }
+
+            let mut form = vec![
+                ("grant_type", "client_credentials"),
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+            ];
+            if let Some(s) = scope {
+                form.push(("scope", s));
+            }
+            let resp = match self.client.post(token_url).form(&form).send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    return Err(DispatchResult::Failure {
+                        error: format!("OAuth2 token endpoint {token_url} request failed: {e}"),
+                        retryable: e.is_timeout() || e.is_connect(),
+                    })
+                }
+            };
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return Err(DispatchResult::Failure {
+                    error: format!(
+                        "OAuth2 token endpoint {token_url} returned status {}: {}",
+                        status.as_u16(),
+                        oauth2_error_detail(&body, client_secret)
+                    ),
+                    retryable: status.is_server_error(),
+                });
+            }
+            let parsed: Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Err(DispatchResult::Failure {
+                        error: format!(
+                            "OAuth2 token endpoint {token_url} returned a non-JSON response"
+                        ),
+                        retryable: false,
+                    })
+                }
+            };
+            let token = match parsed.get("access_token").and_then(|v| v.as_str()) {
+                Some(t) if !t.is_empty() => t.to_string(),
+                _ => {
+                    return Err(DispatchResult::Failure {
+                        error: format!(
+                            "OAuth2 token endpoint {token_url} response missing access_token"
+                        ),
+                        retryable: false,
+                    })
+                }
+            };
+            let ttl_secs = parsed
+                .get("expires_in")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()));
+            if let Some(ttl) = ttl_secs.filter(|t| *t > 0) {
+                // 提前刷新窗口 = min(30s, ttl/10)：短 TTL 令牌不会被固定窗口贬为永不缓存。
+                let margin = std::cmp::min(
+                    std::time::Duration::from_secs(30),
+                    std::time::Duration::from_secs(ttl / 10),
+                );
+                cache.insert(
+                    key,
+                    CachedToken {
+                        token: token.clone(),
+                        expires_at: std::time::Instant::now() + std::time::Duration::from_secs(ttl)
+                            - margin,
+                    },
+                );
+            }
+            Ok(token)
         }
 
         /// 完整 HTTP 调用契约：
@@ -1640,7 +2023,7 @@ pub mod phase4 {
         /// - `query`: 查询参数映射
         /// - `headers`: 请求头映射
         /// - `body`: 显式请求体（缺省用工作流输入）
-        /// - `auth`: 认证（basic/bearer）
+        /// - `auth`: 认证（basic/bearer/oauth2）
         async fn dispatch_http(
             &self,
             with: Option<&Value>,
@@ -1734,7 +2117,10 @@ pub mod phase4 {
 
             // 认证
             if let Some(auth_cfg) = auth {
-                req = self.apply_auth(req, &auth_cfg);
+                req = match self.apply_auth(req, &auth_cfg).await {
+                    Ok(req) => req,
+                    Err(failure) => return failure,
+                };
             }
 
             // 发送请求
@@ -4355,7 +4741,529 @@ events:
         }
     }
 
+    // ═══ P2：`with` 运行时表达式求值（#96）═══
+
+    /// `$context` / `$input` 整串表达式在 query / header / body / auth 中的求值。
+    #[tokio::test]
+    async fn test_http_dispatcher_context_expression_evaluated() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let (addr, log) = spawn_request_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new();
+        let with = serde_json::json!({
+            "method": "POST",
+            "endpoint": format!("http://{addr}/commands/activate"),
+            "query": {"emp": "${ $context.target.id }"},
+            "headers": {"X-Employee": "${ $context.target.id }"},
+            "body": {"payload": {"employee_id": "${ $context.target.id }"}, "n": "${ $input.count }"},
+            "auth": {"scheme": "bearer", "token": "${ $context.token }"},
+        });
+        let input = serde_json::json!({"target": {"id": "E-42"}, "count": 2, "token": "CTX-TOKEN"});
+        match dispatcher.dispatch("http", Some(&with), &input, None).await {
+            DispatchResult::Success { .. } => {}
+            DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+        }
+        let req = log.lock().join("\n");
+        let req_lower = req.to_lowercase();
+        assert!(
+            req.contains("POST /commands/activate?emp=E-42 "),
+            "query 未求值：{req}"
+        );
+        assert!(
+            req_lower.contains("x-employee: e-42"),
+            "header 未求值：{req}"
+        );
+        assert!(
+            req.contains(r#""employee_id":"E-42""#),
+            "body 未求值：{req}"
+        );
+        assert!(req.contains(r#""n":2"#), "$input 未求值：{req}");
+        assert!(
+            req_lower.contains("authorization: bearer ctx-token"),
+            "auth 未求值：{req}"
+        );
+        assert!(!req.contains("${"), "占位符字面量不得发出：{req}");
+    }
+
+    /// 未知绑定 / 内嵌表达式 / 非表达式文本 ⇒ fail-closed，且请求不发出。
+    #[tokio::test]
+    async fn test_http_dispatcher_expression_failure_fails_closed() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let (addr, log) = spawn_request_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new();
+        let input = serde_json::json!({"target": {"id": "E-42"}, "token": "CTX-TOKEN"});
+        let cases = [
+            serde_json::json!({"method":"GET","endpoint":format!("http://{addr}/x"),
+                               "body": {"v": "${ $workflow.id }"}}),
+            serde_json::json!({"method":"GET","endpoint":format!("http://{addr}/x"),
+                               "query": {"v": "id=${ $context.target.id }"}}),
+            serde_json::json!({"method":"GET","endpoint":format!("http://{addr}/x"),
+                               "body": {"v": "${ $context.target.id } ${ $context.token }"}}),
+            serde_json::json!({"method":"GET","endpoint":format!("http://{addr}/x"),
+                               "body": {"v": "${ strconv }"}}),
+        ];
+        for with in &cases {
+            match dispatcher.dispatch("http", Some(with), &input, None).await {
+                DispatchResult::Failure { error, retryable } => {
+                    assert!(!retryable, "fail-closed 不得可重试：{error}");
+                    assert!(
+                        error.contains("workflow dispatch blocked"),
+                        "error: {error}"
+                    );
+                    assert!(!error.contains("${"), "错误不得回显占位符：{error}");
+                }
+                DispatchResult::Success { .. } => panic!("fail-closed 不得派发成功：{with}"),
+            }
+        }
+        assert!(
+            log.lock().is_empty(),
+            "fail-closed 不得发出任何请求：{:?}",
+            log.lock()
+        );
+    }
+
     // ═══ P2：`new_with_dispatch` 接线端到端（定义里的占位符 → 真实请求）═══
+
+    /// 记录每个连接完整请求原文的服务器（body / header / query 断言用）。
+    async fn spawn_request_recording_server(
+    ) -> (String, std::sync::Arc<parking_lot::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack.windows(needle.len()).position(|w| w == needle)
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let log: std::sync::Arc<parking_lot::Mutex<Vec<String>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log_for_task = log.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let log = log_for_task.clone();
+                tokio::spawn(async move {
+                    // 读到 header 结束，再按 Content-Length 读完 body：小请求通常单段到达，
+                    // 但分包时只读第一段会让 body 断言假阴性。
+                    let mut raw = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = sock.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        raw.extend_from_slice(&buf[..n]);
+                        if let Some(head_end) = find_subslice(&raw, b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&raw[..head_end]);
+                            let content_len = head
+                                .lines()
+                                .find_map(|l| {
+                                    let (name, value) = l.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            if raw.len() >= head_end + 4 + content_len {
+                                break;
+                            }
+                        }
+                    }
+                    log.lock().push(String::from_utf8_lossy(&raw).to_string());
+                    let body = serde_json::json!({"ok": true}).to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (addr, log)
+    }
+
+    // ═══ P2：OAuth2 client_credentials 派发认证（#97）═══
+
+    /// mock OAuth2 令牌端点：默认每次签发递增令牌（`MOCK-TOKEN-<n>`）并记录表单原文；
+    /// 状态码 / 响应体可被测试覆盖（覆盖优先于默认 JSON）。
+    struct OAuth2TokenServer {
+        addr: String,
+        form_bodies: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+        status: std::sync::Arc<parking_lot::Mutex<u16>>,
+        body_override: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+    }
+
+    impl OAuth2TokenServer {
+        async fn spawn(expires_in: Option<u64>) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+                haystack.windows(needle.len()).position(|w| w == needle)
+            }
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let form_bodies: std::sync::Arc<parking_lot::Mutex<Vec<String>>> =
+                std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let status: std::sync::Arc<parking_lot::Mutex<u16>> =
+                std::sync::Arc::new(parking_lot::Mutex::new(200));
+            let body_override: std::sync::Arc<parking_lot::Mutex<Option<String>>> =
+                std::sync::Arc::new(parking_lot::Mutex::new(None));
+            let forms_for_task = form_bodies.clone();
+            let status_for_task = status.clone();
+            let override_for_task = body_override.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let forms = forms_for_task.clone();
+                    let st = status_for_task.clone();
+                    let bo = override_for_task.clone();
+                    tokio::spawn(async move {
+                        let mut raw = Vec::new();
+                        let mut buf = [0u8; 4096];
+                        while let Ok(n) = sock.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                            raw.extend_from_slice(&buf[..n]);
+                            if let Some(head_end) = find_subslice(&raw, b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&raw[..head_end]);
+                                let len = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        let (name, value) = l.split_once(':')?;
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then(|| value.trim().parse::<usize>().ok())
+                                            .flatten()
+                                    })
+                                    .unwrap_or(0);
+                                if raw.len() >= head_end + 4 + len {
+                                    break;
+                                }
+                            }
+                        }
+                        let head_end = find_subslice(&raw, b"\r\n\r\n").unwrap_or(raw.len());
+                        let body_start = (head_end + 4).min(raw.len());
+                        forms
+                            .lock()
+                            .push(String::from_utf8_lossy(&raw[body_start..]).to_string());
+                        let code = *st.lock();
+                        let resp_body = match (code, bo.lock().clone()) {
+                            (200, None) => {
+                                let n = forms.lock().len();
+                                let mut v = serde_json::json!({
+                                    "access_token": format!("MOCK-TOKEN-{n}"),
+                                    "token_type": "Bearer",
+                                });
+                                if let Some(ttl) = expires_in {
+                                    v["expires_in"] = serde_json::json!(ttl);
+                                }
+                                v.to_string()
+                            }
+                            (_, Some(b)) => b,
+                            (other, None) => {
+                                serde_json::json!({"error": format!("status {other}")}).to_string()
+                            }
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            resp_body.len(),
+                            resp_body
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        let _ = sock.shutdown().await;
+                    });
+                }
+            });
+            Self {
+                addr,
+                form_bodies,
+                status,
+                body_override,
+            }
+        }
+
+        fn token_url(&self) -> String {
+            format!("http://{}/oauth2/token", self.addr)
+        }
+    }
+
+    /// oauth2 client_credentials：取令牌并作为 Bearer 发出；表单只带 client_credentials 字段。
+    #[tokio::test]
+    async fn test_http_dispatcher_oauth2_gets_token_and_sends_bearer() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let token_server = OAuth2TokenServer::spawn(Some(300)).await;
+        let (res_addr, res_log) = spawn_auth_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new().with_secrets(HashMap::from([
+            ("hrClientId".to_string(), "HR-CLIENT".to_string()),
+            ("hrClientSecret".to_string(), "HR-SECRET".to_string()),
+        ]));
+        let with = serde_json::json!({
+            "method": "POST",
+            "endpoint": format!("http://{res_addr}/commands/activate"),
+            "auth": {
+                "scheme": "oauth2",
+                "tokenUrl": token_server.token_url(),
+                "clientId": "${ $secrets.hrClientId }",
+                "clientSecret": "${ $secrets.hrClientSecret }",
+                "scope": "hr.employee.activate",
+            },
+        });
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
+            .await
+        {
+            DispatchResult::Success { .. } => {}
+            DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+        }
+        let forms = token_server.form_bodies.lock().clone();
+        assert_eq!(forms.len(), 1, "应恰好取一次令牌：{forms:?}");
+        let form = &forms[0];
+        assert!(
+            form.contains("grant_type=client_credentials"),
+            "form: {form}"
+        );
+        assert!(form.contains("client_id=HR-CLIENT"), "form: {form}");
+        assert!(form.contains("client_secret=HR-SECRET"), "form: {form}");
+        assert!(form.contains("scope=hr.employee.activate"), "form: {form}");
+        assert_eq!(
+            res_log.lock().as_slice(),
+            ["Bearer MOCK-TOKEN-1"],
+            "资源服务器未收到按 oauth2 取得的 Bearer 令牌"
+        );
+    }
+
+    /// 未过期令牌复用：两次派发只取一次令牌。
+    #[tokio::test]
+    async fn test_http_dispatcher_oauth2_token_cached_until_expiry() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let token_server = OAuth2TokenServer::spawn(Some(300)).await;
+        let (res_addr, res_log) = spawn_auth_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new().with_secrets(HashMap::from([
+            ("hrClientId".to_string(), "HR-CLIENT".to_string()),
+            ("hrClientSecret".to_string(), "HR-SECRET".to_string()),
+        ]));
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{res_addr}/ping"),
+            "auth": {
+                "scheme": "oauth2",
+                "tokenUrl": token_server.token_url(),
+                "clientId": "${ $secrets.hrClientId }",
+                "clientSecret": "${ $secrets.hrClientSecret }",
+            },
+        });
+        for _ in 0..2 {
+            match dispatcher
+                .dispatch("http", Some(&with), &serde_json::json!({}), None)
+                .await
+            {
+                DispatchResult::Success { .. } => {}
+                DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+            }
+        }
+        assert_eq!(
+            token_server.form_bodies.lock().len(),
+            1,
+            "未过期令牌应复用（不反复取令牌）"
+        );
+        assert_eq!(
+            res_log.lock().as_slice(),
+            ["Bearer MOCK-TOKEN-1", "Bearer MOCK-TOKEN-1"]
+        );
+    }
+
+    /// 过期（expires_in=0）令牌刷新：两次派发各取一次令牌。
+    #[tokio::test]
+    async fn test_http_dispatcher_oauth2_token_refreshed_when_expired() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let token_server = OAuth2TokenServer::spawn(Some(0)).await;
+        let (res_addr, res_log) = spawn_auth_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new().with_secrets(HashMap::from([
+            ("hrClientId".to_string(), "HR-CLIENT".to_string()),
+            ("hrClientSecret".to_string(), "HR-SECRET".to_string()),
+        ]));
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{res_addr}/ping"),
+            "auth": {
+                "scheme": "oauth2",
+                "tokenUrl": token_server.token_url(),
+                "clientId": "${ $secrets.hrClientId }",
+                "clientSecret": "${ $secrets.hrClientSecret }",
+            },
+        });
+        for _ in 0..2 {
+            match dispatcher
+                .dispatch("http", Some(&with), &serde_json::json!({}), None)
+                .await
+            {
+                DispatchResult::Success { .. } => {}
+                DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+            }
+        }
+        assert_eq!(
+            token_server.form_bodies.lock().len(),
+            2,
+            "过期令牌应刷新（每轮重新取令牌）"
+        );
+        assert_eq!(
+            res_log.lock().as_slice(),
+            ["Bearer MOCK-TOKEN-1", "Bearer MOCK-TOKEN-2"],
+            "第二轮应使用刷新后的令牌"
+        );
+    }
+
+    /// 令牌端点失败口径：5xx retryable、4xx 非 retryable、缺 access_token 非 retryable；
+    /// 错误信息对 client_secret 脱敏，失败不调用资源服务器。
+    #[tokio::test]
+    async fn test_http_dispatcher_oauth2_token_endpoint_failure_semantics() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let token_server = OAuth2TokenServer::spawn(Some(300)).await;
+        let (res_addr, res_log) = spawn_auth_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new().with_secrets(HashMap::from([
+            ("hrClientId".to_string(), "HR-CLIENT".to_string()),
+            ("hrClientSecret".to_string(), "HR-SECRET".to_string()),
+        ]));
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{res_addr}/ping"),
+            "auth": {
+                "scheme": "oauth2",
+                "tokenUrl": token_server.token_url(),
+                "clientId": "${ $secrets.hrClientId }",
+                "clientSecret": "${ $secrets.hrClientSecret }",
+            },
+        });
+
+        // 5xx → 可重试
+        *token_server.status.lock() = 503;
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
+            .await
+        {
+            DispatchResult::Failure { error, retryable } => {
+                assert!(retryable, "令牌端点 5xx 应可重试：{error}");
+                assert!(
+                    !error.contains("HR-SECRET"),
+                    "错误不得含 client_secret：{error}"
+                );
+            }
+            DispatchResult::Success { .. } => panic!("令牌端点 5xx 不得派发成功"),
+        }
+
+        // 4xx → 不可重试；响应体回显 client_secret 时必须脱敏
+        *token_server.status.lock() = 400;
+        *token_server.body_override.lock() = Some(
+            serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "client_secret HR-SECRET rejected",
+            })
+            .to_string(),
+        );
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
+            .await
+        {
+            DispatchResult::Failure { error, retryable } => {
+                assert!(!retryable, "令牌端点 4xx 不得可重试：{error}");
+                assert!(
+                    error.contains("invalid_client"),
+                    "应保留 OAuth2 错误码：{error}"
+                );
+                assert!(
+                    !error.contains("HR-SECRET"),
+                    "错误必须脱敏 client_secret：{error}"
+                );
+            }
+            DispatchResult::Success { .. } => panic!("令牌端点 4xx 不得派发成功"),
+        }
+
+        // 200 但响应缺 access_token → 不可重试
+        *token_server.status.lock() = 200;
+        *token_server.body_override.lock() =
+            Some(serde_json::json!({"token_type": "Bearer"}).to_string());
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
+            .await
+        {
+            DispatchResult::Failure { error, retryable } => {
+                assert!(!retryable, "缺 access_token 不得可重试：{error}");
+            }
+            DispatchResult::Success { .. } => panic!("缺 access_token 不得派发成功"),
+        }
+
+        assert!(
+            res_log.lock().is_empty(),
+            "令牌获取失败不得调用资源服务器：{:?}",
+            res_log.lock()
+        );
+    }
+
+    /// oauth2 配置缺失（tokenUrl / clientSecret）⇒ fail-closed：不可重试、点名字段、
+    /// 不取令牌、不调用资源服务器。
+    #[tokio::test]
+    async fn test_http_dispatcher_oauth2_missing_config_fails_closed() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let (res_addr, res_log) = spawn_auth_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new().with_secrets(HashMap::from([
+            ("hrClientId".to_string(), "HR-CLIENT".to_string()),
+            ("hrClientSecret".to_string(), "HR-SECRET".to_string()),
+        ]));
+
+        // 缺 tokenUrl
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{res_addr}/ping"),
+            "auth": {"scheme": "oauth2", "clientId": "${ $secrets.hrClientId }"},
+        });
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
+            .await
+        {
+            DispatchResult::Failure { error, retryable } => {
+                assert!(!retryable, "配置缺失不得可重试：{error}");
+                assert!(error.contains("tokenUrl"), "应点名 tokenUrl：{error}");
+                assert!(!error.contains("HR-SECRET"), "错误不得含凭据值：{error}");
+            }
+            DispatchResult::Success { .. } => panic!("配置缺失不得派发成功"),
+        }
+
+        // 缺 clientSecret：tokenUrl 指向必然拒连的端口——如果实现去取令牌会是
+        // retryable 的连接失败，本用例断言必须是配置缺失的非重试失败。
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{res_addr}/ping"),
+            "auth": {
+                "scheme": "oauth2",
+                "tokenUrl": "http://127.0.0.1:1/oauth2/token",
+                "clientId": "${ $secrets.hrClientId }",
+            },
+        });
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
+            .await
+        {
+            DispatchResult::Failure { error, retryable } => {
+                assert!(!retryable, "配置缺失不得可重试：{error}");
+                assert!(
+                    error.contains("clientSecret"),
+                    "应点名 clientSecret：{error}"
+                );
+            }
+            DispatchResult::Success { .. } => panic!("配置缺失不得派发成功"),
+        }
+
+        assert!(
+            res_log.lock().is_empty(),
+            "配置缺失不得调用资源服务器：{:?}",
+            res_log.lock()
+        );
+    }
 
     /// 记录 Authorization 头的服务器（接线验证用）。
     async fn spawn_auth_recording_server(
@@ -4496,6 +5404,63 @@ events:
             log.lock().is_empty(),
             "fail-closed 不应发出任何请求：{:?}",
             log.lock()
+        );
+    }
+
+    /// 单动作 SW：POST `http://<addr>/commands/activate`，body 用 `$context` 表达式。
+    fn sample_context_dispatch_sw(addr: &str) -> String {
+        format!(
+            r#"{{
+          "id": "dispatch-context-wf",
+          "version": "1.0",
+          "start": "call",
+          "functions": [ {{ "name": "activate", "operation": "http://{addr}/commands/activate" }} ],
+          "states": [
+            {{ "name": "call", "type": "operation",
+              "actions": [ {{ "name": "activateAction",
+                              "functionRef": {{ "refName": "activate",
+                                "arguments": {{ "method": "POST",
+                                  "body": {{ "employee_id": "${{ $context.employee_id }}" }} }} }} }} ],
+              "end": true }}
+          ]
+        }}"#
+        )
+    }
+
+    /// 引擎端到端：实例上下文经 `$context` 表达式进入请求体。
+    #[tokio::test]
+    async fn test_engine_context_expression_end_to_end() {
+        let (addr, log) = spawn_request_recording_server().await;
+        let svc = WorkflowEngineService::new();
+        let def_id = svc
+            .deploy_definition("test", &sample_context_dispatch_sw(&addr))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({"employee_id": "E-99"}))
+            .await
+            .unwrap();
+
+        let mut terminal = false;
+        for _ in 0..40 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            if cur.status == InstanceStatus::Completed || cur.status == InstanceStatus::Failed {
+                assert_eq!(
+                    cur.status,
+                    InstanceStatus::Completed,
+                    "工作流未成功：{:?}",
+                    cur.fault
+                );
+                terminal = true;
+                break;
+            }
+        }
+        assert!(terminal, "工作流未在限时内终止");
+        let req = log.lock().join("\n");
+        assert!(
+            req.contains(r#""employee_id":"E-99""#),
+            "上下文未经 $context 进入请求体：{req}"
         );
     }
 
