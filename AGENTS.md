@@ -32,6 +32,36 @@
   - `bash scripts/check-panics.sh`
   - `cargo audit` 与 `cargo deny check`（advisories / licenses / bans / sources）
 
+## 发布（Release）
+
+发版动作 = 升版提交 → 推 tag → 发布链路自动出产物；发布对象一律由链路创建，agent 只做只读验证。
+
+- **升版**：推 tag 前提交 `chore(release): vX.Y.Z`——workspace `Cargo.toml`（version 与内部 path
+  依赖）、`Cargo.lock`、`coord-java-sdk/pom.xml` 及对外版本行（`grep -rn` 旧版本号确认无残留，覆盖
+  `README*.md`、`SECURITY.md`、`deploy/`、`docs/production/`）。tag 名与 workspace 版本必须同名——
+  tag 触发的 smoke 会断言 `coord --version`。
+- **二进制 / 镜像**：`git tag vX.Y.Z && git push origin vX.Y.Z` 即完成。`.github/workflows/release.yml`
+  由 tag 触发：构建 `coord` 二进制 + SHA256、创建同名 GitHub Release、推
+  `ghcr.io/byteforce-cn/coord` 镜像；验证用只读命令（`gh run watch`、`gh release view`）。手工
+  `gh release create` / `gh api` 会与 workflow 上传的同名 asset 撞车（`artifact already exists`）
+  并让发布失败。只验构建的干跑用 `workflow_dispatch`（不建 release、不推镜像）。
+- **coord-java-sdk（Maven Central）**：凭证在本机固定路径，只读引用、勿入库：
+  - `/root/.maven-gpg-keyfpr` → `-Dgpg.keyname`；
+  - `/root/.maven-gpg-passphrase` → `MAVEN_GPG_PASSPHRASE`；
+  - `/root/.maventoken` → `~/.m2/settings.xml` 中 server `central` 的 Portal 用户 token
+    （与 pom `publishingServerId` 同名）。
+
+  ```bash
+  cd coord-java-sdk
+  JAVA_HOME=/opt/jdk-21.0.12.1+1 MAVEN_GPG_PASSPHRASE="$(cat /root/.maven-gpg-passphrase)" \
+    /opt/apache-maven-3.9.16/bin/mvn -Prelease clean deploy \
+    -Dgpg.keyname="$(cat /root/.maven-gpg-keyfpr)"
+  ```
+
+  须用 Maven 3.9.x（PATH 上的 `mvn` 是 3.10，staging 元数据残留会被 Central 拒收；其余前置条件见
+  `coord-java-sdk/pom.xml` 的 `release` profile 注释）。deploy 后为 validated（`autoPublish=false`），
+  在 central.sonatype.com 人工确认发布；生效后再同步文档中的「最新发布」版本行。
+
 ## 临时文件（强制）
 
 - **所有临时文件、草稿脚本、日志、下载产物一律放系统 `/tmp` 下**（建议 `/tmp/coord-*` 前缀，
