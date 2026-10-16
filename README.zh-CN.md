@@ -155,7 +155,7 @@ try (CoordClient client = CoordClient.create(config)) {
 ```
 
 > 上面是**真 SDK**（`coord-java-sdk`，group `cn.byteforce`，artifact `coord-java-sdk`，当前源码版本 `0.3.1`）的用法——入口是
-> `CoordClient.create(CoordConfig)`。已发布到 **Maven Central**（`cn.byteforce:coord-java-sdk`；最新发布版为 `0.3.0`）；
+> `CoordClient.create(CoordConfig)`。已发布到 **Maven Central**（`cn.byteforce:coord-java-sdk`；最新发布版为 `0.3.1`）；
 > 也可在仓库内执行 `mvn -pl coord-java-sdk install` 从源码构建。`java-example/` 是**独立的自包含** gRPC 示例；
 > 其中的 `cn.byteforce.coord.example.CoordClient` 是示例本地包装类，**不是** SDK 的类。
 

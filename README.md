@@ -167,7 +167,7 @@ try (CoordClient client = CoordClient.create(config)) {
 
 > The snippet above is the **real** SDK (`coord-java-sdk`, Maven group `cn.byteforce`,
 > artifact `coord-java-sdk`, current source version `0.3.1`) — connect via `CoordClient.create(CoordConfig)`.
-> It is published on **Maven Central** (`cn.byteforce:coord-java-sdk`; latest published release is `0.3.0`); alternatively
+> It is published on **Maven Central** (`cn.byteforce:coord-java-sdk`; latest published release is `0.3.1`); alternatively
 > run `mvn -pl coord-java-sdk install` in this repo to build the current version from source. The `java-example/` module is a
 > **separate, self-contained** gRPC demo; its
 > `cn.byteforce.coord.example.CoordClient` convenience wrapper is example-local

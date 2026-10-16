@@ -45,7 +45,7 @@ leaks wire types into the public surface.
 ## Install
 
 Available on **Maven Central** — repository version `0.3.1`
-(latest published release: `0.3.0`; until `0.3.1` is live there, use `0.3.0` or the from-source path below):
+(latest published release: `0.3.1`; alternatively use the from-source path below):
 
 ```xml
 <dependency>
