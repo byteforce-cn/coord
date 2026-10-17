@@ -62,6 +62,12 @@ ADR-0001 的「默认关」约束的是**生产默认口径**（`ServiceConfig::
 - 回退路径反转（删 builder / 关开关）⇒ dev 启动即 fail-closed 拒绝（负控制
   已实跑），这是特性而非缺陷。
 
+## 后续修订
+
+- ADR-0014 D3：`workflow` 的 durable 装配（`workflow_durable`）在 dev 预设中开启。
+  dev 已是 Server + Agent 一体化拓扑，KV 与 MQ 前置齐备；生产默认仍全关。审批面
+  因此在 `coord dev` 开箱可用（判据见 `coord/tests/dev_mode_services_test.rs`）。
+
 ## 参考
 
 - 代码：`coord-agent/src/service.rs`（`ServiceConfig::dev_mode()`）、

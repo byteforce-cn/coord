@@ -53,10 +53,12 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawResponse;
 import cn.byteforce.coord.contracts.workflow.v1.TaskFrame;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
+import cn.byteforce.coord.sdk.workflow.ApprovalAudit;
 import cn.byteforce.coord.sdk.workflow.ApprovalBranch;
 import cn.byteforce.coord.sdk.workflow.ApprovalInstanceDetail;
 import cn.byteforce.coord.sdk.workflow.ApprovalRound;
 import cn.byteforce.coord.sdk.workflow.ApprovalTask;
+import cn.byteforce.coord.sdk.workflow.ApprovalVote;
 import cn.byteforce.coord.sdk.workflow.PendingApprovalTask;
 import cn.byteforce.coord.sdk.workflow.Suspension;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
@@ -420,11 +422,18 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String approve(String workflowId, String taskId, String comment, String idempotencyKey) {
+        return approveOnBehalfOf(workflowId, taskId, comment, idempotencyKey, null);
+    }
+
+    @Override
+    public String approveOnBehalfOf(String workflowId, String taskId, String comment,
+                                    String idempotencyKey, String onBehalfOf) {
         WorkflowApproveRequest.Builder req = WorkflowApproveRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setTaskId(taskId);
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowApproveResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -439,11 +448,18 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String reject(String workflowId, String taskId, String comment, String idempotencyKey) {
+        return rejectOnBehalfOf(workflowId, taskId, comment, idempotencyKey, null);
+    }
+
+    @Override
+    public String rejectOnBehalfOf(String workflowId, String taskId, String comment,
+                                   String idempotencyKey, String onBehalfOf) {
         WorkflowRejectRequest.Builder req = WorkflowRejectRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setTaskId(taskId);
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowRejectResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -458,10 +474,17 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String acknowledge(String workflowId, String taskId, String idempotencyKey) {
+        return acknowledgeOnBehalfOf(workflowId, taskId, idempotencyKey, null);
+    }
+
+    @Override
+    public String acknowledgeOnBehalfOf(String workflowId, String taskId,
+                                        String idempotencyKey, String onBehalfOf) {
         WorkflowAcknowledgeRequest.Builder req = WorkflowAcknowledgeRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setTaskId(taskId);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowAcknowledgeResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -478,6 +501,14 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     public String addSign(String workflowId, String branchId, List<String> approvers,
                           List<String> pool, List<String> readers, String comment,
                           String idempotencyKey) {
+        return addSignOnBehalfOf(workflowId, branchId, approvers, pool, readers, comment,
+                idempotencyKey, null);
+    }
+
+    @Override
+    public String addSignOnBehalfOf(String workflowId, String branchId, List<String> approvers,
+                                    List<String> pool, List<String> readers, String comment,
+                                    String idempotencyKey, String onBehalfOf) {
         WorkflowAddSignRequest.Builder req = WorkflowAddSignRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setBranchId(branchId);
@@ -492,6 +523,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         }
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowAddSignResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -507,6 +539,12 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     @Override
     public String removeSign(String workflowId, String branchId, List<String> taskIds,
                              String comment, String idempotencyKey) {
+        return removeSignOnBehalfOf(workflowId, branchId, taskIds, comment, idempotencyKey, null);
+    }
+
+    @Override
+    public String removeSignOnBehalfOf(String workflowId, String branchId, List<String> taskIds,
+                                       String comment, String idempotencyKey, String onBehalfOf) {
         WorkflowRemoveSignRequest.Builder req = WorkflowRemoveSignRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setBranchId(branchId);
@@ -515,6 +553,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         }
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowRemoveSignResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -530,12 +569,20 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     @Override
     public String returnToNode(String workflowId, String branchId, String targetNode,
                                String comment, String idempotencyKey) {
+        return returnToNodeOnBehalfOf(workflowId, branchId, targetNode, comment, idempotencyKey,
+                null);
+    }
+
+    @Override
+    public String returnToNodeOnBehalfOf(String workflowId, String branchId, String targetNode,
+                                         String comment, String idempotencyKey, String onBehalfOf) {
         WorkflowReturnToNodeRequest.Builder req = WorkflowReturnToNodeRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setBranchId(branchId)
                 .setTargetNode(targetNode);
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowReturnToNodeResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -551,12 +598,19 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     @Override
     public String transfer(String workflowId, String taskId, String to, String comment,
                            String idempotencyKey) {
+        return transferOnBehalfOf(workflowId, taskId, to, comment, idempotencyKey, null);
+    }
+
+    @Override
+    public String transferOnBehalfOf(String workflowId, String taskId, String to, String comment,
+                                     String idempotencyKey, String onBehalfOf) {
         WorkflowTransferRequest.Builder req = WorkflowTransferRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setTaskId(taskId)
                 .setTo(to);
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowTransferResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -572,12 +626,19 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     @Override
     public String delegate(String workflowId, String taskId, String to, String comment,
                            String idempotencyKey) {
+        return delegateOnBehalfOf(workflowId, taskId, to, comment, idempotencyKey, null);
+    }
+
+    @Override
+    public String delegateOnBehalfOf(String workflowId, String taskId, String to, String comment,
+                                     String idempotencyKey, String onBehalfOf) {
         WorkflowDelegateRequest.Builder req = WorkflowDelegateRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setTaskId(taskId)
                 .setTo(to);
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowDelegateResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -592,10 +653,17 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String withdraw(String workflowId, String comment, String idempotencyKey) {
+        return withdrawOnBehalfOf(workflowId, comment, idempotencyKey, null);
+    }
+
+    @Override
+    public String withdrawOnBehalfOf(String workflowId, String comment, String idempotencyKey,
+                                     String onBehalfOf) {
         WorkflowWithdrawRequest.Builder req = WorkflowWithdrawRequest.newBuilder()
                 .setWorkflowId(workflowId);
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowWithdrawResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -609,10 +677,17 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String terminate(String workflowId, String reason, String idempotencyKey) {
+        return terminateOnBehalfOf(workflowId, reason, idempotencyKey, null);
+    }
+
+    @Override
+    public String terminateOnBehalfOf(String workflowId, String reason, String idempotencyKey,
+                                      String onBehalfOf) {
         WorkflowTerminateRequest.Builder req = WorkflowTerminateRequest.newBuilder()
                 .setWorkflowId(workflowId);
         setOptional(req::setReason, reason);
         setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
 
         WorkflowTerminateResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -626,9 +701,16 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public List<PendingApprovalTask> listPendingTasks(int pageSize, String pageToken) {
+        return listPendingTasksFor(null, pageSize, pageToken);
+    }
+
+    @Override
+    public List<PendingApprovalTask> listPendingTasksFor(String assignee, int pageSize,
+                                                         String pageToken) {
         WorkflowListPendingTasksRequest.Builder req = WorkflowListPendingTasksRequest.newBuilder()
                 .setPageSize(Math.max(1, Math.min(pageSize, 200)));
         setOptional(req::setPageToken, pageToken);
+        setOptional(req::setAssignee, assignee);
 
         WorkflowListPendingTasksResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -666,20 +748,33 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         }
         List<ApprovalTask> tasks = new ArrayList<>();
         for (cn.byteforce.coord.contracts.workflow.v1.ApprovalTask t : response.getTasksList()) {
+            List<ApprovalVote> votes = new ArrayList<>();
+            for (cn.byteforce.coord.contracts.workflow.v1.ApprovalVote v : t.getVotesList()) {
+                votes.add(new ApprovalVote(v.getRoundId(), v.getDecision(), v.getActor(),
+                        v.getOnBehalfOf(), v.getComment(), v.getAtMs(), v.getActingService()));
+            }
             tasks.add(new ApprovalTask(t.getId(), t.getBranchId(), t.getRoundId(), t.getKind(),
-                    t.getStatus(), t.getAssignee(), t.getCandidatesList(), t.getDeadlineMs()));
+                    t.getStatus(), t.getAssignee(), t.getCandidatesList(), t.getDeadlineMs(),
+                    votes));
         }
         List<ApprovalRound> rounds = new ArrayList<>();
         for (cn.byteforce.coord.contracts.workflow.v1.ApprovalRound r : response.getRoundsList()) {
             rounds.add(new ApprovalRound(r.getId(), r.getBranchId(), r.getNumber(), r.getStatus(),
                     r.getTotalCount(), r.getCompletedCount(), r.getRejectedCount()));
         }
+        List<ApprovalAudit> audit = new ArrayList<>();
+        for (cn.byteforce.coord.contracts.workflow.v1.ApprovalAudit a : response.getAuditList()) {
+            audit.add(new ApprovalAudit(a.getAtMs(), a.getAction(), a.getBranchId(), a.getBy(),
+                    a.getDetail(), a.getActingService()));
+        }
 
-        log.debug("Workflow getInstanceDetail: id={}, status={}, branches={}, tasks={}, rounds={}",
-                workflowId, response.getStatus(), branches.size(), tasks.size(), rounds.size());
+        log.debug("Workflow getInstanceDetail: id={}, status={}, branches={}, tasks={}, rounds={}, audit={}",
+                workflowId, response.getStatus(), branches.size(), tasks.size(), rounds.size(),
+                audit.size());
         return new ApprovalInstanceDetail(
                 response.getInstanceId(), response.getStatus(), response.getInitiator(),
-                response.getRevision(), response.getDefinitionName(), branches, tasks, rounds);
+                response.getRevision(), response.getDefinitionName(), branches, tasks, rounds,
+                audit);
     }
 
     /** 仅在值非空时写入可选字段（空值保持 proto3 默认，wire 上不出现）。 */

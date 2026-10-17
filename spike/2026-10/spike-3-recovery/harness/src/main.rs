@@ -221,6 +221,7 @@ fn build_service(
             relay_enabled: args.relay,
             relay_interval_ms: 50,
             approval_roles: std::collections::HashMap::new(),
+            on_behalf_services: Vec::new(),
         },
     )
 }

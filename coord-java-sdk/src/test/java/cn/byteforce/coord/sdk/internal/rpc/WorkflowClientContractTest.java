@@ -154,6 +154,27 @@ class WorkflowClientContractTest {
     }
 
     @Test
+    @DisplayName("approveOnBehalfOf 发送 on_behalf_of（服务代终端用户）")
+    void approveOnBehalfOfSendsRepresentedUser() {
+        wf.approveOnBehalfOf("inst-1", "task-9", "代批", "idem-ob", "alice");
+
+        assertThat(fake.lastApprove.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastApprove.getTaskId()).isEqualTo("task-9");
+        assertThat(fake.lastApprove.getIdempotencyKey()).isEqualTo("idem-ob");
+        assertThat(fake.lastApprove.getOnBehalfOf()).isEqualTo("alice");
+    }
+
+    @Test
+    @DisplayName("listPendingTasksFor 发送 assignee（服务代查待办）")
+    void listPendingTasksForSendsAssignee() {
+        wf.listPendingTasksFor("alice", 20, "page-1");
+
+        assertThat(fake.lastListPendingTasks.getAssignee()).isEqualTo("alice");
+        assertThat(fake.lastListPendingTasks.getPageSize()).isEqualTo(20);
+        assertThat(fake.lastListPendingTasks.getPageToken()).isEqualTo("page-1");
+    }
+
+    @Test
     @DisplayName("命令响应 status 映射为实例状态")
     void commandStatusMapped() {
         fake.nextApproveStatus = "COMPLETED";
@@ -241,6 +262,15 @@ class WorkflowClientContractTest {
                         .addCandidates("alice")
                         .addCandidates("carol")
                         .setDeadlineMs(1755000000000L)
+                        .addVotes(cn.byteforce.coord.contracts.workflow.v1.ApprovalVote.newBuilder()
+                                .setRoundId("rd-1")
+                                .setDecision("approve")
+                                .setActor("alice")
+                                .setOnBehalfOf("")
+                                .setComment("ok")
+                                .setAtMs(1755000000000L)
+                                .setActingService("svc-bff")
+                                .build())
                         .build())
                 .addRounds(cn.byteforce.coord.contracts.workflow.v1.ApprovalRound.newBuilder()
                         .setId("rd-1")
@@ -250,6 +280,14 @@ class WorkflowClientContractTest {
                         .setTotalCount(3)
                         .setCompletedCount(1)
                         .setRejectedCount(0)
+                        .build())
+                .addAudit(cn.byteforce.coord.contracts.workflow.v1.ApprovalAudit.newBuilder()
+                        .setAtMs(1755000000000L)
+                        .setAction("add_sign")
+                        .setBranchId("br-1")
+                        .setBy("alice")
+                        .setDetail("seats=1")
+                        .setActingService("svc-bff")
                         .build())
                 .build();
 
@@ -275,6 +313,12 @@ class WorkflowClientContractTest {
         assertThat(d.tasks().get(0).assignee()).isEqualTo("alice");
         assertThat(d.tasks().get(0).candidates()).containsExactly("alice", "carol");
         assertThat(d.tasks().get(0).deadlineMs()).isEqualTo(1755000000000L);
+        assertThat(d.tasks().get(0).votes()).hasSize(1);
+        assertThat(d.tasks().get(0).votes().get(0).actor()).isEqualTo("alice");
+        assertThat(d.tasks().get(0).votes().get(0).actingService()).isEqualTo("svc-bff");
+        assertThat(d.audit()).hasSize(1);
+        assertThat(d.audit().get(0).by()).isEqualTo("alice");
+        assertThat(d.audit().get(0).actingService()).isEqualTo("svc-bff");
         assertThat(d.rounds()).hasSize(1);
         assertThat(d.rounds().get(0).id()).isEqualTo("rd-1");
         assertThat(d.rounds().get(0).branchId()).isEqualTo("br-1");

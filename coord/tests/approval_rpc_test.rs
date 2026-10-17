@@ -113,6 +113,7 @@ async fn setup() -> TestEnv {
             relay_enabled: false,
             relay_interval_ms: 50,
             approval_roles: std::collections::HashMap::new(),
+            on_behalf_services: Vec::new(),
         },
     );
     svc.start().await.expect("engine start");
@@ -757,6 +758,61 @@ async fn idempotency_key_replay_single_write() {
         env.event_count(&wf_id, ROUND_PASSED).await,
         0,
         "双席位仅一票，轮次未通过"
+    );
+}
+
+/// 服务代终端用户：生效主体是被代表用户（席位归属照常判定），投票记录保留执行服务；
+/// 同幂等键重放不重复执行、不重复计数。
+#[tokio::test(flavor = "multi_thread")]
+async fn on_behalf_command_records_service_and_replays_once() {
+    let env = setup().await;
+    let wf_id = env
+        .deploy_start("acceptance-quorum", QUORUM_YAML, "origin")
+        .await;
+    env.await_status(&wf_id, InstanceStatus::Suspended).await;
+
+    let detail = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    let u1_task = task_id_for(&detail, "u1");
+
+    let first = env
+        .svc
+        .approval_command_with(
+            &wf_id,
+            "u1",
+            Some("svc-approval"),
+            ApprovalCommand::Approve {
+                task_id: &u1_task,
+                comment: Some("代终端用户批准"),
+            },
+            Some("on-behalf-idem-1"),
+        )
+        .await
+        .expect("on-behalf approve");
+    let replay = env
+        .svc
+        .approval_command_with(
+            &wf_id,
+            "u1",
+            Some("svc-approval"),
+            ApprovalCommand::Approve {
+                task_id: &u1_task,
+                comment: Some("代终端用户批准"),
+            },
+            Some("on-behalf-idem-1"),
+        )
+        .await
+        .expect("on-behalf replay");
+    assert_eq!(first, replay, "同键重放必须返回首次响应");
+
+    let after = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    assert_eq!(after.rounds[0].completed_count, 1, "重放不得重复计数");
+    let seat = after.tasks.iter().find(|t| t.id == u1_task).expect("seat");
+    let vote = seat.votes.first().expect("vote recorded");
+    assert_eq!(vote.actor, "u1", "被代表用户是投票主体");
+    assert_eq!(
+        vote.acting_service.as_deref(),
+        Some("svc-approval"),
+        "执行服务必须与被代表用户同时可见"
     );
 }
 

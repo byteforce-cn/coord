@@ -222,17 +222,25 @@
   **`GetJob` 回读**（只读、幂等；未注册 ⇒ `found=false`，不是错误码；重启 /
   换 agent 后仍可读，状态在 Server KV）。
 - 工作流：**保留策略已落地（G-WF-1）**——`DeleteInstance`（仅终态）/`DeleteDefinition`（无实例引用才可删）；删除**不可回滚**、**无自动 TTL/归档**（`boundaries.md` B-WF-1；完整语义见 `workflow-semantics.md`）；子流程恢复为周期扫描（B-WF-2/B-WF-3）。
-- **人工审批 v2（原生 `approve` 节点，ADR-0013）**：走到该节点的工作流实例进入 `SUSPENDED`
-  （`expected_signal = "approval.completed"`，审批实例 id = workflow 实例 id）；外部经 10 个命令
-  RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/Delegate/Withdraw/Terminate`）
-  操作席位、经 2 个查询 RPC（`ListPendingTasks`/`GetInstanceDetail`）读待办与实例详情。命令携带
-  `idempotency_key`，重放返回首次响应（不重复执行）；主体身份取自 CCT（请求体无 actor）。审批事件
-  写 `com.china-workflow.*` 命名空间、带 `.v1` 后缀：实例级 `instance.returned|cancelled|terminated|
-  completed|rejected.v1`、轮次级 `approval.round.passed|rejected.v1`；**消费者按
-  `(instance_id, sequence)` 去重**，每个类型的 JSON Schema 在 `apis/contracts/schemas/events/`。
-  审批面依赖 durable 装配（`workflow_durable`，**默认关闭**）：默认部署未启用时审批 RPC 返回
-  `FAILED_PRECONDITION`，且 `approve` 节点在驱动时 fault（实例 `FAILED`）。
-  授权矩阵、deadline 无自动处置、幂等与分页口径见 `workflow-semantics.md` §7 / ADR-0013。
+- **人工审批 v2（原生 `approve` 节点，ADR-0013 / ADR-0014）**：走到该节点的工作流实例进入
+  `SUSPENDED`（`expected_signal = "approval.completed"`，审批实例 id = workflow 实例 id）；
+  外部经 10 个命令 RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/
+  Delegate/Withdraw/Terminate`）操作席位、经 2 个查询 RPC（`ListPendingTasks`/
+  `GetInstanceDetail`）读待办与实例详情。命令携带 `idempotency_key`，重放返回首次响应
+  （不重复执行）；默认主体身份取自 CCT（请求体无 actor）。
+  业务服务代终端用户时：命令填 `on_behalf_of`、`ListPendingTasks` 填 `assignee`；调用方
+  服务须在 agent 配置 `services.workflow_on_behalf_services` 白名单内，生效主体是被代表
+  用户（席位归属判定不变）。`GetInstanceDetail` 的 votes/audit 同时给出 `actor`/`by`
+  与 `acting_service`，可区分「谁批的」与「哪个服务代执行」。
+  席位来源支持 `${ ... }` 运行时表达式（`$input`/`$context`），空结果 fail-closed。
+  审批事件写 `com.china-workflow.*` 命名空间、带 `.v1` 后缀：实例级 `instance.returned|
+  cancelled|terminated|completed|rejected.v1`、轮次级
+  `approval.round.passed|rejected.v1`；**消费者按 `(instance_id, sequence)` 去重**，每个类型
+  的 JSON Schema 在 `apis/contracts/schemas/events/`。
+  审批面依赖 durable 装配：`coord dev` 一体化拓扑默认开启；生产默认关闭（ADR-0001），
+  未启用时审批 RPC 返回 `FAILED_PRECONDITION`，且 `approve` 节点在驱动时 fault
+  （实例 `FAILED`）。授权矩阵、deadline 无自动处置、幂等与分页口径见
+  `workflow-semantics.md` §7 / ADR-0013 / ADR-0014。
 - **补偿（saga）已落地**：`sw.rs` 编译 DSL 的 `CompensatedBy`，实例失败/取消
   时按序执行补偿步骤（端到端判据
   `coord-agent/src/services/workflow.rs::test_sw_compensated_by_runs_compensation_end_to_end`）。

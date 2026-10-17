@@ -17,10 +17,18 @@ public final class ApprovalTask {
     private final String assignee;
     private final List<String> candidates;
     private final long deadlineMs;
+    private final List<ApprovalVote> votes;
 
     public ApprovalTask(String id, String branchId, String roundId, String kind,
                         String status, String assignee, List<String> candidates,
                         long deadlineMs) {
+        this(id, branchId, roundId, kind, status, assignee, candidates, deadlineMs,
+                Collections.emptyList());
+    }
+
+    public ApprovalTask(String id, String branchId, String roundId, String kind,
+                        String status, String assignee, List<String> candidates,
+                        long deadlineMs, List<ApprovalVote> votes) {
         this.id = id;
         this.branchId = branchId;
         this.roundId = roundId;
@@ -30,6 +38,8 @@ public final class ApprovalTask {
         this.candidates = candidates != null
                 ? Collections.unmodifiableList(candidates) : Collections.emptyList();
         this.deadlineMs = deadlineMs;
+        this.votes = votes != null
+                ? Collections.unmodifiableList(votes) : Collections.emptyList();
     }
 
     public String id() { return id; }
@@ -43,6 +53,9 @@ public final class ApprovalTask {
     /** Timeout threshold (Unix milliseconds); 0 = no timeout. */
     public long deadlineMs() { return deadlineMs; }
 
+    /** Vote records; {@code actingService} distinguishes service on-behalf-of execution. */
+    public List<ApprovalVote> votes() { return votes; }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -54,19 +67,21 @@ public final class ApprovalTask {
                 && Objects.equals(kind, that.kind)
                 && Objects.equals(status, that.status)
                 && Objects.equals(assignee, that.assignee)
-                && Objects.equals(candidates, that.candidates);
+                && Objects.equals(candidates, that.candidates)
+                && Objects.equals(votes, that.votes);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(id, branchId, roundId, kind, status, assignee,
-                candidates, deadlineMs);
+                candidates, deadlineMs, votes);
     }
 
     @Override
     public String toString() {
         return "ApprovalTask{id='" + id + "', branchId='" + branchId + "', roundId='"
                 + roundId + "', kind='" + kind + "', status='" + status + "', assignee='"
-                + assignee + "', candidates=" + candidates + ", deadlineMs=" + deadlineMs + "}";
+                + assignee + "', candidates=" + candidates + ", deadlineMs=" + deadlineMs
+                + ", votes=" + votes + "}";
     }
 }

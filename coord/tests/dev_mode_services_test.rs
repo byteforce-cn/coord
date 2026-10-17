@@ -283,3 +283,159 @@ async fn dev_mode_agent_serves_full_builtin_service_set() {
         "transit roundtrip must preserve the plaintext"
     );
 }
+
+/// dev 一体化拓扑的审批面端到端（ADR-0014 D3）：
+/// `coord dev` 具备 Server 连接 + MQ ⇒ durable 审批桥启用，`approve` 节点可消费。
+///
+/// 判据链：部署含 `approve` 节点的定义 → Start 进入 `SUSPENDED` →
+/// ListPendingTasks 看到动态席位（席位来源取自启动 input）→ Approve →
+/// 实例继续执行并 `COMPLETED`。任一步退回 `FAILED_PRECONDITION` 或实例停在
+/// 挂起态都算失败（审批面在单节点一体化部署不可用）。
+#[tokio::test(flavor = "multi_thread")]
+async fn dev_mode_approval_flow_is_durable_end_to_end() {
+    use coord_proto::workflow::v1::workflow_client::WorkflowClient;
+    use coord_proto::workflow::v1::{
+        WorkflowApproveRequest, WorkflowGetStatusRequest, WorkflowListPendingTasksRequest,
+        WorkflowStartRequest,
+    };
+
+    let (grpc_port, agent_port) = pick_dev_ports();
+    let agent_addr = format!("127.0.0.1:{agent_port}");
+    let mut dev = spawn_dev(grpc_port, agent_port);
+
+    // 等 agent 端口就绪；durable 初始化额外需要 Server/KV 就绪，后续 RPC 有重试。
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if tokio::net::TcpStream::connect(&agent_addr).await.is_ok() {
+            break;
+        }
+        if let Ok(Some(status)) = dev.child.try_wait() {
+            panic!("coord dev exited early ({status}); logs:\n{}", dev.logs());
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!(
+                "agent gRPC {agent_addr} not ready within 60s; logs:\n{}",
+                dev.logs()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
+        .unwrap()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .connect()
+        .await
+        .expect("connect to dev agent");
+    let mut workflow = WorkflowClient::new(channel);
+
+    // 席位来源引用启动 input：同一份定义可把席位派给不同主体（动态解析）。
+    let dsl = r#"
+document:
+  dsl: "1.0.3"
+  namespace: dev
+  name: dev-approval
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["${ $input.approvers }"]
+  - done:
+      set:
+        variable: done
+        value: "true"
+"#;
+    // dev 关闭鉴权 ⇒ CCT 为空，handler 主体回落 `anonymous`；输入把席位派给该主体。
+    let input = serde_json::to_vec(&serde_json::json!({"approvers": ["anonymous"]})).unwrap();
+    let started = workflow
+        .start(WorkflowStartRequest {
+            definition_dsl: dsl.into(),
+            input,
+            definition_id: String::new(),
+        })
+        .await
+        .expect("workflow start must deploy + run in dev mode")
+        .into_inner();
+    let workflow_id = started.workflow_id;
+
+    // 进入 SUSPENDED（reason=approval）——审批节点确实由 durable 桥开启。
+    let mut suspended = false;
+    for _ in 0..200 {
+        let status = workflow
+            .get_status(WorkflowGetStatusRequest {
+                workflow_id: workflow_id.clone(),
+            })
+            .await
+            .expect("get status")
+            .into_inner()
+            .status;
+        if status == "SUSPENDED" {
+            suspended = true;
+            break;
+        }
+        if status == "FAULTED" {
+            panic!(
+                "approve node faulted (approval bridge not wired); logs:\n{}",
+                dev.logs()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        suspended,
+        "instance never reached SUSPENDED; logs:\n{}",
+        dev.logs()
+    );
+
+    let pending = workflow
+        .list_pending_tasks(WorkflowListPendingTasksRequest {
+            page_size: 50,
+            page_token: String::new(),
+            assignee: String::new(),
+        })
+        .await
+        .expect("list pending tasks must be served by the durable approval bridge")
+        .into_inner()
+        .tasks;
+    assert_eq!(pending.len(), 1, "exactly one dynamically-resolved seat");
+    let seat = &pending[0];
+    assert_eq!(seat.instance_id, workflow_id);
+    assert_eq!(seat.assignee, "anonymous");
+
+    workflow
+        .approve(WorkflowApproveRequest {
+            workflow_id: workflow_id.clone(),
+            task_id: seat.task_id.clone(),
+            comment: "dev e2e".into(),
+            idempotency_key: "dev-e2e-1".into(),
+            on_behalf_of: String::new(),
+        })
+        .await
+        .expect("approve must resume the workflow");
+
+    // 批准后实例继续执行到终态：审批面在一体化 dev 部署里闭合。
+    let mut completed = false;
+    for _ in 0..200 {
+        let status = workflow
+            .get_status(WorkflowGetStatusRequest {
+                workflow_id: workflow_id.clone(),
+            })
+            .await
+            .expect("get status")
+            .into_inner()
+            .status;
+        if status == "COMPLETED" {
+            completed = true;
+            break;
+        }
+        if status == "FAULTED" {
+            panic!("workflow faulted after approval; logs:\n{}", dev.logs());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        completed,
+        "workflow never completed after approval; logs:\n{}",
+        dev.logs()
+    );
+}

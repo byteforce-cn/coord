@@ -237,7 +237,7 @@ impl ApprovalBridge {
         node: &str,
         task: &ApproveTask,
     ) -> Result<(), BridgeError> {
-        let seats = self.resolve_seats(task)?;
+        let seats = self.resolve_seats(task, &wf.context)?;
         let policy = ApprovalPolicy {
             allow_self_approve: task.allow_self_approve,
             sign_admins: task.sign_admins.clone(),
@@ -319,6 +319,35 @@ impl ApprovalBridge {
         cmd: ApprovalCommand<'_>,
         idem_key: Option<&str>,
     ) -> Result<CommandOutcome, BridgeError> {
+        self.command_inner(approval_id, actor, None, cmd, idem_key)
+            .await
+    }
+
+    /// 以「服务代终端用户」形式执行命令。
+    ///
+    /// `actor` 是被代表的终端用户（授权判定按它做席位归属），`acting_service` 是持有
+    /// CCT 的服务主体（授权白名单由 gRPC handler 先判定）。投票/审计记录同时保留二者：
+    /// `VoteRecord.actor` / `AuditEntry.by` = 被代表用户，`acting_service` = 执行服务。
+    pub async fn command_on_behalf(
+        &self,
+        approval_id: &str,
+        actor: &str,
+        acting_service: &str,
+        cmd: ApprovalCommand<'_>,
+        idem_key: Option<&str>,
+    ) -> Result<CommandOutcome, BridgeError> {
+        self.command_inner(approval_id, actor, Some(acting_service), cmd, idem_key)
+            .await
+    }
+
+    async fn command_inner(
+        &self,
+        approval_id: &str,
+        actor: &str,
+        acting_service: Option<&str>,
+        cmd: ApprovalCommand<'_>,
+        idem_key: Option<&str>,
+    ) -> Result<CommandOutcome, BridgeError> {
         let now = self.clock.now_ms();
         let mut attempt = 0u32;
         loop {
@@ -342,7 +371,12 @@ impl ApprovalBridge {
                 .map_err(BridgeError::from)?
                 .ok_or_else(|| BridgeError::NotFound(approval_id.to_string()))?;
             let branch_id = self.command_branch(&engine, &cmd);
-            let effects = self.apply_command(&mut engine, actor, cmd.clone(), now)?;
+            // 归因只对本次命令有效：引擎是本次加载的局部聚合，提交前清空，
+            // 避免随存储实现（如内存 store 直接持有对象）泄漏到下一条命令。
+            engine.set_acting_service(acting_service.map(str::to_string));
+            let applied = self.apply_command(&mut engine, actor, cmd.clone(), now);
+            engine.set_acting_service(None);
+            let effects = applied?;
             let response = response_for(&engine);
             let node_outcome = branch_id
                 .as_deref()
@@ -565,14 +599,37 @@ impl ApprovalBridge {
 
     // ------------------------------------------------------------ 内部实现
 
-    /// 展开 `task` 的席位：静态席位 + 角色解析结果；并做可计票席位守卫。
-    fn resolve_seats(&self, task: &ApproveTask) -> Result<Vec<SeatSpec>, BridgeError> {
-        let mut seats = task.to_seats();
-        for role in &task.roles {
+    /// 展开 `task` 的席位：运行时表达式 + 静态名单 + 角色解析结果；并做可计票席位守卫。
+    ///
+    /// 四个席位来源（`approvers` / `pool` / `readers` / `roles`）的每个条目都支持
+    /// `${ ... }` 运行时表达式，按实例 `context` 求值（`$input` 与 `$context` 同值，
+    /// 与 `with` 的求值口径一致）。表达式可返回单个主体字符串或主体数组；空结果、
+    /// 非字符串元素与空主体一律 fail-closed——席位来源解析不出人时绝不能开出
+    /// 「无人可批」的节点（空轮次会被引擎立即判通过）。
+    fn resolve_seats(
+        &self,
+        task: &ApproveTask,
+        context: &Value,
+    ) -> Result<Vec<SeatSpec>, BridgeError> {
+        let mut seats: Vec<SeatSpec> = self
+            .expand_source("approvers", &task.approvers, context)?
+            .iter()
+            .map(|p| SeatSpec::approver(p))
+            .collect();
+        let pool = self.expand_source("pool", &task.pool, context)?;
+        if !pool.is_empty() {
+            seats.push(SeatSpec::pool(pool));
+        }
+        seats.extend(
+            self.expand_source("readers", &task.readers, context)?
+                .iter()
+                .map(|p| SeatSpec::reader(p)),
+        );
+        for role in self.expand_source("roles", &task.roles, context)? {
             let principals = self
                 .resolver
                 .as_ref()
-                .and_then(|r| r.resolve(role))
+                .and_then(|r| r.resolve(&role))
                 .ok_or_else(|| BridgeError::InvalidArgument(format!("approve.role.{role}")))?;
             seats.extend(principals.iter().map(|p| SeatSpec::approver(p)));
         }
@@ -581,6 +638,52 @@ impl ApprovalBridge {
             return Err(BridgeError::InvalidArgument("approve seats".into()));
         }
         Ok(seats)
+    }
+
+    /// 展开单个席位来源：字面量原样保留，`${ ... }` 条目按实例上下文求值。
+    ///
+    /// 声明了来源却展开为空（`[]` / `null`）即拒绝，错误信息点名来源键。
+    fn expand_source(
+        &self,
+        source: &str,
+        entries: &[String],
+        context: &Value,
+    ) -> Result<Vec<Principal>, BridgeError> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let invalid = || BridgeError::InvalidArgument(format!("approve.{source}"));
+        let evaluator = crate::workflow::expression::ExpressionEvaluator::new();
+        // 与运行时 `with` 的口径一致：`$input` 与 `$context` 绑定同一实例上下文。
+        let vars = HashMap::from([("input".to_string(), context.clone())]);
+        let mut principals = Vec::new();
+        for entry in entries {
+            let trimmed = entry.trim();
+            let is_expression = trimmed.starts_with("${") && trimmed.ends_with('}');
+            if !is_expression {
+                principals.push(entry.clone());
+                continue;
+            }
+            let value = evaluator
+                .evaluate_with_vars(trimmed, context, &vars)
+                .map_err(|e| BridgeError::InvalidArgument(format!("approve.{source}: {e}")))?;
+            match value {
+                Value::String(principal) => principals.push(principal),
+                Value::Array(items) => {
+                    for item in items {
+                        match item {
+                            Value::String(principal) => principals.push(principal),
+                            _ => return Err(invalid()),
+                        }
+                    }
+                }
+                _ => return Err(invalid()),
+            }
+        }
+        if principals.is_empty() || principals.iter().any(|p| p.is_empty()) {
+            return Err(invalid());
+        }
+        Ok(principals)
     }
 
     /// 在已加载的引擎上进入节点 + 开启首轮，返回两段命令的全部效果记录。
@@ -964,6 +1067,12 @@ mod tests {
         }
     }
 
+    fn wf_with_context(context: Value) -> WorkflowInstance {
+        let mut instance = wf();
+        instance.context = context;
+        instance
+    }
+
     fn approve_task(approvers: &[&str]) -> ApproveTask {
         ApproveTask {
             approvers: approvers.iter().map(|s| s.to_string()).collect(),
@@ -1092,6 +1201,96 @@ mod tests {
         assert_eq!(
             err,
             BridgeError::InvalidArgument("approve.role.manager".into())
+        );
+        assert!(store.load(ID).await.unwrap().is_none(), "不得开节点");
+    }
+
+    #[tokio::test]
+    async fn ensure_node_open_expands_runtime_approvers_from_input() {
+        let (bridge, store) = build(None);
+        let task = approve_task(&["${ $input.approvers }"]);
+
+        bridge
+            .ensure_node_open(
+                &wf_with_context(json!({"approvers": ["alice", "bob"]})),
+                "review",
+                &task,
+            )
+            .await
+            .unwrap();
+
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        let mut assignees: Vec<&str> = engine
+            .tasks
+            .values()
+            .filter_map(|t| t.assignee.as_deref())
+            .collect();
+        assignees.sort_unstable();
+        assert_eq!(assignees, vec!["alice", "bob"]);
+    }
+
+    #[tokio::test]
+    async fn ensure_node_open_expands_runtime_role_names() {
+        let resolver = MapApproverResolver::new(HashMap::from([(
+            "manager".to_string(),
+            vec!["alice".to_string()],
+        )]));
+        let (bridge, store) = build(Some(Arc::new(resolver)));
+        let mut task = approve_task(&[]);
+        task.roles = vec!["${ $input.role }".into()];
+
+        bridge
+            .ensure_node_open(
+                &wf_with_context(json!({"role": "manager"})),
+                "review",
+                &task,
+            )
+            .await
+            .unwrap();
+
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(
+            engine
+                .tasks
+                .values()
+                .filter_map(|t| t.assignee.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["alice"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_node_open_empty_runtime_approvers_fails_closed() {
+        let (bridge, store) = build(None);
+        let task = approve_task(&["${ $input.approvers }"]);
+
+        let err = bridge
+            .ensure_node_open(&wf_with_context(json!({"approvers": []})), "review", &task)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            BridgeError::InvalidArgument("approve.approvers".into())
+        );
+        assert!(store.load(ID).await.unwrap().is_none(), "不得开节点");
+    }
+
+    #[tokio::test]
+    async fn ensure_node_open_non_string_runtime_approvers_fails_closed() {
+        let (bridge, store) = build(None);
+        let task = approve_task(&["${ $input.approvers }"]);
+
+        let err = bridge
+            .ensure_node_open(
+                &wf_with_context(json!({"approvers": [41]})),
+                "review",
+                &task,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            BridgeError::InvalidArgument("approve.approvers".into())
         );
         assert!(store.load(ID).await.unwrap().is_none(), "不得开节点");
     }
