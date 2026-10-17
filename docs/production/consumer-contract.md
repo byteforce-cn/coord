@@ -78,6 +78,9 @@
 
 - 注册发现：实例心跳过期由服务端判定下线；消费者侧以 `Discover` 结果为准，
   `Watch` 只作变更信号。
+- **实例 metadata 是不透明元数据**（proto 约定建议 JSON），实例地址放 `address`
+  键（`{"address":"host:port",...}`）；agent 的存活探测只读该键，读不到地址的
+  实例**不探测**（保留在 `Discover` 结果里，不因元数据形态被摘流）。
 - 配置中心：读取「KV + 本地 cache + watch」；变更传播是收敛语义（§0.3）。
   - **快照 + 位点续订（resync 纪律）**：`List` 返回 `entries + revision`（位点 W）；
     以 W 为起订位点订阅，闭合「快照 → 订阅」窗口——**快照后被删除的 key

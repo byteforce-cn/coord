@@ -62,6 +62,74 @@ impl ServiceInstance {
             registered_at: now,
         }
     }
+
+    /// 构造注册请求对应的实例。
+    ///
+    /// `address` 只保存**可探测的 TCP 地址**；`metadata` 是不透明元数据（proto
+    /// 约定建议 JSON、实例地址放 `address` 键），原样保留给消费方。两者不得混用：
+    /// 把整段 JSON 写进 `address`，周期探测就会拿它当主机名连接并摘流。
+    pub fn from_register(
+        service_name: impl Into<String>,
+        instance_id: impl Into<String>,
+        metadata: impl Into<String>,
+        lease_id: i64,
+    ) -> Self {
+        let metadata = metadata.into();
+        let mut instance = Self::new(
+            service_name,
+            instance_id,
+            "",
+            metadata.into_bytes(),
+            lease_id,
+        );
+        if let Some(address) = instance.probe_target() {
+            instance.address = address;
+        }
+        instance
+    }
+
+    /// 周期探测使用的 TCP 目标（连不上 = 实例不存活）。
+    ///
+    /// 派生顺序：metadata JSON 的 `address` 键 → 裸地址形态的 metadata → 内部
+    /// `address` 字段。都没有 ⇒ `None`：调用方**不得**探测；摘流过滤器把「没有
+    /// 探测结果」视为存活（fail-open），不透明 metadata 不能因为解析不出地址
+    /// 就被摘流。
+    pub fn probe_target(&self) -> Option<String> {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&self.metadata) {
+            if let Some(address) = value.get("address").and_then(|v| v.as_str()) {
+                let address = address.trim();
+                if is_socket_target(address) {
+                    return Some(address.to_string());
+                }
+            }
+        }
+        if let Ok(raw) = std::str::from_utf8(&self.metadata) {
+            let raw = raw.trim();
+            if is_socket_target(raw) {
+                return Some(raw.to_string());
+            }
+        }
+        let address = self.address.trim();
+        is_socket_target(address).then(|| address.to_string())
+    }
+}
+
+/// `host:port` 形态：探测只接受可连接目标（裸主机名 / JSON 文本都不算）。
+fn is_socket_target(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if value.parse::<std::net::SocketAddr>().is_ok() {
+        return true;
+    }
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return false;
+    };
+    if host.is_empty() || port.parse::<u16>().is_err() {
+        return false;
+    }
+    // 未加括号的 IPv6 字面量（`::1`）不是 `host:port`，连接必然失败。
+    !host.contains(':') || host.starts_with('[')
 }
 
 /// 服务发现查询结果
@@ -403,18 +471,8 @@ impl RegistryService {
             .flatten()
             .collect();
         let total = instances.len();
-        let mut alive = 0;
-        let mut results = HashMap::new();
-        for inst in &instances {
-            let ok = probe_instance_addr(&inst.address).await;
-            if ok {
-                alive += 1;
-            }
-            results.insert(
-                RegistryCache::make_key(&inst.service_name, &inst.instance_id),
-                ok,
-            );
-        }
+        let results = probe_instances(&instances).await;
+        let alive = results.values().filter(|alive| **alive).count();
         *self.probe_results.write() = results;
         (alive, total)
     }
@@ -475,6 +533,30 @@ fn filter_alive_impl(
             probes.get(&key).copied().unwrap_or(true)
         })
         .collect()
+}
+
+/// R-AGT-11：批量探测（周期任务与 `probe_all_now` 共用，避免两条路径漂移）。
+///
+/// 返回 `实例缓存 key → 存活`。无可探测地址（不透明 metadata）的实例**不写入
+/// 结果**：摘流过滤器把「没有探测结果」当作存活（fail-open）。
+async fn probe_instances(instances: &[ServiceInstance]) -> HashMap<String, bool> {
+    let mut results = HashMap::new();
+    for instance in instances {
+        let Some(target) = instance.probe_target() else {
+            tracing::debug!(
+                service = %instance.service_name,
+                instance = %instance.instance_id,
+                "registry probe skipped: metadata carries no TCP address (fail-open)"
+            );
+            continue;
+        };
+        let alive = probe_instance_addr(&target).await;
+        results.insert(
+            RegistryCache::make_key(&instance.service_name, &instance.instance_id),
+            alive,
+        );
+    }
+    results
 }
 
 /// R-AGT-11：TCP 连接探测（1s 超时）；空地址视为不存活（避免误判可用）。
@@ -640,15 +722,7 @@ impl BaseService for RegistryService {
                             .into_values()
                             .flatten()
                             .collect();
-                        let mut results = HashMap::new();
-                        for inst in &instances {
-                            let ok = probe_instance_addr(&inst.address).await;
-                            results.insert(
-                                RegistryCache::make_key(&inst.service_name, &inst.instance_id),
-                                ok,
-                            );
-                        }
-                        *results_for_probe.write() = results;
+                        *results_for_probe.write() = probe_instances(&instances).await;
                     }
                 }
             }
@@ -802,17 +876,12 @@ impl Registry for RegistryService {
             0
         };
 
-        let instance = ServiceInstance {
-            service_name: req.service_name.clone(),
-            instance_id: req.instance_id.clone(),
-            address: req.metadata.clone(), // metadata field carries address info for agent_api
-            metadata: req.metadata.into_bytes(),
+        let instance = ServiceInstance::from_register(
+            req.service_name.clone(),
+            req.instance_id.clone(),
+            req.metadata,
             lease_id,
-            registered_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        };
+        );
 
         self.register(instance)
             .await
@@ -1105,5 +1174,88 @@ mod tests {
         let alive = probe_instance_addr(&addr.to_string()).await;
         // 端口刚释放可能短暂 TIME_WAIT 可连；此处仅断言函数不 panic 且返回 bool
         let _ = alive;
+    }
+
+    // ──── 探测地址派生：metadata 是不透明 JSON，不得整段当作 TCP 地址 ────
+
+    #[test]
+    fn test_probe_target_uses_metadata_address_json() {
+        // C1 约定：metadata = {"address":"host:port",...}。存量实例的
+        // `address` 字段曾被写成整段 JSON，探测必须以 metadata 的 address 键为准。
+        let metadata = r#"{"address":"ims-hr-1:8082","protocol":"http","weight":100}"#;
+        let inst = ServiceInstance::new(
+            "ims-hr",
+            "ims-hr-1",
+            metadata,
+            metadata.as_bytes().to_vec(),
+            0,
+        );
+        assert_eq!(inst.probe_target().as_deref(), Some("ims-hr-1:8082"));
+    }
+
+    #[test]
+    fn test_probe_target_falls_back_to_raw_metadata_address() {
+        // 历史形态：metadata 就是裸地址（address 字段同样保存它）。
+        let inst = ServiceInstance::new(
+            "svc",
+            "i1",
+            "coord-agent:19528",
+            b"coord-agent:19528".to_vec(),
+            0,
+        );
+        assert_eq!(inst.probe_target().as_deref(), Some("coord-agent:19528"));
+    }
+
+    #[test]
+    fn test_probe_target_none_for_opaque_metadata() {
+        // 不含 address 键的 JSON 且 address 字段为空 ⇒ 无可探测地址：
+        // 不探测（摘流过滤器把「未探测」视为存活，fail-open）。
+        let inst = ServiceInstance::new("svc", "i1", "", br#"{"zone":"us-east-1"}"#.to_vec(), 0);
+        assert_eq!(inst.probe_target(), None);
+    }
+
+    #[test]
+    fn test_register_instance_derives_probe_address_and_keeps_metadata() {
+        let metadata = r#"{"address":"ims-hr-1:8082","protocol":"http"}"#;
+        let inst = ServiceInstance::from_register("ims-hr", "ims-hr-1", metadata, 7);
+        assert_eq!(
+            inst.address, "ims-hr-1:8082",
+            "address 只保存可探测的 TCP 地址"
+        );
+        assert_eq!(
+            inst.metadata,
+            metadata.as_bytes(),
+            "metadata 原样保留给消费方"
+        );
+        assert_eq!(inst.lease_id, 7);
+    }
+
+    #[tokio::test]
+    async fn test_probe_instances_probes_json_metadata_address() {
+        // 端到端语义：C1 约定的 metadata JSON 不会导致探测失败（#109 的 false-negative）。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let metadata = format!(r#"{{"address":"{addr}","protocol":"http"}}"#);
+        let inst = ServiceInstance::from_register("svc", "i1", metadata, 0);
+
+        let results = probe_instances(std::slice::from_ref(&inst)).await;
+        assert_eq!(
+            results.get(&RegistryCache::make_key("svc", "i1")),
+            Some(&true),
+            "metadata address 可连 ⇒ 探测存活"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_probe_instances_skips_opaque_metadata() {
+        // 不透明 metadata（无 address 键）：不写探测结果 ⇒ 摘流过滤器保留实例。
+        let inst = ServiceInstance::new("svc", "i1", "", br#"{"zone":"us-east-1"}"#.to_vec(), 0);
+        let results = probe_instances(std::slice::from_ref(&inst)).await;
+        assert!(results.is_empty(), "无可探测地址不写结果（fail-open）");
+        assert_eq!(
+            filter_alive_impl(false, &results, vec![inst]).len(),
+            1,
+            "未探测实例不得被摘流"
+        );
     }
 }
