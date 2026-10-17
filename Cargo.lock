@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "coord"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "axum",
  "clap",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "coord-agent"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "coord-client"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "coord-core",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "coord-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "base64",
@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "coord-macros"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "coord-core",
  "proc-macro2",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "coord-proto"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "proptest",
  "prost",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "coord-server"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "coord-test"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "coord-core",
  "rand 0.8.6",
