@@ -1,6 +1,8 @@
 package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.sdk.CoordConfig;
+import cn.byteforce.coord.sdk.CoordException;
+import cn.byteforce.coord.sdk.ErrorCode;
 import cn.byteforce.coord.sdk.cache.CacheClearResult;
 import cn.byteforce.coord.sdk.cache.CacheClient;
 import cn.byteforce.coord.sdk.cache.CacheKeyPage;
@@ -28,6 +30,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -148,6 +152,24 @@ class CacheClientTest {
         assertThat(result.getBytesReclaimed()).isEqualTo(128);
     }
 
+    @Test
+    void shouldReturnNullOnMiss() {
+        // 未命中是数据类型语义（found=false），不是错误。
+        assertThat(cache.get("absent")).isNull();
+    }
+
+    @Test
+    void shouldPropagatePermissionDeniedInsteadOfReturningNull() {
+        // 能力拒绝必须上抛：吞成 null 会让「缺 coord:cache:read」与「键不存在」
+        // 无法区分（最小权限无法验证，见 #110）。
+        fake.deniedKey = "forbidden";
+
+        assertThatThrownBy(() -> cache.get("forbidden"))
+                .isInstanceOf(CoordException.class)
+                .extracting(e -> ((CoordException) e).getErrorCode())
+                .isEqualTo(ErrorCode.PERMISSION_DENIED);
+    }
+
     // ──── In-process stub server ────
 
     /** Minimal Cache server stub with list state, mimicking agent semantics. */
@@ -161,6 +183,7 @@ class CacheClientTest {
         String lastClearPrefix;
         long clearRemovedEntries;
         long clearBytesReclaimed;
+        String deniedKey;
 
         java.util.List<byte[]> list(String key) {
             return lists.getOrDefault(key, java.util.List.of());
@@ -242,6 +265,12 @@ class CacheClientTest {
 
         @Override
         public void get(CacheGetRequest request, StreamObserver<CacheGetResponse> responseObserver) {
+            if (request.getKey().equals(deniedKey)) {
+                responseObserver.onError(Status.PERMISSION_DENIED
+                        .withDescription("role(s) [] do not have capability 'coord:cache:read'")
+                        .asRuntimeException());
+                return;
+            }
             CacheGetResponse.Builder resp = CacheGetResponse.newBuilder().setFound(false);
             if ("k".equals(request.getKey())) {
                 resp.setValue(ByteString.copyFromUtf8("v")).setFound(true);

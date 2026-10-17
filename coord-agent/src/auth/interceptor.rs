@@ -865,6 +865,66 @@ mod tests {
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
+    /// Cache 读（`Cache/Get`）必须校验 `coord:cache:read`。
+    ///
+    /// 回归点：SDK 曾把拒绝吞成 `null`，使「缺能力」与「键不存在」无法区分；
+    /// 这条用例钉住 agent 侧判定本身（能力表映射 + 空角色 fail-closed），
+    /// 不依赖客户端错误处理。
+    #[test]
+    fn test_cache_get_requires_cache_read_capability() {
+        use super::super::role_cache::{CapabilityGrant, RoleEntry};
+
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![
+            RoleEntry {
+                name: "registry-only".to_string(),
+                grants: vec![CapabilityGrant {
+                    capability_id: "coord:registry:register".to_string(),
+                    scope: String::new(),
+                }],
+                high_sensitive: false,
+            },
+            RoleEntry {
+                name: "cache-reader".to_string(),
+                grants: vec![CapabilityGrant {
+                    capability_id: "coord:cache:read".to_string(),
+                    scope: String::new(),
+                }],
+                high_sensitive: false,
+            },
+        ]);
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+
+        let denied = format!(
+            "Bearer {}",
+            make_test_cct(vec!["registry-only"], HashMap::new())
+        );
+        match interceptor.validate_request_accesses("/coord.cache.v1.Cache/Get", Some(&denied), &[])
+        {
+            AuthResult::Deny(reason) => assert!(
+                reason.contains("coord:cache:read"),
+                "拒绝原因必须点名能力：{reason}"
+            ),
+            AuthResult::Allow(_) => panic!("缺 coord:cache:read 的角色不得读缓存"),
+        }
+
+        let allowed = format!(
+            "Bearer {}",
+            make_test_cct(vec!["cache-reader"], HashMap::new())
+        );
+        assert!(
+            matches!(
+                interceptor.validate_request_accesses(
+                    "/coord.cache.v1.Cache/Get",
+                    Some(&allowed),
+                    &[]
+                ),
+                AuthResult::Allow(_)
+            ),
+            "持有 coord:cache:read 的调用必须放行"
+        );
+    }
+
     /// **root 必须能经 agent 走通全路径**。
     ///
     /// root 的角色记录里不逐项列能力（全靠旁路兜着）⇒ 若 agent 侧没有 root 旁路，

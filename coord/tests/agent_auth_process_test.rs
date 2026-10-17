@@ -32,8 +32,9 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::Request;
 
+use coord_proto::agent::cache_client::CacheClient;
 use coord_proto::agent::handshake_client::HandshakeClient;
-use coord_proto::agent::HandshakeRequest;
+use coord_proto::agent::{CacheGetRequest, HandshakeRequest};
 use coord_proto::auth::auth_client::AuthClient;
 use coord_proto::auth::{
     AuthenticateRequest, RoleAddRequest, RoleGrantCapabilityRequest, UserAddRequest,
@@ -376,6 +377,44 @@ async fn agent_forwards_credentials_and_enforces_scope_under_auth() {
     .await
     .expect("root may grant role");
 
+    // 只持 `coord:cache:read` 的角色：验证 cache 面的「无能力 → 拒 / 有 → 放行」两侧。
+    auth.role_add(with_token(
+        RoleAddRequest {
+            name: "cache-reader".into(),
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may add cache role");
+    auth.role_grant_capability(with_token(
+        RoleGrantCapabilityRequest {
+            role: "cache-reader".into(),
+            capability_id: "coord:cache:read".into(),
+            scope: String::new(),
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may grant cache read");
+    auth.user_add(with_token(
+        UserAddRequest {
+            name: "cache-user".into(),
+            password: "cache-pw-123456".into(),
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may add cache user");
+    auth.user_grant_role(with_token(
+        UserGrantRoleRequest {
+            user: "cache-user".into(),
+            role: "cache-reader".into(),
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may grant cache role");
+
     // ──── 4. 真实 agent 进程：**auth.enabled = true** ────
     let agent_port = find_free_port();
     let agent_http_port = find_free_port();
@@ -402,6 +441,8 @@ bootstrap_token = "{BOOTSTRAP_TOKEN}"
 # ⇒ **整张 `[services]` 表缺失**时用的是 `ServiceConfig::default()`（代码默认），
 # 只有"表在但键缺"才走 `bool::default()`=false。本用例显式写出 [services] 表 + idgen=true（不依赖任一默认）。
 idgen = true
+# Cache 数据面：本用例验证 `coord:cache:read` 的拒/放两侧，故显式启用。
+cache = true
 "#,
             agent_data = agent_dir.display(),
             vk = agent_verifying_key_hex(),
@@ -483,9 +524,54 @@ idgen = true
         "missing credential must be denied, got: {status:?}"
     );
 
-    // ──── 8. agent **自发**流量在鉴权下必须成功 ────
+    // ──── 8. Cache 读能力：缺 coord:cache:read → 拒；有 → 放行 ────
     //
-    // 上面 5–7 覆盖的是"**替调用方**发请求"的路径；这一节覆盖"**agent 为自己**
+    // 钉住两件事：① agent 的能力表把 `/coord.cache.v1.Cache/Get` 映射到
+    // `coord:cache:read` 并真的拒绝（不是只登记）；② 拒绝以稳定错误码到达
+    // 调用方（SDK 曾把拒绝吞成 null，使「缺能力」与「键不存在」无法区分）。
+    let cache_cct = auth
+        .authenticate(AuthenticateRequest {
+            name: "cache-user".into(),
+            password: "cache-pw-123456".into(),
+        })
+        .await
+        .expect("cache-user authenticate")
+        .into_inner()
+        .cct;
+    let mut cache_via_agent = CacheClient::new(channel(&agent_addr).await);
+
+    let denied = cache_via_agent
+        .get(with_token(
+            CacheGetRequest {
+                key: "probe:no-cap".into(),
+            },
+            &app_cct,
+        ))
+        .await;
+    let status = denied.expect_err("Cache/Get without coord:cache:read must be denied");
+    assert!(
+        matches!(
+            status.code(),
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated
+        ),
+        "Cache/Get without capability must be denied, got: {status:?}"
+    );
+
+    let allowed = cache_via_agent
+        .get(with_token(
+            CacheGetRequest {
+                key: "probe:no-cap".into(),
+            },
+            &cache_cct,
+        ))
+        .await
+        .expect("Cache/Get with coord:cache:read must be allowed")
+        .into_inner();
+    assert!(!allowed.found, "miss must be found=false, not an error");
+
+    // ──── 9. agent **自发**流量在鉴权下必须成功 ────
+    //
+    // 上面 5–8 覆盖的是"**替调用方**发请求"的路径；这一节覆盖"**agent 为自己**
     // 发请求"的路径 —— 它必须有凭据通道，否则锁自动续期 / registry
     // 目录加载与订阅 / idgen nodeid 注册**全线** `missing CCT token`。
     //
