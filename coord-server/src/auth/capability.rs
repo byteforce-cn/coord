@@ -5,7 +5,7 @@
 //
 // This module provides:
 // - In-memory capability store (backed by KV)
-// - Bootstrap of all 81 built-in capabilities (Appendix A + bootstrap 令牌管理)
+// - Bootstrap of all built-in capabilities (89 live + 31 deprecated)
 // - Register/Deprecate/List/Get operations
 // - Barrier-encrypted persistence via CapabilityStore
 
@@ -182,10 +182,10 @@ impl CapabilityRegistry {
         }
     }
 
-    /// Bootstrap all 81 built-in capabilities from Appendix A.
+    /// Bootstrap all built-in capabilities (live catalog + deprecated names).
     ///
-    /// （附录 A 的 80 项 + `admin:auth:bootstrap_token`——动态 bootstrap 令牌
-    /// 签发/列表/撤销的统一管理能力。）
+    /// live 目录是执行面的镜像（`coord_core::grpc_auth::rpc_capability`）；
+    /// 已废弃的名字只为存量授权与拼写错误可发现而保留，永不被执行。
     pub fn bootstrap_builtin(&self) {
         let builtins = builtin_capabilities();
         let mut caps = self.capabilities.write();
@@ -307,682 +307,642 @@ impl CapabilityStore {
     }
 }
 
-// ──── Built-in Capabilities (Appendix A — 80 + 1 bootstrap 令牌管理 = 81) ────
+// ──── Built-in Capabilities ────
+//
+// 两张表就是发现面的全部事实。`BUILTIN_CAPABILITY_META` 的 ID 集合必须与执行面
+// （`coord_core::grpc_auth::rpc_capability` 的返回值集合）**双向恒等**；
+// `DEPRECATED_CAPABILITIES` 里的名字永远不会被执行，只用于让存量授权与拼写错误可发现。
+// 双向恒等与废弃纪律由本文件 tests 从 proto 描述符集枚举方法后机检，
+// 并由 `scripts/check-capability-registry.sh` 作为 CI 门禁（含负控制）。
 
-fn builtin_capabilities() -> Vec<CapabilityDef> {
-    let def = |id: &str,
-               domain: &str,
-               service: &str,
-               action: &str,
-               cap_type: CapabilityType,
-               desc: &str| {
-        CapabilityDef {
-            id: id.to_string(),
-            domain: domain.to_string(),
-            service: service.to_string(),
-            action: action.to_string(),
-            description: desc.to_string(),
-            cap_type,
-            deprecated: false,
-            version: 1,
-            scope_description: String::new(),
-        }
+/// live 能力目录：`(id, 类型, 描述)`。
+///
+/// `domain:service:action` 三段从 ID 解析（[`capability_def`]），不在表里重复；
+/// 三段式由 `builtin_ids_are_domain_service_action` 钉住。
+const BUILTIN_CAPABILITY_META: &[(&str, CapabilityType, &str)] = &[
+    // ──── data ────
+    (
+        "data:kv:delete",
+        CapabilityType::Write,
+        "按前缀/范围删除键值对",
+    ),
+    (
+        "data:kv:read",
+        CapabilityType::Read,
+        "按前缀/范围读取键值对",
+    ),
+    ("data:kv:write", CapabilityType::Write, "写入/更新键值对"),
+    ("data:lease:grant", CapabilityType::Write, "创建租约"),
+    (
+        "data:lease:keepalive",
+        CapabilityType::Write,
+        "租约心跳续期",
+    ),
+    ("data:lease:revoke", CapabilityType::Write, "撤销租约"),
+    (
+        "data:storage:read",
+        CapabilityType::Read,
+        "Get/Stat 对象（coord.storage）",
+    ),
+    (
+        "data:storage:write",
+        CapabilityType::Write,
+        "Put/Delete 对象（coord.storage）",
+    ),
+    ("data:txn:execute", CapabilityType::Write, "执行原子事务"),
+    (
+        "data:watch:subscribe",
+        CapabilityType::Read,
+        "订阅 Key 变更事件",
+    ),
+    // ──── coord ────
+    (
+        "coord:breaker:manage",
+        CapabilityType::Write,
+        "重置熔断器（CircuitBreaker/Reset）",
+    ),
+    (
+        "coord:breaker:read",
+        CapabilityType::Read,
+        "读取熔断器状态（CircuitBreaker/GetState）",
+    ),
+    (
+        "coord:breaker:report",
+        CapabilityType::Write,
+        "上报熔断器成功/失败（ReportSuccess/ReportFailure）",
+    ),
+    (
+        "coord:cache:read",
+        CapabilityType::Read,
+        "读取缓存（Get/HGet/HGetAll/Keys/LLen/LRange/SMembers）",
+    ),
+    (
+        "coord:cache:write",
+        CapabilityType::Write,
+        "写入/删除缓存（Set/HSet/LPush/RPop/SAdd/Delete/Clear）",
+    ),
+    (
+        "coord:config:list",
+        CapabilityType::Read,
+        "列出配置（Config/List）",
+    ),
+    ("coord:config:read", CapabilityType::Read, "读取配置"),
+    (
+        "coord:config:watch",
+        CapabilityType::Read,
+        "订阅配置变更（Config/Watch）",
+    ),
+    ("coord:config:write", CapabilityType::Write, "变更配置"),
+    (
+        "coord:election:campaign",
+        CapabilityType::Write,
+        "参与 Leader 选举（LeaderElection/Campaign）",
+    ),
+    (
+        "coord:election:read",
+        CapabilityType::Read,
+        "查询当前 Leader（LeaderElection/GetLeader）",
+    ),
+    (
+        "coord:election:resign",
+        CapabilityType::Write,
+        "放弃 Leader（LeaderElection/Resign）",
+    ),
+    (
+        "coord:election:watch",
+        CapabilityType::Read,
+        "订阅 Leader 变更（LeaderElection/Watch）",
+    ),
+    ("coord:event:publish", CapabilityType::Write, "发布事件"),
+    ("coord:event:subscribe", CapabilityType::Read, "订阅事件"),
+    (
+        "coord:event:unsubscribe",
+        CapabilityType::Write,
+        "取消事件订阅（Event/Unsubscribe）",
+    ),
+    (
+        "coord:flags:manage",
+        CapabilityType::Write,
+        "管理 Feature Flag（PutFlag/DeleteFlag）",
+    ),
+    (
+        "coord:flags:read",
+        CapabilityType::Read,
+        "读取/评估 Feature Flag（Evaluate/IsEnabled/ListFlags）",
+    ),
+    (
+        "coord:handshake:negotiate",
+        CapabilityType::Read,
+        "agent 握手协商（Handshake/Negotiate）",
+    ),
+    (
+        "coord:health:check",
+        CapabilityType::Read,
+        "agent 健康检查（Health/Check）",
+    ),
+    (
+        "coord:idgen:next",
+        CapabilityType::Write,
+        "生成全局唯一 ID（NextId/NextBatch）",
+    ),
+    ("coord:lock:acquire", CapabilityType::Write, "获取分布式锁"),
+    (
+        "coord:lock:info",
+        CapabilityType::Read,
+        "查询锁状态（Lock/GetLockInfo）",
+    ),
+    ("coord:lock:release", CapabilityType::Write, "释放分布式锁"),
+    ("coord:lock:renew", CapabilityType::Write, "续期分布式锁"),
+    (
+        "coord:mq:consume",
+        CapabilityType::Write,
+        "消费消息（Poll/Ack/GetTopicLeader）",
+    ),
+    (
+        "coord:mq:dlq",
+        CapabilityType::Write,
+        "死信队列处置（MoveToDlq/PollDlq）",
+    ),
+    (
+        "coord:mq:manage",
+        CapabilityType::Write,
+        "管理 Topic（CreateTopic/DeleteTopic）",
+    ),
+    (
+        "coord:mq:publish",
+        CapabilityType::Write,
+        "发布消息（MQ/Publish）",
+    ),
+    (
+        "coord:mq:subscribe",
+        CapabilityType::Read,
+        "订阅 Topic（MQ/Subscribe）",
+    ),
+    (
+        "coord:plugin:invoke",
+        CapabilityType::Write,
+        "调用插件（Plugin/Invoke）",
+    ),
+    (
+        "coord:plugin:list",
+        CapabilityType::Read,
+        "列出插件（Plugin/List）",
+    ),
+    (
+        "coord:policy:evaluate",
+        CapabilityType::Read,
+        "执行策略评估",
+    ),
+    ("coord:policy:manage", CapabilityType::Write, "管理策略规则"),
+    (
+        "coord:ratelimit:check",
+        CapabilityType::Read,
+        "限流检查（RateLimiter/Allow）",
+    ),
+    (
+        "coord:registry:deregister",
+        CapabilityType::Write,
+        "注销服务实例",
+    ),
+    ("coord:registry:discover", CapabilityType::Read, "服务发现"),
+    (
+        "coord:registry:heartbeat",
+        CapabilityType::Write,
+        "实例心跳上报",
+    ),
+    (
+        "coord:registry:register",
+        CapabilityType::Write,
+        "注册服务实例",
+    ),
+    (
+        "coord:registry:watch",
+        CapabilityType::Read,
+        "订阅服务目录变更（Registry/Watch）",
+    ),
+    (
+        "coord:replica:read",
+        CapabilityType::Read,
+        "副本对账（Replica/Reconcile）",
+    ),
+    (
+        "coord:replica:write",
+        CapabilityType::Write,
+        "副本写入与 ISR 心跳（Replica/Apply、Replica/IsrHeartbeat）",
+    ),
+    (
+        "coord:scheduler:execute",
+        CapabilityType::Write,
+        "领取/完成调度任务（ClaimJob/CompleteJob/Heartbeat）",
+    ),
+    (
+        "coord:scheduler:manage",
+        CapabilityType::Write,
+        "注册调度任务（Scheduler/RegisterJob）",
+    ),
+    (
+        "coord:scheduler:read",
+        CapabilityType::Read,
+        "查询调度任务（Scheduler/GetJob）",
+    ),
+    (
+        "coord:transit:crypto",
+        CapabilityType::Write,
+        "加解密与 HMAC（Encrypt/Decrypt/HmacSign/HmacVerify/Rewrap）",
+    ),
+    (
+        "coord:workflow:define",
+        CapabilityType::Write,
+        "定义工作流模板",
+    ),
+    (
+        "coord:workflow:execute",
+        CapabilityType::Write,
+        "驱动工作流实例（Start/Signal/Approve/Reject/…）",
+    ),
+    (
+        "coord:workflow:read",
+        CapabilityType::Read,
+        "查询工作流定义与实例（Get/List 系列）",
+    ),
+    // ──── pki ────
+    (
+        "pki:ca:init",
+        CapabilityType::Write,
+        "初始化 PKI CA（Pki/InitCa）",
+    ),
+    (
+        "pki:cert:issue",
+        CapabilityType::Write,
+        "签发/续期证书（IssueCert/RenewCert）",
+    ),
+    (
+        "pki:cert:read",
+        CapabilityType::Read,
+        "读取/校验证书（GetCaCert/GetCertByCN/ListCerts/VerifyCert）",
+    ),
+    (
+        "pki:cert:rotate",
+        CapabilityType::Write,
+        "轮换证书（Pki/RotateCert）",
+    ),
+    // ──── admin ────
+    (
+        "admin:auth:bootstrap_token",
+        CapabilityType::Admin,
+        "签发/列出/撤销 agent bootstrap 令牌（TTL + 一次性）",
+    ),
+    ("admin:auth:disable", CapabilityType::Admin, "禁用认证"),
+    ("admin:auth:enable", CapabilityType::Admin, "启用认证"),
+    ("admin:auth:role_add", CapabilityType::Admin, "创建角色"),
+    ("admin:auth:role_delete", CapabilityType::Admin, "删除角色"),
+    (
+        "admin:auth:role_grant",
+        CapabilityType::Admin,
+        "为角色授权能力",
+    ),
+    ("admin:auth:role_list", CapabilityType::Read, "列出角色"),
+    (
+        "admin:auth:role_revoke",
+        CapabilityType::Admin,
+        "撤销角色能力",
+    ),
+    ("admin:auth:status", CapabilityType::Read, "查询认证状态"),
+    (
+        "admin:auth:user_add",
+        CapabilityType::Admin,
+        "创建用户/AppRole",
+    ),
+    (
+        "admin:auth:user_delete",
+        CapabilityType::Admin,
+        "删除用户/AppRole",
+    ),
+    (
+        "admin:auth:user_grant_role",
+        CapabilityType::Admin,
+        "为用户分配角色",
+    ),
+    ("admin:auth:user_list", CapabilityType::Read, "列出用户"),
+    (
+        "admin:auth:user_revoke_role",
+        CapabilityType::Admin,
+        "撤销用户角色",
+    ),
+    (
+        "admin:capability:deprecate",
+        CapabilityType::Admin,
+        "废弃能力",
+    ),
+    (
+        "admin:capability:list",
+        CapabilityType::Read,
+        "列出所有能力",
+    ),
+    (
+        "admin:capability:register",
+        CapabilityType::Admin,
+        "注册新能力定义",
+    ),
+    (
+        "admin:maintenance:compact",
+        CapabilityType::Admin,
+        "压缩历史（raft 下发）",
+    ),
+    (
+        "admin:maintenance:member_add",
+        CapabilityType::Admin,
+        "添加节点",
+    ),
+    (
+        "admin:maintenance:member_list",
+        CapabilityType::Read,
+        "列出节点",
+    ),
+    (
+        "admin:maintenance:member_promote",
+        CapabilityType::Admin,
+        "晋升 Learner",
+    ),
+    (
+        "admin:maintenance:member_remove",
+        CapabilityType::Admin,
+        "移除节点",
+    ),
+    ("admin:maintenance:seal", CapabilityType::Admin, "封存集群"),
+    (
+        "admin:maintenance:snapshot",
+        CapabilityType::Read,
+        "导出快照",
+    ),
+    (
+        "admin:maintenance:status",
+        CapabilityType::Read,
+        "查询集群状态",
+    ),
+    (
+        "admin:maintenance:unseal",
+        CapabilityType::Admin,
+        "解封集群",
+    ),
+];
+
+/// 已废弃能力：`(id, 类型, 原描述, 替代项)`。
+///
+/// 替代项为空串 = 无替代（该功能未实现）。这些 ID 不在执行面，
+/// `RoleGrantCapability` 会拒绝它们并点名替代项。
+const DEPRECATED_CAPABILITIES: &[(&str, CapabilityType, &str, &str)] = &[
+    // ──── data ────
+    (
+        "data:cache:delete",
+        CapabilityType::Write,
+        "删除/清空本地缓存",
+        "coord:cache:write",
+    ),
+    (
+        "data:cache:read",
+        CapabilityType::Read,
+        "读取本地缓存",
+        "coord:cache:read",
+    ),
+    (
+        "data:cache:write",
+        CapabilityType::Write,
+        "写入本地缓存",
+        "coord:cache:write",
+    ),
+    (
+        "data:idgen:generate",
+        CapabilityType::Write,
+        "生成全局唯一 ID",
+        "coord:idgen:next",
+    ),
+    (
+        "data:mq:manage",
+        CapabilityType::Write,
+        "管理 Topic",
+        "coord:mq:manage",
+    ),
+    (
+        "data:mq:receive",
+        CapabilityType::Read,
+        "消费消息",
+        "coord:mq:consume",
+    ),
+    (
+        "data:mq:send",
+        CapabilityType::Write,
+        "发送消息",
+        "coord:mq:publish",
+    ),
+    // ──── coord ────
+    (
+        "coord:config:rollback",
+        CapabilityType::Write,
+        "回滚配置",
+        "",
+    ),
+    (
+        "coord:leader:campaign",
+        CapabilityType::Write,
+        "参与 Leader 选举",
+        "coord:election:campaign",
+    ),
+    (
+        "coord:leader:observe",
+        CapabilityType::Read,
+        "观察选举结果",
+        "coord:election:read",
+    ),
+    (
+        "coord:leader:resign",
+        CapabilityType::Write,
+        "放弃 Leader",
+        "coord:election:resign",
+    ),
+    (
+        "coord:lock:query",
+        CapabilityType::Read,
+        "查询锁状态",
+        "coord:lock:info",
+    ),
+    (
+        "coord:pki:issue",
+        CapabilityType::Write,
+        "签发短期证书",
+        "pki:cert:issue",
+    ),
+    (
+        "coord:pki:read",
+        CapabilityType::Read,
+        "查询证书",
+        "pki:cert:read",
+    ),
+    ("coord:pki:revoke", CapabilityType::Write, "吊销证书", ""),
+    (
+        "coord:resilience:circuit_breaker",
+        CapabilityType::Write,
+        "熔断开关",
+        "coord:breaker:manage",
+    ),
+    (
+        "coord:resilience:rate_limit",
+        CapabilityType::Write,
+        "限流规则管理",
+        "coord:ratelimit:check",
+    ),
+    (
+        "coord:resilience:replication",
+        CapabilityType::Write,
+        "副本同步控制",
+        "coord:replica:read",
+    ),
+    (
+        "coord:saga:compensate",
+        CapabilityType::Write,
+        "补偿/回滚",
+        "",
+    ),
+    ("coord:saga:execute", CapabilityType::Write, "启动 Saga", ""),
+    (
+        "coord:saga:query",
+        CapabilityType::Read,
+        "查询 Saga 状态",
+        "",
+    ),
+    (
+        "coord:scheduler:cancel",
+        CapabilityType::Write,
+        "取消定时任务",
+        "",
+    ),
+    (
+        "coord:scheduler:query",
+        CapabilityType::Read,
+        "查询任务状态",
+        "coord:scheduler:read",
+    ),
+    (
+        "coord:scheduler:schedule",
+        CapabilityType::Write,
+        "创建定时任务",
+        "coord:scheduler:manage",
+    ),
+    (
+        "coord:transit:decrypt",
+        CapabilityType::Read,
+        "解密数据",
+        "coord:transit:crypto",
+    ),
+    (
+        "coord:transit:encrypt",
+        CapabilityType::Write,
+        "加密数据",
+        "coord:transit:crypto",
+    ),
+    (
+        "coord:workflow:cancel",
+        CapabilityType::Write,
+        "取消工作流",
+        "coord:workflow:execute",
+    ),
+    (
+        "coord:workflow:query",
+        CapabilityType::Read,
+        "查询工作流状态",
+        "coord:workflow:read",
+    ),
+    (
+        "coord:workflow:signal",
+        CapabilityType::Write,
+        "发送信号/推进状态",
+        "coord:workflow:execute",
+    ),
+    (
+        "coord:workflow:start",
+        CapabilityType::Write,
+        "启动工作流实例",
+        "coord:workflow:execute",
+    ),
+    // ──── admin ────
+    (
+        "admin:capability:get",
+        CapabilityType::Read,
+        "查询能力详情",
+        "admin:capability:list",
+    ),
+];
+
+/// 把 `domain:service:action` 解析为三段；段数或空段即返回 `None`。
+///
+/// 返回 `None` 而不 panic：内建目录是编译期常量，坏行由 `builtin_ids_are_domain_service_action` 置红，
+/// 运行时（bootstrap）不得因一条坏数据让进程崩溃。
+fn capability_def(
+    id: &str,
+    cap_type: CapabilityType,
+    description: String,
+    deprecated: bool,
+) -> Option<CapabilityDef> {
+    let mut parts = id.split(':');
+    let (Some(domain), Some(service), Some(action), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
     };
+    if domain.is_empty() || service.is_empty() || action.is_empty() {
+        return None;
+    }
+    Some(CapabilityDef {
+        id: id.to_string(),
+        domain: domain.to_string(),
+        service: service.to_string(),
+        action: action.to_string(),
+        description,
+        cap_type,
+        deprecated,
+        version: 1,
+        scope_description: String::new(),
+    })
+}
 
-    vec![
-        // ──── 数据面 (17) ────
-        def(
-            "data:kv:read",
-            "data",
-            "kv",
-            "read",
-            CapabilityType::Read,
-            "按前缀/范围读取键值对",
-        ),
-        def(
-            "data:kv:write",
-            "data",
-            "kv",
-            "write",
-            CapabilityType::Write,
-            "写入/更新键值对",
-        ),
-        def(
-            "data:kv:delete",
-            "data",
-            "kv",
-            "delete",
-            CapabilityType::Write,
-            "按前缀/范围删除键值对",
-        ),
-        def(
-            "data:txn:execute",
-            "data",
-            "txn",
-            "execute",
-            CapabilityType::Write,
-            "执行原子事务",
-        ),
-        def(
-            "data:lease:grant",
-            "data",
-            "lease",
-            "grant",
-            CapabilityType::Write,
-            "创建租约",
-        ),
-        def(
-            "data:lease:revoke",
-            "data",
-            "lease",
-            "revoke",
-            CapabilityType::Write,
-            "撤销租约",
-        ),
-        def(
-            "data:lease:keepalive",
-            "data",
-            "lease",
-            "keepalive",
-            CapabilityType::Write,
-            "租约心跳续期",
-        ),
-        def(
-            "data:watch:subscribe",
-            "data",
-            "watch",
-            "subscribe",
-            CapabilityType::Read,
-            "订阅 Key 变更事件",
-        ),
-        // 对象存储（coord.storage 数据面）
-        def(
-            "data:storage:read",
-            "data",
-            "storage",
-            "read",
-            CapabilityType::Read,
-            "Get/Stat 对象（coord.storage）",
-        ),
-        def(
-            "data:storage:write",
-            "data",
-            "storage",
-            "write",
-            CapabilityType::Write,
-            "Put/Delete 对象（coord.storage）",
-        ),
-        def(
-            "data:cache:read",
-            "data",
-            "cache",
-            "read",
-            CapabilityType::Read,
-            "读取本地缓存",
-        ),
-        def(
-            "data:cache:write",
-            "data",
-            "cache",
-            "write",
-            CapabilityType::Write,
-            "写入本地缓存",
-        ),
-        def(
-            "data:cache:delete",
-            "data",
-            "cache",
-            "delete",
-            CapabilityType::Write,
-            "删除/清空本地缓存",
-        ),
-        def(
-            "data:mq:send",
-            "data",
-            "mq",
-            "send",
-            CapabilityType::Write,
-            "发送消息",
-        ),
-        def(
-            "data:mq:receive",
-            "data",
-            "mq",
-            "receive",
-            CapabilityType::Read,
-            "消费消息",
-        ),
-        def(
-            "data:mq:manage",
-            "data",
-            "mq",
-            "manage",
-            CapabilityType::Write,
-            "管理 Topic",
-        ),
-        def(
-            "data:idgen:generate",
-            "data",
-            "idgen",
-            "generate",
-            CapabilityType::Write,
-            "生成全局唯一 ID",
-        ),
-        // ──── 协调面 (37) ────
-        def(
-            "coord:registry:register",
-            "coord",
-            "registry",
-            "register",
-            CapabilityType::Write,
-            "注册服务实例",
-        ),
-        def(
-            "coord:registry:deregister",
-            "coord",
-            "registry",
-            "deregister",
-            CapabilityType::Write,
-            "注销服务实例",
-        ),
-        def(
-            "coord:registry:heartbeat",
-            "coord",
-            "registry",
-            "heartbeat",
-            CapabilityType::Write,
-            "实例心跳上报",
-        ),
-        def(
-            "coord:registry:discover",
-            "coord",
-            "registry",
-            "discover",
-            CapabilityType::Read,
-            "服务发现",
-        ),
-        def(
-            "coord:lock:acquire",
-            "coord",
-            "lock",
-            "acquire",
-            CapabilityType::Write,
-            "获取分布式锁",
-        ),
-        def(
-            "coord:lock:release",
-            "coord",
-            "lock",
-            "release",
-            CapabilityType::Write,
-            "释放分布式锁",
-        ),
-        def(
-            "coord:lock:renew",
-            "coord",
-            "lock",
-            "renew",
-            CapabilityType::Write,
-            "续期分布式锁",
-        ),
-        def(
-            "coord:lock:query",
-            "coord",
-            "lock",
-            "query",
-            CapabilityType::Read,
-            "查询锁状态",
-        ),
-        def(
-            "coord:workflow:define",
-            "coord",
-            "workflow",
-            "define",
-            CapabilityType::Write,
-            "定义工作流模板",
-        ),
-        def(
-            "coord:workflow:start",
-            "coord",
-            "workflow",
-            "start",
-            CapabilityType::Write,
-            "启动工作流实例",
-        ),
-        def(
-            "coord:workflow:signal",
-            "coord",
-            "workflow",
-            "signal",
-            CapabilityType::Write,
-            "发送信号/推进状态",
-        ),
-        def(
-            "coord:workflow:cancel",
-            "coord",
-            "workflow",
-            "cancel",
-            CapabilityType::Write,
-            "取消工作流",
-        ),
-        def(
-            "coord:workflow:query",
-            "coord",
-            "workflow",
-            "query",
-            CapabilityType::Read,
-            "查询工作流状态",
-        ),
-        def(
-            "coord:config:read",
-            "coord",
-            "config",
-            "read",
-            CapabilityType::Read,
-            "读取配置",
-        ),
-        def(
-            "coord:config:write",
-            "coord",
-            "config",
-            "write",
-            CapabilityType::Write,
-            "变更配置",
-        ),
-        def(
-            "coord:config:rollback",
-            "coord",
-            "config",
-            "rollback",
-            CapabilityType::Write,
-            "回滚配置",
-        ),
-        def(
-            "coord:leader:campaign",
-            "coord",
-            "leader",
-            "campaign",
-            CapabilityType::Write,
-            "参与 Leader 选举",
-        ),
-        def(
-            "coord:leader:resign",
-            "coord",
-            "leader",
-            "resign",
-            CapabilityType::Write,
-            "放弃 Leader",
-        ),
-        def(
-            "coord:leader:observe",
-            "coord",
-            "leader",
-            "observe",
-            CapabilityType::Read,
-            "观察选举结果",
-        ),
-        def(
-            "coord:event:publish",
-            "coord",
-            "event",
-            "publish",
-            CapabilityType::Write,
-            "发布事件",
-        ),
-        def(
-            "coord:event:subscribe",
-            "coord",
-            "event",
-            "subscribe",
-            CapabilityType::Read,
-            "订阅事件",
-        ),
-        def(
-            "coord:policy:evaluate",
-            "coord",
-            "policy",
-            "evaluate",
-            CapabilityType::Read,
-            "执行策略评估",
-        ),
-        def(
-            "coord:policy:manage",
-            "coord",
-            "policy",
-            "manage",
-            CapabilityType::Write,
-            "管理策略规则",
-        ),
-        def(
-            "coord:pki:issue",
-            "coord",
-            "pki",
-            "issue",
-            CapabilityType::Write,
-            "签发短期证书",
-        ),
-        def(
-            "coord:pki:revoke",
-            "coord",
-            "pki",
-            "revoke",
-            CapabilityType::Write,
-            "吊销证书",
-        ),
-        def(
-            "coord:pki:read",
-            "coord",
-            "pki",
-            "read",
-            CapabilityType::Read,
-            "查询证书",
-        ),
-        def(
-            "coord:transit:encrypt",
-            "coord",
-            "transit",
-            "encrypt",
-            CapabilityType::Write,
-            "加密数据",
-        ),
-        def(
-            "coord:transit:decrypt",
-            "coord",
-            "transit",
-            "decrypt",
-            CapabilityType::Read,
-            "解密数据",
-        ),
-        def(
-            "coord:saga:execute",
-            "coord",
-            "saga",
-            "execute",
-            CapabilityType::Write,
-            "启动 Saga",
-        ),
-        def(
-            "coord:saga:compensate",
-            "coord",
-            "saga",
-            "compensate",
-            CapabilityType::Write,
-            "补偿/回滚",
-        ),
-        def(
-            "coord:saga:query",
-            "coord",
-            "saga",
-            "query",
-            CapabilityType::Read,
-            "查询 Saga 状态",
-        ),
-        def(
-            "coord:resilience:circuit_breaker",
-            "coord",
-            "resilience",
-            "circuit_breaker",
-            CapabilityType::Write,
-            "熔断开关",
-        ),
-        def(
-            "coord:resilience:rate_limit",
-            "coord",
-            "resilience",
-            "rate_limit",
-            CapabilityType::Write,
-            "限流规则管理",
-        ),
-        def(
-            "coord:resilience:replication",
-            "coord",
-            "resilience",
-            "replication",
-            CapabilityType::Write,
-            "副本同步控制",
-        ),
-        def(
-            "coord:scheduler:schedule",
-            "coord",
-            "scheduler",
-            "schedule",
-            CapabilityType::Write,
-            "创建定时任务",
-        ),
-        def(
-            "coord:scheduler:cancel",
-            "coord",
-            "scheduler",
-            "cancel",
-            CapabilityType::Write,
-            "取消定时任务",
-        ),
-        def(
-            "coord:scheduler:query",
-            "coord",
-            "scheduler",
-            "query",
-            CapabilityType::Read,
-            "查询任务状态",
-        ),
-        // ──── 管控面 (25) ────
-        def(
-            "admin:maintenance:status",
-            "admin",
-            "maintenance",
-            "status",
-            CapabilityType::Read,
-            "查询集群状态",
-        ),
-        def(
-            "admin:maintenance:seal",
-            "admin",
-            "maintenance",
-            "seal",
-            CapabilityType::Admin,
-            "封存集群",
-        ),
-        def(
-            "admin:maintenance:unseal",
-            "admin",
-            "maintenance",
-            "unseal",
-            CapabilityType::Admin,
-            "解封集群",
-        ),
-        def(
-            "admin:maintenance:snapshot",
-            "admin",
-            "maintenance",
-            "snapshot",
-            CapabilityType::Read,
-            "导出快照",
-        ),
-        def(
-            "admin:maintenance:compact",
-            "admin",
-            "maintenance",
-            "compact",
-            CapabilityType::Admin,
-            "压缩历史（raft 下发）",
-        ),
-        def(
-            "admin:maintenance:member_add",
-            "admin",
-            "maintenance",
-            "member_add",
-            CapabilityType::Admin,
-            "添加节点",
-        ),
-        def(
-            "admin:maintenance:member_remove",
-            "admin",
-            "maintenance",
-            "member_remove",
-            CapabilityType::Admin,
-            "移除节点",
-        ),
-        def(
-            "admin:maintenance:member_promote",
-            "admin",
-            "maintenance",
-            "member_promote",
-            CapabilityType::Admin,
-            "晋升 Learner",
-        ),
-        def(
-            "admin:maintenance:member_list",
-            "admin",
-            "maintenance",
-            "member_list",
-            CapabilityType::Read,
-            "列出节点",
-        ),
-        def(
-            "admin:auth:enable",
-            "admin",
-            "auth",
-            "enable",
-            CapabilityType::Admin,
-            "启用认证",
-        ),
-        def(
-            "admin:auth:disable",
-            "admin",
-            "auth",
-            "disable",
-            CapabilityType::Admin,
-            "禁用认证",
-        ),
-        def(
-            "admin:auth:status",
-            "admin",
-            "auth",
-            "status",
-            CapabilityType::Read,
-            "查询认证状态",
-        ),
-        def(
-            "admin:auth:user_add",
-            "admin",
-            "auth",
-            "user_add",
-            CapabilityType::Admin,
-            "创建用户/AppRole",
-        ),
-        def(
-            "admin:auth:user_delete",
-            "admin",
-            "auth",
-            "user_delete",
-            CapabilityType::Admin,
-            "删除用户/AppRole",
-        ),
-        def(
-            "admin:auth:user_list",
-            "admin",
-            "auth",
-            "user_list",
-            CapabilityType::Read,
-            "列出用户",
-        ),
-        def(
-            "admin:auth:role_add",
-            "admin",
-            "auth",
-            "role_add",
-            CapabilityType::Admin,
-            "创建角色",
-        ),
-        def(
-            "admin:auth:role_delete",
-            "admin",
-            "auth",
-            "role_delete",
-            CapabilityType::Admin,
-            "删除角色",
-        ),
-        def(
-            "admin:auth:role_grant",
-            "admin",
-            "auth",
-            "role_grant",
-            CapabilityType::Admin,
-            "为角色授权能力",
-        ),
-        def(
-            "admin:auth:role_revoke",
-            "admin",
-            "auth",
-            "role_revoke",
-            CapabilityType::Admin,
-            "撤销角色能力",
-        ),
-        def(
-            "admin:auth:role_list",
-            "admin",
-            "auth",
-            "role_list",
-            CapabilityType::Read,
-            "列出角色",
-        ),
-        def(
-            "admin:auth:user_grant_role",
-            "admin",
-            "auth",
-            "user_grant_role",
-            CapabilityType::Admin,
-            "为用户分配角色",
-        ),
-        def(
-            "admin:auth:user_revoke_role",
-            "admin",
-            "auth",
-            "user_revoke_role",
-            CapabilityType::Admin,
-            "撤销用户角色",
-        ),
-        def(
-            "admin:auth:bootstrap_token",
-            "admin",
-            "auth",
-            "bootstrap_token",
-            CapabilityType::Admin,
-            "签发/列出/撤销 agent bootstrap 令牌（TTL + 一次性）",
-        ),
-        def(
-            "admin:capability:register",
-            "admin",
-            "capability",
-            "register",
-            CapabilityType::Admin,
-            "注册新能力定义",
-        ),
-        def(
-            "admin:capability:deprecate",
-            "admin",
-            "capability",
-            "deprecate",
-            CapabilityType::Admin,
-            "废弃能力",
-        ),
-        def(
-            "admin:capability:list",
-            "admin",
-            "capability",
-            "list",
-            CapabilityType::Read,
-            "列出所有能力",
-        ),
-        def(
-            "admin:capability:get",
-            "admin",
-            "capability",
-            "get",
-            CapabilityType::Read,
-            "查询能力详情",
-        ),
-    ]
+/// `id` 是否属于 live 内建能力（执行面覆盖的能力）。
+pub fn is_live_builtin(capability_id: &str) -> bool {
+    BUILTIN_CAPABILITY_META
+        .iter()
+        .any(|(id, _, _)| *id == capability_id)
+}
+
+/// `id` 是否属于已废弃的内建能力。
+pub fn is_deprecated_builtin(capability_id: &str) -> bool {
+    DEPRECATED_CAPABILITIES
+        .iter()
+        .any(|(id, _, _, _)| *id == capability_id)
+}
+
+/// 已废弃能力的替代项：`None` = 不是已废弃能力；`Some("")` = 无替代。
+pub fn deprecated_replacement(capability_id: &str) -> Option<&'static str> {
+    DEPRECATED_CAPABILITIES
+        .iter()
+        .find(|(id, _, _, _)| *id == capability_id)
+        .map(|(_, _, _, repl)| *repl)
+}
+
+/// Bootstrap 用的内建能力清单：live 在前，deprecated 在后。
+fn builtin_capabilities() -> Vec<CapabilityDef> {
+    let live = BUILTIN_CAPABILITY_META
+        .iter()
+        .filter_map(|(id, ty, desc)| capability_def(id, *ty, (*desc).to_string(), false));
+    let deprecated = DEPRECATED_CAPABILITIES
+        .iter()
+        .filter_map(|(id, ty, desc, repl)| {
+            let note = if repl.is_empty() {
+                "（已废弃：无替代，功能未实现）".to_string()
+            } else {
+                format!("（已废弃：替代能力 {repl}）")
+            };
+            capability_def(id, *ty, format!("{desc}{note}"), true)
+        });
+    live.chain(deprecated).collect()
 }
 
 // ──── Tests ────
@@ -990,6 +950,177 @@ fn builtin_capabilities() -> Vec<CapabilityDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ──── 执行面 ↔ 发现面（机检的 Rust 侧）────
+
+    /// proto 事实源里的全部方法（`/package.Service/Method`）。
+    ///
+    /// 输入是编译期 FileDescriptorSet，不是另一份手写清单：新增 RPC 会自动出现在这里。
+    fn proto_methods() -> Vec<String> {
+        let set = prost_types::FileDescriptorSet::decode(coord_proto::FILE_DESCRIPTOR_SET)
+            .expect("compiled FileDescriptorSet must decode");
+        let mut out = Vec::new();
+        for file in &set.file {
+            let package = file.package.clone().unwrap_or_default();
+            for service in &file.service {
+                for method in &service.method {
+                    out.push(format!(
+                        "/{package}.{}/{}",
+                        service.name.clone().unwrap_or_default(),
+                        method.name.clone().unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// 执行面：`rpc_capability` 对 proto 全部方法返回的能力 ID 集合。
+    fn execution_face() -> std::collections::BTreeSet<String> {
+        proto_methods()
+            .into_iter()
+            .filter_map(|m| coord_core::grpc_auth::rpc_capability(&m).map(str::to_string))
+            .collect()
+    }
+
+    /// 不需要能力的方法：认证前置端点（interceptor 白名单 + 角色同步端点）与 raft 内部 RPC。
+    ///
+    /// raft RPC 走 raft 端口，不经过 agent 面鉴权层；其余端点由服务内自证。
+    /// 本清单是**收口常量**：豁免范围的变化必须显式改这里。
+    const CAPABILITY_FREE_METHODS: &[&str] = &[
+        "/coord.auth.Auth/Authenticate",
+        "/coord.auth.Auth/RefreshToken",
+        "/coord.auth.Auth/Bootstrap",
+        "/coord.auth.Auth/GetRevocationDelta",
+        "/coord.raft.Raft/AppendEntries",
+        "/coord.raft.Raft/InstallSnapshot",
+        "/coord.raft.Raft/InstallSnapshotStreaming",
+        "/coord.raft.Raft/SubmitPdOp",
+        "/coord.raft.Raft/TransferLeader",
+        "/coord.raft.Raft/Vote",
+    ];
+
+    fn is_capability_free(method: &str) -> bool {
+        crate::auth::interceptor::is_whitelisted(method)
+            || method == "/coord.auth.Auth/GetRevocationDelta"
+            || method.starts_with("/coord.raft.Raft/")
+    }
+
+    /// 每个 proto 方法都必须要么有执行面映射，要么在豁免清单里。
+    #[test]
+    fn every_proto_method_is_mapped_or_capability_free() {
+        let mut unmapped = Vec::new();
+        let mut exempt = std::collections::BTreeSet::new();
+        for method in proto_methods() {
+            if coord_core::grpc_auth::rpc_capability(&method).is_some() {
+                continue;
+            }
+            if is_capability_free(&method) {
+                exempt.insert(method);
+            } else {
+                unmapped.push(method);
+            }
+        }
+        assert!(
+            unmapped.is_empty(),
+            "RPC 未登记能力映射（新增 RPC 必须先在 rpc_capability 登记，或显式加入豁免清单）: {unmapped:?}"
+        );
+        let expected: std::collections::BTreeSet<String> = CAPABILITY_FREE_METHODS
+            .iter()
+            .map(|m| (*m).to_string())
+            .collect();
+        assert_eq!(
+            exempt, expected,
+            "能力豁免集合漂移：白名单/raft 内部 RPC 的增删必须同步 CAPABILITY_FREE_METHODS"
+        );
+    }
+
+    /// registry 的 live 集合与执行面**双向恒等**。
+    #[test]
+    fn registry_live_set_equals_execution_face() {
+        let executed = execution_face();
+        let live: std::collections::BTreeSet<String> = builtin_capabilities()
+            .into_iter()
+            .filter(|cap| !cap.deprecated)
+            .map(|cap| cap.id)
+            .collect();
+        let missing: Vec<&String> = executed.difference(&live).collect();
+        let extra: Vec<&String> = live.difference(&executed).collect();
+        assert!(
+            missing.is_empty(),
+            "执行面有、registry 未登记（live）: {missing:?}"
+        );
+        assert!(
+            extra.is_empty(),
+            "registry 有、执行面不执行且未标 deprecated: {extra:?}"
+        );
+    }
+
+    /// 废弃条目必须写明替代项（或明确「无替代」），替代项本身必须是 live 能力；
+    /// 标了废弃却仍在执行面 = 语义自相矛盾，必须红。
+    #[test]
+    fn deprecated_entries_name_a_live_replacement_or_reason() {
+        let executed = execution_face();
+        let deprecated: Vec<CapabilityDef> = builtin_capabilities()
+            .into_iter()
+            .filter(|cap| cap.deprecated)
+            .collect();
+        assert!(
+            !deprecated.is_empty(),
+            "废弃目录不得为空（空集合会让本测试假绿）"
+        );
+        for cap in deprecated {
+            let replacement = deprecated_replacement(&cap.id)
+                .expect("deprecated capability must come from DEPRECATED_CAPABILITIES");
+            assert!(
+                !is_live_builtin(&cap.id),
+                "{} 同时出现在 live 与 deprecated 目录",
+                cap.id
+            );
+            assert!(
+                !executed.contains(&cap.id),
+                "{} 已标废弃但仍在执行面（rpc_capability 仍返回它）",
+                cap.id
+            );
+            if replacement.is_empty() {
+                assert!(
+                    cap.description.contains("无替代"),
+                    "{} 没有替代项，描述必须写明「无替代」及原因",
+                    cap.id
+                );
+            } else {
+                assert!(
+                    cap.description.contains(replacement),
+                    "{} 的描述必须点名替代能力 {replacement}",
+                    cap.id
+                );
+                assert!(
+                    is_live_builtin(replacement),
+                    "{} 的替代项 {replacement} 不是 live 能力",
+                    cap.id
+                );
+            }
+        }
+    }
+
+    /// 内建目录的 ID 必须是 `domain:service:action` 三段非空，且与拆解字段一致。
+    #[test]
+    fn builtin_ids_are_domain_service_action() {
+        for cap in builtin_capabilities() {
+            let parts: Vec<&str> = cap.id.split(':').collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "{} 不是 domain:service:action 三段式",
+                cap.id
+            );
+            assert_eq!(parts[0], cap.domain, "{} 的 domain 与 ID 不一致", cap.id);
+            assert_eq!(parts[1], cap.service, "{} 的 service 与 ID 不一致", cap.id);
+            assert_eq!(parts[2], cap.action, "{} 的 action 与 ID 不一致", cap.id);
+            assert!(parts.iter().all(|p| !p.is_empty()), "{} 含空段", cap.id);
+        }
+    }
 
     // ──── Capability Registry CRUD ────
 
@@ -1110,8 +1241,9 @@ mod tests {
         registry.bootstrap_builtin();
         assert_eq!(
             registry.count(),
-            81,
-            "should have all 81 built-in capabilities (17 data + 37 coord + 27 admin)"
+            120,
+            "should have all 120 built-in capabilities (89 live: data 10 / coord 49 / pki 4 / admin 26; \
+             31 deprecated: data 7 / coord 23 / admin 1)"
         );
     }
 
@@ -1208,19 +1340,19 @@ mod tests {
         let registry = CapabilityRegistry::new();
         registry.bootstrap_builtin();
         let all_caps = registry.list();
-        assert_eq!(all_caps.len(), 81);
+        assert_eq!(all_caps.len(), 120);
 
-        // Encrypt all 81 capabilities
+        // Encrypt all 120 capabilities
         let encrypted_all = store
             .encrypt_all(&all_caps)
             .expect("encrypt all should succeed");
-        assert_eq!(encrypted_all.len(), 81);
+        assert_eq!(encrypted_all.len(), 120);
 
         // Decrypt all
         let decrypted_all = store
             .decrypt_all(&encrypted_all)
             .expect("decrypt all should succeed");
-        assert_eq!(decrypted_all.len(), 81);
+        assert_eq!(decrypted_all.len(), 120);
 
         // Verify round-trip for each
         for (orig, dec) in all_caps.iter().zip(decrypted_all.iter()) {
