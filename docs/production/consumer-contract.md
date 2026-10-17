@@ -131,7 +131,8 @@
 
 | RPC（组） | 能力 |
 |:--|:--|
-| `MQ/CreateTopic` / `PollDlq` / `MoveToDlq` / `DeleteTopic` | `coord:mq:manage` |
+| `MQ/CreateTopic` / `DeleteTopic` | `coord:mq:manage` |
+| `MQ/MoveToDlq` / `PollDlq` | `coord:mq:dlq` |
 | `MQ/Publish` | `coord:mq:publish` |
 | `MQ/Subscribe` | `coord:mq:subscribe` |
 | `MQ/Poll` / `Ack` / `GetTopicLeader` | `coord:mq:consume` |
@@ -161,6 +162,9 @@
 
 - 显式管理路径 `MoveToDlq`（净额记账、分区不被阻塞）；`reason` / `detail`
   随消息存入，`PollDlq` 可读（`MqMessage.dlqReason/dlqDetail`）。
+- **最小权限**：毒消息处置只需 `coord:mq:consume + coord:mq:dlq`；
+  `coord:mq:manage` 只覆盖 topic 生命周期（`CreateTopic` / `DeleteTopic`），
+  不得为处置毒消息而授予。
 - **无自动投毒判定**（按重试次数/策略的自动判定不在承诺内）——移入决定属于
   消费者。
 - 毒消息处置范式：`Poll` → 处理失败 N 次 → `MoveToDlq`（带 reason）→ `Ack`

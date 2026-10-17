@@ -153,7 +153,7 @@ public interface MqClient {
 
     /**
      * Explicitly move a message into the dead-letter queue (management path;
-     * capability {@code coord:mq:manage}, G-MQ-2).
+     * capability {@code coord:mq:dlq}, G-MQ-2).
      * <p>
      * The message is removed from the main log and appended to the DLQ within one
      * transaction (net accounting — the partition is not blocked). {@code reason} and

@@ -175,7 +175,9 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
 
         // MQ —— 消息队列（COMMITTED）
         "/coord.mq.v1.MQ/CreateTopic" => Some("coord:mq:manage"),
-        "/coord.mq.v1.MQ/PollDlq" => Some("coord:mq:manage"),
+        // DLQ 处置与 topic 生命周期分权：消费者只需 `coord:mq:dlq` 处理毒消息，
+        // 不得因此获得删除任意 topic 的管理能力（最小权限）。
+        "/coord.mq.v1.MQ/PollDlq" => Some("coord:mq:dlq"),
         "/coord.mq.v1.MQ/Publish" => Some("coord:mq:publish"),
         "/coord.mq.v1.MQ/Subscribe" => Some("coord:mq:subscribe"),
         "/coord.mq.v1.MQ/Ack" => Some("coord:mq:consume"),
@@ -183,7 +185,7 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         // Leader/ISR 拓扑查询：消费者路由所需（读面，与消费同能力）
         "/coord.mq.v1.MQ/GetTopicLeader" => Some("coord:mq:consume"),
         // 显式移入 DLQ / 删除 topic：管理路径（G-MQ-2 / G-MQ-4）
-        "/coord.mq.v1.MQ/MoveToDlq" => Some("coord:mq:manage"),
+        "/coord.mq.v1.MQ/MoveToDlq" => Some("coord:mq:dlq"),
         "/coord.mq.v1.MQ/DeleteTopic" => Some("coord:mq:manage"),
 
         // Replica —— 副本（内部面，但经 agent 暴露）
@@ -730,6 +732,37 @@ mod tests {
             rpc_capability("/coord.maintenance.Maintenance/Join"),
             Some("admin:maintenance:member_add")
         );
+    }
+
+    #[test]
+    fn mq_dlq_ops_are_split_from_topic_lifecycle() {
+        // DLQ 处置（消费者处理毒消息）与 topic 生命周期（破坏性运维）必须分权：
+        // 只持有 `coord:mq:consume + coord:mq:dlq` 的消费者能处理毒消息，
+        // 但不得因此获得删除任意 topic 的能力。
+        assert_eq!(
+            rpc_capability("/coord.mq.v1.MQ/MoveToDlq"),
+            Some("coord:mq:dlq")
+        );
+        assert_eq!(
+            rpc_capability("/coord.mq.v1.MQ/PollDlq"),
+            Some("coord:mq:dlq")
+        );
+        assert_eq!(
+            rpc_capability("/coord.mq.v1.MQ/DeleteTopic"),
+            Some("coord:mq:manage")
+        );
+        assert_eq!(
+            rpc_capability("/coord.mq.v1.MQ/CreateTopic"),
+            Some("coord:mq:manage")
+        );
+        // 消费面不受拆分影响。
+        for rpc in [
+            "/coord.mq.v1.MQ/Poll",
+            "/coord.mq.v1.MQ/Ack",
+            "/coord.mq.v1.MQ/GetTopicLeader",
+        ] {
+            assert_eq!(rpc_capability(rpc), Some("coord:mq:consume"), "{rpc}");
+        }
     }
 
     #[test]

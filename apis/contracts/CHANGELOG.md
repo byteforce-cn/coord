@@ -1,3 +1,33 @@
+## [contracts/v1.7.1] — 2026-10-17（Patch：MQ 能力粒度拆分——DLQ 处置与 topic 生命周期分权）
+
+**发布口径**：本条目为 **Patch**（wire 不变：无字段/RPC 变更；变的是
+`coord-core/src/grpc_auth.rs::rpc_capability` 的**授权语义**）。`buf breaking` 基线仍为
+`contracts/v1.6.1`，CI 强制。
+
+**授权语义变更（wire 不变）**
+
+| RPC | 旧能力 | 新能力 |
+|:--|:--|:--|
+| `MQ/MoveToDlq` / `MQ/PollDlq` | `coord:mq:manage` | `coord:mq:dlq` |
+| `MQ/CreateTopic` / `MQ/DeleteTopic` | `coord:mq:manage` | 不变 |
+
+- 动机：DLQ 处置是消费者的日常动作，而 `DeleteTopic` 是破坏性运维——两者同属
+  `coord:mq:manage` 时，最小权限的消费者必须同时持有「删除任意 topic」的能力。
+- 迁移：只持有 `coord:mq:manage` 的角色若需继续 `MoveToDlq` / `PollDlq`，须补授
+  `coord:mq:dlq`（`RoleGrantCapability`）；不需要 DLQ 的消费方无需动作。
+- 能力名的唯一来源仍是 `coord-core/src/grpc_auth.rs::rpc_capability`；消费方视图见
+  `docs/production/consumer-contract.md` §5。
+
+**影响范围**：把 `coord:mq:manage` 当作 DLQ 凭证的 MQ 消费方角色。
+
+**回滚预案**：回滚本分支 / 镜像即恢复旧映射；无 wire / 落盘迁移。
+
+**校验（本地已跑）**
+
+- `cargo test -p coord-core --lib grpc_auth::tests`（含新增 `mq_dlq_ops_are_split_from_topic_lifecycle`）；
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --lib --bins -- -D warnings`；
+- `scripts/check-panics.sh`、`scripts/check-doc-refs.sh`。
+
 ## [contracts/v1.7.0] — 2026-10-17（Minor：审批面消费闭环，ADR-0014）
 
 **发布口径**：本条目为 **Minor**（新增请求字段 + 新消息；不改动任何既有字段编号/类型；
