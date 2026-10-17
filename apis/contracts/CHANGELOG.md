@@ -1,3 +1,35 @@
+## [contracts/v1.7.0] — 2026-10-17（Minor：审批面消费闭环，ADR-0014）
+
+**发布口径**：本条目为 **Minor**（新增请求字段 + 新消息；不改动任何既有字段编号/类型；
+`buf breaking` 基线 = `contracts/v1.6.1`，CI 强制）。
+
+**新增字段（wire 兼容）**
+
+- 10 个审批命令请求新增 `string on_behalf_of`（Approve/Reject/Acknowledge 为 5/5/4，
+  AddSign 为 8，RemoveSign/ReturnToNode/Transfer/Delegate 为 6，Withdraw/Terminate 为 4）：
+  服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行。
+- `WorkflowListPendingTasksRequest` 新增 `string assignee = 3`：按席位责任人查询；
+  空 = 调用方自身。服务代查须在 agent 配置 `services.workflow_on_behalf_services` 内。
+- `ApprovalTask` 新增 `repeated ApprovalVote votes = 9`；
+  `WorkflowGetInstanceDetailResponse` 新增 `repeated ApprovalAudit audit = 9`。
+- 新消息 `ApprovalVote`（`actor` / `on_behalf_of` / `acting_service` / `comment` / `at_ms`）
+  与 `ApprovalAudit`（`at_ms` / `action` / `branch_id` / `by` / `detail` / `acting_service`）。
+
+**语义声明变更（wire 不变）**
+
+- `approve` 节点四类席位来源的单个条目支持 `${ ... }` 运行时表达式（`$input`/`$context`）；
+  空结果 / 非字符串元素 / 空主体 fail-closed。
+- 服务代操作授权两层：调用方服务白名单 + 被代表用户的席位归属；审计同时保留
+  `actor`/`by`（被代表用户）与 `acting_service`（执行服务）。
+- `coord dev` 一体化拓扑默认开启 `workflow_durable`（生产默认仍关闭，ADR-0001）。
+
+**影响范围**：新增字段均为 additive；未填新字段的既有调用方行为不变。
+`coord-java-sdk 0.3.5` 提供 `*OnBehalfOf` 与 `listPendingTasksFor` 重载。
+
+**验证（本地已跑）**：`cargo fmt --all -- --check`、`cargo clippy --workspace --lib --bins
+-- -D warnings`、审批定向测试、`coord/tests/dev_mode_services_test.rs` 一体化 e2e、
+`apis/contracts/scripts/` 三脚本、Java SDK `mvn test`。
+
 # 契约变更记录（CHANGELOG）
 
 版本规则见 WHITEPAPER.md。契约版本独立于代码版本。

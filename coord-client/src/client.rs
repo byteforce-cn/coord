@@ -1467,6 +1467,7 @@ fn approve_request(
         task_id: task_id.to_string(),
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1481,6 +1482,7 @@ fn reject_request(
         task_id: task_id.to_string(),
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1493,6 +1495,7 @@ fn acknowledge_request(
         workflow_id: workflow_id.to_string(),
         task_id: task_id.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1513,6 +1516,7 @@ fn add_sign_request(
         readers: readers.to_vec(),
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1529,6 +1533,7 @@ fn remove_sign_request(
         task_ids: task_ids.to_vec(),
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1545,6 +1550,7 @@ fn return_to_node_request(
         target_node: target_node.to_string(),
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1561,6 +1567,7 @@ fn transfer_request(
         to: to.to_string(),
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1577,6 +1584,7 @@ fn delegate_request(
         to: to.to_string(),
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1589,6 +1597,7 @@ fn withdraw_request(
         workflow_id: workflow_id.to_string(),
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1601,6 +1610,7 @@ fn terminate_request(
         workflow_id: workflow_id.to_string(),
         reason: reason.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
+        on_behalf_of: String::new(),
     }
 }
 
@@ -1608,6 +1618,7 @@ fn list_pending_tasks_request(page_size: i32, page_token: &str) -> WorkflowListP
     WorkflowListPendingTasksRequest {
         page_size,
         page_token: page_token.to_string(),
+        assignee: String::new(),
     }
 }
 

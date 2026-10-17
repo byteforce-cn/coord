@@ -18,11 +18,20 @@ public final class ApprovalInstanceDetail {
     private final List<ApprovalBranch> branches;
     private final List<ApprovalTask> tasks;
     private final List<ApprovalRound> rounds;
+    private final List<ApprovalAudit> audit;
 
     public ApprovalInstanceDetail(String instanceId, String status, String initiator,
                                   long revision, String definitionName,
                                   List<ApprovalBranch> branches, List<ApprovalTask> tasks,
                                   List<ApprovalRound> rounds) {
+        this(instanceId, status, initiator, revision, definitionName, branches, tasks, rounds,
+                Collections.emptyList());
+    }
+
+    public ApprovalInstanceDetail(String instanceId, String status, String initiator,
+                                  long revision, String definitionName,
+                                  List<ApprovalBranch> branches, List<ApprovalTask> tasks,
+                                  List<ApprovalRound> rounds, List<ApprovalAudit> audit) {
         this.instanceId = instanceId;
         this.status = status;
         this.initiator = initiator;
@@ -34,6 +43,8 @@ public final class ApprovalInstanceDetail {
                 ? Collections.unmodifiableList(tasks) : Collections.emptyList();
         this.rounds = rounds != null
                 ? Collections.unmodifiableList(rounds) : Collections.emptyList();
+        this.audit = audit != null
+                ? Collections.unmodifiableList(audit) : Collections.emptyList();
     }
 
     public String instanceId() { return instanceId; }
@@ -48,6 +59,9 @@ public final class ApprovalInstanceDetail {
     public List<ApprovalTask> tasks() { return tasks; }
     public List<ApprovalRound> rounds() { return rounds; }
 
+    /** Management-action audit entries (including {@code actingService}). */
+    public List<ApprovalAudit> audit() { return audit; }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -59,13 +73,14 @@ public final class ApprovalInstanceDetail {
                 && Objects.equals(definitionName, that.definitionName)
                 && Objects.equals(branches, that.branches)
                 && Objects.equals(tasks, that.tasks)
-                && Objects.equals(rounds, that.rounds);
+                && Objects.equals(rounds, that.rounds)
+                && Objects.equals(audit, that.audit);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(instanceId, status, initiator, revision, definitionName,
-                branches, tasks, rounds);
+                branches, tasks, rounds, audit);
     }
 
     @Override
@@ -73,6 +88,7 @@ public final class ApprovalInstanceDetail {
         return "ApprovalInstanceDetail{instanceId='" + instanceId + "', status='" + status
                 + "', initiator='" + initiator + "', revision=" + revision
                 + ", definitionName='" + definitionName + "', branches=" + branches.size()
-                + ", tasks=" + tasks.size() + ", rounds=" + rounds.size() + "}";
+                + ", tasks=" + tasks.size() + ", rounds=" + rounds.size()
+                + ", audit=" + audit.size() + "}";
     }
 }

@@ -2437,6 +2437,8 @@ pub mod phase4 {
         /// `None` ⇒ 审批命令 / 查询 fail-closed（`FailedPrecondition`），绝不退化为
         /// 内存审批：无桥就无审批实例，静默成功会比报错更坏。
         approval: Option<Arc<ApprovalBridge>>,
+        /// 允许代终端用户操作 / 查询的服务主体白名单（`workflow_on_behalf_services`）。
+        on_behalf_services: Vec<String>,
     }
 
     /// durable 装配的实例驱动租约 TTL（秒）。
@@ -2465,6 +2467,9 @@ pub mod phase4 {
         /// 来自 `ServicesConfig::workflow_approval_roles`；空映射时使用 `roles` 的节点
         /// 在开启时 fail-closed（未映射角色不得静默当空席位）。
         pub approval_roles: HashMap<String, Vec<String>>,
+        /// 允许代终端用户操作 / 查询的服务主体白名单
+        /// （`ServicesConfig::workflow_on_behalf_services`）。
+        pub on_behalf_services: Vec<String>,
     }
 
     /// 待办审批席位（`ListPendingTasks` 查询投影；`kind`/`status` 为模型 JSON 口径）。
@@ -2496,6 +2501,8 @@ pub mod phase4 {
         pub branches: Vec<ApprovalBranch>,
         pub tasks: Vec<ApprovalTask>,
         pub rounds: Vec<ApprovalRound>,
+        /// 管理动作审计（加签 / 减签 / 驳回 / 撤回 / 终止，含 acting_service）。
+        pub audit: Vec<coord_core::workflow::approval::model::AuditEntry>,
     }
 
     /// 审批实体枚举的 JSON 标签（serde snake_case，与模型持久化口径一致）。
@@ -2685,6 +2692,7 @@ pub mod phase4 {
             // topic 创建推迟到 `start()`（届时 MQ 已就绪）；此处只留句柄。
             svc.durable_mq = Some(opts.mq);
             svc.durable_topic = opts.topic;
+            svc.on_behalf_services = opts.on_behalf_services;
             svc
         }
 
@@ -2818,6 +2826,7 @@ pub mod phase4 {
                 durable_mq: None,
                 durable_topic: String::new(),
                 approval,
+                on_behalf_services: Vec::new(),
             }
         }
 
@@ -2864,7 +2873,15 @@ pub mod phase4 {
                 durable_mq: None,
                 durable_topic: String::new(),
                 approval,
+                on_behalf_services: Vec::new(),
             }
+        }
+
+        /// 测试辅助：注入代终端用户服务白名单。
+        #[cfg(test)]
+        pub(crate) fn with_on_behalf_services(mut self, services: Vec<String>) -> Self {
+            self.on_behalf_services = services;
+            self
         }
 
         fn runtime(&self) -> Result<&Arc<EngineRuntime>, WorkflowEngineError> {
@@ -3145,6 +3162,23 @@ pub mod phase4 {
             })
         }
 
+        /// 代终端用户操作/查询的授权判定（handler 层先于任何副作用调用）。
+        ///
+        /// `represented == caller` 是直接操作，恒允许；否则调用方必须在
+        /// `services.workflow_on_behalf_services` 白名单内（空名单 = 全部拒绝）。
+        /// 指名 `system` 的保留主体不在此面开放。
+        pub fn on_behalf_allowed(&self, caller: &str, represented: &str) -> bool {
+            if represented == caller {
+                return true;
+            }
+            caller != "anonymous"
+                && caller != coord_core::workflow::approval::bridge::SYSTEM_ACTOR
+                && self
+                    .on_behalf_services
+                    .iter()
+                    .any(|service| service == caller)
+        }
+
         /// 执行审批命令并按其节点结论驱动工作流。
         ///
         /// `Duplicate`（幂等键命中）原样返回首次响应，不重复驱动；`Applied` 时按分支
@@ -3160,6 +3194,23 @@ pub mod phase4 {
             cmd: ApprovalCommand<'_>,
             idempotency_key: Option<&str>,
         ) -> Result<(String, String), BridgeError> {
+            self.approval_command_with(workflow_id, actor, None, cmd, idempotency_key)
+                .await
+        }
+
+        /// 审批命令的完整形式：`acting_service` 非空时记录「服务代终端用户」归因。
+        ///
+        /// 授权白名单由 gRPC handler 在调用本方法前判定；本方法只保证引擎按被代表
+        /// 用户做席位归属，并把执行服务写进投票/审计记录。
+        #[allow(clippy::too_many_arguments)]
+        pub async fn approval_command_with(
+            &self,
+            workflow_id: &str,
+            actor: &str,
+            acting_service: Option<&str>,
+            cmd: ApprovalCommand<'_>,
+            idempotency_key: Option<&str>,
+        ) -> Result<(String, String), BridgeError> {
             let bridge = self.approval_bridge()?;
             // `ReturnToNode` 的恢复目标须在命令被桥消费前取出：桥只重开**目标节点**的
             // 分支，工作流仍挂在**返回节点**上。若不把实例重新驱动到目标节点，目标分支
@@ -3171,10 +3222,19 @@ pub mod phase4 {
                 }
                 _ => None,
             };
-            match bridge
-                .command(workflow_id, actor, cmd, idempotency_key)
-                .await?
-            {
+            let outcome = match acting_service {
+                Some(service) => {
+                    bridge
+                        .command_on_behalf(workflow_id, actor, service, cmd, idempotency_key)
+                        .await?
+                }
+                None => {
+                    bridge
+                        .command(workflow_id, actor, cmd, idempotency_key)
+                        .await?
+                }
+            };
+            match outcome {
                 CommandOutcome::Duplicate(response) => approval_response_status(&response),
                 CommandOutcome::Applied {
                     response,
@@ -3335,6 +3395,7 @@ pub mod phase4 {
                 branches: engine.branches.values().cloned().collect(),
                 tasks: engine.tasks.values().cloned().collect(),
                 rounds: engine.rounds.values().cloned().collect(),
+                audit: engine.instance.audit.clone(),
             })
         }
 
@@ -3476,6 +3537,7 @@ pub mod phase4 {
                 durable_mq: self.durable_mq.clone(),
                 durable_topic: self.durable_topic.clone(),
                 approval: self.approval.clone(),
+                on_behalf_services: self.on_behalf_services.clone(),
             }
         }
     }

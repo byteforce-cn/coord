@@ -269,6 +269,7 @@ message WorkflowApproveRequest {
   string task_id = 2;
   string comment = 3;
   string idempotency_key = 4;
+  string on_behalf_of = 5; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowApproveResponse {
@@ -281,6 +282,7 @@ message WorkflowRejectRequest {
   string task_id = 2;
   string comment = 3;
   string idempotency_key = 4;
+  string on_behalf_of = 5; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowRejectResponse {
@@ -292,6 +294,7 @@ message WorkflowAcknowledgeRequest {
   string workflow_id = 1;
   string task_id = 2;
   string idempotency_key = 3;
+  string on_behalf_of = 4; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowAcknowledgeResponse {
@@ -307,6 +310,7 @@ message WorkflowAddSignRequest {
   repeated string readers = 5;
   string comment = 6;
   string idempotency_key = 7;
+  string on_behalf_of = 8; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowAddSignResponse {
@@ -320,6 +324,7 @@ message WorkflowRemoveSignRequest {
   repeated string task_ids = 3;
   string comment = 4;
   string idempotency_key = 5;
+  string on_behalf_of = 6; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowRemoveSignResponse {
@@ -333,6 +338,7 @@ message WorkflowReturnToNodeRequest {
   string target_node = 3;
   string comment = 4;
   string idempotency_key = 5;
+  string on_behalf_of = 6; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowReturnToNodeResponse {
@@ -346,6 +352,7 @@ message WorkflowTransferRequest {
   string to = 3;
   string comment = 4;
   string idempotency_key = 5;
+  string on_behalf_of = 6; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowTransferResponse {
@@ -359,6 +366,7 @@ message WorkflowDelegateRequest {
   string to = 3;
   string comment = 4;
   string idempotency_key = 5;
+  string on_behalf_of = 6; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowDelegateResponse {
@@ -370,6 +378,7 @@ message WorkflowWithdrawRequest {
   string workflow_id = 1;
   string comment = 2;
   string idempotency_key = 3;
+  string on_behalf_of = 4; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowWithdrawResponse {
@@ -381,6 +390,7 @@ message WorkflowTerminateRequest {
   string workflow_id = 1;
   string reason = 2;
   string idempotency_key = 3;
+  string on_behalf_of = 4; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
 }
 
 message WorkflowTerminateResponse {
@@ -392,6 +402,7 @@ message WorkflowTerminateResponse {
 message WorkflowListPendingTasksRequest {
   int32 page_size = 1;
   string page_token = 2;
+  string assignee = 3; // 按席位责任人查询；空 = 调用方自身。服务代查须在 on-behalf 白名单内
 }
 
 message WorkflowListPendingTasksResponse {
@@ -426,6 +437,7 @@ message WorkflowGetInstanceDetailResponse {
   repeated ApprovalBranch branches = 6;
   repeated ApprovalTask tasks = 7;
   repeated ApprovalRound rounds = 8;
+  repeated ApprovalAudit audit = 9; // 管理动作审计（含 acting_service）
 }
 
 message ApprovalBranch {
@@ -447,6 +459,29 @@ message ApprovalTask {
   string assignee = 6;
   repeated string candidates = 7;
   int64 deadline_ms = 8; // 超时阈值（Unix ms）；0 = 无超时
+  repeated ApprovalVote votes = 9; // 投票记录（含 actor / on_behalf_of / acting_service）
+}
+
+// 投票记录：`actor` 是被代表用户（直接操作时即调用方）；`acting_service` 是代其执行的
+// 服务主体（直接操作为空）；`on_behalf_of` 保留委派场景的「被代表人」语义。
+message ApprovalVote {
+  string round_id = 1;
+  string decision = 2;
+  string actor = 3;
+  string on_behalf_of = 4;
+  string comment = 5;
+  int64 at_ms = 6;
+  string acting_service = 7;
+}
+
+// 管理动作审计（加签 / 减签 / 驳回至节点 / 撤回 / 终止）。
+message ApprovalAudit {
+  int64 at_ms = 1;
+  string action = 2;
+  string branch_id = 3;
+  string by = 4;
+  string detail = 5;
+  string acting_service = 6;
 }
 
 message ApprovalRound {

@@ -232,6 +232,7 @@ async fn running_instance_is_redriven_after_restart() {
         relay_enabled: true,
         relay_interval_ms: 50,
         approval_roles: std::collections::HashMap::new(),
+        on_behalf_services: Vec::new(),
     };
 
     // 起一个引擎部署定义，并取回已部署定义（快照要按它构造）。
@@ -515,6 +516,7 @@ async fn stale_pin_running_instance_faults_on_restart_reconcile() {
         relay_enabled: true,
         relay_interval_ms: 50,
         approval_roles: std::collections::HashMap::new(),
+        on_behalf_services: Vec::new(),
     };
     let svc = WorkflowEngineService::new_with_kv_store_durable(
         Arc::clone(&inner),

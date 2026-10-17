@@ -817,6 +817,7 @@ async fn deploy(
             relay_enabled: true,
             relay_interval_ms: 100,
             approval_roles: std::collections::HashMap::new(),
+            on_behalf_services: Vec::new(),
         },
     );
     svc.start().await.expect("engine start");
@@ -957,6 +958,7 @@ async fn wait_instance_recovers_after_engine_restart() {
             relay_enabled: true,
             relay_interval_ms: 100,
             approval_roles: std::collections::HashMap::new(),
+            on_behalf_services: Vec::new(),
         },
     );
     svc2.start().await.expect("restart engine");
@@ -1022,6 +1024,7 @@ async fn durable_service_creates_events_topic_after_late_mq_start() {
             relay_enabled: true,
             relay_interval_ms: 100,
             approval_roles: std::collections::HashMap::new(),
+            on_behalf_services: Vec::new(),
         },
     );
     // 构造时 MQ 未起（`get_topic_config` 读表需 MQ 已 start，故此断言只能验证
@@ -1076,6 +1079,7 @@ async fn listen_instance_resubscribes_after_engine_restart() {
             relay_enabled: true,
             relay_interval_ms: 100,
             approval_roles: std::collections::HashMap::new(),
+            on_behalf_services: Vec::new(),
         },
     );
     svc2.start().await.expect("restart engine");
@@ -1126,6 +1130,7 @@ async fn outbox_events_pending_at_crash_are_delivered_after_restart() {
             relay_enabled: false,
             relay_interval_ms: 100,
             approval_roles: std::collections::HashMap::new(),
+            on_behalf_services: Vec::new(),
         },
     );
     svc.start().await.expect("start");
@@ -1187,6 +1192,7 @@ async fn outbox_events_pending_at_crash_are_delivered_after_restart() {
             relay_enabled: true,
             relay_interval_ms: 50,
             approval_roles: std::collections::HashMap::new(),
+            on_behalf_services: Vec::new(),
         },
     );
     svc2.start().await.expect("restart");

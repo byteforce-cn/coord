@@ -156,6 +156,15 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub workflow_approval_roles: std::collections::HashMap<String, Vec<String>>,
 
+    /// 允许「服务代终端用户」执行审批命令 / 按席位责任人查询待办的 CCT 主体白名单。
+    ///
+    /// 未经列出的服务只能操作自己名下的席位；列入后可在审批命令里填写
+    /// `on_behalf_of`（等价地，查询时填写 `assignee`）。被代表用户仍须是席位责任人/
+    /// 候选人/被委派人——服务身份放行不改变引擎的席位归属判定。缺省为空 = 不授权
+    /// 任何代操作（fail-closed）。
+    #[serde(default)]
+    pub workflow_on_behalf_services: Vec<String>,
+
     /// 权限策略引擎（OPA）
     #[serde(default)]
     pub policy: bool,
@@ -247,6 +256,7 @@ impl Default for ServiceConfig {
             workflow_durable: false,
             workflow_events_topic: default_workflow_events_topic(),
             workflow_approval_roles: std::collections::HashMap::new(),
+            workflow_on_behalf_services: Vec::new(),
             policy: false,
             scheduler: false,
             circuit_breaker: false,
@@ -289,11 +299,13 @@ impl ServiceConfig {
             cache: true,
             mq: true,
             workflow: true,
-            // durable 是 workflow 的持久化增强（非独立服务）：其端到端验收未闭合，
-            // dev 保持与生产默认相同的现有装配路径；开启须显式。
-            workflow_durable: false,
+            // dev 是单命令拉起 Server + Agent 的一体化拓扑：Server 连接（KV）与 MQ
+            // 都已具备，durable 前置条件成立。开启后 `approve` 审批面可直接消费
+            // （见 ADR-0014 D3）；生产默认仍关闭（ADR-0001）。
+            workflow_durable: true,
             workflow_events_topic: default_workflow_events_topic(),
             workflow_approval_roles: std::collections::HashMap::new(),
+            workflow_on_behalf_services: Vec::new(),
             policy: true,
             scheduler: true,
             circuit_breaker: true,
@@ -440,6 +452,10 @@ mod tests {
         assert_eq!(
             from_empty_toml.workflow_approval_roles,
             code_default.workflow_approval_roles
+        );
+        assert_eq!(
+            from_empty_toml.workflow_on_behalf_services,
+            code_default.workflow_on_behalf_services
         );
         assert_eq!(from_empty_toml.transit, code_default.transit);
         assert_eq!(from_empty_toml.pki, code_default.pki);
@@ -589,11 +605,11 @@ workflow_events_topic = "com.example.wf"
         assert!(dev.cache, "dev must enable cache");
         assert!(dev.mq, "dev must enable mq");
         assert!(dev.workflow, "dev must enable workflow");
-        // durable 是 workflow 的持久化增强而非独立服务：dev 保持现有装配路径
-        // （验收未闭合），开启须显式。
+        // dev 是 Server + Agent 一体化拓扑：KV/MQ 前置齐备，durable 审批面开箱可用
+        // （见 ADR-0014 D3）；生产默认仍是关闭的（ADR-0001）。
         assert!(
-            !dev.workflow_durable,
-            "dev must NOT enable workflow_durable: it is an opt-in persistence enhancement"
+            dev.workflow_durable,
+            "dev must enable workflow_durable: dev has the required server connection and mq"
         );
         assert_eq!(dev.workflow_events_topic, default_workflow_events_topic());
         assert!(dev.policy, "dev must enable policy");

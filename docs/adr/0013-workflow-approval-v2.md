@@ -114,6 +114,8 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
       allowSelfApprove: false   # 默认 false（发起人不可自批）
 ```
 
+- **增量（ADR-0014 D1）**：四个席位来源的单个条目可写 `${ ... }` 运行时表达式，
+  节点开启时按实例上下文（`$input`/`$context`）求值；空结果 fail-closed。
 - 席位来源 `approvers/pool/readers/roles` 全空 ⇒ `MissingRequiredField`；`mode` 非法形状
   （含 `quorum:0`、`ratio:0/<den>`、`ratio:<num>/0` 等零阈值——恒真会退化成「零审批自动通过」）
   在解析期 fail-closed；`deadline` 必须在解析期可换算为具体时刻，否则拒绝（不得把无期限当默认）。
@@ -192,6 +194,9 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 
 ### D7 审批契约与授权
 
+- **增量（ADR-0014 D2）**：命令请求可带 `on_behalf_of`、`ListPendingTasks` 可带
+  `assignee`；调用方服务须在 `services.workflow_on_behalf_services` 白名单内，
+  生效主体为被代表用户，`acting_service` 记执行服务（详见 ADR-0014）。
 - 契约面：`coord.workflow.v1` **增量新增 12 个 RPC**（WHITEPAPER §4.2 允许的 Minor）：
   命令 10 个——`Approve / Reject / Acknowledge / AddSign / RemoveSign / ReturnToNode /
   Transfer / Delegate / Withdraw / Terminate`；查询 2 个——`ListPendingTasks /

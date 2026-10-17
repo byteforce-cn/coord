@@ -102,6 +102,9 @@ pub struct AuditEntry {
     pub branch: Option<Id>,
     pub by: Principal,
     pub detail: String,
+    /// 代终端用户执行的管理动作的服务主体；直接操作为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_service: Option<Principal>,
 }
 
 /// 驳回至节点的记录：从 `from_node` 驳回到 `to_node`。
@@ -251,11 +254,15 @@ pub enum Decision {
 pub struct VoteRecord {
     pub round_id: Id,
     pub decision: Decision,
+    /// 被代表用户；直接投票时即调用方主体。
     pub actor: Principal,
     /// 委派场景下记录被代表人；直接投票为 None。
     pub on_behalf_of: Option<Principal>,
     pub comment: Option<String>,
     pub at: i64,
+    /// 代 `actor` 执行的服务主体；直接操作为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_service: Option<Principal>,
 }
 
 /// 席位（审批任务）。
@@ -510,6 +517,7 @@ mod tests {
                 branch: Some("inst-1:b0000".into()),
                 by: "u-initiator".into(),
                 detail: "root".into(),
+                acting_service: None,
             }],
             returns: vec![ReturnRecord {
                 from_node: "manager".into(),
@@ -567,6 +575,7 @@ mod tests {
                 on_behalf_of: Some("u-approver".into()),
                 comment: Some("信息不足".into()),
                 at: 180,
+                acting_service: None,
             }],
             scope: BTreeMap::from([("urgent".to_string(), json!(true))]),
             created_at: 130,

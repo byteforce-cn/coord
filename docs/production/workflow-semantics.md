@@ -175,6 +175,17 @@ auth:
 - **DSL**：定义里用原生 `approve` 节点声明席位与策略（camelCase 键：`approvers / pool / readers /
   roles / mode / veto / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
   非法 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed；语法逐字见 ADR-0013 D2。
+- **动态席位（ADR-0014 D1）**：四个席位来源的单个条目可写 `${ ... }` 表达式，在节点开启时
+  按实例上下文求值（`$input` / `$context` 同值；返回字符串或字符串数组）。空结果 / 非字符串
+  元素 / 空主体 fail-closed 并点名来源键；`roles` 的表达式结果再经 `ApproverResolver` 展开：
+
+  ```yaml
+  - hr_review:
+      approve:
+        approvers: ["${ $input.hrApprovers }"]   # 启动 input 提供审批人集合
+        readers: ["${ $context.auditor }"]
+        roles: ["${ $input.approverRole }"]
+  ```
 - **挂起 / 恢复**：走到 `approve` 节点 ⇒ 实例 `SUSPENDED`，`SuspensionMeta` 给出
   `reason="approval"`、`expected_signal="approval.completed"`、`approval_instance_id` 与节点名
   （审批实例 id = workflow 实例 id）。分支本轮通过 ⇒ 按节点 `onPass` 恢复（缺省顺序推进下一
@@ -185,6 +196,12 @@ auth:
   不可自批（`allowSelfApprove` 可开，匿名发起豁免）、加签/减签 = `signAdmins` ∪ 发起人、
   驳回至节点 = 未决席位持有人 ∪ `signAdmins` ∪ 发起人、终止 = `signAdmins`（内部
   `SYSTEM_ACTOR="system"` 恒可，用于运行时收口）。矩阵逐行见 ADR-0013 D7。
+- **服务代终端用户（ADR-0014 D2）**：业务服务可在 10 个命令请求里填 `on_behalf_of`、
+  在 `ListPendingTasks` 里填 `assignee`。调用方服务必须列在 agent 配置
+  `services.workflow_on_behalf_services`（缺省空 = 不授权）；生效主体是被代表用户，
+  席位归属判定不变。`VoteRecord.actor` / `AuditEntry.by` 记被代表用户，新增
+  `acting_service` 记执行服务（经 `GetInstanceDetail` 的 votes/audit 可见）。
+  保留主体 `system` 两侧都拒绝；未授权代操作在任何副作用前 `PERMISSION_DENIED`。
 - **幂等**：命令按 `idempotency_key` 去重，记录键
   `/_workflow/v4/idempotency/{instance}/{key}`，与状态、本批事件**同一次 CAS 提交**写入；
   命中即原样返回首次响应，不重复执行（重放/重启后仍成立）。
@@ -200,23 +217,35 @@ auth:
   `Open`，处置由人（`AddSign` 或 `Terminate`）决定。**混合轮次**（部分席位已批、部分过期）里
   过期席位从 `total` 剔除；剔除后剩余席位全部通过 ⇒ 本轮**判通过**（与「全员过期保持
   `Open`」区分）。重开（`ReturnToNode`）的席位不设 deadline。
-- **启用条件（`workflow_durable` 默认关闭）**：审批桥与审批聚合仅在 durable 工作流引擎装配时
-  注入。默认部署未开 `workflow_durable` 时审批 RPC 返回 `FAILED_PRECONDITION`（例外：保留
-  actor `system` 的 `Terminate` 先被授权拒绝为 `PERMISSION_DENIED`），且 `approve`
-  节点在驱动时 fail-closed（实例 `Failed` + `workflow.faulted`）——绝不静默降级为无审批继续。
+- **启用条件**：审批桥与审批聚合仅在 durable 工作流引擎装配时注入。`coord dev` 是
+  Server + Agent 一体化拓扑，ADR-0014 D3 起 `workflow_durable` 在 dev 预设中默认开启
+  （审批面开箱可用）；生产默认仍关闭。未开 `workflow_durable` 时审批 RPC 返回
+  `FAILED_PRECONDITION`（例外：保留 actor `system` 的 `Terminate` 先被授权拒绝为
+  `PERMISSION_DENIED`），且 `approve` 节点在驱动时 fail-closed（实例 `Failed` +
+  `workflow.faulted`）——绝不静默降级为无审批继续。生产启用示例：
+
+  ```toml
+  [services]
+  workflow = true
+  workflow_durable = true
+  mq = true
+  # 服务代终端用户白名单（CCT subject；空 = 不授权）
+  workflow_on_behalf_services = ["ims-approval"]
+  ```
 - **存储与写路径**：状态单文档 `/_workflow/v4/instances/{instance_id}`，与 v1 的
   `/_workflow/v3/instances/` 扫描面互不可见；唯一写路径带 CAS
   （`ExpectedRev::{CreateOnly, Exact(mod_rev)}`，无无守卫写入形态），状态与本批事件同一
   KV Txn 提交。布局与谓词见 ADR-0013 D3/D8。
-- **查询与分页**：`ListPendingTasks(actor)` 按实例 id 字典序跨实例扫描 + 分页
-  （`page_size` 0 ⇒ 默认 50；`page_token` = 上一页最后实例 id；硬上限 200）；
-  `GetInstanceDetail` 返回实例快照（branches / tasks / rounds + `revision`，`revision` 为
-  CAS 守卫值）。
+- **查询与分页**：`ListPendingTasks` 默认查调用方自己；服务代查时填 `assignee`（须在白名单内），
+  按实例 id 字典序跨实例扫描 + 分页（`page_size` 0 ⇒ 默认 50；`page_token` = 上一页最后实例
+  id；硬上限 200）；`GetInstanceDetail` 返回实例快照（branches / tasks(含 votes) / rounds /
+  audit + `revision`，`revision` 为 CAS 守卫值）。
 
 **已知未落地（当前口径）**：
 
 - 未实现 D8 的 watch 驱动按实例有界缓存：KV 实现按实例做线性一致单键读，无缓存/淘汰；
 - 无 UI 审批面、无 REST facade（`coord-ui` 仅影响评估）；
-- `roles` 仅支持启动/命令路径注入的静态映射 `ApproverResolver`，外部解析服务未接线；
+- `roles` 的角色名可来自运行时表达式，但角色→审批人仍是启动/命令路径注入的静态
+  `ApproverResolver`；外部解析服务未接线；
 - `ListPendingTasks` 为全 v4 前缀扫描（无按年龄/actor 的索引），规模上界见 `ops/boundaries.md`
   的 `B-WF-*`。

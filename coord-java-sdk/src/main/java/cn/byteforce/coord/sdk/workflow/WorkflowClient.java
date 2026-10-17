@@ -356,6 +356,62 @@ public interface WorkflowClient {
     String terminate(String workflowId, String reason, String idempotencyKey);
 
     /**
+     * Approve as a service acting on behalf of an end user (服务代终端用户).
+     *
+     * <p>The acting service must be listed in the agent's
+     * {@code services.workflow_on_behalf_services}; the represented user must still own
+     * the seat. The vote record keeps both identities ({@code actor} = end user,
+     * {@code acting_service} = caller).</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the decision twice
+     * @param onBehalfOf     the represented end user (null/empty = direct operation)
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication, authorization, or guard violation
+     */
+    String approveOnBehalfOf(String workflowId, String taskId, String comment,
+                             String idempotencyKey, String onBehalfOf);
+
+    /** Reject as a service acting on behalf of an end user (see {@link #approveOnBehalfOf}). */
+    String rejectOnBehalfOf(String workflowId, String taskId, String comment,
+                            String idempotencyKey, String onBehalfOf);
+
+    /** Acknowledge as a service acting on behalf of an end user. */
+    String acknowledgeOnBehalfOf(String workflowId, String taskId,
+                                 String idempotencyKey, String onBehalfOf);
+
+    /** Add seats as a service acting on behalf of an end user. */
+    String addSignOnBehalfOf(String workflowId, String branchId, List<String> approvers,
+                             List<String> pool, List<String> readers, String comment,
+                             String idempotencyKey, String onBehalfOf);
+
+    /** Remove seats as a service acting on behalf of an end user. */
+    String removeSignOnBehalfOf(String workflowId, String branchId, List<String> taskIds,
+                                String comment, String idempotencyKey, String onBehalfOf);
+
+    /** Return to a previous node as a service acting on behalf of an end user. */
+    String returnToNodeOnBehalfOf(String workflowId, String branchId, String targetNode,
+                                  String comment, String idempotencyKey, String onBehalfOf);
+
+    /** Transfer a seat as a service acting on behalf of the current assignee. */
+    String transferOnBehalfOf(String workflowId, String taskId, String to, String comment,
+                              String idempotencyKey, String onBehalfOf);
+
+    /** Delegate a seat as a service acting on behalf of the current assignee. */
+    String delegateOnBehalfOf(String workflowId, String taskId, String to, String comment,
+                              String idempotencyKey, String onBehalfOf);
+
+    /** Withdraw as a service acting on behalf of the initiator. */
+    String withdrawOnBehalfOf(String workflowId, String comment, String idempotencyKey,
+                              String onBehalfOf);
+
+    /** Terminate as a service acting on behalf of a sign admin. */
+    String terminateOnBehalfOf(String workflowId, String reason, String idempotencyKey,
+                               String onBehalfOf);
+
+    /**
      * List pending approval seats (待办) for the current principal.
      *
      * @param pageSize  max results per page (1-200; server caps at 200)
@@ -364,6 +420,21 @@ public interface WorkflowClient {
      * @throws CoordException on communication failure
      */
     List<PendingApprovalTask> listPendingTasks(int pageSize, String pageToken);
+
+    /**
+     * List pending approval seats for a specific assignee (服务代终端用户查询待办).
+     *
+     * <p>When {@code assignee} differs from the caller, the caller must be listed in
+     * {@code services.workflow_on_behalf_services}; otherwise the server returns
+     * {@code PERMISSION_DENIED}.</p>
+     *
+     * @param assignee  the end user whose pending seats are queried (null/empty = caller)
+     * @param pageSize  max results per page (1-200; server caps at 200)
+     * @param pageToken pagination token from previous response (empty for first page)
+     * @return list of pending approval seats
+     * @throws CoordException on communication or authorization failure
+     */
+    List<PendingApprovalTask> listPendingTasksFor(String assignee, int pageSize, String pageToken);
 
     /**
      * Get the full approval detail (branches / tasks / rounds) of an instance.

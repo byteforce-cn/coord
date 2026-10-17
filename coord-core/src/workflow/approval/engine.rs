@@ -53,6 +53,12 @@ pub struct Engine {
     node_attempts: BTreeMap<String, u32>,
     /// 已分配的子实体序号（持久化，重载后继续递增）。
     seq: u64,
+    /// 命令归因：代终端用户执行的服务主体（仅桥执行 on-behalf 命令期间设置）。
+    ///
+    /// 不持久化：它是单次命令的调用上下文，不是聚合状态；桥在提交前清空，
+    /// 直接调用引擎命令（测试/内部路径）时恒为 `None`。
+    #[serde(skip)]
+    acting_service: Option<Principal>,
 }
 
 impl Engine {
@@ -103,7 +109,15 @@ impl Engine {
             rounds: BTreeMap::new(),
             node_attempts: BTreeMap::new(),
             seq: 0,
+            acting_service: None,
         })
+    }
+
+    /// 设置后续命令的服务归因；由审批桥在 on-behalf 命令期间注入。
+    ///
+    /// 调用方必须在命令结束（成功或失败）后清空，避免归因泄漏到下一条命令。
+    pub(crate) fn set_acting_service(&mut self, service: Option<Principal>) {
+        self.acting_service = service;
     }
 
     // -------------------------------------------------------------- 流程
@@ -150,6 +164,7 @@ impl Engine {
             branch: Some(id.clone()),
             by: "engine".into(),
             detail: format!("node={node} attempt={attempt}"),
+            acting_service: self.acting_service.clone(),
         });
         self.touch(now);
         Ok((id, out))
@@ -260,6 +275,7 @@ impl Engine {
             branch: Some(branch.id.clone()),
             by: by.into(),
             detail: format!("seats={} comment={}", ids.len(), comment.unwrap_or("")),
+            acting_service: self.acting_service.clone(),
         });
         self.touch(now);
         Ok((ids, out))
@@ -354,6 +370,7 @@ impl Engine {
             branch: Some(branch.id.clone()),
             by: by.into(),
             detail: format!("seats={cancelled}"),
+            acting_service: self.acting_service.clone(),
         });
         self.touch(now);
         Ok(out)
@@ -686,6 +703,7 @@ impl Engine {
             branch: Some(branch.id.clone()),
             by: by.into(),
             detail: format!("{} -> {}", branch.node, target_node),
+            acting_service: self.acting_service.clone(),
         });
         let jump_count = self.instance.jump_count;
         self.emit(
@@ -729,6 +747,7 @@ impl Engine {
             branch: None,
             by: by.into(),
             detail: String::new(),
+            acting_service: self.acting_service.clone(),
         });
         self.emit(
             &mut out,
@@ -765,6 +784,7 @@ impl Engine {
             branch: None,
             by: by.into(),
             detail: reason.into(),
+            acting_service: self.acting_service.clone(),
         });
         self.emit(
             &mut out,
@@ -1114,6 +1134,7 @@ impl Engine {
             on_behalf_of,
             comment: comment.map(str::to_string),
             at: now,
+            acting_service: self.acting_service.clone(),
         });
         t.status = to;
         t.updated_at = now;
