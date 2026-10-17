@@ -220,9 +220,10 @@ jobs:
           git checkout -- "$target"
           echo "OK: consumer-doc labels gate correctly turned red on the injected label"
       - name: Assert the capability-registry gate turns red on an injected capability gap
-        # 能力门禁的负控制：从 live 目录里删掉一个**会被执行**的能力（`coord:mq:dlq`），
-        # 断言脚本必须红（registry live 集合 ≠ 执行面）。CI 是全新 checkout，
-        # 本地复现时用 `/tmp` 备份还原，不要用 `git checkout --`（会连同一并改动一起丢掉）。
+        # 能力门禁的负控制：把 live 目录里一个**会被执行**的能力改名（`coord:mq:dlq`），
+        # 断言脚本必须红（registry live 集合 ≠ 执行面）。锚点是能力名的字面量，
+        # 不随 rustfmt 换行漂移。CI 是全新 checkout；本地复现必须用 `/tmp` 备份还原，
+        # 不要用 `git checkout --`（会把同文件里未提交的改动一起丢掉）。
         run: |
           set -euo pipefail
           target=coord-server/src/auth/capability.rs
@@ -231,9 +232,10 @@ jobs:
           import pathlib, sys
           p = pathlib.Path(sys.argv[1])
           t = p.read_text(encoding="utf-8")
-          needle = '    ("coord:mq:dlq", CapabilityType::Write, "死信队列处置（MoveToDlq/PollDlq）"),\n'
-          assert t.count(needle) == 1, "self-check anchor missing: capability catalog changed, update this step"
-          p.write_text(t.replace(needle, "", 1), encoding="utf-8")
+          # 用**字面量替换**而不是行匹配：锚点不随 rustfmt 换行方式漂移。
+          needle = '"coord:mq:dlq"'
+          assert t.count(needle) == 1, "self-check anchor missing/ambiguous: capability catalog changed, update this step"
+          p.write_text(t.replace(needle, '"coord:mq:dlq_gap"', 1), encoding="utf-8")
           PY
           if bash scripts/check-capability-registry.sh >/dev/null 2>&1; then
             echo "::error::capability-registry gate DID NOT fail on an injected capability gap — the gate is not effective"
