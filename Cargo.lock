@@ -747,6 +747,7 @@ dependencies = [
  "parking_lot",
  "postcard",
  "prost",
+ "prost-types",
  "rand 0.8.6",
  "redb",
  "reqwest",

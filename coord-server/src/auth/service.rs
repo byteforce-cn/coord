@@ -987,6 +987,27 @@ impl AuthTrait for AuthService {
                 "capability_id must not be empty",
             ));
         }
+        // 发现面只列可执行能力：未知/已废弃的名字永远不会被 interceptor 判定，
+        // 授予它们只会换来运行期 403（排障时 registry 也帮不上忙）。fail-closed + 点名。
+        if let Some(replacement) =
+            crate::auth::capability::deprecated_replacement(&req.capability_id)
+        {
+            let hint = if replacement.is_empty() {
+                "no replacement (feature not implemented)".to_string()
+            } else {
+                format!("use '{replacement}'")
+            };
+            return Err(tonic::Status::invalid_argument(format!(
+                "capability '{}' is deprecated: {hint}",
+                req.capability_id
+            )));
+        }
+        if !crate::auth::capability::is_live_builtin(&req.capability_id) {
+            return Err(tonic::Status::invalid_argument(format!(
+                "unknown capability '{}': not in the built-in catalog (see `coord capability list`)",
+                req.capability_id
+            )));
+        }
 
         self.apply_auth_op(AuthOp::RoleGrantCapability {
             role: req.role.clone(),
@@ -1021,6 +1042,14 @@ impl AuthTrait for AuthService {
             return Err(tonic::Status::invalid_argument(
                 "capability_id must not be empty",
             ));
+        }
+        // 撤销不校验能力是否存在：校验上线前写入的拼写错误只能靠撤销清理。
+        if !crate::auth::capability::is_live_builtin(&req.capability_id) {
+            tracing::warn!(
+                capability_id = %req.capability_id,
+                role = %req.role,
+                "revoking a capability that is not in the live catalog (deprecated or unknown)"
+            );
         }
 
         self.apply_auth_op(AuthOp::RoleRevokeCapability {
@@ -2197,6 +2226,96 @@ mod cct_tests {
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].capability_id, "data:kv:write");
         assert_eq!(grants[0].scope, "/app/order/");
+    }
+
+    // ──── 授权输入校验（发现面只列可执行能力，授权必须拒绝永远不生效的名字）────
+
+    /// RPC 层授予被拒：`INVALID_ARGUMENT`、点名能力 ID、且不落库。
+    fn assert_grant_rejected(capability_id: &str, needles: &[&str]) {
+        let svc = build_service_with_cct();
+        svc.auth_manager.role_add("checked").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let status = rt.block_on(async {
+            svc.role_grant_capability(tonic::Request::new(RoleGrantCapabilityRequest {
+                role: "checked".into(),
+                capability_id: capability_id.into(),
+                scope: String::new(),
+            }))
+            .await
+            .expect_err("granting an unknown/deprecated capability must be rejected")
+        });
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        let msg = status.message();
+        for needle in needles {
+            assert!(
+                msg.contains(needle),
+                "message {msg:?} must mention {needle:?}"
+            );
+        }
+        assert!(
+            svc.auth_manager
+                .role_get_capability_grants("checked")
+                .unwrap()
+                .is_empty(),
+            "被拒的授权不得落库"
+        );
+    }
+
+    #[test]
+    fn role_grant_capability_rejects_unknown_id() {
+        assert_grant_rejected("coord:no:such", &["unknown capability", "coord:no:such"]);
+    }
+
+    #[test]
+    fn role_grant_capability_rejects_deprecated_id() {
+        // 已废弃名字永远不会被 interceptor 判定，授了就是静默失效：必须点名替代项。
+        assert_grant_rejected(
+            "data:mq:send",
+            &["deprecated", "data:mq:send", "coord:mq:publish"],
+        );
+    }
+
+    #[test]
+    fn role_grant_capability_accepts_live_id() {
+        let svc = build_service_with_cct();
+        svc.auth_manager.role_add("live-role").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            svc.role_grant_capability(tonic::Request::new(RoleGrantCapabilityRequest {
+                role: "live-role".into(),
+                capability_id: "coord:mq:dlq".into(),
+                scope: String::new(),
+            }))
+            .await
+            .expect("live capability must be grantable");
+        });
+    }
+
+    #[test]
+    fn role_revoke_capability_allows_unknown_stored_id() {
+        // 存量授权里可能有校验上线前写错的 ID；撤销必须放行，否则永远删不掉。
+        let svc = build_service_with_cct();
+        svc.auth_manager.role_add("legacy-role").unwrap();
+        svc.auth_manager
+            .role_grant_capability("legacy-role", "coord:legacy:typo", "")
+            .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            svc.role_revoke_capability(tonic::Request::new(RoleRevokeCapabilityRequest {
+                role: "legacy-role".into(),
+                capability_id: "coord:legacy:typo".into(),
+                scope: String::new(),
+            }))
+            .await
+            .expect("revoking a stored legacy grant must be allowed");
+        });
+        assert!(
+            svc.auth_manager
+                .role_get_capability_grants("legacy-role")
+                .unwrap()
+                .is_empty(),
+            "撤销后不应残留授权"
+        );
     }
 
     #[test]

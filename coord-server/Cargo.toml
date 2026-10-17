@@ -69,3 +69,5 @@ rust-embed = { workspace = true }
 openraft-multi = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
+# 能力注册表门禁要解码编译期 FileDescriptorSet（proto 方法全集是机检输入）。
+prost-types = "0.14.4"

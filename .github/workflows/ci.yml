@@ -68,6 +68,11 @@ jobs:
         # 消费方文档（consumer-contract.md / SDK README）不得残留 EXPERIMENTAL
         # 标注——STATUS.md 已把相应能力提升为 COMMITTED；再漂一次必须机器可见。
         run: bash scripts/check-consumer-doc-labels.sh
+      - name: Capability registry gate (registry live set == execution face)
+        # 判据：从 proto 描述符集枚举全部方法 → rpc_capability 分类 → 与 registry 的
+        # live 集合**双向**比对；废弃条目必须点名 live 替代项。脚本额外断言 4 条期望
+        # 测试真的以 ok 出现（测试被改名/过滤/删除 = 未跑 ≠ 通过）。
+        run: bash scripts/check-capability-registry.sh
 
   # **检查自检**——唯一能区分「检查存在」与「检查生效」的机制。
   #
@@ -130,7 +135,8 @@ jobs:
       # 负控制从 2 道门扩到 6 道：**解析型校验"看起来在跑" ≠ "真的会红"**。
       # 下面每一道都注入一个**最小**违规并断言该校验必须变红；每步结束还原文件
       # （CI 是全新 checkout，但还原能让"红/绿"只由本步的注入解释）。
-      # 覆盖：fmt、panic 路径、wire-sync、wire-descriptor、sdk-sync、告警↔runbook、doc-refs。
+      # 覆盖：fmt、panic 路径、wire-sync、wire-descriptor、sdk-sync、告警↔runbook、doc-refs、
+      # 文档标签、capability registry。
       - name: Assert the wire-descriptor gate turns red on an injected wire drift
         run: |
           set -euo pipefail
@@ -213,6 +219,30 @@ jobs:
           fi
           git checkout -- "$target"
           echo "OK: consumer-doc labels gate correctly turned red on the injected label"
+      - name: Assert the capability-registry gate turns red on an injected capability gap
+        # 能力门禁的负控制：把 live 目录里一个**会被执行**的能力改名（`coord:mq:dlq`），
+        # 断言脚本必须红（registry live 集合 ≠ 执行面）。锚点是能力名的字面量，
+        # 不随 rustfmt 换行漂移。CI 是全新 checkout；本地复现必须用 `/tmp` 备份还原，
+        # 不要用 `git checkout --`（会把同文件里未提交的改动一起丢掉）。
+        run: |
+          set -euo pipefail
+          target=coord-server/src/auth/capability.rs
+          bash scripts/check-capability-registry.sh
+          python3 - "$target" <<'PY'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          t = p.read_text(encoding="utf-8")
+          # 用**字面量替换**而不是行匹配：锚点不随 rustfmt 换行方式漂移。
+          needle = '"coord:mq:dlq"'
+          assert t.count(needle) == 1, "self-check anchor missing/ambiguous: capability catalog changed, update this step"
+          p.write_text(t.replace(needle, '"coord:mq:dlq_gap"', 1), encoding="utf-8")
+          PY
+          if bash scripts/check-capability-registry.sh >/dev/null 2>&1; then
+            echo "::error::capability-registry gate DID NOT fail on an injected capability gap — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: capability-registry gate correctly turned red on the injected gap"
   frontend-lint:
     name: frontend lint (coord-ui)
     runs-on: ubuntu-latest
