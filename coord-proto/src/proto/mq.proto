@@ -107,7 +107,7 @@ service MQ {
   // `replication_enabled=false`、`leader_agent` 为空 = 调用方视本 agent 为 Leader）。
   rpc GetTopicLeader(MqGetTopicLeaderRequest) returns (MqGetTopicLeaderResponse);
 
-  // 显式移入死信队列（管理路径，能力门禁 `coord:mq:manage`）。
+  // 显式移入死信队列（管理路径，能力门禁 `coord:mq:dlq`）。
   //
   // 语义：把 (topic, partition, offset) 的消息从主日志移入 DLQ（净额记账、
   // 分区不被阻塞），reason / detail 原样可读（`PollDlq` 可见）；消息或 topic
