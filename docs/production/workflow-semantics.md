@@ -1,6 +1,6 @@
 # 工作流语义（补偿 / 重试 / 信号 / 保留）
 
-> Owner: maintainers ｜ Last verified: 2026-10-15
+> Owner: maintainers ｜ Last verified: 2026-10-16
 
 面向接入方的语义单一归属页（G-WF-1）。事实源：`coord.workflow.v1` 的 proto 声明
 （wire 字段）、`coord-core/src/workflow/`（sw 编译器 + runtime）与
@@ -66,6 +66,21 @@
 `PENDING → RUNNING ⇄ WAITING/SUSPENDED → COMPLETED | FAILED(FAULTED) | CANCELLED`；
 `GetStatus.status` 字符串映射见 `grpc_handlers.rs`（`FAULTED` 即 Failed）。
 子流程恢复的轮询边界见 `boundaries.md` B-WF-2 / B-WF-3。
+
+**业务阶段（`GetStatus.current_state_name`）**：只回报 CNCF SW 定义里声明的稳定状态名。
+引擎为编译期展开生成的内部任务名（`<状态>__route` / `<状态>__transition` /
+`<状态>__action_<i>` 等）在读取时按实例钉死的定义归一化回声明状态名（issue #101），
+消费方无需做前缀剥离。
+
+- 读侧对**历史实例**同样生效（声明状态从 `do_tasks` 推导，无需数据迁移）；
+  外部若已把 `<状态>__route` 落库，升级后重读 `GetStatus` 即得声明状态名，
+  或按同规则去掉 `__<内部后缀>`。
+- 遗留 `document/do` DSL 无「声明状态」概念，仍返回当前任务名（行为不变）。
+- 原始引擎任务名（含内部名）保留在 `task_stack[].task_name`，供诊断，不做归一化。
+- 判据：`sw.rs::test_declared_state_name_normalizes_internal_task_names`、
+  `model.rs::current_task_name_reads_index_then_falls_back_to_last`、
+  `workflow.rs::test_current_state_name_normalizes_internal_route_task`、
+  `grpc_handlers.rs::test_get_status_reports_declared_state_name_not_internal_task`。
 
 ## 6. HTTP 任务派发：运行时表达式与凭据注入（`$context` / `$secrets` / `$constants`）
 

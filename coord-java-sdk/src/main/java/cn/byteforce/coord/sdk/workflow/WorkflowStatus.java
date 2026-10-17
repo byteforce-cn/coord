@@ -91,7 +91,12 @@ public final class WorkflowStatus {
     public List<TaskFrame> taskStack() { return taskStack; }
 
     /**
-     * 当前状态名（SW 状态名 = 当前任务名，含审批驳回 / 分支路由后的目标状态名）。
+     * 当前状态名 —— 定义里声明的稳定状态名（如 {@code human} / {@code autostart}）。
+     *
+     * <p>CNCF SW 编译器为路由 / 转移生成的内部任务名（{@code <状态>__route} /
+     * {@code <状态>__transition} / {@code <状态>__action_<i>} 等）不会出现：读取时已按
+     * 实例钉死的定义归一化回声明状态名。遗留 {@code document/do} DSL 无「声明状态」
+     * 概念，仍返回当前任务名。需要原始引擎任务名做诊断时用 {@link #taskStack()}。
      *
      * @return current state name, or empty string if not available
      */

@@ -2163,13 +2163,10 @@ impl Workflow for WorkflowEngineService {
                     })
                     .collect();
 
-                // 当前状态名 = 当前任务帧任务名（SW 状态名 = 当前任务名，含驳回/分支后目标）
-                let current_state_name = inst
-                    .task_stack
-                    .get(inst.current_task_index)
-                    .map(|tf| tf.task_name.clone())
-                    .or_else(|| inst.task_stack.last().map(|tf| tf.task_name.clone()))
-                    .unwrap_or_default();
+                // 当前状态名 = 定义里声明的稳定状态名（含驳回/分支后目标）。
+                // 引擎内部任务名（`<状态>__route` / `<状态>__transition` 等）由
+                // 定义归一化，不对外暴露（issue #101）。
+                let current_state_name = self.current_state_name(&inst).await;
 
                 // 挂起元信息（SUSPENDED/WAITING 时返回）
                 let suspension =
@@ -3494,6 +3491,84 @@ do:
         let mut expected = ns_a_ids.clone();
         expected.sort();
         assert_eq!(seen, expected, "分页不得遗漏 nsA 实例");
+    }
+
+    /// issue #101：`GetStatus.current_state_name` 只回报定义里声明的状态名，
+    /// 不暴露 `<状态>__route` / `<状态>__transition` 这类引擎内部任务名。
+    #[tokio::test]
+    async fn test_get_status_reports_declared_state_name_not_internal_task() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = r#"
+id: approval-wf
+version: "1.0"
+start: approve
+states:
+  - name: approve
+    type: event
+    onEvents:
+      - eventRefs: [ { "eventRef": "approved" } ]
+        transition: notify
+      - eventRefs: [ { "eventRef": "rejected" } ]
+        transition: reject
+  - name: notify
+    type: inject
+    data: { result: "approved" }
+    end: true
+  - name: reject
+    type: inject
+    data: { result: "rejected" }
+    end: true
+events:
+  - name: approved
+    type: icps.approval.approved
+  - name: rejected
+    type: icps.approval.rejected
+"#;
+        let def_id = svc.deploy_definition("test", yaml).await.unwrap();
+        let started = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        // 挂起在 event 状态的 listen 上：状态名即声明状态名
+        let status = Workflow::get_status(
+            &svc,
+            tonic::Request::new(WorkflowGetStatusRequest {
+                workflow_id: started.id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(status.current_state_name, "approve");
+
+        // 手动 signal 命中 rejected 分支：路由走 `<状态>__route` → reject，
+        // 完成后不得把路由/转移任务名当作当前状态回报
+        svc.resume_instance(
+            &started.id,
+            Some("icps.approval.rejected"),
+            Some(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+        let status = Workflow::get_status(
+            &svc,
+            tonic::Request::new(WorkflowGetStatusRequest {
+                workflow_id: started.id,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(status.status, "COMPLETED");
+        assert_eq!(
+            status.current_state_name, "reject",
+            "GetStatus must report the declared state name, not engine task names"
+        );
     }
 
     /// internal 错误脱敏：客户端仅收到通用 "internal error"，不含内部细节
