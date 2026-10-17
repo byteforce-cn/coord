@@ -18,6 +18,12 @@ import java.util.Map;
  * configurable) — the data plane is then distributed / highly available.
 
  *
+ * <p><b>Error semantics:</b> only <i>misses</i> return {@code null} / empty
+ * collections (wire-level {@code found=false}). Every other failure — including
+ * {@code PERMISSION_DENIED} when the CCT lacks {@code coord:cache:read} /
+ * {@code coord:cache:write} — propagates as {@link CoordException}; it is never
+ * converted into "not found".
+ *
  * <pre>{@code
  * try (CoordClient client = CoordClient.create(config)) {
  *     CacheClient cache = client.cache();

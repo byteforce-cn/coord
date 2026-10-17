@@ -1,7 +1,6 @@
 package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.sdk.CoordConfig;
-import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.cache.CacheClearResult;
 import cn.byteforce.coord.sdk.cache.CacheClient;
 import cn.byteforce.coord.sdk.cache.CacheKeyPage;
@@ -32,17 +31,12 @@ public final class CacheClientImpl extends AgentRpcClient implements CacheClient
     @Override
     public byte[] get(String key) {
         CacheGetRequest request = CacheGetRequest.newBuilder().setKey(key).build();
-        try {
-            CacheGetResponse response = callWithRetry(
-                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
-                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                            .get((CacheGetRequest) req),
-                    request, "cache.get");
-            return response.getFound() ? response.getValue().toByteArray() : null;
-        } catch (CoordException e) {
-            log.debug("Cache get failed: key={}, error={}", key, e.getMessage());
-            return null;
-        }
+        CacheGetResponse response = callWithRetry(
+                (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .get((CacheGetRequest) req),
+                request, "cache.get");
+        return response.getFound() ? response.getValue().toByteArray() : null;
     }
 
     @Override
@@ -121,17 +115,12 @@ public final class CacheClientImpl extends AgentRpcClient implements CacheClient
     public byte[] hget(String key, String field) {
         CacheHGetRequest request = CacheHGetRequest.newBuilder()
                 .setKey(key).setField(field).build();
-        try {
-            CacheHGetResponse response = callWithRetry(
-                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
-                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                            .hGet((CacheHGetRequest) req),
-                    request, "cache.hget");
-            return response.getFound() ? response.getValue().toByteArray() : null;
-        } catch (CoordException e) {
-            log.debug("Cache hget failed: key={}, field={}", key, field);
-            return null;
-        }
+        CacheHGetResponse response = callWithRetry(
+                (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .hGet((CacheHGetRequest) req),
+                request, "cache.hget");
+        return response.getFound() ? response.getValue().toByteArray() : null;
     }
 
     @Override
@@ -150,19 +139,14 @@ public final class CacheClientImpl extends AgentRpcClient implements CacheClient
     @Override
     public Map<String, byte[]> hgetAll(String key) {
         CacheHGetAllRequest request = CacheHGetAllRequest.newBuilder().setKey(key).build();
-        try {
-            CacheHGetAllResponse response = callWithRetry(
-                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
-                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                            .hGetAll((CacheHGetAllRequest) req),
-                    request, "cache.hgetall");
-            Map<String, byte[]> result = new LinkedHashMap<>();
-            response.getFieldsMap().forEach((k, v) -> result.put(k, v.toByteArray()));
-            return result;
-        } catch (CoordException e) {
-            log.debug("Cache hgetall failed: key={}", key);
-            return Map.of();
-        }
+        CacheHGetAllResponse response = callWithRetry(
+                (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .hGetAll((CacheHGetAllRequest) req),
+                request, "cache.hgetall");
+        Map<String, byte[]> result = new LinkedHashMap<>();
+        response.getFieldsMap().forEach((k, v) -> result.put(k, v.toByteArray()));
+        return result;
     }
 
     @Override
@@ -183,51 +167,36 @@ public final class CacheClientImpl extends AgentRpcClient implements CacheClient
     public List<byte[]> lrange(String key, long start, long stop) {
         CacheLRangeRequest request = CacheLRangeRequest.newBuilder()
                 .setKey(key).setStart(start).setStop(stop).build();
-        try {
-            CacheLRangeResponse response = callWithRetry(
-                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
-                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                            .lRange((CacheLRangeRequest) req),
-                    request, "cache.lrange");
-            return response.getValuesList().stream()
-                    .map(com.google.protobuf.ByteString::toByteArray)
-                    .collect(java.util.stream.Collectors.toList());
-        } catch (CoordException e) {
-            log.debug("Cache lrange failed: key={}", key);
-            return List.of();
-        }
+        CacheLRangeResponse response = callWithRetry(
+                (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .lRange((CacheLRangeRequest) req),
+                request, "cache.lrange");
+        return response.getValuesList().stream()
+                .map(com.google.protobuf.ByteString::toByteArray)
+                .collect(java.util.stream.Collectors.toList());
     }
 
     @Override
     public byte[] rpop(String key) {
         CacheRPopRequest request = CacheRPopRequest.newBuilder().setKey(key).build();
-        try {
-            CacheRPopResponse response = callWithRetry(
-                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
-                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                            .rPop((CacheRPopRequest) req),
-                    request, "cache.rpop");
-            return response.getFound() ? response.getValue().toByteArray() : null;
-        } catch (CoordException e) {
-            log.debug("Cache rpop failed: key={}", key);
-            return null;
-        }
+        CacheRPopResponse response = callWithRetry(
+                (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .rPop((CacheRPopRequest) req),
+                request, "cache.rpop");
+        return response.getFound() ? response.getValue().toByteArray() : null;
     }
 
     @Override
     public long llen(String key) {
         CacheLLenRequest request = CacheLLenRequest.newBuilder().setKey(key).build();
-        try {
-            CacheLLenResponse response = callWithRetry(
-                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
-                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                            .lLen((CacheLLenRequest) req),
-                    request, "cache.llen");
-            return response.getLength();
-        } catch (CoordException e) {
-            log.debug("Cache llen failed: key={}", key);
-            return 0;
-        }
+        CacheLLenResponse response = callWithRetry(
+                (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .lLen((CacheLLenRequest) req),
+                request, "cache.llen");
+        return response.getLength();
     }
 
     @Override
@@ -246,18 +215,13 @@ public final class CacheClientImpl extends AgentRpcClient implements CacheClient
     @Override
     public List<byte[]> smembers(String key) {
         CacheSMembersRequest request = CacheSMembersRequest.newBuilder().setKey(key).build();
-        try {
-            CacheSMembersResponse response = callWithRetry(
-                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
-                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                            .sMembers((CacheSMembersRequest) req),
-                    request, "cache.smembers");
-            return response.getMembersList().stream()
-                    .map(com.google.protobuf.ByteString::toByteArray)
-                    .collect(java.util.stream.Collectors.toList());
-        } catch (CoordException e) {
-            log.debug("Cache smembers failed: key={}", key);
-            return List.of();
-        }
+        CacheSMembersResponse response = callWithRetry(
+                (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .sMembers((CacheSMembersRequest) req),
+                request, "cache.smembers");
+        return response.getMembersList().stream()
+                .map(com.google.protobuf.ByteString::toByteArray)
+                .collect(java.util.stream.Collectors.toList());
     }
 }
