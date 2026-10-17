@@ -1,6 +1,6 @@
 # 消费方契约页（Consumer Contract）
 
-> Owner: maintainers ｜ Last verified: 2026-10-15
+> Owner: maintainers ｜ Last verified: 2026-10-17
 
 面向**接入方**的聚合页：按服务给出「一致性 / 路由 / 失败语义 + 推荐消费范式」，
 并把每 RPC 的能力名与已接受的边界汇总为可检索的表。
@@ -22,8 +22,23 @@
 - 例外（自身无能力要求，服务内自证/一次性令牌）：`Auth/Authenticate`、
   `Auth/RefreshToken`、`Auth/Bootstrap`、`Auth/GetRevocationDelta`（仅需合法
   CCT）。
-- 能力名唯一维护在 `coord-core/src/grpc_auth.rs::rpc_capability`；本页 §1–§11
-  列出的是**消费方视角的对照**，变更以该文件为准。
+- **执行面（唯一事实源）**：能力名唯一维护在
+  `coord-core/src/grpc_auth.rs::rpc_capability`（方法 → 能力）；只有这里返回的
+  能力名会被鉴权层判定。本页 §1–§11 列出的是**消费方视角的对照**，变更以该文件为准。
+- **发现面**：`CapabilityRegistry/List`（`coord capability list`）列出的 live 能力
+  集合与执行面**双向恒等**——这是机器判据，不是承诺：
+  `scripts/check-capability-registry.sh` 从 proto 描述符集枚举全部方法，反向推出
+  执行面集合并与 registry 比对（新增 RPC 漏登记、只补一侧、废弃标记不全均会置红）。
+- **`deprecated=true` 语义**：已废弃的名字**永远不会被执行**（`rpc_capability`
+  不返回它们），保留只为让存量授权与拼写错误在 `List`/`Get` 里可发现；`description`
+  写明替代能力，或明确「无替代（功能未实现）」。
+- **授权写入校验**：`RoleGrantCapability` 对未知或已废弃的能力名返回
+  `INVALID_ARGUMENT` 并点名该 ID（废弃项同时给出替代能力）；`RoleRevokeCapability`
+  **不校验**能力名（放行任意 ID），否则校验上线前写入的拼写错误将无法清理。
+  存量授权不需要数据迁移——被拒的只是新写入。
+- 运行时 `CapabilityRegistry/Register` 注册的自定义能力**不在执行面**
+  （`rpc_capability` 无对应映射 ⇒ 永远不会被判定），因此也不参与授权校验；
+  可执行能力只能通过编译期目录扩展。
 - 客户端侧：能力由服务端 CCT 决定，SDK 不本地判断；`PERMISSION_DENIED`
   表示 CCT 无对应能力（不是重试目标）。
 
