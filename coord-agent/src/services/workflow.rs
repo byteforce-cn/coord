@@ -3095,6 +3095,24 @@ pub mod phase4 {
                 .map_err(|e| format!("store error: {e}"))
         }
 
+        /// 当前状态名：按实例钉死的定义，把引擎任务名归一化为定义中声明的状态名
+        /// （issue #101）。定义读不到时回退为原始任务名 —— 读路径不因存储抖动失败。
+        pub async fn current_state_name(&self, inst: &WorkflowInstance) -> String {
+            let raw = inst.current_task_name();
+            match self
+                .store
+                .load_definition(
+                    &inst.definition_ns,
+                    &inst.definition_name,
+                    &inst.definition_version,
+                )
+                .await
+            {
+                Ok(Some(def)) => def.declared_state_name(raw),
+                _ => raw.to_string(),
+            }
+        }
+
         pub async fn signal_instance(
             &self,
             instance_id: &str,
@@ -3528,7 +3546,9 @@ pub mod phase4 {
 #[cfg(test)]
 mod phase4_tests {
     use super::phase4::*;
-    use coord_core::workflow::model::{InstanceStatus, Task, WorkflowInstance};
+    use coord_core::workflow::model::{
+        InstanceStatus, Task, TaskFrame, TaskStatus, WorkflowInstance,
+    };
     use coord_core::workflow::ports::{DispatchResult, TaskDispatcher};
 
     use std::collections::HashMap;
@@ -3673,6 +3693,64 @@ do:
         let loaded = svc.get_instance(&inst.id).await.unwrap();
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().id, inst.id);
+    }
+
+    /// issue #101：`GetStatus.current_state_name` 不得暴露编译期内部任务名。
+    #[tokio::test]
+    async fn test_current_state_name_normalizes_internal_route_task() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = r#"
+id: onboarding
+version: "1.0"
+start: autostart
+states:
+  - name: autostart
+    type: event
+    onEvents:
+      - eventRefs: [ { eventRef: activate } ]
+        transition: human
+      - eventRefs: [ { eventRef: void } ]
+        transition: cancelpath
+  - name: human
+    type: inject
+    data: { step: human }
+    transition: cancelpath
+  - name: cancelpath
+    type: inject
+    data: {}
+    end: true
+events:
+  - name: activate
+    type: icps.activation
+  - name: void
+    type: icps.void
+"#;
+        let def_id = svc.deploy_definition("test", yaml).await.unwrap();
+        let def = svc.get_definition(&def_id).await.unwrap().unwrap();
+
+        let frame = |name: &str| TaskFrame {
+            task_name: name.to_string(),
+            task_type: "switch".to_string(),
+            status: TaskStatus::Completed,
+            input: None,
+            output: None,
+            started_at: None,
+            ended_at: None,
+            retry_count: 0,
+            pending_branches: None,
+        };
+
+        // 事件状态挂起在 listen 上：当前任务名即状态名，归一化后不变
+        let mut inst = WorkflowInstance::new(&def, serde_json::json!({}), 0);
+        inst.task_stack.push(frame("autostart"));
+        inst.current_task_index = 0;
+        assert_eq!(svc.current_state_name(&inst).await, "autostart");
+
+        // route Goto 提交窗口：index 已指向下一状态，栈顶仍是 `<状态>__route` 帧。
+        // 读侧必须归一化到声明状态名。
+        inst.task_stack.push(frame("autostart__route"));
+        inst.current_task_index = inst.task_stack.len();
+        assert_eq!(svc.current_state_name(&inst).await, "autostart");
     }
 
     #[tokio::test]

@@ -371,6 +371,70 @@ pub fn looks_like_cncf_sw(value: &Value) -> bool {
     value.get("states").is_some() || value.get("start").is_some()
 }
 
+/// CNCF SW 定义的 DSL 标记（`document.dsl`）
+pub const SW_DSL_MARKER: &str = "cncf-serverless-workflow";
+
+/// 编译期在状态名之后追加的**定长**内部任务后缀，
+/// 与 `convert()` 各状态分支的 `format!` 生成点一一对应。
+const INTERNAL_TASK_SUFFIXES: &[&str] = &["__transition", "__route", "__listen", "__call"];
+
+/// 编译期追加的**带索引**内部任务后缀（后缀后跟 `<i>` / `<key>`）。
+const INTERNAL_TASK_INDEXED_SUFFIXES: &[&str] = &["__data_", "__action_", "__item_", "__comp_"];
+
+impl WorkflowDefinition {
+    /// 引擎任务名 → 定义中声明的稳定状态名（issue #101）。
+    ///
+    /// CNCF SW 编译会把一个状态展开成多个任务（`<状态>__route` / `<状态>__transition`
+    /// 等）；对外回答「当前处于哪个状态」时必须回落到声明状态名，否则消费方看到的是
+    /// 引擎内部名。遗留 `document/do` DSL 没有「声明状态」概念——原样返回，保持既有语义。
+    ///
+    /// 无法识别为声明状态的任务名（如 `__end`、fork 分支内部名）原样返回。
+    pub fn declared_state_name(&self, task_name: &str) -> String {
+        if self.document.dsl != SW_DSL_MARKER {
+            return task_name.to_string();
+        }
+        let states = self.declared_state_names();
+        if states.contains(task_name) {
+            return task_name.to_string();
+        }
+        for suffix in INTERNAL_TASK_SUFFIXES {
+            if let Some(state) = task_name.strip_suffix(suffix) {
+                if states.contains(state) {
+                    return state.to_string();
+                }
+            }
+        }
+        for suffix in INTERNAL_TASK_INDEXED_SUFFIXES {
+            if let Some(idx) = task_name.rfind(suffix) {
+                let state = &task_name[..idx];
+                if states.contains(state) {
+                    return state.to_string();
+                }
+            }
+        }
+        task_name.to_string()
+    }
+
+    /// 编译产物中可识别为「声明状态名」的集合。
+    ///
+    /// 每个状态在 `do_tasks` 里至少留一个锚点：event/switch/delay/foreach/parallel 等
+    /// 状态有同名任务，多动作 operation / 空数据 inject 等只有 `<状态>__transition`。
+    /// 取两者并集并排除含 `__` 的编译期内部名，得到声明状态集合。
+    fn declared_state_names(&self) -> HashSet<&str> {
+        let mut states = HashSet::new();
+        for task in &self.do_tasks {
+            if let Some(state) = task.name.strip_suffix("__transition") {
+                if !state.is_empty() {
+                    states.insert(state);
+                }
+            } else if !task.name.contains("__") {
+                states.insert(task.name.as_str());
+            }
+        }
+        states
+    }
+}
+
 /// 解析 CNCF SW 文档（serde_json::Value）为内部执行模型
 pub fn parse_cncf_sw_value(root: Value) -> Result<WorkflowDefinition, String> {
     // 官方 use.extensions 在 states/start 路线同样无执行面；serde 会静默忽略它，
@@ -1087,7 +1151,7 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
 
     // ── 5. document / use.functions ──
     let document = Document {
-        dsl: "cncf-serverless-workflow".into(),
+        dsl: SW_DSL_MARKER.into(),
         namespace: "default".into(), // deploy 时以调用方参数覆盖
         name: doc.name.or(doc.id).unwrap_or_else(|| "workflow".into()),
         version: doc.version.unwrap_or_else(|| "1.0".into()),
@@ -2051,6 +2115,82 @@ mod tests {
             }
             other => panic!("expected route switch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_declared_state_name_normalizes_internal_task_names() {
+        // issue #101：`<状态>__route` 等编译期内部任务名不得作为「当前状态名」暴露
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "autostart",
+            "states": [
+                { "name": "autostart", "type": "event",
+                  "onEvents": [
+                      { "eventRefs": [ { "eventRef": "on" } ], "transition": "human" },
+                      { "eventRefs": [ { "eventRef": "off" } ], "transition": "cancelpath" }
+                  ] },
+                { "name": "human", "type": "operation",
+                  "actions": [
+                      { "name": "a", "functionRef": { "refName": "f" } },
+                      { "name": "b", "functionRef": { "refName": "f" } }
+                  ],
+                  "transition": "rollback" },
+                { "name": "rollback", "type": "inject", "data": {}, "end": true },
+                { "name": "cancelpath", "type": "inject", "data": {}, "end": true }
+            ],
+            "events": [
+                { "name": "on", "type": "icps.on" },
+                { "name": "off", "type": "icps.off" }
+            ],
+            "functions": [ { "name": "f", "operation": "http://x" } ]
+        });
+        let def = parse_cncf_sw_value(v).expect("definition should parse");
+
+        assert_eq!(def.declared_state_name("autostart__route"), "autostart");
+        assert_eq!(def.declared_state_name("autostart"), "autostart");
+        assert_eq!(def.declared_state_name("human__action_1"), "human");
+        assert_eq!(def.declared_state_name("human__transition"), "human");
+        // 终端任务不属于声明状态集合：原样返回
+        assert_eq!(def.declared_state_name("__end"), "__end");
+    }
+
+    #[test]
+    fn test_declared_state_name_keeps_legacy_task_names() {
+        // 遗留 document/do DSL 没有「声明状态」概念：任何任务名都不得被改写
+        let def = WorkflowDefinition {
+            id: None,
+            document: crate::workflow::model::Document {
+                dsl: "1.0.0".into(),
+                namespace: "test".into(),
+                name: "legacy".into(),
+                version: "1.0".into(),
+                title: None,
+                summary: None,
+                tags: None,
+            },
+            do_tasks: vec![NamedTask {
+                name: "human__route".into(),
+                task: Task::Set(SetTask {
+                    variable: "x".into(),
+                    value: "1".into(),
+                }),
+            }],
+            input: None,
+            output: None,
+            timeout: None,
+            use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
+            raw_yaml: None,
+        };
+
+        assert_eq!(def.declared_state_name("human__route"), "human__route");
+        assert_eq!(
+            def.declared_state_name("human__transition"),
+            "human__transition"
+        );
     }
 
     #[test]

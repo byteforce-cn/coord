@@ -1122,6 +1122,16 @@ impl WorkflowInstance {
             engine_version: Some(ENGINE_VERSION.to_string()),
         }
     }
+
+    /// 当前任务名：优先取 `task_stack[current_task_index]`，索引越界（如路由
+    /// `Goto` 目标索引大于已入栈帧数）回退栈顶帧；空栈返回空串。
+    pub fn current_task_name(&self) -> &str {
+        self.task_stack
+            .get(self.current_task_index)
+            .or_else(|| self.task_stack.last())
+            .map(|frame| frame.task_name.as_str())
+            .unwrap_or("")
+    }
 }
 
 // ─── 测试 ───
@@ -1171,6 +1181,58 @@ mod tests {
             Some(definition_hash(&def).as_str())
         );
         assert_eq!(inst.engine_version.as_deref(), Some(ENGINE_VERSION));
+    }
+
+    #[test]
+    fn current_task_name_reads_index_then_falls_back_to_last() {
+        let mut inst = WorkflowInstance::new(
+            &WorkflowDefinition {
+                id: None,
+                document: Document {
+                    dsl: crate::workflow::sw::SW_DSL_MARKER.to_string(),
+                    namespace: "test".to_string(),
+                    name: "phase".to_string(),
+                    version: "1.0".to_string(),
+                    title: None,
+                    summary: None,
+                    tags: None,
+                },
+                do_tasks: vec![],
+                input: None,
+                output: None,
+                timeout: None,
+                use_components: None,
+                schedule: Default::default(),
+                auth: Default::default(),
+                secrets: Default::default(),
+                constants: Default::default(),
+                task_meta: Default::default(),
+                raw_yaml: None,
+            },
+            serde_json::json!({}),
+            1000,
+        );
+        assert_eq!(inst.current_task_name(), "");
+
+        let frame = |name: &str| TaskFrame {
+            task_name: name.to_string(),
+            task_type: "sync".to_string(),
+            status: TaskStatus::Completed,
+            input: None,
+            output: None,
+            started_at: None,
+            ended_at: None,
+            retry_count: 0,
+            pending_branches: None,
+        };
+        inst.task_stack.push(frame("autostart"));
+        inst.current_task_index = 0;
+        assert_eq!(inst.current_task_name(), "autostart");
+
+        // route Goto 后：索引指向下一状态（超出已入栈帧数），回退栈顶的内部任务名
+        inst.task_stack.push(frame("autostart__route"));
+        inst.current_task_index = 2;
+        assert_eq!(inst.current_task_name(), "autostart__route");
     }
 
     #[test]

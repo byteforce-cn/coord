@@ -2,6 +2,43 @@
 
 版本规则见 WHITEPAPER.md。契约版本独立于代码版本。
 
+## [contracts/v1.6.1] — 2026-10-16（Patch：workflow `current_state_name` 归一化到声明状态名，issue #101）
+
+**发布口径**：本条目为 **Patch**（实现缺陷修正 + 注释级语义澄清；wire 不变：字段编号 /
+类型 / 默认值均未改动；`buf breaking` 基线 = `contracts/v1.6.0`，CI 强制）。
+
+**行为修正（wire 不变）**
+
+- `coord.workflow.v1.WorkflowGetStatusResponse.current_state_name` 此前按「当前任务名」
+  回报，CNCF SW 多 `onEvents` 状态会把编译期内部任务名（如 `autostart__route`）泄漏给
+  消费方（界面显示引擎内部名；消费方被迫做前缀归一化）。现改为回报**定义中声明的
+  稳定状态名**：
+  - 任何 `<状态>__<内部后缀>`（`__route` / `__transition` / `__listen` / `__call` /
+    `__action_<i>` / `__data_<key>` / `__item_<i>` / `__comp_<i>`）都归一化回 `<状态>`；
+  - 历史实例与既有已部署定义同样生效（归一化在读取时按实例钉死的定义推导声明状态
+    集合，无落盘迁移）；
+  - 遗留 `document/do` DSL 无「声明状态」概念，行为不变（仍返回当前任务名）；
+  - 原始引擎任务名保留在 `task_stack[].task_name`，诊断面不受影响。
+
+**影响范围（消费者数量 / 名单）**：已知消费方 ims-approval（EIS/ICPS 域）——其
+`FlowPhase.normalize` 前缀剥离与历史值迁移（`V320__approval_flow_phase_normalize.sql`）
+可在升级后逐步退役；返回值集合从「任务名全集」收窄为「声明状态集」，属缺陷修正
+（字段注释本就承诺「状态名」），不新增错误码、不改默认值。本仓 `coord-java-sdk`
+`WorkflowStatus.currentStateName()` 透传不变。
+
+**回滚预案**：回滚本分支 / 镜像即可；无 wire / 落盘格式迁移。回滚后退回内部任务名口径。
+
+**灰度计划**：不支持滚动升级（见 `docs/production/ops/upgrade.md`）——全集群同版本切换。
+
+**校验（本地已跑）**
+
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --lib --bins -- -D warnings` 全绿；
+- `cargo test --workspace --no-fail-fast`：2617 passed / 0 failed，含新增回归用例
+  （`test_declared_state_name_normalizes_internal_task_names` /
+  `test_get_status_reports_declared_state_name_not_internal_task`）；
+- `apis/contracts/scripts/` 的 `check-wire-sync.sh` / `check-wire-descriptor.sh` / `check-sdk-sync.sh`
+  均 exit 0（两副本逐字一致，descriptor 级 wire 不变）；`buf lint` / `buf breaking`（对 main 基线）exit 0。
+
 ## [contracts/v1.6.0] — 2026-10-15（Minor：workflow 审批 v2 RPC，ADR-0013 / G-WF-1）
 
 **发布口径**：本条目为 **Minor**（新增 RPC + 注释级语义声明；不改动任何既有字段编号与类型；

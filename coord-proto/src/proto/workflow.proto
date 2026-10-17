@@ -90,8 +90,14 @@ message WorkflowGetStatusResponse {
   bytes input = 6; // 启动时传入的输入参数
   int64 created_at = 7; // 实例创建时间（Unix ms）
   int64 updated_at = 8; // 实例最后更新时间（Unix ms）
-  repeated TaskFrame task_stack = 9; // 当前任务执行栈（可选）
-  string current_state_name = 10; // 当前状态名（SW 状态名 = 当前任务名）
+  // 当前任务执行栈（可选）。task_name 为引擎原始任务名，含编译期内部名
+  // （`<状态>__route` 等），供诊断；业务阶段判定请用 current_state_name。
+  repeated TaskFrame task_stack = 9;
+  // 当前状态名：定义里声明的稳定状态名（如 `human` / `autostart`）。
+  // CNCF SW 编译器为路由/转移生成的内部任务名（`<状态>__route` / `<状态>__transition`
+  // / `<状态>__action_<i>` 等）在读取时归一化回声明状态名，绝不回报；
+  // 遗留 `document/do` DSL 无「声明状态」概念，仍为当前任务名。
+  string current_state_name = 10;
   SuspensionMeta suspension = 11; // 挂起元信息（SUSPENDED/WAITING 时返回）
 }
 
