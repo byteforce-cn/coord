@@ -82,8 +82,8 @@ impl tso_v2::tso_server::Tso for CoordNode {
     ) -> Result<Response<tso_v2::AllocateResponse>, Status> {
         self.kvt().gate(KvTCapability::Tso)?;
         let max = self.kvt().config().tso_batch_size.min(65_536);
-        let batch_size = normalize_batch_size(request.into_inner().batch_size, max)
-            .map_err(tso_status)?;
+        let batch_size =
+            normalize_batch_size(request.into_inner().batch_size, max).map_err(tso_status)?;
         let batch = allocate_tso(self, batch_size).await?;
         Ok(Response::new(tso_v2::AllocateResponse {
             start_ts: ts_to_i64(batch.start_ts)?,

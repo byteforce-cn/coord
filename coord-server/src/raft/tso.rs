@@ -17,7 +17,6 @@ pub struct TsoBatch {
     pub end_ts: u64,
 }
 
-
 /// 批次请求归一：`0` 视为 1；超过 `max`（`[kv_t].tso_batch_size`，
 /// D9 上限 65536）显式拒绝，不静默截断。
 pub fn normalize_batch_size(requested: u32, max: u32) -> Result<u32> {

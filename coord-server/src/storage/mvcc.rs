@@ -4405,9 +4405,7 @@ mod tests {
             first_end,
             "重启后高水位必须从持久化记录恢复"
         );
-        let second = reopened
-            .apply_tso_allocate(512, 9, applied_for(9))
-            .unwrap();
+        let second = reopened.apply_tso_allocate(512, 9, applied_for(9)).unwrap();
         assert_eq!(second.start_ts, first_end, "新批起点接续旧上界");
         assert!(second.end_ts > first_end);
     }
