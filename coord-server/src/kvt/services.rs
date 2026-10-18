@@ -17,7 +17,11 @@ use coord_proto::tso::v2 as tso_v2;
 use coord_proto::txn::v2 as txn_v2;
 use coord_proto::watch::v2 as watch_v2;
 
+use coord_core::error::Error;
+use coord_core::error_code::{attach, CoordErrorCode};
+
 use super::KvTCapability;
+use crate::raft::tso::{normalize_batch_size, TsoAllocator, TsoBatch};
 use crate::server::CoordNode;
 
 /// 门禁 + 未实现哨兵。
@@ -35,20 +39,68 @@ type ShellStream<T> = tokio_stream::Empty<Result<T, Status>>;
 
 // ──── coord.tso.v2 ────
 
+/// TSO 分配链路的错误映射：先结构化分类（NOT_LEADER / INVALID_ARGUMENT /
+/// UNAVAILABLE），再交给通用 `map_err` 脱敏。
+fn tso_status(err: Error) -> Status {
+    let code = match &err {
+        Error::NotLeader { .. } | Error::NotLeaderNoHint => Some(CoordErrorCode::NotLeader),
+        Error::InvalidArgument(_) => Some(CoordErrorCode::InvalidArgument),
+        Error::ClusterUnavailable(_) => Some(CoordErrorCode::Unavailable),
+        _ => None,
+    };
+    let status = crate::server::map_err(err);
+    match code {
+        Some(code) => attach(status, code),
+        None => status,
+    }
+}
+
+/// 经 region 0 raft 申请批次。无 raft（如未装配的单节点进程）→ 配置/装配错误
+/// （FAILED_PRECONDITION），不是网络故障。
+async fn allocate_tso(node: &CoordNode, batch_size: u32) -> Result<TsoBatch, Status> {
+    let Some(raft) = node.raft.as_ref() else {
+        return Err(attach(
+            Status::failed_precondition(
+                "kv_t requires a region 0 raft to allocate TSO (multi_raft assembly missing)",
+            ),
+            CoordErrorCode::FailedPrecondition,
+        ));
+    };
+    let allocator = TsoAllocator::new(raft.as_ref().clone(), node.node_id);
+    allocator.allocate(batch_size).await.map_err(tso_status)
+}
+
+fn ts_to_i64(ts: u64) -> Result<i64, Status> {
+    i64::try_from(ts).map_err(|_| Status::internal("TSO exceeds i64 wire range"))
+}
+
 #[tonic::async_trait]
 impl tso_v2::tso_server::Tso for CoordNode {
     async fn allocate(
         &self,
-        _request: Request<tso_v2::AllocateRequest>,
+        request: Request<tso_v2::AllocateRequest>,
     ) -> Result<Response<tso_v2::AllocateResponse>, Status> {
-        Err(shell(KvTCapability::Tso, self))
+        self.kvt().gate(KvTCapability::Tso)?;
+        let max = self.kvt().config().tso_batch_size.min(65_536);
+        let batch_size = normalize_batch_size(request.into_inner().batch_size, max)
+            .map_err(tso_status)?;
+        let batch = allocate_tso(self, batch_size).await?;
+        Ok(Response::new(tso_v2::AllocateResponse {
+            start_ts: ts_to_i64(batch.start_ts)?,
+            end_ts: ts_to_i64(batch.end_ts)?,
+        }))
     }
 
+    /// `GetTs` 是 `Allocate(1)` 的便捷面；#137 换成本地批次缓存后不再每次过 raft。
     async fn get_ts(
         &self,
         _request: Request<tso_v2::GetTsRequest>,
     ) -> Result<Response<tso_v2::GetTsResponse>, Status> {
-        Err(shell(KvTCapability::Tso, self))
+        self.kvt().gate(KvTCapability::Tso)?;
+        let batch = allocate_tso(self, 1).await?;
+        Ok(Response::new(tso_v2::GetTsResponse {
+            ts: ts_to_i64(batch.start_ts)?,
+        }))
     }
 }
 

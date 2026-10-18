@@ -5,10 +5,10 @@
 //! 1. `[kv_t].enabled` 是否为真（ADR-0001 默认关闭）；
 //! 2. 某个 v2 能力是否已经交付（G0–G6 分批；未交付 = `FAILED_PRECONDITION`）。
 //!
-//! G0 的 `implemented` 集合是空的：v2 服务**注册**（reflection 可见），但每个
-//! RPC 都返回 `FAILED_PRECONDITION`。后续 gate 在自己的 issue 里把对应能力加入
-//! `implemented` 并实现 handler；不得用"未实现就返回 UNIMPLEMENTED"绕过门禁
-//! （那会让调用方无法区分"关闭"与"写错地址"）。
+//! v2 服务**始终注册**（reflection 可见）；`implemented` 只包含已交付 gate 的
+//! 能力（当前为 #136 的 `Tso`）。其余 RPC 返回 `FAILED_PRECONDITION`。后续 gate
+//! 在自己的 issue 里把对应能力加入 `implemented` 并实现 handler；不得用"未实现
+//! 就返回 UNIMPLEMENTED"绕过门禁（那会让调用方无法区分"关闭"与"写错地址"）。
 
 use std::collections::BTreeSet;
 
@@ -110,7 +110,7 @@ impl KvTState {
         }
     }
 
-    /// 按配置构造；G0 交付能力集合为空（后续 gate 通过 [`Self::with_implemented`] 扩展）。
+    /// 按配置构造；能力集合由装配方通过 [`Self::with_implemented`] 声明。
     pub fn new(enabled: bool, config: KvTRuntimeConfig) -> Self {
         Self {
             enabled,

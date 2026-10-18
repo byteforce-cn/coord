@@ -2821,27 +2821,31 @@ async fn run_server(
     // 前置（multi_raft + PD、与迁移开关互斥）已由配置校验 fail-closed 拒绝非法组合；
     // 这里只装配门禁状态：G0 尚未交付任何 v2 能力，因此 v2 RPC 一律
     // FAILED_PRECONDITION，直到对应 gate 把能力加入 implemented 集合并实现 handler。
-    node.set_kvt_state(coord_server::kvt::KvTState::new(
-        cfg.kv_t.enabled,
-        coord_server::kvt::KvTRuntimeConfig {
-            tso_batch_size: cfg.kv_t.tso_batch_size,
-            commit_sequencer_batch: cfg.kv_t.commit_sequencer_batch,
-            commit_log_shard_records: cfg.kv_t.commit_log_shard_records,
-            commit_log_shard_secs: cfg.kv_t.commit_log_shard_secs,
-            shard_seal_timeout_secs: cfg.kv_t.shard_seal_timeout_secs,
-            watch_retention: cfg.kv_t.watch_retention,
-            max_txn_bytes: cfg.kv_t.max_txn_bytes,
-            max_read_set: cfg.kv_t.max_read_set,
-            max_range: cfg.kv_t.max_range,
-            read_ts_wait_ms: cfg.kv_t.read_ts_wait_ms,
-            txn_ttl_secs: cfg.kv_t.txn_ttl_secs,
-        },
-    ));
+    node.set_kvt_state(
+        coord_server::kvt::KvTState::new(
+            cfg.kv_t.enabled,
+            coord_server::kvt::KvTRuntimeConfig {
+                tso_batch_size: cfg.kv_t.tso_batch_size,
+                commit_sequencer_batch: cfg.kv_t.commit_sequencer_batch,
+                commit_log_shard_records: cfg.kv_t.commit_log_shard_records,
+                commit_log_shard_secs: cfg.kv_t.commit_log_shard_secs,
+                shard_seal_timeout_secs: cfg.kv_t.shard_seal_timeout_secs,
+                watch_retention: cfg.kv_t.watch_retention,
+                max_txn_bytes: cfg.kv_t.max_txn_bytes,
+                max_read_set: cfg.kv_t.max_read_set,
+                max_range: cfg.kv_t.max_range,
+                read_ts_wait_ms: cfg.kv_t.read_ts_wait_ms,
+                txn_ttl_secs: cfg.kv_t.txn_ttl_secs,
+            },
+        )
+        // #136：TSO 批次分配已交付；其余 v2 能力按各自 gate 逐步加入。
+        .with_implemented([coord_server::kvt::KvTCapability::Tso]),
+    );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
     if cfg.kv_t.enabled {
         tracing::warn!(
-            "KV-T enabled ([kv_t].enabled=true): v2 services are registered but no v2 \
-             capability is delivered yet (G0); every v2 RPC returns FAILED_PRECONDITION"
+            "KV-T enabled ([kv_t].enabled=true): TSO allocation (coord.tso.v2) is \
+             available; other v2 RPCs remain FAILED_PRECONDITION until their gate lands"
         );
     } else {
         tracing::info!(
