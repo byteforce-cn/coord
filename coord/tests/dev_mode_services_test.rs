@@ -489,6 +489,8 @@ async fn dev_mode_metrics_share_one_registry() {
         .issue_cert(PkiIssueCertRequest {
             common_name: "metrics-e2e".into(),
             ttl_seconds: 3600,
+            dns_names: vec!["metrics-e2e".into()],
+            ip_addresses: vec![],
         })
         .await
         .expect("IssueCert must succeed in dev mode");
