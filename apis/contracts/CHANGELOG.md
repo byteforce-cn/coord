@@ -1,3 +1,39 @@
+## [contracts/v1.8.0] — 2026-10-18（Minor：PKI 证书 SAN + 参数一致才幂等）
+
+**发布口径**：本条目为 **Minor**（新增请求字段；不改动既有字段编号/类型；`buf breaking`
+基线 = `contracts/v1.6.1`，CI 强制）。同时含**行为变更**：未传 SAN 时默认把 CN 派生为
+DNS SAN；`IssueCert` 的幂等条件收紧为「SAN / TTL 一致」。
+
+**新增字段（wire 兼容）**
+
+- `PkiIssueCertRequest` 新增 `repeated string dns_names = 3`、`repeated string ip_addresses = 4`；
+- `PkiRotateCertRequest` 新增同名字段（编号 3 / 4）——否则「轮换后丢 SAN」。
+
+**行为变更（证书内容 / 幂等语义，wire 不变）**
+
+- **SAN 默认开**：`IssueCert` 未传 SAN ⇒ 把 `common_name` 派生为 DNS SAN（rcgen 不会自动写
+  SAN）。此前签出的证书**没有 SAN**，Go ≥1.15 / rustls-webpki / 浏览器 / Envoy 一律拒绝。
+  非法 DNS 名（非 ASCII 等）⇒ `INVALID_ARGUMENT`（提示显式传 `dns_names`），不静默退回无 SAN。
+- **轮换/续期保留 SAN**：`RotateCert` 未传 SAN ⇒ 继承当前 active 证书；`RenewCert(serial)`
+  同样继承（无 SAN 的升级前旧记录由 CN 派生）。
+- **幂等条件收紧（#119）**：同 CN 的 `IssueCert` 仅在 SAN 与 TTL 都与当前 active 记录一致时
+  返回既有证书；参数不一致 ⇒ 等价 `RotateCert`（新 serial + 新密钥，旧记录 retired 保留至
+  `not_after`）。此前是「同 CN 未过期即原样返回」，SAN/TTL 被静默忽略。
+- **升级影响**：升级前建立的 dev 数据目录中的旧记录没有 SAN；下一次 `IssueCert` 会按新语义
+  自动替换（**不需要** `--fresh`）。
+
+**影响范围**：所有调用 `Pki/IssueCert` / `Pki/RotateCert` 的消费方；未显式传 SAN 的调用方
+（含 Java SDK `issueCert(cn)`）不需要改代码，但会拿到带 CN 派生 SAN 的新证书。
+
+**回滚预案**：回滚本分支 / 镜像即恢复旧行为；新字段对旧实现是未知字段（protobuf 忽略），
+已签出的证书无需迁移。
+
+**校验（本地已跑）**
+
+- `cargo test -p coord-agent --lib pki`、`cargo test -p coord-agent --test agent_pki_test`
+  （含 rustls-webpki 正例 + 错误名字负控制、非 ASCII CN `INVALID_ARGUMENT`、参数一致幂等）；
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --lib --bins -- -D warnings`。
+
 ## [contracts/v1.7.1] — 2026-10-17（Patch：MQ 能力粒度拆分——DLQ 处置与 topic 生命周期分权）
 
 **发布口径**：本条目为 **Patch**（wire 不变：无字段/RPC 变更；变的是

@@ -359,6 +359,8 @@ async fn test_expired_current_record_is_reissued_not_returned() {
         serial: "expired-0x1".into(),
         status: CertStatus::Active,
         parent_serial: None,
+        dns_names: Vec::new(),
+        ip_addresses: Vec::new(),
     };
     store.create_cert(cn, &expired).await.expect("seed expired");
 

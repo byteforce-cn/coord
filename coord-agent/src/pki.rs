@@ -13,13 +13,16 @@
 //
 // 使用 rcgen 生成 X.509 证书，x509-parser 解析验证。
 
+use std::net::IpAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64;
 use parking_lot::RwLock;
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::string::Ia5String;
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
 use time::OffsetDateTime;
 
 use crate::pki_store::{CaRecord, CertRecord, CertStatus, MemoryPkiStore, PkiStore, PkiStoreError};
@@ -102,6 +105,118 @@ impl From<CertRecord> for CertInfo {
             parent_serial: r.parent_serial,
         }
     }
+}
+
+// ──── SanSpec ────
+
+/// 证书 SAN 集合（已归一化：排序 + 去重，作为幂等比较口径）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SanSpec {
+    /// DNS SAN（IA5String 字符集）
+    pub dns_names: Vec<String>,
+    /// IP SAN（标准字面量：IPv4 / IPv6）
+    pub ip_addresses: Vec<String>,
+}
+
+impl SanSpec {
+    pub fn new(dns_names: Vec<String>, ip_addresses: Vec<String>) -> Self {
+        Self {
+            dns_names,
+            ip_addresses,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dns_names.is_empty() && self.ip_addresses.is_empty()
+    }
+
+    /// 校验并归一化（排序 + 去重）。
+    ///
+    /// 校验在签发前完成：非法 DNS/IP 必须返回 `INVALID_ARGUMENT`，
+    /// 不能等 rcgen 在 `spawn_blocking` 里报一个与调用方参数无关的
+    /// `certificate generation failed`。
+    fn normalized(mut self) -> Result<Self, PkiError> {
+        for name in &self.dns_names {
+            validate_dns_name(name)?;
+            // 提前验证 IA5String 可构造，确保签发阶段不会再遇到参数错误
+            Ia5String::try_from(name.as_str())
+                .map_err(|_| PkiError::InvalidArgument(format!("invalid DNS name: {name:?}")))?;
+        }
+        for ip in &self.ip_addresses {
+            IpAddr::from_str(ip)
+                .map_err(|_| PkiError::InvalidArgument(format!("invalid IP address: {ip:?}")))?;
+        }
+        self.dns_names.sort();
+        self.dns_names.dedup();
+        self.ip_addresses.sort();
+        self.ip_addresses.dedup();
+        Ok(self)
+    }
+}
+
+/// CN 派生为 DNS SAN 时的语法约束。
+///
+/// 这是「默认开箱即用」的判据：CN 非法时**不得**静默签出无 SAN 证书；
+/// 调用方须显式传 `dns_names`（CN 仅作 subject）。
+fn validate_dns_name(name: &str) -> Result<(), PkiError> {
+    let valid = !name.is_empty()
+        && name.len() <= 253
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '*'));
+    if valid {
+        Ok(())
+    } else {
+        Err(PkiError::InvalidArgument(format!(
+            "common_name {name:?} is not a valid DNS name; pass dns_names explicitly"
+        )))
+    }
+}
+
+fn derive_san_from_cn(common_name: &str) -> Result<SanSpec, PkiError> {
+    validate_dns_name(common_name)?;
+    Ok(SanSpec {
+        dns_names: vec![common_name.to_string()],
+        ip_addresses: Vec::new(),
+    })
+}
+
+/// 选定本次签发的生效 SAN：
+/// - 显式请求非空 → 用请求（IssueCert / RotateCert）；
+/// - 否则若可继承且记录已有 SAN → 继承（RenewCert / RotateCert 未传 SAN）；
+/// - 否则由 CN 派生（含升级前的无 SAN 旧记录）。
+fn effective_san(
+    common_name: &str,
+    requested: &SanSpec,
+    inherit_existing: bool,
+    existing: Option<&CertRecord>,
+) -> Result<SanSpec, PkiError> {
+    if !requested.is_empty() {
+        return Ok(requested.clone());
+    }
+    if inherit_existing {
+        if let Some(record) = existing {
+            if !record.dns_names.is_empty() || !record.ip_addresses.is_empty() {
+                return Ok(SanSpec {
+                    dns_names: record.dns_names.clone(),
+                    ip_addresses: record.ip_addresses.clone(),
+                });
+            }
+        }
+    }
+    derive_san_from_cn(common_name)
+}
+
+fn effective_ttl_seconds(ttl_seconds: u64, default_ttl_hours: u32) -> u64 {
+    if ttl_seconds > 0 {
+        ttl_seconds
+    } else {
+        default_ttl_hours as u64 * 3600
+    }
+}
+
+fn record_ttl_seconds(record: &CertRecord) -> u64 {
+    record.not_after.saturating_sub(record.not_before) as u64
 }
 
 // ──── PkiService ────
@@ -244,18 +359,32 @@ impl PkiService {
     /// 版本化 CAS 替换的最大重试次数（仅在并发替换/并发创建冲突时消耗）。
     const MAX_REPLACE_ATTEMPTS: usize = 5;
 
-    /// 签发终端证书（**get-or-create，到期即换新**）
+    /// 签发终端证书（**get-or-create，到期即换新，参数一致才幂等**）
     ///
-    /// 同一 CN 未过期证书直接返回既有记录（同 serial / 公钥 / 私钥）；
-    /// 未命中则 CAS 创建；**已过期则走替换路径重签（新 serial / 新密钥）**，
-    /// 绝不返回既有过期记录。替换走版本化 CAS：并发冲突时重读按当前状态重试，
-    /// 不丢更新。`ttl_seconds`: 有效期（秒）。为 0 时使用 config.cert_ttl_hours。
+    /// 同一 CN 且 SAN / TTL 与当前 active 记录一致 → 返回既有记录（同 serial / 私钥）；
+    /// 参数不一致或已过期 → 走替换路径重签（新 serial / 新密钥），旧记录 retired。
+    /// `ttl_seconds`: 有效期（秒）。为 0 时使用 config.cert_ttl_hours。
     pub async fn issue_cert(
         &self,
         common_name: &str,
         ttl_seconds: u64,
     ) -> Result<CertInfo, PkiError> {
-        self.ensure_cert(common_name, ttl_seconds, false).await
+        self.issue_cert_with_san(common_name, ttl_seconds, SanSpec::default())
+            .await
+    }
+
+    /// 同 [`Self::issue_cert`]，显式指定 SAN。
+    ///
+    /// SAN 两者皆空 ⇒ 将 CN 派生为 DNS SAN；CN 不是合法 DNS 名时返回
+    /// `InvalidArgument`（不静默签出无 SAN 证书）。
+    pub async fn issue_cert_with_san(
+        &self,
+        common_name: &str,
+        ttl_seconds: u64,
+        san: SanSpec,
+    ) -> Result<CertInfo, PkiError> {
+        self.ensure_cert(common_name, ttl_seconds, false, san.normalized()?, false)
+            .await
     }
 
     /// 续期证书：**按 serial 查回真实 CN**，再替换出一个新证书（新密钥 + 新 serial）
@@ -269,7 +398,15 @@ impl PkiService {
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?
             .ok_or_else(|| PkiError::CertNotFound(serial.to_string()))?;
-        self.ensure_cert(&old.common_name, ttl_seconds, true).await
+        // RenewCert 无 SAN 入参：继承旧记录 SAN（无 SAN 的旧记录由 CN 派生）。
+        self.ensure_cert(
+            &old.common_name,
+            ttl_seconds,
+            true,
+            SanSpec::default(),
+            true,
+        )
+        .await
     }
 
     /// 按 CN 显式轮换：签发新 active，旧记录（含已过期）retired 入历史
@@ -278,13 +415,31 @@ impl PkiService {
         common_name: &str,
         ttl_seconds: u64,
     ) -> Result<CertInfo, PkiError> {
-        self.ensure_cert(common_name, ttl_seconds, true).await
+        self.rotate_cert_with_san(common_name, ttl_seconds, SanSpec::default())
+            .await
+    }
+
+    /// 同 [`Self::rotate_cert`]，显式指定 SAN。
+    ///
+    /// SAN 两者皆空 ⇒ 继承当前 active 记录的 SAN（无既有记录时由 CN 派生），
+    /// 避免「轮换后丢 SAN」。
+    pub async fn rotate_cert_with_san(
+        &self,
+        common_name: &str,
+        ttl_seconds: u64,
+        san: SanSpec,
+    ) -> Result<CertInfo, PkiError> {
+        self.ensure_cert(common_name, ttl_seconds, true, san.normalized()?, true)
+            .await
     }
 
     /// 统一的签发/轮换实现。
     ///
-    /// - `force_rotate = false`（IssueCert）：当前记录未过期 → 幂等返回；过期 → 替换重签。
+    /// - `force_rotate = false`（IssueCert）：当前记录未过期**且 SAN/TTL 与本次请求一致**
+    ///   → 幂等返回；参数不一致或已过期 → 替换重签。
     /// - `force_rotate = true`（RotateCert / RenewCert）：无条件替换出新 active。
+    /// - `inherit_existing_san`：请求未给 SAN 时是否继承现有记录（Renew/未显式传 SAN 的
+    ///   Rotate）；false 时由 CN 派生（IssueCert 的默认语义）。
     ///
     /// 三条路径的并发安全：创建用 CAS Version==0；替换用「读到的 key version」做
     /// CAS 比较（见 [`PkiStore::replace_active_cert_cas`]）。冲突即重读，按最新状态
@@ -294,7 +449,10 @@ impl PkiService {
         common_name: &str,
         ttl_seconds: u64,
         force_rotate: bool,
+        requested_san: SanSpec,
+        inherit_existing_san: bool,
     ) -> Result<CertInfo, PkiError> {
+        let want_ttl = effective_ttl_seconds(ttl_seconds, self.config.cert_ttl_hours);
         for _ in 0..Self::MAX_REPLACE_ATTEMPTS {
             match self
                 .store
@@ -302,16 +460,29 @@ impl PkiService {
                 .await
                 .map_err(|e| PkiError::Store(e.to_string()))?
             {
-                // 幂等快路径：未过期且非强制轮换 → 直接返回
-                Some((record, _version)) if !force_rotate && !record.is_expired(now_unix()) => {
-                    return Ok(record.into());
-                }
-                // 替换路径：过期记录或强制轮换 → 新签 + 版本化 CAS 替换
                 Some((record, version)) => {
+                    // 幂等快路径：未过期 + 非强制轮换 + SAN/TTL 与请求一致
+                    if !force_rotate && !record.is_expired(now_unix()) {
+                        let san = effective_san(common_name, &requested_san, false, Some(&record))?;
+                        if san.dns_names == record.dns_names
+                            && san.ip_addresses == record.ip_addresses
+                            && record_ttl_seconds(&record) == want_ttl
+                        {
+                            return Ok(record.into());
+                        }
+                    }
+                    // 替换路径：参数不一致 / 过期 / 强制轮换 → 新签 + 版本化 CAS 替换
+                    let san = effective_san(
+                        common_name,
+                        &requested_san,
+                        inherit_existing_san,
+                        Some(&record),
+                    )?;
                     let new_record = self
                         .sign_new_cert_blocking(
                             common_name,
                             ttl_seconds,
+                            san,
                             CertStatus::Active,
                             Some(record.serial.clone()),
                         )
@@ -331,8 +502,16 @@ impl PkiService {
                 }
                 // 首次签发：CAS Version==0 原子创建
                 None => {
+                    let san =
+                        effective_san(common_name, &requested_san, inherit_existing_san, None)?;
                     let new_record = self
-                        .sign_new_cert_blocking(common_name, ttl_seconds, CertStatus::Active, None)
+                        .sign_new_cert_blocking(
+                            common_name,
+                            ttl_seconds,
+                            san,
+                            CertStatus::Active,
+                            None,
+                        )
                         .await?;
                     match self.store.create_cert(common_name, &new_record).await {
                         Ok(()) => return Ok(new_record.into()),
@@ -380,6 +559,7 @@ impl PkiService {
         &self,
         common_name: &str,
         ttl_seconds: u64,
+        san: SanSpec,
         status: CertStatus,
         parent_serial: Option<String>,
     ) -> Result<CertRecord, PkiError> {
@@ -396,6 +576,7 @@ impl PkiService {
                 &cn,
                 ttl_seconds,
                 default_ttl_hours,
+                &san,
                 status,
                 parent_serial,
             )
@@ -413,6 +594,7 @@ fn sign_cert_with_ca(
     common_name: &str,
     ttl_seconds: u64,
     default_ttl_hours: u32,
+    san: &SanSpec,
     status: CertStatus,
     parent_serial: Option<String>,
 ) -> Result<CertRecord, PkiError> {
@@ -436,12 +618,23 @@ fn sign_cert_with_ca(
         rcgen::ExtendedKeyUsagePurpose::ServerAuth,
     ];
 
+    // rcgen 不会把 CN 自动写入 SAN；只认 SAN 的校验方（Go ≥1.15 / rustls /
+    // 浏览器 / Envoy）会拒绝无 SAN 证书，故 SAN 必须显式写入。
+    let mut subject_alt_names = Vec::with_capacity(san.dns_names.len() + san.ip_addresses.len());
+    for name in &san.dns_names {
+        let ia5 = Ia5String::try_from(name.as_str())
+            .map_err(|_| PkiError::InvalidArgument(format!("invalid DNS name: {name:?}")))?;
+        subject_alt_names.push(SanType::DnsName(ia5));
+    }
+    for ip in &san.ip_addresses {
+        let addr = IpAddr::from_str(ip)
+            .map_err(|_| PkiError::InvalidArgument(format!("invalid IP address: {ip:?}")))?;
+        subject_alt_names.push(SanType::IpAddress(addr));
+    }
+    params.subject_alt_names = subject_alt_names;
+
     let now = OffsetDateTime::now_utc();
-    let ttl = if ttl_seconds > 0 {
-        time::Duration::seconds(ttl_seconds as i64)
-    } else {
-        time::Duration::hours(default_ttl_hours as i64)
-    };
+    let ttl = time::Duration::seconds(effective_ttl_seconds(ttl_seconds, default_ttl_hours) as i64);
     params.not_before = now;
     params.not_after = now + ttl;
 
@@ -468,6 +661,8 @@ fn sign_cert_with_ca(
         serial,
         status,
         parent_serial,
+        dns_names: san.dns_names.clone(),
+        ip_addresses: san.ip_addresses.clone(),
     })
 }
 
@@ -578,6 +773,8 @@ impl PkiService {
 #[derive(Debug)]
 pub enum PkiError {
     CaNotInitialized,
+    /// 调用方参数非法（非法 DNS SAN / IP / CN 无法派生 SAN）
+    InvalidArgument(String),
     KeyGen(String),
     CertGen(String),
     CertParse(String),
@@ -596,6 +793,7 @@ impl std::fmt::Display for PkiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CaNotInitialized => write!(f, "CA not initialized"),
+            Self::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
             Self::KeyGen(msg) => write!(f, "key generation failed: {msg}"),
             Self::CertGen(msg) => write!(f, "certificate generation failed: {msg}"),
             Self::CertParse(msg) => write!(f, "certificate parse failed: {msg}"),
@@ -627,6 +825,20 @@ use coord_proto::agent::{
 };
 use tonic::{Request, Response, Status};
 
+/// `PkiError → tonic::Status` 的单一映射点。
+///
+/// 参数错误必须是 `INVALID_ARGUMENT`（调用方可重试/修正），其余保持
+/// `INTERNAL`；不得让所有失败都退化成无法区分的内部错误。
+fn status_from_pki_error(e: PkiError) -> Status {
+    match e {
+        PkiError::InvalidArgument(msg) => Status::invalid_argument(msg),
+        PkiError::CertNotFound(serial) => {
+            Status::not_found(format!("certificate not found by serial: {serial}"))
+        }
+        other => Status::internal(other.to_string()),
+    }
+}
+
 fn status_to_str(status: CertStatus) -> &'static str {
     match status {
         CertStatus::Active => "active",
@@ -656,7 +868,7 @@ impl Pki for PkiService {
         let req = request.into_inner();
         PkiService::init_ca(self, &req.ca_common_name)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(status_from_pki_error)?;
         Ok(Response::new(PkiInitCaResponse {}))
     }
 
@@ -665,9 +877,14 @@ impl Pki for PkiService {
         request: Request<PkiIssueCertRequest>,
     ) -> Result<Response<PkiIssueCertResponse>, Status> {
         let req = request.into_inner();
-        let cert_info = PkiService::issue_cert(self, &req.common_name, req.ttl_seconds as u64)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let cert_info = PkiService::issue_cert_with_san(
+            self,
+            &req.common_name,
+            req.ttl_seconds as u64,
+            SanSpec::new(req.dns_names, req.ip_addresses),
+        )
+        .await
+        .map_err(status_from_pki_error)?;
         Ok(Response::new(cert_to_issue_response(cert_info)))
     }
 
@@ -679,7 +896,7 @@ impl Pki for PkiService {
         // 修复：按 serial 查回真实 CN 再续期，不再把 serial 当 CN
         let cert_info = PkiService::renew_cert(self, &req.serial_number, req.ttl_seconds as u64)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(status_from_pki_error)?;
         Ok(Response::new(PkiRenewCertResponse {
             common_name: cert_info.common_name,
             cert_pem: cert_info.cert_pem,
@@ -697,9 +914,14 @@ impl Pki for PkiService {
         request: Request<PkiRotateCertRequest>,
     ) -> Result<Response<PkiRotateCertResponse>, Status> {
         let req = request.into_inner();
-        let cert_info = PkiService::rotate_cert(self, &req.common_name, req.ttl_seconds as u64)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let cert_info = PkiService::rotate_cert_with_san(
+            self,
+            &req.common_name,
+            req.ttl_seconds as u64,
+            SanSpec::new(req.dns_names, req.ip_addresses),
+        )
+        .await
+        .map_err(status_from_pki_error)?;
         Ok(Response::new(PkiRotateCertResponse {
             common_name: cert_info.common_name,
             cert_pem: cert_info.cert_pem,
@@ -719,7 +941,7 @@ impl Pki for PkiService {
         let req = request.into_inner();
         let certs = PkiService::list_certs(self, &req.common_name)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(status_from_pki_error)?;
         let summaries = certs
             .into_iter()
             .map(|c| PkiCertSummary {
@@ -742,7 +964,7 @@ impl Pki for PkiService {
         let req = request.into_inner();
         let cert_info = PkiService::get_cert_by_cn(self, &req.common_name)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(status_from_pki_error)?
             .ok_or_else(|| {
                 Status::not_found(format!("no active certificate for CN: {}", req.common_name))
             })?;
@@ -763,8 +985,7 @@ impl Pki for PkiService {
         request: Request<PkiVerifyCertRequest>,
     ) -> Result<Response<PkiVerifyCertResponse>, Status> {
         let req = request.into_inner();
-        let valid = PkiService::verify_cert(self, &req.cert_pem)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let valid = PkiService::verify_cert(self, &req.cert_pem).map_err(status_from_pki_error)?;
         Ok(Response::new(PkiVerifyCertResponse { valid }))
     }
 
@@ -772,8 +993,7 @@ impl Pki for PkiService {
         &self,
         _request: Request<PkiGetCaCertRequest>,
     ) -> Result<Response<PkiGetCaCertResponse>, Status> {
-        let ca_cert_pem =
-            PkiService::ca_cert_pem(self).map_err(|e| Status::internal(e.to_string()))?;
+        let ca_cert_pem = PkiService::ca_cert_pem(self).map_err(status_from_pki_error)?;
         Ok(Response::new(PkiGetCaCertResponse { ca_cert_pem }))
     }
 }
@@ -910,6 +1130,8 @@ mod tests {
             serial: serial.to_string(),
             status: CertStatus::Active,
             parent_serial: None,
+            dns_names: Vec::new(),
+            ip_addresses: Vec::new(),
         }
     }
 
@@ -1024,12 +1246,12 @@ mod tests {
 
         let first = pki.issue_cert("svc-ttl.local", 1).await.expect("issue");
 
-        // 过期前：幂等返回同一证书
+        // 过期前 + 同 TTL：幂等返回同一证书（参数一致才幂等）
         let same = pki
-            .issue_cert("svc-ttl.local", 0)
+            .issue_cert("svc-ttl.local", 1)
             .await
             .expect("issue again");
-        assert_eq!(first.serial, same.serial, "过期前必须幂等");
+        assert_eq!(first.serial, same.serial, "过期前同参数必须幂等");
 
         // 越过 TTL（1s）→ 再次 issue 必须换新
         // 留出 2 秒级余量：not_after 为秒级截断，1s TTL 在跨秒边界上最多需 ~2s 才判过期
@@ -1157,5 +1379,313 @@ mod tests {
             cert_b.key_pem,
             "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----"
         );
+    }
+
+    // ──── SAN 签发（#117）────
+
+    /// 解析证书 SAN 集合（x509-parser 直接读取扩展，不经 OpenSSL 的 CN 回退）。
+    fn cert_sans(cert_pem: &str) -> (Vec<String>, Vec<String>) {
+        use x509_parser::extensions::GeneralName;
+
+        let der = pem_to_der(cert_pem).expect("pem -> der");
+        let (_rest, cert) = x509_parser::parse_x509_certificate(&der).expect("parse x509");
+        let mut dns = Vec::new();
+        let mut ips = Vec::new();
+        if let Some(ext) = cert.subject_alternative_name().expect("san extension") {
+            for name in &ext.value.general_names {
+                match name {
+                    GeneralName::DNSName(name) => dns.push((*name).to_string()),
+                    GeneralName::IPAddress(bytes) => match bytes.len() {
+                        4 => ips.push(
+                            IpAddr::from([bytes[0], bytes[1], bytes[2], bytes[3]]).to_string(),
+                        ),
+                        16 => {
+                            let mut octets = [0u8; 16];
+                            octets.copy_from_slice(bytes);
+                            ips.push(IpAddr::from(octets).to_string());
+                        }
+                        other => panic!("unexpected IP SAN length: {other}"),
+                    },
+                    _ => {}
+                }
+            }
+        }
+        dns.sort();
+        ips.sort();
+        (dns, ips)
+    }
+
+    /// 只认 SAN 的校验方（与 Go ≥1.15 / rustls / 浏览器 / Envoy 同口径）。
+    fn webpki_verify(
+        ca_pem: &str,
+        leaf_pem: &str,
+        server_name: &str,
+        at_unix: u64,
+    ) -> Result<(), String> {
+        use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+
+        let ca_der = CertificateDer::from(pem_to_der(ca_pem).expect("ca der"));
+        let leaf_der = CertificateDer::from(pem_to_der(leaf_pem).expect("leaf der"));
+        let anchor = webpki::anchor_from_trusted_cert(&ca_der).expect("trust anchor");
+        let anchors = [anchor];
+        let cert = webpki::EndEntityCert::try_from(&leaf_der).expect("end entity");
+        let name = ServerName::try_from(server_name).expect("server name");
+        cert.verify_for_usage(
+            webpki::ALL_VERIFICATION_ALGS,
+            &anchors,
+            &[],
+            UnixTime::since_unix_epoch(std::time::Duration::from_secs(at_unix)),
+            webpki::KeyUsage::server_auth(),
+            None,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        cert.verify_is_valid_for_subject_name(&name)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_issue_cert_defaults_san_from_cn() {
+        let pki = make_pki();
+        pki.init_ca("SAN CA").await.expect("init");
+
+        let cert = pki.issue_cert("orders-api", 0).await.expect("issue");
+        let (dns, ips) = cert_sans(&cert.cert_pem);
+        assert_eq!(dns, vec!["orders-api"], "CN 必须派生为 DNS SAN");
+        assert!(ips.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_issue_cert_explicit_san_matches_request() {
+        let pki = make_pki();
+        pki.init_ca("SAN CA").await.expect("init");
+
+        let requested = SanSpec::new(
+            vec!["orders-api".into(), "orders-api.svc".into()],
+            vec!["127.0.0.1".into(), "::1".into()],
+        );
+        let cert = pki
+            .issue_cert_with_san("orders-api", 3600, requested.clone())
+            .await
+            .expect("issue with san");
+
+        let (dns, ips) = cert_sans(&cert.cert_pem);
+        let mut want_dns = requested.dns_names.clone();
+        want_dns.sort();
+        let mut want_ips = requested.ip_addresses.clone();
+        want_ips.sort();
+        assert_eq!(
+            (dns, ips),
+            (want_dns, want_ips),
+            "SAN 集合必须与请求精确相等"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_issue_cert_rejects_non_ascii_cn_without_san() {
+        let pki = make_pki();
+        pki.init_ca("SAN CA").await.expect("init");
+
+        match pki.issue_cert("订单-api", 0).await {
+            Err(PkiError::InvalidArgument(msg)) => {
+                assert!(msg.contains("dns_names"), "错误提示必须指向显式 SAN: {msg}");
+            }
+            other => panic!("expected InvalidArgument, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_issue_cert_rejects_invalid_ip_san() {
+        let pki = make_pki();
+        pki.init_ca("SAN CA").await.expect("init");
+
+        match pki
+            .issue_cert_with_san(
+                "orders-api",
+                0,
+                SanSpec::new(vec![], vec!["999.0.0.1".into()]),
+            )
+            .await
+        {
+            Err(PkiError::InvalidArgument(_)) => {}
+            other => panic!("expected InvalidArgument, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rotate_cert_preserves_san_when_not_specified() {
+        let pki = make_pki();
+        pki.init_ca("SAN Rotate CA").await.expect("init");
+
+        let requested = SanSpec::new(vec!["orders-api".into()], vec!["127.0.0.1".into()]);
+        pki.issue_cert_with_san("orders-api", 0, requested)
+            .await
+            .expect("issue");
+        let rotated = pki.rotate_cert("orders-api", 0).await.expect("rotate");
+
+        let (dns, ips) = cert_sans(&rotated.cert_pem);
+        assert_eq!(dns, vec!["orders-api"], "轮换后 DNS SAN 不得丢");
+        assert_eq!(ips, vec!["127.0.0.1"], "轮换后 IP SAN 不得丢");
+    }
+
+    #[tokio::test]
+    async fn test_renew_cert_preserves_san() {
+        let pki = make_pki();
+        pki.init_ca("SAN Renew CA").await.expect("init");
+
+        let issued = pki
+            .issue_cert_with_san(
+                "orders-api",
+                0,
+                SanSpec::new(vec!["orders-api.svc".into()], vec![]),
+            )
+            .await
+            .expect("issue");
+        let renewed = pki.renew_cert(&issued.serial, 0).await.expect("renew");
+
+        let (dns, _) = cert_sans(&renewed.cert_pem);
+        assert_eq!(dns, vec!["orders-api.svc"], "RenewCert 必须继承 SAN");
+    }
+
+    #[tokio::test]
+    async fn test_issued_cert_passes_webpki_positive_and_fails_other_name() {
+        let pki = make_pki();
+        pki.init_ca("WebPKI CA").await.expect("init");
+        let cert = pki
+            .issue_cert_with_san(
+                "orders-api",
+                3600,
+                SanSpec::new(
+                    vec!["orders-api".into(), "orders-api.svc".into()],
+                    vec!["127.0.0.1".into()],
+                ),
+            )
+            .await
+            .expect("issue");
+        let ca = pki.ca_cert_pem().expect("ca");
+        let now = now_unix() as u64;
+
+        webpki_verify(&ca, &cert.cert_pem, "orders-api", now)
+            .expect("rustls-webpki must accept the requested DNS name");
+        webpki_verify(&ca, &cert.cert_pem, "orders-api.svc", now)
+            .expect("additional DNS SAN must verify");
+        webpki_verify(&ca, &cert.cert_pem, "127.0.0.1", now).expect("IP SAN must verify");
+
+        // 负控制：错误名字必须失败——否则"通过"不能证明 SAN 生效。
+        assert!(
+            webpki_verify(&ca, &cert.cert_pem, "orders-api.evil", now).is_err(),
+            "wrong name must fail"
+        );
+    }
+
+    // ──── 参数一致才幂等（#119）────
+
+    #[tokio::test]
+    async fn test_issue_cert_same_params_stays_idempotent() {
+        let pki = make_pki();
+        pki.init_ca("Param Idem CA").await.expect("init");
+        let san = SanSpec::new(vec!["orders-api".into()], vec!["127.0.0.1".into()]);
+
+        let first = pki
+            .issue_cert_with_san("orders-api", 3600, san.clone())
+            .await
+            .expect("first");
+        let second = pki
+            .issue_cert_with_san("orders-api", 3600, san)
+            .await
+            .expect("second");
+
+        assert_eq!(first.serial, second.serial, "同 SAN/TTL 必须幂等");
+        assert_eq!(first.cert_pem, second.cert_pem);
+    }
+
+    #[tokio::test]
+    async fn test_issue_cert_different_ttl_reissues_and_keeps_history() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki.init_ca("Param TTL CA").await.expect("init");
+
+        let first = pki.issue_cert("orders-api", 3600).await.expect("first");
+        let second = pki.issue_cert("orders-api", 7200).await.expect("second");
+
+        assert_ne!(first.serial, second.serial, "TTL 变化必须换新证书");
+        assert_eq!(
+            second.not_after - second.not_before,
+            7200,
+            "新证书 TTL 必须与本次请求一致"
+        );
+
+        let old = store
+            .get_cert_by_serial(&first.serial)
+            .await
+            .expect("by serial")
+            .expect("retired history keeps old cert");
+        assert_eq!(old.status, CertStatus::Retired);
+    }
+
+    #[tokio::test]
+    async fn test_issue_cert_different_san_reissues() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki.init_ca("Param SAN CA").await.expect("init");
+
+        let first = pki
+            .issue_cert_with_san(
+                "orders-api",
+                0,
+                SanSpec::new(vec!["old.svc".into()], vec![]),
+            )
+            .await
+            .expect("first");
+        let second = pki
+            .issue_cert_with_san(
+                "orders-api",
+                0,
+                SanSpec::new(vec!["new.svc".into()], vec![]),
+            )
+            .await
+            .expect("second");
+
+        assert_ne!(first.serial, second.serial, "SAN 变化必须换新证书");
+        let (dns, _) = cert_sans(&second.cert_pem);
+        assert_eq!(dns, vec!["new.svc"], "SAN 必须与本次请求一致");
+
+        let old = store
+            .get_cert_by_serial(&first.serial)
+            .await
+            .expect("by serial")
+            .expect("retired history keeps old cert");
+        assert_eq!(old.status, CertStatus::Retired);
+    }
+
+    #[tokio::test]
+    async fn test_issue_cert_upgrades_legacy_record_without_san() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki.init_ca("Legacy CA").await.expect("init");
+
+        // 升级前的记录：无 SAN 字段（反序列化为空），未过期、TTL 与默认值一致。
+        let now = now_unix();
+        let legacy = CertRecord {
+            common_name: "legacy-svc".into(),
+            cert_pem: "-----BEGIN CERTIFICATE-----\nLEGACY\n-----END CERTIFICATE-----".into(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nLEGACY\n-----END PRIVATE KEY-----".into(),
+            not_before: now,
+            not_after: now + 86_400,
+            serial: "legacy-0x1".into(),
+            status: CertStatus::Active,
+            parent_serial: None,
+            dns_names: Vec::new(),
+            ip_addresses: Vec::new(),
+        };
+        store
+            .create_cert("legacy-svc", &legacy)
+            .await
+            .expect("seed legacy");
+
+        let upgraded = pki.issue_cert("legacy-svc", 0).await.expect("issue");
+        assert_ne!(upgraded.serial, legacy.serial, "无 SAN 旧记录必须被替换");
+        let (dns, _) = cert_sans(&upgraded.cert_pem);
+        assert_eq!(dns, vec!["legacy-svc"], "替换后必须带 CN 派生 SAN");
     }
 }

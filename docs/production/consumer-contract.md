@@ -309,6 +309,15 @@
 - **到期 = 换新触发**（G-PKI-1）：`IssueCert` / `RotateCert` 对过期记录走替换
   路径重签（新 serial / 新密钥）；`RenewCert(serial)` 为按序列号恢复入口；
   `GetCertByCN` 仅未过期返回，否则 `NOT_FOUND`。
+- **证书 profile**：密钥 ECDSA P-256；KU = `digitalSignature` + `keyEncipherment`；
+  EKU = `clientAuth` + `serverAuth`；有效期由请求 TTL（缺省 24h）决定。
+  **身份以 SAN 为准**，CN 仅作 subject（OpenSSL 的 CN 回退不是契约）：`IssueCert`
+  未传 `dns_names` / `ip_addresses` 时默认把 CN 派生为 DNS SAN；CN 不是合法
+  DNS 名（非 ASCII 等）⇒ `INVALID_ARGUMENT`（显式传 `dns_names` 可保留任意 CN）。
+  `RotateCert` 未传 SAN ⇒ 继承当前证书；`RenewCert` 同样继承。
+- **参数一致才幂等**：同 CN 的 `IssueCert` 仅在 SAN 与 TTL 都与当前 active 记录一致时
+  返回既有证书（同 serial / 同私钥）；SAN 或 TTL 不同 ⇒ 等价 `RotateCert`
+  （新 serial + 新密钥，旧记录 retired 保留至 `not_after`，按 serial 仍可取回）。
 - 观测：`coord_agent_pki_certs_active` / `..._certs_expiring_soon`（窗口
   `expiry_warn_hours`，默认 6h），告警 `CoordPkiCertExpiringSoon`。
 - **无吊销（CRL/OCSP 不在本轮）**：泄露应急 = 消费侧剔除 + CN 轮换
