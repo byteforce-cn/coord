@@ -62,7 +62,10 @@ pub enum Error {
 
     /// v2 写命令的 `commit_ts` 不合法（<= current_revision 且未命中已有写入）
     #[error("commit_ts {commit_ts} rejected: current revision is {current_revision}")]
-    CommitRejected { commit_ts: u64, current_revision: u64 },
+    CommitRejected {
+        commit_ts: u64,
+        current_revision: u64,
+    },
 
     /// 数据损坏
     #[error("data corruption: {0}")]
