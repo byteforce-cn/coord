@@ -514,6 +514,38 @@ mod tests {
         import_snapshot_data(&storage, &restored).unwrap();
     }
 
+    /// 判据（#136 Review Focus 4）：TSO 高水位随 `/_sys/*` 域进快照；装快照后
+    /// 下一批起点不得低于快照前上界（否则时间戳复用）。
+    #[test]
+    fn test_snapshot_carries_tso_high_water() {
+        let (_tmp, storage) = setup_storage();
+        let batch = storage
+            .apply_tso_allocate(64, 7, AppliedLogId::standalone(7))
+            .unwrap();
+        assert_eq!(batch.start_ts, 1);
+
+        let data = export_snapshot_data(&storage, 7, 1).unwrap();
+        let restored = SnapshotData::from_bytes(&data.to_bytes().unwrap()).unwrap();
+
+        let (_tmp2, storage2) = setup_storage();
+        import_snapshot_data(&storage2, &restored).unwrap();
+        assert_eq!(
+            storage2.tso_high_water().unwrap(),
+            batch.end_ts,
+            "快照必须携带 TSO 高水位"
+        );
+
+        let next = storage2
+            .apply_tso_allocate(64, 8, AppliedLogId::standalone(8))
+            .unwrap();
+        assert!(
+            next.start_ts >= batch.end_ts,
+            "装快照后不得复用旧批次：next=[{}, {})",
+            next.start_ts,
+            next.end_ts
+        );
+    }
+
     #[test]
     fn test_snapshot_with_kv_data() {
         let (_tmp, storage) = setup_storage();

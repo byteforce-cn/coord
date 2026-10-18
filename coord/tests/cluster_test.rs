@@ -525,7 +525,6 @@ mod tests {
         }
     }
 
-
     // ──── Test: TSO batch never reused across leader failover (#136) ────
 
     /// 选举/转发窗口内的可重试错误（allocate 本身绝不复用：失败重试只会拿到新批）。
@@ -534,8 +533,10 @@ mod tests {
         loop {
             match alloc.allocate(batch_size).await {
                 Ok(batch) => return batch,
-                Err(e @ (coord_core::error::Error::NotLeader { .. }
-                | coord_core::error::Error::ClusterUnavailable(_))) => {
+                Err(
+                    e @ (coord_core::error::Error::NotLeader { .. }
+                    | coord_core::error::Error::ClusterUnavailable(_)),
+                ) => {
                     if tokio::time::Instant::now() > deadline {
                         panic!("TSO allocate should succeed after failover: {e}");
                     }
