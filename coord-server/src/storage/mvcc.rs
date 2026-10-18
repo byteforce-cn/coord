@@ -99,6 +99,30 @@ pub const PD_QUEUE_PREFIX: &[u8] = b"/_pd/ops/";
 /// 终态条目保留上限（超出删最旧终态；apply 期确定性裁剪，只依赖持久状态）
 const PD_QUEUE_MAX_TERMINAL: usize = 512;
 
+// ──── TSO（region 0 system raft，#136）────
+
+/// TSO 内部记录前缀（region 0 MVCC，`TABLE_KV` 原始行）。
+///
+/// 选 `/_sys/` 而不是 `/_meta/`：快照导出按 `/_sys/*` 整域携带（`/_sys/auth/`
+/// 之外），高水位随快照/恢复一起走——装快照后不得回退（否则会重发旧批）。
+/// 非 `/kv/` 前缀 → 不加密；无 KvMetadata → 不经 compaction 清理。
+pub const TSO_PREFIX: &[u8] = b"/_sys/tso/";
+
+/// 下一个未发放的时间戳（u64 BE；缺失 = 1）。0 是协议里的「由服务端决定」
+/// 哨兵，不得发放。
+const TSO_HIGH_WATER: &[u8] = b"/_sys/tso/high_water";
+
+/// 最近一次分配的批次（信封 V2；重放同一 revision 时原样返回）。
+const TSO_LAST_BATCH: &[u8] = b"/_sys/tso/last_batch";
+
+/// 单次 TSO 批次分配记录（重放幂等：同 revision 必须返回同一区间）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct TsoBatchRecord {
+    revision: u64,
+    start_ts: u64,
+    end_ts: u64,
+}
+
 /// 队列键：`/_pd/ops/{op_id:u64be}`（定宽，前缀迭代即 op_id 升序）
 pub(crate) fn encode_pd_op_key(op_id: u64) -> Vec<u8> {
     let mut key = Vec::with_capacity(PD_QUEUE_PREFIX.len() + 8);
@@ -499,6 +523,17 @@ pub struct CompactOutcome {
     pub deleted_changelog: usize,
     /// 被物理删除的 tombstone 数（KV 行 + 元数据行）
     pub deleted_tombstones: usize,
+}
+
+/// TSO 批次分配 apply 结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TsoBatchOutcome {
+    /// 批次左闭右开起点（`start_ts` 可用）
+    pub start_ts: u64,
+    /// 批次终点（`end_ts` 不可用）
+    pub end_ts: u64,
+    /// true = 该 revision 已 apply，本次为重放（区间不变、高水位不推进）
+    pub replayed: bool,
 }
 
 // ──── MvccStorage ────
@@ -2038,6 +2073,97 @@ impl<B: StorageBackend> MvccStorage<B> {
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
 
             Ok(ApplyOutcome::applied())
+        })
+    }
+
+    // ──── TSO（#136）────
+
+    /// 读取 TSO 高水位（下一个未发放值；缺失 = 1）。
+    pub fn tso_high_water(&self) -> Result<u64> {
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, TSO_HIGH_WATER)?
+                .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+                .map(u64::from_be_bytes)
+                .unwrap_or(1))
+        })
+    }
+
+    /// apply 一条 TSO 批次分配（region 0 system raft）。
+    ///
+    /// 批次 = `[start, start + batch_size)`，`batch_size = 0` 视为 1。高水位与
+    /// `META_LAST_APPLIED` 同事务持久化：apply 返回后即使进程崩溃，重启也不会
+    /// 复用已发放区间（只增不减、允许空洞）。
+    pub fn apply_tso_allocate(
+        &self,
+        batch_size: u32,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<TsoBatchOutcome> {
+        if self.changelog_contains_revision(revision)? {
+            let last: Option<TsoBatchRecord> = self.backend.read(|tx| {
+                Ok(tx
+                    .get(TABLE_KV, TSO_LAST_BATCH)?
+                    .and_then(|b| crate::storage::envelope::decode(&b).ok()))
+            })?;
+            return Ok(match last {
+                Some(rec) if rec.revision == revision => TsoBatchOutcome {
+                    start_ts: rec.start_ts,
+                    end_ts: rec.end_ts,
+                    replayed: true,
+                },
+                // 只可能是更旧的重复条目（raft 不会产生）；返回当前高水位空区间，
+                // 保证“重放不推进高水位”而不是伪造成新批。
+                _ => {
+                    let high_water = self.tso_high_water()?;
+                    TsoBatchOutcome {
+                        start_ts: high_water,
+                        end_ts: high_water,
+                        replayed: true,
+                    }
+                }
+            });
+        }
+
+        self.backend.write(|tx| {
+            let start_ts = tx
+                .get(TABLE_KV, TSO_HIGH_WATER)?
+                .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+                .map(u64::from_be_bytes)
+                .unwrap_or(1);
+            let end_ts = start_ts
+                .checked_add(u64::from(batch_size.max(1)))
+                .ok_or_else(|| Error::Internal("TSO high-water overflow".to_string()))?;
+
+            let record = TsoBatchRecord {
+                revision,
+                start_ts,
+                end_ts,
+            };
+            let record_bytes = crate::storage::envelope::encode(&record)
+                .map_err(|e| Error::Internal(format!("encode TSO batch record: {e}")))?;
+
+            tx.insert(TABLE_KV, TSO_HIGH_WATER, &end_ts.to_be_bytes())?;
+            tx.insert(TABLE_KV, TSO_LAST_BATCH, &record_bytes)?;
+
+            // 幂等守卫/水位：与批次记录同一事务（重放由 changelog 判定）。
+            let event = ChangeEvent {
+                revision,
+                changes: Vec::new(),
+                event_type: EventType::Put,
+            };
+            tx.insert(
+                TABLE_CHANGELOG,
+                &encode_changelog_key(revision),
+                &event.to_bytes(),
+            )?;
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+
+            Ok(TsoBatchOutcome {
+                start_ts,
+                end_ts,
+                replayed: false,
+            })
         })
     }
 
@@ -4239,6 +4365,68 @@ mod tests {
         // 尾部两个（op_id 514/515）仍 Pending（未完成、不可裁剪）
         assert!(entries[entries.len() - 2].is_pending());
         assert!(entries[entries.len() - 1].is_pending());
+    }
+
+    // ──── TSO（#136）────
+
+    fn applied_for(index: u64) -> AppliedLogId {
+        AppliedLogId {
+            term: 1,
+            node_id: 1,
+            index,
+        }
+    }
+
+    #[test]
+    fn test_tso_allocate_monotonic_and_batch_bounds() {
+        let (_dir, storage) = create_storage();
+        let first = storage
+            .apply_tso_allocate(1024, 10, applied_for(10))
+            .unwrap();
+        assert_eq!((first.start_ts, first.end_ts), (1, 1025));
+        let second = storage.apply_tso_allocate(0, 11, applied_for(11)).unwrap();
+        assert_eq!((second.start_ts, second.end_ts), (1025, 1026));
+        assert_eq!(storage.tso_high_water().unwrap(), 1026);
+    }
+
+    #[test]
+    fn test_tso_restart_does_not_reuse_batch() {
+        let (dir, storage) = create_storage();
+        let first = storage.apply_tso_allocate(512, 8, applied_for(8)).unwrap();
+        assert_eq!(first.start_ts, 1);
+        let first_end = first.end_ts;
+        drop(storage);
+
+        let config = StorageConfig::default();
+        let backend = RedbBackend::open(dir.path(), &config).unwrap();
+        let reopened = MvccStorage::new(backend).unwrap();
+        assert_eq!(
+            reopened.tso_high_water().unwrap(),
+            first_end,
+            "重启后高水位必须从持久化记录恢复"
+        );
+        let second = reopened
+            .apply_tso_allocate(512, 9, applied_for(9))
+            .unwrap();
+        assert_eq!(second.start_ts, first_end, "新批起点接续旧上界");
+        assert!(second.end_ts > first_end);
+    }
+
+    #[test]
+    fn test_tso_replay_returns_same_batch() {
+        let (_dir, storage) = create_storage();
+        let first = storage.apply_tso_allocate(16, 42, applied_for(42)).unwrap();
+        let replay = storage.apply_tso_allocate(16, 42, applied_for(42)).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(
+            (replay.start_ts, replay.end_ts),
+            (first.start_ts, first.end_ts)
+        );
+        assert_eq!(
+            storage.tso_high_water().unwrap(),
+            first.end_ts,
+            "重放不得推进高水位"
+        );
     }
 
     #[test]
