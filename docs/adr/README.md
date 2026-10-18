@@ -36,3 +36,4 @@
 | [ADR-0012](0012-transit-hmac-purpose-bound-keys.md) | Transit HMAC 用途化密钥与轮换窗口（G-TR-3） | accepted |
 | [ADR-0013](0013-workflow-approval-v2.md) | 工作流引擎 v2：中国式审批能力落地（状态模型/并发/事件/恢复/契约） | proposed |
 | [ADR-0014](0014-approval-consume-closure.md) | 审批面消费闭环：动态席位来源 / 服务代终端用户 / 一体化启用 | accepted |
+| [ADR-0015](0015-kv-t.md) | KV-T：全局时间戳、serializable 跨 Region 事务与严格透明 Watch | proposed |
