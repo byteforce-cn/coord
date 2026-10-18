@@ -734,9 +734,15 @@ impl<B: StorageBackend> MvccStorage<B> {
 
     /// 内部 log-index 记录（lease/auth/PD/TSO/compact 等）：v1 下同步推进
     /// revision（保持 revision == applied index），v2 下不触碰 revision。
+    ///
+    /// 只前进不后退：重放/合成测试可能传入更低的 applied，revision 单调是
+    /// ADR-0015 D11.2 的不变量。
     fn note_log_index_revision(&self, tx: &mut dyn WriteTx, revision: Revision) -> Result<()> {
         if self.revision_mode == RevisionMode::LogIndex {
-            tx.insert(TABLE_META, META_CURRENT_REVISION, &revision.to_be_bytes())?;
+            let current = Self::current_revision_in_tx(tx, RevisionMode::LogIndex)?;
+            if revision > current {
+                tx.insert(TABLE_META, META_CURRENT_REVISION, &revision.to_be_bytes())?;
+            }
         }
         Ok(())
     }
@@ -2442,15 +2448,16 @@ impl<B: StorageBackend> MvccStorage<B> {
     ///   revision 与持久化状态，不读墙钟/随机数，约束 1）；
     /// - **分片删除**：每批 `COMPACT_BATCH_SIZE` 条一个写事务，避免巨型事务；
     /// - **幂等**：`revision <= 已持久化 compacted_revision` 为 no-op（重启重放安全）；
-    /// - **不得失败**：openraft 将 apply 错误视为致命，故 `revision > applied.index`
-    ///   时钳制为 applied.index（未来 revision 的拒绝由 RPC/提案层负责，错误码
-    ///   `INVALID_ARGUMENT`）。
+    /// - **不得失败**：openraft 将 apply 错误视为致命，故 `revision > current_revision`
+    ///   时钳制为 current revision（未来 revision 的拒绝由 RPC/提案层负责，错误码
+    ///   `INVALID_ARGUMENT`）。水位是 TSO current revision，**不得**用 raft
+    ///   `applied.index` 钳制（ADR-0015 D3）。
     pub fn apply_compact(
         &self,
         revision: Revision,
         applied: AppliedLogId,
     ) -> Result<CompactOutcome> {
-        let effective = revision.min(applied.index);
+        let effective = revision.min(self.current_revision());
         if effective == 0 {
             return Ok(CompactOutcome {
                 deleted_changelog: 0,
@@ -2833,6 +2840,60 @@ mod tests {
             .put_at_commit_ts(b"k2", b"v", None, 99, applied_for(8))
             .expect_err("重启后仍必须拒绝回退");
         assert!(matches!(err, Error::CommitRejected { .. }));
+    }
+
+    /// #139：compact 水位跟 current revision（commit_ts），不再被 applied index 钳制。
+    #[test]
+    fn test_compact_watermark_uses_current_revision_not_applied_index() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v", None, 1_000, applied_for(3))
+            .unwrap();
+        storage.apply_compact(1_000, applied_for(5)).unwrap();
+        assert_eq!(
+            storage.compacted_revision().unwrap(),
+            1_000,
+            "水位必须取 current revision，不是 applied.index=5"
+        );
+        assert_eq!(storage.current_revision(), 1_000);
+        assert!(storage.changelog_contains_revision(1_000).unwrap());
+    }
+
+    /// #139：compact(1000) 删除 <1000 的 changelog，保留 1000 本身。
+    #[test]
+    fn test_compact_deletes_only_below_commit_ts_watermark() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"a", b"1", None, 900, applied_for(3))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"b", b"2", None, 1_000, applied_for(4))
+            .unwrap();
+        storage.apply_compact(1_000, applied_for(5)).unwrap();
+        assert!(
+            !storage.changelog_contains_revision(900).unwrap(),
+            "低于水位的 changelog 必须删除"
+        );
+        assert!(
+            storage.changelog_contains_revision(1_000).unwrap(),
+            "水位自身的 changelog 不得删除"
+        );
+        assert_eq!(storage.compacted_revision().unwrap(), 1_000);
+    }
+
+    /// #139：未来 revision 的防御性钳制只到 current revision（不得 fail-open 到 log index）。
+    #[test]
+    fn test_compact_future_revision_clamped_to_current_revision() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v", None, 1_000, applied_for(3))
+            .unwrap();
+        storage.apply_compact(5_000, applied_for(5)).unwrap();
+        assert_eq!(
+            storage.compacted_revision().unwrap(),
+            1_000,
+            "未来 revision 只能钳到 current revision"
+        );
     }
 
     #[test]
@@ -4358,14 +4419,19 @@ mod tests {
             .unwrap();
         assert_eq!(lower.deleted_changelog, 0);
 
-        // 未来 revision（> 命令自身 entry index）在 apply 内钳制为该 index
-        // （apply 不得失败——openraft 视为致命；真正的"未来 revision"拒绝由
-        // RPC/提案层返回 INVALID_ARGUMENT）：钳制后 compacted_revision 推进
+        // 未来 revision 只钳到 current revision（#139：不得用 log index 钳制；
+        // apply 不得失败——真正的"未来 revision"拒绝由 RPC/提案层返回
+        // INVALID_ARGUMENT）。
         let future = storage
-            .apply_compact(999, AppliedLogId::standalone(10))
+            .apply_compact(999, AppliedLogId::standalone(6))
             .unwrap();
-        assert_eq!(future.deleted_changelog, 3); // rev 3,4,5（< 钳制后的 10）
-        assert_eq!(storage.compacted_revision().unwrap(), 10);
+        assert_eq!(future.deleted_changelog, 2); // rev 3,4（< current=5）
+        assert_eq!(storage.compacted_revision().unwrap(), 5);
+        assert_eq!(
+            storage.current_revision(),
+            6,
+            "applied 前进，revision 不回退"
+        );
     }
 
     #[test]

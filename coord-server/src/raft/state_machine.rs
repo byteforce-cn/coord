@@ -649,10 +649,11 @@ impl StateMachineStore {
             }
             Command::Compact { revision } => {
                 // raft 下发 compact revision，apply 分片删除（幂等、确定性）。
-                // 非法 revision（> applied）在 apply 内钳制，拒绝由 RPC/提案层负责。
+                // 水位是 TSO current revision：未来 revision 只钳到 current
+                // （拒绝由 RPC/提案层负责），不得用 log index 钳制。
+                let effective = (*revision).min(sm.current_revision());
                 let outcome = sm.apply_compact(*revision, applied).map_err(io_err)?;
                 let _ = outcome; // 计数已由 apply 内日志记录
-                let effective = (*revision).min(applied.index);
                 Ok((
                     Response::Compact {
                         compacted_revision: effective,
@@ -1381,6 +1382,38 @@ mod tests {
         );
         assert_eq!(store.state_machine.current_revision(), 200);
         assert_eq!(store.state_machine.get(b"a").unwrap(), None);
+    }
+
+    /// #139：Compact 响应取 current revision，不是 log index。
+    #[test]
+    fn test_compact_response_uses_current_revision_not_log_index() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::PutV2 {
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                    lease_id: None,
+                    commit_ts: 1_000,
+                },
+                5,
+                applied_at(5),
+            )
+            .expect("seed put");
+        let (resp, _event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::Compact { revision: 1_000 },
+                6,
+                applied_at(6),
+            )
+            .expect("compact apply");
+        match resp {
+            Response::Compact { compacted_revision } => assert_eq!(compacted_revision, 1_000),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(store.state_machine.compacted_revision().unwrap(), 1_000);
     }
 
     /// D11.5：用户级拒绝不得让 apply 返回 Err；applied 仍须前进。
