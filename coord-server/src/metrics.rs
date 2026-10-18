@@ -71,6 +71,14 @@ struct MetricsInner {
     /// KV-T 开关/门禁状态：0 = `[kv_t].enabled=false`，1 = 已开启（能力仍可能
     /// 按 gate 未交付）。用于区分"配置没开"与"开了但请求被门禁拒绝"。
     pub kv_t_enabled: AtomicI64,
+    /// 最近一次经本地缓存发放的 TSO（0 = 尚未发放）
+    pub tso_current: AtomicU64,
+    /// 本地批次缓存剩余可发放个数（`end - next`）
+    pub tso_batch_remaining: AtomicU64,
+    /// 批次 refill 失败次数（含重试与最终失败）
+    pub tso_refill_failures_total: AtomicU64,
+    /// 客户端观测到的 leadership 丢失次数（旧批随后被丢弃）
+    pub tso_leader_changes_total: AtomicU64,
 
     // ── Multi-Raft 指标（v6.0） ──
     /// Region 总数（全局）
@@ -212,6 +220,10 @@ impl Default for MetricsInner {
             lease_expired_total: AtomicU64::new(0),
             seal_status: AtomicI64::new(0),
             kv_t_enabled: AtomicI64::new(0),
+            tso_current: AtomicU64::new(0),
+            tso_batch_remaining: AtomicU64::new(0),
+            tso_refill_failures_total: AtomicU64::new(0),
+            tso_leader_changes_total: AtomicU64::new(0),
             regions_total: AtomicU64::new(0),
             nodes_online: AtomicU64::new(0),
             region_split_total: AtomicU64::new(0),
@@ -554,6 +566,32 @@ impl Metrics {
             .store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
     }
 
+    /// 记录最近一次发放的 TSO（gauge）。
+    pub fn set_tso_current(&self, ts: u64) {
+        self.inner.tso_current.store(ts, Ordering::Relaxed);
+    }
+
+    /// 记录本地批次缓存剩余可发放个数（gauge）。
+    pub fn set_tso_batch_remaining(&self, remaining: u64) {
+        self.inner
+            .tso_batch_remaining
+            .store(remaining, Ordering::Relaxed);
+    }
+
+    /// 批次 refill 失败计数 +1（含重试）。
+    pub fn inc_tso_refill_failure(&self) {
+        self.inner
+            .tso_refill_failures_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 客户端观测到 leadership 丢失（旧批丢弃）计数 +1。
+    pub fn inc_tso_leader_change(&self) {
+        self.inner
+            .tso_leader_changes_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 设置本节点 Leader 数量
     pub fn set_local_leader_count(&self, count: u64) {
         self.inner
@@ -658,6 +696,40 @@ impl Metrics {
         out.push_str(&format!(
             "coord_kv_t_enabled {}\n",
             inner.kv_t_enabled.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_tso_current Last TSO issued by the local batch cache\n");
+        out.push_str("# TYPE coord_tso_current gauge\n");
+        out.push_str(&format!(
+            "coord_tso_current {}\n",
+            inner.tso_current.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_tso_batch_remaining TSOs left in the local batch cache\n",
+        );
+        out.push_str("# TYPE coord_tso_batch_remaining gauge\n");
+        out.push_str(&format!(
+            "coord_tso_batch_remaining {}\n",
+            inner.tso_batch_remaining.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_tso_refill_failures_total TSO batch refill failures (retries included)\n",
+        );
+        out.push_str("# TYPE coord_tso_refill_failures_total counter\n");
+        out.push_str(&format!(
+            "coord_tso_refill_failures_total {}\n",
+            inner.tso_refill_failures_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_tso_leader_changes_total Observed leadership losses by the TSO client\n",
+        );
+        out.push_str("# TYPE coord_tso_leader_changes_total counter\n");
+        out.push_str(&format!(
+            "coord_tso_leader_changes_total {}\n",
+            inner.tso_leader_changes_total.load(Ordering::Relaxed)
         ));
 
         out.push_str("\n# HELP raft_leader_id Current Raft leader ID (0 = no leader)\n");
@@ -1295,6 +1367,20 @@ mod tests {
         // 应该复用同一个 Arc 实例
         rm1.size_bytes.store(123, Ordering::Relaxed);
         assert_eq!(rm1_again.size_bytes.load(Ordering::Relaxed), 123);
+    }
+
+    #[test]
+    fn test_metrics_kv_t_tso_gauges_and_counters() {
+        let m = Metrics::new();
+        m.set_tso_current(4242);
+        m.set_tso_batch_remaining(17);
+        m.inc_tso_refill_failure();
+        m.inc_tso_leader_change();
+        let output = m.render_prometheus_text();
+        assert!(output.contains("coord_tso_current 4242"));
+        assert!(output.contains("coord_tso_batch_remaining 17"));
+        assert!(output.contains("coord_tso_refill_failures_total 1"));
+        assert!(output.contains("coord_tso_leader_changes_total 1"));
     }
 
     #[test]
