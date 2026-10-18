@@ -335,6 +335,17 @@ pub enum ObjectStoreOp {
     Delete { bucket: Vec<u8>, object_id: Vec<u8> },
 }
 
+/// 全局时间戳（TSO）命令（仅 region 0 system raft 提出）。
+///
+/// `batch_size` 由 proposer 归一（0 → 1、上限校验）后入日志：apply 必须只依赖
+/// 日志内容（确定性），不得读配置或墙钟。高水位持久化与幂等见
+/// `MvccStorage::apply_tso_allocate`。**末尾追加变体**（旧日志/快照兼容）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TsoOp {
+    /// 分配 `[start_ts, start_ts + batch_size)`；只增不减、允许空洞、绝不复用
+    Allocate { batch_size: u32 },
+}
+
 /// Raft 日志负载：客户端提交的状态机命令
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
@@ -380,6 +391,11 @@ pub enum Command {
     ///
     /// 按对象 manifest key 路由到所属 Region raft 提出；**末尾追加**。
     ObjectStore(ObjectStoreOp),
+    /// 全局 TSO 批次分配（仅 region 0 system raft 提出）。
+    ///
+    /// **末尾追加**；data region raft 不应收到（收到时按普通内部记录 apply，
+    /// 不影响业务 keyspace）。
+    Tso(TsoOp),
 }
 
 impl std::fmt::Display for Command {
@@ -404,6 +420,7 @@ impl std::fmt::Display for Command {
             }
             Command::Pd(op) => write!(f, "Pd({op:?})"),
             Command::ObjectStore(op) => write!(f, "ObjectStore({op:?})"),
+            Command::Tso(op) => write!(f, "Tso({op:?})"),
         }
     }
 }
@@ -452,6 +469,11 @@ pub enum Response {
     Compact {
         compacted_revision: u64,
     },
+    /// TSO 批次分配结果（左闭右开）
+    Tso {
+        start_ts: u64,
+        end_ts: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -474,6 +496,9 @@ impl std::fmt::Display for Response {
             }
             Response::Compact { compacted_revision } => {
                 write!(f, "Compact(rev={})", compacted_revision)
+            }
+            Response::Tso { start_ts, end_ts } => {
+                write!(f, "Tso([{start_ts}, {end_ts}))")
             }
         }
     }

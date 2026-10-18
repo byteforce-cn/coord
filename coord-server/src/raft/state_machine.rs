@@ -701,6 +701,21 @@ impl StateMachineStore {
                 .map_err(io_err)?;
                 Ok((Response::ObjectStore { revision, ok }, None))
             }
+            Command::Tso(op) => {
+                // 全局 TSO（region 0 system raft）：高水位与 META_LAST_APPLIED
+                // 同事务持久化；内部记录不上 Watch。
+                let crate::raft::type_config::TsoOp::Allocate { batch_size } = op;
+                let outcome = sm
+                    .apply_tso_allocate(*batch_size, revision, applied)
+                    .map_err(io_err)?;
+                Ok((
+                    Response::Tso {
+                        start_ts: outcome.start_ts,
+                        end_ts: outcome.end_ts,
+                    },
+                    None,
+                ))
+            }
         }
     }
 }
@@ -1134,6 +1149,32 @@ mod tests {
         let tracker = Arc::new(SnapshotTracker::default());
         let store = StateMachineStore::new(mvcc, tmp.path().join("snapshots"), tracker);
         (tmp, store)
+    }
+
+    /// TSO 命令经 apply 返回分配批次；TSO 是内部记录，不上 Watch。
+    #[test]
+    fn test_execute_tso_command_returns_allocated_batch() {
+        let (_tmp, store) = setup_store();
+        let applied = AppliedLogId {
+            term: 1,
+            node_id: 1,
+            index: 3,
+        };
+        let (resp, event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::Tso(crate::raft::type_config::TsoOp::Allocate { batch_size: 8 }),
+                3,
+                applied,
+            )
+            .expect("tso apply");
+        assert!(event.is_none(), "TSO 是内部记录，不得产生 Watch 事件");
+        match resp {
+            Response::Tso { start_ts, end_ts } => {
+                assert_eq!((start_ts, end_ts), (1, 9));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     /// 判据（机制级，负控制）：openraft 在 `get_snapshot_builder()` 返回的
