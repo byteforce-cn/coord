@@ -705,9 +705,7 @@ impl Metrics {
             inner.tso_current.load(Ordering::Relaxed)
         ));
 
-        out.push_str(
-            "\n# HELP coord_tso_batch_remaining TSOs left in the local batch cache\n",
-        );
+        out.push_str("\n# HELP coord_tso_batch_remaining TSOs left in the local batch cache\n");
         out.push_str("# TYPE coord_tso_batch_remaining gauge\n");
         out.push_str(&format!(
             "coord_tso_batch_remaining {}\n",
