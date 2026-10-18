@@ -40,6 +40,22 @@
 | 探活 | coord.maintenance | STABLE | - | 仅 Status（裁剪承诺） |
 | 健康检查 | grpc.health.v1 | STABLE | - | 标准协议 |
 
+## KV-T v2（ADR-0015；默认关闭）
+
+`[kv_t].enabled=false`（默认）时 v2 服务仍注册（reflection 可见），但每个 RPC 返回
+`FAILED_PRECONDITION`；v1 行为、磁盘布局与服务注册不变。契约包已随 G0 落地；
+实现按 G1–G6 gate 分批交付（ADR-0015 D10），未交付能力同样 `FAILED_PRECONDITION`。
+v2 集群不服务 v1 数据面、不做 v1→v2 迁移（ADR-0015 D13）。
+
+| 能力 | 契约包 | 状态 | 期限 | 实现落点/边界说明 |
+|:---|:---|:---:|:---|:---|
+| 全局时间戳（TSO） | coord.tso.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/tso/v2/`；G1（TSO 状态机/客户端）；能力 `data:tso:allocate`；批只保证唯一/单调，允许空洞、绝不复用 |
+| KV v2 | coord.kv.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/kv/v2/`；G1（单 Region 读写）/G2（跨区 Range）；`commit_ts`/`read_ts` 语义见 proto 头注；`CommitRejected`/`SAFE_TS_LAG` |
+| Txn v2 | coord.txn.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/txn/v2/`；G3（OCC + Commit Sequencer）；服务端读集会话，冲突 `TXN_CONFLICT`；上限 4MiB/4096/10000 |
+| Watch v2 | coord.watch.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/watch/v2/`；G4（Commit Log/Coordinator）；按 `commit_ts` 全局有序、事务原子批、窗口不足 `HISTORY_UNAVAILABLE` |
+| Lease v2 | coord.lease.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/lease/v2/`；G2（跨区 revoke/region 0 租约表）；`LeaseTimeToLive` 能力 `data:lease:read` |
+| Storage v2 | coord.storage.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/storage/v2/`；G5（manifest commit_ts + `/obj/` 固定区间）；`/obj/` 不参与任意 KV split |
+
 ## 实验承诺区（EXPERIMENTAL）
 
 **本区已于 `contracts/v1.2.0`（2026-09-19）清空。**

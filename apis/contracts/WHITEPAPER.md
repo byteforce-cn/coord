@@ -241,6 +241,10 @@ wire 兼容不等于行为兼容。以下服务端行为变化同样视为 Break
   能力承诺独立演进的基础，Major 升级按同规则引入 `.v2` 双跑。
 - `buf.yaml` 中的 lint 例外（`PACKAGE_VERSION_SUFFIX` 等）仅为底座原语
   线端兼容而保留，禁止为通过 lint 而"修正"。
+- **KV-T v2 的例外（ADR-0015 D13）**：`coord.<domain>.v2` 是 **greenfield-only**
+  包集——同一集群**不双跑** v1/v2（v2 集群不服务 v1 数据面，v1 数据不迁移）。
+  因此本节"新旧包双跑 ≥ 12 个月"的默认规则不适用于 KV-T；该例外由 ADR-0015
+  显式记录，不是静默违约。升级路径 = 建 v2 集群并按 v2 重新写入。
 
 ---
 
@@ -386,6 +390,23 @@ v1 的「Txn 条件不满足 = 非错误」**不适用于 v2 OCC**：v2 没有 `
   （`server/mod.rs:155-173`）。网络重试/超时重发场景建议始终携带。
 - 不带 `request_id` 的写重试**不保证幂等**。
 
+### 8.6 KV-T v2（默认关闭）
+
+`coord.{tso,kv,txn,watch,lease,storage}.v2`（ADR-0015）是数据面的 v2 语义，
+默认关闭（`[kv_t].enabled=false`）。可见行为：
+
+- 关闭时 v2 服务仍注册（reflection 可见），每个 RPC 返回 `FAILED_PRECONDITION`；
+  开启但对应 gate 未交付时同样 `FAILED_PRECONDITION`（消息点名契约包）。
+- v2 读写的 revision = 全局 `commit_ts`；`Range.read_ts=0` 取服务端 `safe_ts`；
+  `read_ts > safe_ts` 等待至多 `read_ts_wait_ms`，超时 `SAFE_TS_LAG`。
+- v2 事务承诺 **serializable**（OCC + 全局 Commit Sequencer），**不承诺**
+  strict serializability；冲突 `TXN_CONFLICT`（`ABORTED`），不写 CommitDecision。
+- Watch 事件按 `commit_ts` 全局有序、同一事务原子批；保留窗口不足
+  `HISTORY_UNAVAILABLE`（`OUT_OF_RANGE`）。
+- v2 集群不服务 v1 数据面、不做 v1→v2 迁移；`/obj/` 是固定 Region 区间，
+  不参与任意 KV split（ADR-0015 D6/D13）。
+- 语义单一归属：`docs/adr/0015-kv-t.md` D2–D13；字段级约定见各 v2 proto 头注。
+
 ---
 
 ## 9. 实验承诺区与实验包规则
@@ -460,6 +481,9 @@ v1 的「Txn 条件不满足 = 非错误」**不适用于 v2 OCC**：v2 没有 `
 6. 被移出承诺面的能力**不得删除**，必须以"显式声明为 best-effort / 不承诺"的
    形式留在契约里（例：`cache` 的容量上限、`mq` 的 `Subscribe`）。
    删除会让已有消费者静默失去一个（曾经默认存在的）保证；声明则会让他们看见边界。
+7. **v2 契约的语义注释是单一归属**（ADR-0015）：`coord.<domain>.v2` 的"谁写/谁读、
+   零值、幂等、重试与失败语义"写在 proto 头注；ADR 只写不可逆的决定，二者不得
+   各说一套。允许/拒绝的错误码必须在头注点名（见 §6.1.1）。
 
 ---
 
@@ -473,6 +497,8 @@ v1 的「Txn 条件不满足 = 非错误」**不适用于 v2 OCC**：v2 没有 `
 | 破坏性检查 | `buf breaking --against` 基线（冻结后 = `contracts/v1.1.0` tag） | **检出 Breaking 即 CI 失败；分支保护设为 required check，合并按钮自动置灰** |
 | wire 一致性 | `scripts/check-wire-sync.sh` | 契约承诺的 rpc/字段编号必须与 `coord-proto` 实现一致，防"空头承诺"与"静默漂移" |
 | 目标日期校验 | `scripts/check-wire-sync.sh`（解析 STATUS.md） | COMMITTED 服务目标日期已到且未落地契约包 → CI 失败（§13） |
+| descriptor 级比对 | `scripts/check-wire-descriptor.sh` | 逐包比对 service/method/message/field/enum 的 wire 签名；`.v1`/`.v2` 为 **strict**（任一侧多/少一项都红），STABLE 底座为 subset |
+| 错误码跨语言 | `scripts/check-error-code-contract.sh` | Rust 发出的每个码必须在 Java `ErrorCode` 中存在（否则客户端静默降级为 `INTERNAL`），反之必须显式登记为客户端本地码 |
 
 ### 11.2 协议变更 PR Checklist（强制）
 

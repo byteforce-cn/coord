@@ -19,6 +19,8 @@ use tonic::{Request, Status};
 use coord_proto::auth::auth_client::AuthClient;
 use coord_proto::auth::{AuthenticateRequest, RoleAddRequest, RoleGrantPermissionRequest};
 use coord_proto::kv::kv_client::KvClient;
+use coord_proto::kv::v2::kv_client::KvClient as KvV2Client;
+use coord_proto::kv::v2::{PutRequest as PutRequestV2, RangeRequest as RangeRequestV2};
 use coord_proto::kv::{PutRequest, RangeRequest};
 use coord_proto::lease::lease_client::LeaseClient;
 use coord_proto::lease::LeaseGrantRequest;
@@ -344,6 +346,53 @@ async fn test_auth_enforcement_full_matrix() {
         .await
         .expect("reader token should allow Range");
     assert_eq!(range.into_inner().kvs.len(), 1);
+
+    // KV-T G0（#134）：v2 能力映射与门禁顺序。
+    //   - 有权限但 `[kv_t].enabled=false` → FAILED_PRECONDITION（落在门禁上）；
+    //   - 缺能力 → PERMISSION_DENIED（先于门禁；不能把"没权限"伪装成"没启用"）。
+    let mut kv_v2 = KvV2Client::new(channel(&addr).await);
+    let gated = kv_v2
+        .range(with_token(
+            RangeRequestV2 {
+                key: b"/app/x".to_vec(),
+                range_end: vec![],
+                limit: 1,
+                read_ts: 0,
+                keys_only: false,
+                count_only: false,
+            },
+            &reader_cct,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        gated.code(),
+        tonic::Code::FailedPrecondition,
+        "reader has data:kv:read; kv_t is disabled, so the gate must answer: {gated}"
+    );
+    assert!(
+        gated.message().contains("[kv_t].enabled=false"),
+        "gate message must name the switch: {}",
+        gated.message()
+    );
+
+    let denied = kv_v2
+        .put(with_token(
+            PutRequestV2 {
+                key: b"/app/y".to_vec(),
+                value: b"v".to_vec(),
+                commit_ts: 1,
+                ..Default::default()
+            },
+            &reader_cct,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.code(),
+        tonic::Code::PermissionDenied,
+        "reader lacks data:kv:write; capability check must run before the gate: {denied}"
+    );
 
     // 负控制（#121）：KV 读权限不得读走 PKI 信任根 / 证书私钥。
     // 前缀区间读与单键点查都必须 PERMISSION_DENIED（不是 UNAUTHENTICATED）。

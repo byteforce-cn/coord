@@ -1,3 +1,40 @@
+## [contracts/v1.9.0] — 2026-10-18（Minor：KV-T v2 契约面）
+
+**发布口径**：**Minor**（新增 6 个 `coord.<domain>.v2` 包 + 追加 8 个结构化错误码；
+未改动任何既有包/字段/枚举；`buf breaking` 基线仍为 `contracts/v1.6.1`，CI 强制）。
+
+**新增契约包**
+
+- `coord.tso.v2`（Allocate/GetTs）、`coord.kv.v2`（Put/Range/Delete）、
+  `coord.txn.v2`（Begin/Read/Commit/Abort）、`coord.watch.v2`（Watch）、
+  `coord.lease.v2`（Grant/Revoke/KeepAlive/TimeToLive）、
+  `coord.storage.v2`（Put/Get/Stat/Delete）。
+- 契约副本与实现副本同路径（`proto/coord/<domain>/v2/` ↔
+  `coord-proto/src/proto/coord/<domain>/v2/`），descriptor 校验把 `.v2` 视为 strict。
+
+**新增错误码（追加，不改既有值）**
+
+`TXN_CONFLICT` / `TXN_NOT_FOUND` / `TXN_TOO_LARGE` / `READ_SET_TOO_LARGE` /
+`COMMIT_REJECTED` / `EPOCH_STALE` / `HISTORY_UNAVAILABLE` / `SAFE_TS_LAG`，
+状态与重试矩阵见 WHITEPAPER §6.1.1/§6.2（Rust `CoordErrorCode` ↔ Java `ErrorCode`
+逐字一致，`check-error-code-contract.sh` 强制）。
+
+**兼容性与默认行为**
+
+- 默认 `[kv_t].enabled=false`：v2 服务注册但每个 RPC 返回 `FAILED_PRECONDITION`；
+  v1 服务、磁盘布局、能力表（除两个新能力）不变（ADR-0001）。
+- v2 集群不服务 v1 数据面，不做迁移（ADR-0015 D13）；v1 包冻结。
+
+**影响范围**：新增包与错误码对既有 v1 消费方无 wire 影响；选择开启 KV-T 的
+部署方需要 v2 客户端（G1+ 交付，SDK v2 GA 见 #172）。
+
+**回滚预案**：不改动 v1 wire，回滚本分支即回到纯 v1 契约面；已生成的 v2 客户端
+调用在旧服务端会得到 `UNIMPLEMENTED`（服务未注册），不会误打到 v1。
+
+**校验（本地已跑）**：`check-wire-sync.sh` / `check-wire-descriptor.sh` /
+`check-sdk-sync.sh` / `buf lint` / `buf breaking` / `check-error-code-contract.sh` /
+`check-capability-registry.sh` / `cargo fmt` / `cargo clippy --workspace --lib --bins`。
+
 ## [contracts/v1.8.0] — 2026-10-18（Minor：PKI 证书 SAN + 参数一致才幂等）
 
 **发布口径**：本条目为 **Minor**（新增请求字段；不改动既有字段编号/类型；`buf breaking`

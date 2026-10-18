@@ -1,6 +1,6 @@
 # 能力边界清单（Scope & non-goals）
 
-> Owner: maintainers ｜ Last verified: 2026-10-15
+> Owner: maintainers ｜ Last verified: 2026-10-18
 
 本清单逐条列出各能力**明确不承诺**的边界，与承诺同等重要（见
 `apis/contracts/WHITEPAPER.md`）。每条都带可核对的实现锚点；凡「不承诺」，
@@ -35,8 +35,8 @@
 
 | # | 不承诺 | 事实锚点 | 若要变成承诺 |
 |:--|:--|:--|:--|
-| B-RG-1 | **不支持动态增删 region**。`remove_region_raft` / `remove_region_runtime` 零调用点（含测试）；启动后新建的 region 也**拿不到 `CompactionManager`**（启动期一次性从 `list_regions()` 构建），其 changelog/tombstone 永不压缩、raft 日志永不回收 | `coord-server/src/raft/network.rs:1085`、`coord-server/src/raft/region.rs:458`、`coord/src/main.rs:3120-3145` | 接线 `remove_region_*` + 让 `_region_compaction_mgrs` 随 region 生命周期增删 |
-| B-RG-2 | region 模式下 watch **拒绝跨 region 与全键空间前缀**（`prefix_successor` 为 `None` → `INVALID_ARGUMENT`） | `coord-server/src/server/mod.rs:553-581` | 增加跨 region watch 扇出 |
+| B-RG-1 | **v1 模式不支持动态增删 region**（`[multi_raft]` 静态 Region 表）。`remove_region_raft` / `remove_region_runtime` 零调用点（含测试）；启动后新建的 region 也**拿不到 `CompactionManager`**（启动期一次性从 `list_regions()` 构建），其 changelog/tombstone 永不压缩、raft 日志永不回收。**v2 的动态 Region 表/在线 split/merge 由 KV-T G5 交付；在 G5 完成前 `[kv_t]` 不宣称支持在线 split/merge** | `coord-server/src/raft/network.rs:1085`、`coord-server/src/raft/region.rs:458`、`coord/src/main.rs`（Region 装配）；v2 计划见 ADR-0015 D6/D10 | v2：接线 `remove_region_*` + 让 `_region_compaction_mgrs` 随 region 生命周期增删（G5）；v1 保持静态 |
+| B-RG-2 | **v1** region 模式下 watch **拒绝跨 region 与全键空间前缀**（`prefix_successor` 为 `None` → `INVALID_ARGUMENT`）。**v2** Watch 的跨 Region/全局序由 Commit Log + Coordinator 提供（G4）；在 G4 完成前 v2 Watch 一律 `FAILED_PRECONDITION` | `coord-server/src/server/mod.rs:553-581`；v2 计划见 ADR-0015 D5 | v1：增加跨 region watch 扇出；v2：G4 交付 Commit Log 分片与 Watch Coordinator |
 
 ## 4. 连接与并发
 
@@ -68,6 +68,24 @@
 | B-PL-3 | 缓存容量上界（默认 1GB）**已由 reaper 强制**：数据面活跃字节记账 + TTL 回收 + 超界淘汰 + 单条超限写拒绝（`RESOURCE_EXHAUSTED`），但**仍不承诺**：<br>(a) 严格逐写上界 —— 周期收敛（默认 10s，周期内可短暂超界；`coord_agent_cache_active_bytes` 可观测）；<br>(b) 真 LRU —— 淘汰按「最后写入」新近度近似（读不刷新，get 零写放大）；<br>(c) 记账只含数据面活跃字节 —— 不含 ISR 复制日志（见 cache.rs 模块头保留声明）与 redb 页面开销（文件体积 > 记账值）；<br>(d) ISR 启用时淘汰/过期回收为**各节点本地行为**，不跨节点复制 | `coord-agent/src/services/cache.rs`（`reap_once` / `account_upsert_tx` / `CACHE_META_TABLE`）、`coord-agent/src/lib.rs`（cache 装配 + 指标采样）、`coord-agent/src/metrics.rs`（`coord_agent_cache_*`） | 逐写严格上界；读触达 LRU；记账覆盖复制日志与文件真空压缩；ISR 一致淘汰 |
 | B-PL-4 | MQ 容量上界（默认 1GB）**已在 publish 入口强制**：消息 + DLQ 与数据同事务记账（redb 单写者 ⇒ **逐写严格上界**，无 reaper 周期收敛窗口）；超界与单条超限的 publish 均拒绝 `RESOURCE_EXHAUSTED`（不静默丢历史）。过期回收由 reaper（默认 10s）按 topic 的 `retention_secs` 清扫消息与 DLQ（`0` = 不按时间回收）。**仍不承诺**：<br>(a) 记账只含消息 + DLQ 物理字节 —— 不含消费位点 / 幂等索引 / ISR 复制日志（复制设计保留）与 redb 页面开销（文件体积 > 记账值）；<br>(b) ISR 启用时配额与回收为**各节点本地行为**（Follower 镜像 Leader 已提交的决定并照常记账，但**不做**配额检查——避免复制分叉）；<br>(c) `move_to_dlq` 为维护路径不受配额拒绝（净增仅 reason/detail 开销）；<br>(d) topic 删除的存量回收**仅经 `DeleteTopic`（RPC，全量：消息/DLQ/位点/幂等索引/next-offset + 配额归还）**；**内部分段方法 `delete_topic`（仅删配置行）仍存在**（其他维护路径使用），经它删除后存量行不被清扫但仍计入配额 —— 运营面不得使用内部方法代餐；<br>(e) 时钟回拨等极端情形下，被非过期行挡住的过期行会延迟到后续轮次回收 | `coord-agent/src/services/mq.rs`（`ensure_quota_tx` / `reap_once` / `purge_expired_in_table` / `delete_topic_full` / `MQ_META_TABLE`）、`coord-agent/src/lib.rs`（MQ 装配 + 指标采样）、`coord-agent/src/metrics.rs`（`coord_agent_mq_*`）；删除判据：`test_delete_topic_full_reclaims_all_state`、`test_leader_query_dlq_and_delete_across_agents` | per-topic size-retention（可选 opt-in）；记账覆盖复制日志与文件真空压缩 |
 | B-PL-5 | **缓存键空间操作（Keys / Clear）的边界**：`Keys` 为**本节点视角**的 best-effort 枚举（ISR 落后节点可能缺新键；string/hash/list/set 逻辑键去重）；单次调用扫描有界（limit 封顶 10000），不退化全表阻塞扫描。`Clear` 按逻辑键前缀**批式**执行（单批 ≤1024 行为一个写事务），与并发写**按到达顺序**竞争（调用窗口内观测到的匹配键都会被清掉；窗口后新写入可能存活）；有 1000 万行安全阀（超限报错；部分清理已提交，重跑幂等）；ISR 启用时清理决定经复制通道全域下发（Follower 幂等应用）。键/前缀**不得含 NUL**（存储编码用 NUL 作分隔） | `coord-agent/src/services/cache.rs`（`keys_page` / `clear_prefix` / `clear_prefix_loop` / `clear_prefix_chunk_tx`）、`coord-agent/src/services/replication.rs`（`CacheClear` 复制条目）；判据：`test_keys_page_prefix_filter_order_and_pagination`、`test_keys_page_covers_all_data_types_deduped`、`test_clear_prefix_all_types_and_accounting`、`test_cache_replicated_setnx_and_clear` | 跨节点一致枚举（等 ISR 同步读）；逐键删除事件（更强的新旧次序保证）需先定语义 |
+
+---
+
+## 7. KV-T v2（ADR-0015）
+
+v2 数据面**默认关闭**；以下边界在 GA 前一直有效。语义单一归属：
+`docs/adr/0015-kv-t.md`（D2–D13）。
+
+| # | 不承诺 | 事实锚点 | 若要变成承诺 |
+|:--|:--|:--|:--|
+| B-KVT-1 | **G0 只有服务壳**：`[kv_t].enabled=false` 或对应能力未交付时，v2 RPC 一律 `FAILED_PRECONDITION`（不是 `UNIMPLEMENTED`/`UNAVAILABLE`）。能力按 G1–G6 分批交付，未到 gate 的能力不可用 | `coord-server/src/kvt/mod.rs`（`KvTState::gate`）、`coord-server/src/kvt/services.rs`；判据：`coord/tests/kv_t_g0_test.rs`（关闭 + 开启未交付 + reflection 三例）、`coord/tests/auth_enforcement_test.rs`（缺能力 `PERMISSION_DENIED` 先于门禁） | 每个 gate 把能力加入 `implemented` 并实现 handler（ADR-0015 D10） |
+| B-KVT-2 | **v2 集群不服务 v1 数据面、无迁移**：greenfield v2；v1 包冻结；备份/恢复只保 v2；升级 = 重建。`[kv_t].enabled=true` 与 `multi_raft.legacy_migration`/`allow_unmigrated` 互斥（启动拒绝） | ADR-0015 D13；`coord/src/config.rs`（`KvTConfig::validate`）；判据：`config::tests::test_kv_t_enabled_rejects_v1_migration_switches` | 提供 v1 facade 或迁移工具需新增 ADR（revision/TSO 映射、跨区语义、HISTORY_UNAVAILABLE 行为） |
+| B-KVT-3 | **`/obj/` 是固定 Region 区间**：不参与任意 KV split/merge；chunk 不随 KV split 迁移；对象容量/扩展管理不在本 ADR 承诺内。用户 key 不得占用 `/obj/` 前缀 | ADR-0015 D6/D9；`coord-server/src/storage/object_store.rs`（保留前缀守卫与 per-Region chunk 模型） | 对象存储独立扩展/容量管理（另行设计）；SplitChecker 跳过 `/obj/` 由 G5 实现并加负控制 |
+| B-KVT-4 | **Watch 历史窗口有限**：默认 24h（可配 1h–7d）；位点超出窗口返回 `OUT_OF_RANGE` + `HISTORY_UNAVAILABLE`，不静默丢事件；Commit Log 与 Raft log 回收相互独立 | ADR-0015 D5/D9；`[kv_t].watch_retention`（`coord/src/config.rs`） | 提高保留窗口/归档需容量评估（写放大：完整 value 在 MVCC 与 Commit Log 各存一份） |
+| B-KVT-5 | **serializable，不是 strict serializable**：不承诺外部实时序；Commit Sequencer 是单 Raft 组（吞吐串行化点）；OCC 谓词校验有读集/区间上限（默认 4096 条 / 单 range 10000 key / 写集 4MiB），超限拒绝 | ADR-0015 D4/D9/D12；`[kv_t].max_read_set/max_range/max_txn_bytes` | 按冲突域分区校验 / strict 2PL / 分布式 SSI 需换协议并新增 ADR |
+| B-KVT-6 | **MQ v1 在 v2 集群不可用**（fail-closed：不注册/一律拒绝）；**MQ v2 未 GA**（G7，KV-T GA 后另立 ADR）。依赖 MQ 的 workflow 触发路径在 v2 集群不可用 | ADR-0015 D8/D13；issue #178（G7 gate） | MQ v2 设计/契约/实现拆分（G7） |
+| B-KVT-7 | **TSO 批次允许空洞**：`commit_ts`/`read_ts` 不连续；客户端批次是进程内内存态，重启丢弃；服务端保证绝不复用，但**不承诺**时间戳可比较外部实时时间 | ADR-0015 D2/D12；`coord-proto/src/proto/coord/tso/v2/tso.proto` 头注 | 无（这是 TSO 的语义，不是缺陷）；若需要外部时间语义，另立时间源 |
+| B-KVT-8 | **v2 事务会话是节点本地的**：协调节点崩溃/重启或 TTL 到期 ⇒ `ABORTED` + `TXN_NOT_FOUND`，客户端重跑整个事务；commit 是 Sequencer 单次决策，不会部分提交 | ADR-0015 D12.2；`coord-proto/src/proto/coord/txn/v2/txn.proto` 头注 | 复制事务会话（成本高且不改变原子性证明）；当前不计划 |
 
 ---
 

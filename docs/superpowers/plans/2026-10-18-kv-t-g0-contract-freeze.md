@@ -89,8 +89,8 @@
 - Produces: `Config.kv_t: KvTConfig`；默认值逐字等于 D9；
   `KvTConfig::validate(&self, multi_raft_enabled: bool, pd_enabled: bool, legacy_migration: bool, allow_unmigrated: bool) -> Vec<String>`
 
-- [ ] 字段：`enabled` / `tso_batch_size`(1024) / `commit_sequencer_batch`(256) / `commit_log_shard_records`(1_000_000) / `commit_log_shard_secs`(3600) / `shard_seal_timeout_secs`(300) / `watch_retention`(86400，1h–7d) / `max_txn_bytes`(4MiB) / `max_read_set`(4096) / `max_range`(10000) / `read_ts_wait_ms`(2000) / `txn_ttl_secs`(60)
-- [ ] 测试：默认值、1h/7d 边界、enabled 缺 multi_raft/PD、与 legacy_migration/allow_unmigrated 互斥、越界值点名
+- [x] 字段：`enabled` / `tso_batch_size`(1024) / `commit_sequencer_batch`(256) / `commit_log_shard_records`(1_000_000) / `commit_log_shard_secs`(3600) / `shard_seal_timeout_secs`(300) / `watch_retention`(86400，1h–7d) / `max_txn_bytes`(4MiB) / `max_read_set`(4096) / `max_range`(10000) / `read_ts_wait_ms`(2000) / `txn_ttl_secs`(60)
+- [x] 测试：默认值、1h/7d 边界、enabled 缺 multi_raft/PD、与 legacy_migration/allow_unmigrated 互斥、越界值点名
 
 ### Task 6 (#134): v2 服务壳、能力门禁、启动校验
 
@@ -110,10 +110,10 @@
 - Gate 语义：`enabled=false` → `FAILED_PRECONDITION("kv_t disabled (…[kv_t].enabled=false)")`；
   `enabled=true` 但能力未交付 → `FAILED_PRECONDITION("kv_t enabled but <cap> not implemented")`
 
-- [ ] 六个 v2 服务始终注册；关闭时全部 `FAILED_PRECONDITION`，v1 不变
-- [ ] 能力映射 + scope 判定齐备；缺能力 `PERMISSION_DENIED`，有权限但未启用 `FAILED_PRECONDITION`
-- [ ] 启动：enabled 缺前置 → 拒绝且可诊断；成功时日志/metrics 暴露开关
-- [ ] 单测：gate 码/消息、能力门禁测试（descriptor 驱动）、配置装配
+- [x] 六个 v2 服务始终注册；关闭时全部 `FAILED_PRECONDITION`，v1 不变
+- [x] 能力映射 + scope 判定齐备；缺能力 `PERMISSION_DENIED`，有权限但未启用 `FAILED_PRECONDITION`
+- [x] 启动：enabled 缺前置 → 拒绝且可诊断；成功时日志/metrics 暴露开关
+- [x] 单测：gate 码/消息、能力门禁测试（descriptor 驱动）、配置装配
 
 ### Task 7 (#135): 文档登记
 
@@ -124,8 +124,8 @@
 - Modify: `docs/production/consumer-contract.md`（v2 页 + v1 冻结）
 - Modify: `docs/production/ops/boundaries.md`（B-RG-1/B-RG-2、`/obj/`、无迁移、保留窗口、serializable 上限、MQ 缺席）
 
-- [ ] `STATUS.md` 的 v2 行能被 wire-sync 解析（`package coord.<domain>.v2;` 已落地）
-- [ ] 每条边界有实现锚点或 ADR 引用；`check-doc-refs.sh` 0 悬空
+- [x] `STATUS.md` 的 v2 行能被 wire-sync 解析（`package coord.<domain>.v2;` 已落地）
+- [x] 每条边界有实现锚点或 ADR 引用；`check-doc-refs.sh` 0 悬空
 
 ## Execution
 
