@@ -18,8 +18,9 @@ use coord_core::storage::StorageBackend;
 
 use super::envelope;
 use super::mvcc::{
-    encode_kv_key, encode_kv_meta_key, AppliedLogId, KvMetadata, MvccStorage, CHANGELOG_PREFIX,
-    META_COMPACT_REVISION, META_LAST_APPLIED, TABLE_CHANGELOG, TABLE_KV, TABLE_KV_META, TABLE_META,
+    encode_kv_key, encode_kv_meta_key, AppliedLogId, KvMetadata, MvccStorage, RevisionMode,
+    CHANGELOG_PREFIX, META_COMPACT_REVISION, META_CURRENT_REVISION, META_LAST_APPLIED,
+    TABLE_CHANGELOG, TABLE_KV, TABLE_KV_META, TABLE_META,
 };
 
 // ──── Snapshot 数据结构 ────
@@ -51,6 +52,12 @@ pub struct SnapshotData {
     pub lease_entries: Vec<SnapshotRawEntry>,
     /// R-RFT-06：changelog 压缩水位（`META_COMPACT_REVISION`，0 = 未压缩）
     pub compacted_revision: u64,
+    /// 已提交的最大 revision（v2 = `commit_ts`；v1 = applied log index）。
+    ///
+    /// 装快照后 `current_revision()` 不得倒退（#140）。TSO 高水位与
+    /// `TSO_LAST_BATCH` 不在此字段重复：它们位于 `/_sys/tso/*`，由
+    /// `sys_entries` 承载（单一事实源）。
+    pub current_revision: u64,
     /// region 0 PD 全局队列域原始条目（`/_pd/*` → bytes）。
     ///
     /// region 0 状态机含 `/_pd/ops/{op_id}` operator 治理记录（全局去重
@@ -105,10 +112,10 @@ pub struct SnapshotKvMeta {
 
 impl SnapshotData {
     /// 当前快照格式版本（版本号 +1；0.1.x 数据不承诺兼容）。
-    /// v5：携带 changelog 窗口（`changelog_entries`）——装快照后历史读 /
-    ///   watch 重放不再出现「洞」（静默返回前值）。v2–v4 格式已随 bincode
-    ///   退场退役：`from_bytes` 仅接受 v5，旧字节显式拒绝（无迁移阶梯）。
-    const CURRENT_VERSION: u32 = 5;
+    /// v6：携带 `current_revision`（#140）——装快照后 revision 不倒退。
+    /// v5 及更早格式已退役：`from_bytes` 仅接受 v6，旧字节显式拒绝
+    /// （无迁移阶梯）。
+    const CURRENT_VERSION: u32 = 6;
 
     /// 创建空快照
     pub fn new(last_included_index: u64, last_included_term: u64) -> Self {
@@ -120,6 +127,7 @@ impl SnapshotData {
             applied_index: 0,
             applied_term: 0,
             applied_node_id: 0,
+            current_revision: 0,
             kv_pairs: Vec::new(),
             kv_metadata: Vec::new(),
             auth_entries: Vec::new(),
@@ -180,6 +188,7 @@ pub fn export_snapshot_data<B: StorageBackend>(
     let backend = storage.backend();
     let (
         applied_bytes,
+        current_revision_bytes,
         compacted_bytes,
         kv_rows,
         meta_rows,
@@ -190,6 +199,7 @@ pub fn export_snapshot_data<B: StorageBackend>(
         changelog_rows,
     ) = backend.read(|tx| {
         let applied = tx.get(TABLE_META, META_LAST_APPLIED)?;
+        let current_revision = tx.get(TABLE_META, META_CURRENT_REVISION)?;
         let compacted = tx.get(TABLE_META, META_COMPACT_REVISION)?;
         let kv_prefix = encode_kv_key(b"");
         let kv_rows = tx.iter_prefix(TABLE_KV, &kv_prefix)?;
@@ -206,6 +216,7 @@ pub fn export_snapshot_data<B: StorageBackend>(
         let changelog_rows = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
         Ok((
             applied,
+            current_revision,
             compacted,
             kv_rows,
             meta_rows,
@@ -222,6 +233,15 @@ pub fn export_snapshot_data<B: StorageBackend>(
     data.applied_term = applied.map(|a| a.term).unwrap_or(0);
     data.applied_node_id = applied.map(|a| a.node_id).unwrap_or(0);
     data.next_revision = data.applied_index.saturating_add(1);
+    data.current_revision = current_revision_bytes
+        .as_deref()
+        .and_then(|b| <[u8; 8]>::try_from(b).ok())
+        .map(u64::from_be_bytes)
+        .unwrap_or_else(|| match storage.revision_mode() {
+            // #138 之前的 v1 库没有 META_CURRENT_REVISION：revision 曾等于 applied。
+            RevisionMode::LogIndex => data.applied_index,
+            RevisionMode::CommitTs => 0,
+        });
     data.compacted_revision = compacted_bytes
         .as_deref()
         .and_then(|b| {
@@ -425,6 +445,17 @@ pub fn import_snapshot_data<B: StorageBackend>(
             tx.remove(TABLE_META, META_COMPACT_REVISION)?;
         }
 
+        // #140：恢复 current revision（v1 = applied index；v2 = 最大 commit_ts）
+        if data.current_revision > 0 {
+            tx.insert(
+                TABLE_META,
+                META_CURRENT_REVISION,
+                &data.current_revision.to_be_bytes(),
+            )?;
+        } else {
+            tx.remove(TABLE_META, META_CURRENT_REVISION)?;
+        }
+
         Ok(())
     })?;
 
@@ -491,6 +522,91 @@ mod tests {
         let backend = RedbBackend::open(tmp.path(), &config).unwrap();
         let storage = MvccStorage::new(backend).unwrap();
         (tmp, storage)
+    }
+
+    fn setup_commit_ts_storage() -> (TempDir, MvccStorage<RedbBackend>) {
+        let tmp = TempDir::new().unwrap();
+        let config = StorageConfig::default();
+        let backend = RedbBackend::open(tmp.path(), &config).unwrap();
+        let storage = MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap();
+        (tmp, storage)
+    }
+
+    /// #140：快照携带 current revision 与 TSO 高水位；装快照后两者都不倒退。
+    #[test]
+    fn test_snapshot_preserves_tso_and_revision() {
+        let (_tmp, storage) = setup_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"/k", b"v", None, 1_000, AppliedLogId::standalone(3))
+            .unwrap();
+        let batch = storage
+            .apply_tso_allocate(8, 4, AppliedLogId::standalone(4))
+            .unwrap();
+        assert_eq!((batch.start_ts, batch.end_ts), (1, 9));
+
+        let data = export_snapshot_data(&storage, 4, 1).unwrap();
+        assert_eq!(data.current_revision, 1_000);
+        let restored = SnapshotData::from_bytes(&data.to_bytes().unwrap()).unwrap();
+
+        let (_tmp2, storage2) = setup_commit_ts_storage();
+        import_snapshot_data(&storage2, &restored).unwrap();
+        assert_eq!(
+            storage2.current_revision(),
+            1_000,
+            "装快照后 revision 不倒退"
+        );
+        assert_eq!(
+            storage2.tso_high_water().unwrap(),
+            batch.end_ts,
+            "TSO 高水位随 /_sys/tso/* 域恢复"
+        );
+
+        let next = storage2
+            .apply_tso_allocate(8, 5, AppliedLogId::standalone(5))
+            .unwrap();
+        assert!(
+            next.start_ts >= batch.end_ts,
+            "装快照后不得复用旧批：next=[{}, {})",
+            next.start_ts,
+            next.end_ts
+        );
+
+        let err = storage2
+            .put_at_commit_ts(b"/k2", b"v", None, 999, AppliedLogId::standalone(6))
+            .expect_err("装快照后回退 commit_ts 必须被拒绝");
+        assert!(matches!(err, Error::CommitRejected { .. }));
+    }
+
+    /// #140：快照落盘 + 重启后 current revision 不倒退。
+    #[test]
+    fn test_current_revision_persists_across_reopen() {
+        let (_tmp, storage) = setup_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"/k", b"v", None, 1_000, AppliedLogId::standalone(3))
+            .unwrap();
+        let data = export_snapshot_data(&storage, 3, 1).unwrap();
+
+        let tmp2 = TempDir::new().unwrap();
+        {
+            let backend = RedbBackend::open(tmp2.path(), &StorageConfig::default()).unwrap();
+            let restored =
+                MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap();
+            import_snapshot_data(&restored, &data).unwrap();
+            assert_eq!(restored.current_revision(), 1_000);
+        }
+
+        let backend = RedbBackend::open(tmp2.path(), &StorageConfig::default()).unwrap();
+        let reopened =
+            MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap();
+        assert_eq!(reopened.current_revision(), 1_000, "重启后 revision 不倒退");
+        let err = reopened
+            .put_at_commit_ts(b"/k2", b"v", None, 999, AppliedLogId::standalone(4))
+            .expect_err("重启后回退 commit_ts 必须被拒绝");
+        assert!(matches!(err, Error::CommitRejected { .. }));
+        let ok = reopened
+            .put_at_commit_ts(b"/k2", b"v", None, 1_001, AppliedLogId::standalone(5))
+            .expect("revision 之后的 commit_ts 必须可用");
+        assert!(!ok.replayed);
     }
 
     #[test]
@@ -941,7 +1057,7 @@ mod tests {
         data
     }
 
-    /// V2 行（postcard，唯一格式，仅承载 v5）⇒ 解码成功。
+    /// V2 行（postcard，唯一格式，仅承载 v6）⇒ 解码成功。
     /// 负控制：删除 V2 读腿 ⇒ 本用例必红。
     #[test]
     fn test_snapshot_v2_row_decodes() {
@@ -956,7 +1072,7 @@ mod tests {
         assert_eq!(restored.applied_term, 3);
     }
 
-    /// V2 行版本不是 v5 ⇒ 显式报错（无迁移阶梯，不得按旧结构试解）。
+    /// V2 行版本不是 v6 ⇒ 显式报错（无迁移阶梯，不得按旧结构试解）。
     /// 负控制：去掉 `version == CURRENT_VERSION` 检查 ⇒ 本用例必红。
     #[test]
     fn test_snapshot_v2_wrong_version_rejected() {
@@ -964,7 +1080,7 @@ mod tests {
         data.version = 4;
         let bytes = envelope::encode(&data).unwrap();
 
-        let err = SnapshotData::from_bytes(&bytes).expect_err("version != 5 必须显式报错");
+        let err = SnapshotData::from_bytes(&bytes).expect_err("version != 6 必须显式报错");
         assert!(
             format!("{err:?}").contains("unsupported snapshot version"),
             "错误必须是版本不受支持，实际：{err:?}"
