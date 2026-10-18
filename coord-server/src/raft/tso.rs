@@ -278,6 +278,12 @@ impl TsoClient {
     fn install_batch(&self, batch: TsoBatch) -> Result<()> {
         let remaining = {
             let mut cache = self.cache.lock();
+            if batch.end_ts <= batch.start_ts {
+                return Err(Error::Internal(format!(
+                    "tso batch is empty: [{}, {}) (would spin without issuing a TSO)",
+                    batch.start_ts, batch.end_ts
+                )));
+            }
             if batch.start_ts < cache.next {
                 return Err(Error::Internal(format!(
                     "tso batch regressed: start_ts {} below next {} (refusing to reuse a TSO)",
@@ -318,6 +324,7 @@ mod tests {
         allocate_calls: AtomicU64,
         failures_left: AtomicU64,
         regressing: AtomicBool,
+        empty: AtomicBool,
         first_allocation_done: AtomicBool,
     }
 
@@ -330,6 +337,7 @@ mod tests {
                     allocate_calls: AtomicU64::new(0),
                     failures_left: AtomicU64::new(0),
                     regressing: AtomicBool::new(false),
+                    empty: AtomicBool::new(false),
                     first_allocation_done: AtomicBool::new(false),
                 }),
             }
@@ -338,6 +346,13 @@ mod tests {
         fn regressing() -> Self {
             let source = Self::new();
             source.inner.regressing.store(true, Ordering::SeqCst);
+            source
+        }
+
+        /// 永远返回空批（模拟实现错误）：客户端必须报错，不得死循环。
+        fn empty() -> Self {
+            let source = Self::new();
+            source.inner.empty.store(true, Ordering::SeqCst);
             source
         }
 
@@ -368,6 +383,12 @@ mod tests {
                     .failures_left
                     .store(failures - 1, Ordering::SeqCst);
                 return Err(Error::ClusterUnavailable("fake election window".into()));
+            }
+            if self.inner.empty.load(Ordering::SeqCst) {
+                return Ok(TsoBatch {
+                    start_ts: 1,
+                    end_ts: 1,
+                });
             }
             if self.inner.regressing.load(Ordering::SeqCst)
                 && self
@@ -504,6 +525,20 @@ mod tests {
         assert!(
             matches!(err, Error::Internal(ref message) if message.contains("regressed")),
             "expected Internal(tso batch regressed), got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tso_client_rejects_empty_batch() {
+        let source = FakeSource::empty();
+        let client = TsoClient::new(Arc::new(source), 8, None);
+        let err = client
+            .get_ts()
+            .await
+            .expect_err("empty batch must fail closed, not spin");
+        assert!(
+            matches!(err, Error::Internal(ref message) if message.contains("empty")),
+            "expected Internal(tso batch is empty), got {err}"
         );
     }
 }

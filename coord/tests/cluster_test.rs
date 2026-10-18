@@ -12,6 +12,7 @@ mod tests {
     use crate::common;
     use std::collections::BTreeMap;
     use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -27,7 +28,7 @@ mod tests {
     use coord_server::raft::log_store::LogStore;
     use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
     use coord_server::raft::state_machine::StateMachineStore;
-    use coord_server::raft::tso::{TsoAllocator, TsoBatch};
+    use coord_server::raft::tso::{TsoAllocator, TsoBatch, TsoClient, TsoSource};
     use coord_server::raft::CoordRaft;
     use coord_server::raft::{new_basic_node, new_raft, RaftConfig};
     use coord_server::server::CoordNode;
@@ -646,6 +647,118 @@ mod tests {
                 second.end_ts
             );
         }
+    }
+
+    // ──── Test: TSO client batches and never reuses across failover (#137) ────
+
+    /// 统计 refill 次数的 TSO 源：证明 `GetTs` 走本地批次缓存而不是每次过 raft。
+    struct CountingSource {
+        inner: TsoAllocator,
+        calls: AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl TsoSource for CountingSource {
+        async fn is_leader(&self) -> bool {
+            TsoSource::is_leader(&self.inner).await
+        }
+
+        async fn allocate(&self, batch_size: u32) -> coord_core::error::Result<TsoBatch> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.allocate(batch_size).await
+        }
+    }
+
+    /// 选举窗口/刚换 leader 时的可重试错误；客户端内部已有有界重试，这里只兼容
+    /// `NotLeader`（领导权短暂迁移/刷新 leader 视图的窗口）。
+    async fn tso_get_ts_with_retry(client: &TsoClient) -> u64 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match client.get_ts().await {
+                Ok(ts) => return ts,
+                Err(
+                    e @ (coord_core::error::Error::NotLeader { .. }
+                    | coord_core::error::Error::ClusterUnavailable(_)),
+                ) => {
+                    if tokio::time::Instant::now() > deadline {
+                        panic!("TSO get_ts should succeed after failover: {e}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("unexpected TSO get_ts error: {e}"),
+            }
+        }
+    }
+
+    /// 判据：本地缓存在并发下不重复；换 leader 后新客户端首值大于旧客户端发出的
+    /// 所有值（未用完的批不再发放）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_tso_client_batches_and_never_reuses_across_failover() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("coord=info,openraft=info")
+            .try_init();
+
+        let (n1, n2, n3) = start_3_node_cluster().await;
+        let mut nodes = vec![n1, n2, n3];
+        let refs: Vec<&TestNode> = nodes.iter().collect();
+        let leader_idx = wait_for_any_leader(&refs, 10_000)
+            .await
+            .expect("cluster must have a leader");
+        let leader = nodes.swap_remove(leader_idx);
+
+        let max_issued = {
+            let source = Arc::new(CountingSource {
+                inner: TsoAllocator::new(leader.raft.as_ref().clone(), leader.node_id),
+                calls: AtomicU64::new(0),
+            });
+            let client = TsoClient::new(Arc::clone(&source) as Arc<dyn TsoSource>, 64, None);
+
+            let mut tasks = tokio::task::JoinSet::new();
+            for _ in 0..200 {
+                let client = Arc::clone(&client);
+                tasks.spawn(async move { tso_get_ts_with_retry(&client).await });
+            }
+            let mut issued = Vec::new();
+            while let Some(result) = tasks.join_next().await {
+                issued.push(result.expect("join get_ts task"));
+            }
+
+            issued.sort_unstable();
+            let before = issued.len();
+            issued.dedup();
+            assert_eq!(before, 200, "并发发放必须发放全部 200 个 TSO");
+            assert_eq!(issued.len(), 200, "并发 get_ts 出现重复 TSO");
+
+            let calls = source.calls.load(Ordering::SeqCst);
+            assert!(
+                calls <= 8,
+                "200 次发放申请了 {calls} 个批次（batch=64），本地缓存未生效"
+            );
+            *issued.last().expect("issued TSOs")
+        };
+
+        // 客户端/源持有 Raft 句柄（Arc）：必须先释放，否则 kill 后 leader 的 core
+        // 仍被本地句柄保活、心跳继续，存活节点永远不会触发选举。
+        leader.kill();
+
+        let survivors: Vec<&TestNode> = nodes.iter().collect();
+        let new_idx = wait_for_any_leader(&survivors, 20_000)
+            .await
+            .expect("new leader after failover");
+        let new_leader = survivors[new_idx];
+        let client = TsoClient::new(
+            Arc::new(TsoAllocator::new(
+                new_leader.raft.as_ref().clone(),
+                new_leader.node_id,
+            )),
+            64,
+            None,
+        );
+        let first = tso_get_ts_with_retry(&client).await;
+        assert!(
+            first > max_issued,
+            "TSO reused across failover: max_issued={max_issued} first={first}"
+        );
     }
 
     // ──── Test: Single-node Raft cluster, Put/Get ────
