@@ -111,3 +111,6 @@ uuid = { workspace = true }
 rcgen = { version = "0.14", features = ["x509-parser"] }
 tracing-subscriber = { workspace = true }
 proptest = { workspace = true }
+# SAN 验收的「只认 SAN」校验方：与 Go / 浏览器 / Envoy 同口径的 webpki 路径。
+rustls-webpki = { version = "0.103", features = ["ring"] }
+rustls-pki-types = "1"

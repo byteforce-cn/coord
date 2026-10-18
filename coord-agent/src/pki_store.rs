@@ -59,6 +59,15 @@ pub struct CertRecord {
     /// 轮换链：本证书由哪个 serial 轮换而来（None = 首次签发）
     #[serde(default)]
     pub parent_serial: Option<String>,
+    /// 签发时生效的 DNS SAN（由请求显式给出，或从 CN 派生）。
+    ///
+    /// 记录「生效值」而非「原始请求」：幂等判定必须与证书内容一致；
+    /// `serde(default)` 兼容升级前无 SAN 字段的旧记录（空 = 旧记录，重新签发时补 SAN）。
+    #[serde(default)]
+    pub dns_names: Vec<String>,
+    /// 签发时生效的 IP SAN（同上）
+    #[serde(default)]
+    pub ip_addresses: Vec<String>,
 }
 
 impl CertRecord {
@@ -639,6 +648,8 @@ mod tests {
             serial: serial.to_string(),
             status,
             parent_serial: None,
+            dns_names: Vec::new(),
+            ip_addresses: Vec::new(),
         }
     }
 
@@ -681,6 +692,10 @@ mod tests {
         let record: CertRecord = serde_json::from_str(json).expect("parse");
         assert_eq!(record.status, CertStatus::Active);
         assert_eq!(record.parent_serial, None);
+        assert!(
+            record.dns_names.is_empty() && record.ip_addresses.is_empty(),
+            "旧记录无 SAN 字段 → 反序列化为空（签发时由 CN 补齐）"
+        );
     }
 
     #[test]
