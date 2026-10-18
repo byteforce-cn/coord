@@ -34,7 +34,7 @@ use crate::raft::state_machine::StateMachineStore;
 use crate::raft::type_config::{Command, Response};
 use crate::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, WatchReceiver};
 use crate::storage::compaction::CompactProposer;
-use crate::storage::mvcc::MvccStorage;
+use crate::storage::mvcc::{MvccStorage, RevisionMode};
 use crate::storage::object_store::{ChunkStore, ObjectStoreCtx};
 use crate::storage::redb_backend::RedbBackend;
 use crate::storage::snapshot::SnapshotTracker;
@@ -66,6 +66,8 @@ pub struct RegionRuntimeSpec {
     /// 对象存储启用配置（`Some` = 启用：本 Region 数据目录下创建 chunk 文件
     /// 存储并挂到状态机/运行时；`None` = 未启用，布局不变）。
     pub object_store: Option<Arc<ObjectStoreCtx>>,
+    /// revision 语义：v1 = `LogIndex`；`[kv_t].enabled=true` 的 v2 集群 = `CommitTs`。
+    pub revision_mode: RevisionMode,
 }
 
 /// 单节点内某个 Region 的运行时句柄
@@ -136,6 +138,7 @@ pub async fn spawn_region_runtime(
         data_dir,
         raft_config,
         object_store,
+        revision_mode,
     } = spec;
 
     std::fs::create_dir_all(&data_dir).map_err(|e| {
@@ -160,7 +163,7 @@ pub async fn spawn_region_runtime(
     let backend = RedbBackend::open(&data_dir, &storage_config)
         .map_err(|e| Error::Storage(format!("open region {region_id} store: {e}")))?;
     let mvcc = Arc::new(
-        MvccStorage::new(backend)
+        MvccStorage::new_with_revision_mode(backend, revision_mode)
             .map_err(|e| Error::Storage(format!("create region {region_id} mvcc: {e}")))?,
     );
     let tracker = Arc::new(SnapshotTracker::default());

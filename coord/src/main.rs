@@ -53,7 +53,7 @@ use coord_server::raft::system_raft::{CoordSystemRaftHandle, SystemRaftHandle};
 use coord_server::server::object_storage::object_gc_loop;
 use coord_server::server::CoordNode;
 use coord_server::storage::compaction::{CompactionConfig, CompactionManager};
-use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::object_store::{ChunkStore, ObjectLimits, ObjectStoreCtx};
 use coord_server::storage::redb_backend::RedbBackend;
 use coord_server::timer::TimerWheel;
@@ -1988,8 +1988,14 @@ async fn run_server(
     let backend = RedbBackend::open(&data_dir, &storage_config)?;
 
     // 3. 单一 MvccStorage 实例：CoordNode 读路径、StateMachine 写路径、
-    //    Compaction、Snapshot 全链路共享；revision ≡ log index。
-    let mvcc = Arc::new(MvccStorage::new(backend)?);
+    //    Compaction、Snapshot 全链路共享。v1 的 revision ≡ log index；
+    //    `[kv_t].enabled=true` 的 v2 集群按显式 commit_ts 记 revision（ADR-0015 D3）。
+    let revision_mode = if cfg.kv_t.enabled {
+        RevisionMode::CommitTs
+    } else {
+        RevisionMode::LogIndex
+    };
+    let mvcc = Arc::new(MvccStorage::new_with_revision_mode(backend, revision_mode)?);
 
     // 3.5 启动一致性校验：META_LAST_APPLIED 与 changelog 尾部一致
     {
@@ -2577,6 +2583,7 @@ async fn run_server(
             &raft_rpc_service,
             region_raft_config,
             object_ctx.clone(),
+            revision_mode,
             &region_seeds,
             &region_peers,
             bootstrap,

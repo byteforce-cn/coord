@@ -31,6 +31,7 @@ use crate::raft::region_runtime::{
     region_data_dir, spawn_region_runtime, RegionRuntime, RegionRuntimeSpec,
 };
 use crate::raft::RaftConfig;
+use crate::storage::mvcc::RevisionMode;
 use crate::storage::object_store::ObjectStoreCtx;
 
 // ============================================================================
@@ -515,6 +516,7 @@ pub async fn spawn_configured_regions(
     rpc: &RaftRpcService,
     raft_config: Arc<RaftConfig>,
     object_store: Option<Arc<ObjectStoreCtx>>,
+    revision_mode: RevisionMode,
     seeds: &[RegionSeed],
     peers: &[Peer],
     initialize: bool,
@@ -576,6 +578,7 @@ pub async fn spawn_configured_regions(
             data_dir: region_data_dir(data_dir, seed.region_id),
             raft_config: Arc::clone(&raft_config),
             object_store: object_store.clone(),
+            revision_mode,
         };
         manager
             .spawn_region(shared_factory, rpc, spec, initialize)

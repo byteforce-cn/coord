@@ -44,7 +44,7 @@ use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::system_raft::{CoordSystemRaftHandle, SystemRaftHandle};
 use coord_server::raft::type_config::PdOp;
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RegionRuntimeSpec, WatchReceiver};
-use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
 use coord_server::storage::snapshot::SnapshotTracker;
 
@@ -201,6 +201,7 @@ async fn start_three_node_one_region_cluster() -> (Vec<NodeHost>, Arc<Region0Clu
             data_dir: region_data_dir(&base, 1),
             raft_config: raft_test_config(),
             object_store: None,
+            revision_mode: RevisionMode::LogIndex,
         };
         // 仅 n1 bootstrap initialize（成员 {1,2,3}）；n2/n3 靠 leader 复制
         manager

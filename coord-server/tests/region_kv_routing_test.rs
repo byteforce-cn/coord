@@ -29,7 +29,7 @@ use coord_server::raft::region::RegionManager;
 use coord_server::raft::region_runtime::region_data_dir;
 use coord_server::raft::{RaftConfig, RegionRuntimeSpec, WatchReceiver};
 use coord_server::server::CoordNode;
-use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
 
 const LEADER_HINT_KEY: &str = "coord-leader-hint";
@@ -115,6 +115,7 @@ async fn start_two_node_two_region_kv_cluster() -> Vec<NodeHost> {
                     ..Default::default()
                 }),
                 object_store: None,
+                revision_mode: RevisionMode::LogIndex,
             };
             manager
                 .spawn_region(&factory, &rpc, spec, node_id == 1)

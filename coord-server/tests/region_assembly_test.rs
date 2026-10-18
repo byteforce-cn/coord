@@ -22,6 +22,7 @@ use coord_server::raft::region::RegionManager;
 use coord_server::raft::region_runtime::region_data_dir;
 use coord_server::raft::type_config::{Command, Response};
 use coord_server::raft::{RaftConfig, RegionRuntime, RegionRuntimeSpec, WatchReceiver};
+use coord_server::storage::mvcc::RevisionMode;
 
 fn find_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -98,6 +99,7 @@ async fn start_two_node_two_region_cluster() -> Vec<NodeHost> {
                     ..Default::default()
                 }),
                 object_store: None,
+                revision_mode: RevisionMode::LogIndex,
             };
             manager
                 .spawn_region(&factory, &rpc, spec, node_id == 1)

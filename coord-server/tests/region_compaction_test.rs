@@ -19,6 +19,7 @@ use coord_server::raft::region_runtime::{region_data_dir, RegionCompactProposer}
 use coord_server::raft::type_config::Command;
 use coord_server::raft::{new_raft, RaftConfig, RegionRuntimeSpec, WatchReceiver};
 use coord_server::storage::compaction::CompactProposer;
+use coord_server::storage::mvcc::RevisionMode;
 use coord_server::storage::redb_backend::RedbBackend;
 
 fn find_port() -> u16 {
@@ -62,6 +63,7 @@ async fn start_single_region() -> (tempfile::TempDir, Arc<RegionManager>, Region
             ..Default::default()
         }),
         object_store: None,
+        revision_mode: RevisionMode::LogIndex,
     };
     manager
         .spawn_region(&factory, &rpc, spec, true)

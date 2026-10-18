@@ -31,7 +31,7 @@ use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::type_config::{Command, LeaseOp, Response};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RegionRuntimeSpec, WatchReceiver};
 use coord_server::server::CoordNode;
-use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
 use coord_server::storage::snapshot::SnapshotTracker;
 use coord_server::timer::TimerWheel;
@@ -140,6 +140,7 @@ async fn start_single_node_with_regions() -> Host {
                 ..Default::default()
             }),
             object_store: None,
+            revision_mode: RevisionMode::LogIndex,
         };
         manager
             .spawn_region(&shared_factory, &rpc, spec, true)

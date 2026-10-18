@@ -26,7 +26,7 @@ use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpc
 use coord_server::raft::region::{spawn_configured_regions, RegionManager, RegionSeed};
 use coord_server::raft::{RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
-use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
 
 const LEADER_HINT_KEY: &str = "coord-leader-hint";
@@ -112,6 +112,7 @@ async fn start_two_node_two_region_config_cluster() -> Vec<NodeHost> {
             &rpc,
             raft_test_config(),
             None, // object storage disabled
+            RevisionMode::LogIndex,
             &seeds,
             &peers,
             node_id == 1, // 仅 bootstrap 节点 initialize 各 Region 成员
@@ -386,6 +387,7 @@ async fn test_config_assembly_rejects_invalid_region_tables() {
         &rpc,
         raft_test_config(),
         None,
+        RevisionMode::LogIndex,
         &gap,
         &peers,
         true,
@@ -409,6 +411,7 @@ async fn test_config_assembly_rejects_invalid_region_tables() {
         &rpc,
         raft_test_config(),
         None,
+        RevisionMode::LogIndex,
         &non_tiled,
         &peers,
         true,
@@ -437,6 +440,7 @@ async fn test_config_assembly_rejects_invalid_region_tables() {
         &rpc,
         raft_test_config(),
         None,
+        RevisionMode::LogIndex,
         &tiled,
         &other_peers,
         true,

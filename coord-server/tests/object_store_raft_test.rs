@@ -26,7 +26,7 @@ use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::type_config::{Command, ObjectStoreOp, Response};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RegionRuntimeSpec};
 use coord_server::server::CoordNode;
-use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::object_store::{
     live_object_hashes, manifest_key, read_manifest, validate_ref, ChunkStore, ObjectLimits,
     ObjectStoreCtx,
@@ -307,6 +307,7 @@ async fn object_store_region_apply_encrypted() {
             ..Default::default()
         }),
         object_store: Some(ctx),
+        revision_mode: RevisionMode::LogIndex,
     };
     manager
         .spawn_region(
