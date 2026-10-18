@@ -19,6 +19,7 @@ pub mod region;
 pub mod region_runtime;
 pub mod state_machine;
 pub mod system_raft;
+pub mod tso;
 pub mod type_config;
 
 pub use network::{

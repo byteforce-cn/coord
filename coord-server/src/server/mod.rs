@@ -1549,7 +1549,7 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
 /// - `std::io::Error`：按 ErrorKind 映射；
 /// - 其余类型：仅识别安全且明确的字符串模式，兜底脱敏为 `INTERNAL`
 ///   （原始信息只进服务端日志，不再原样回传客户端）。
-fn map_err<E: std::fmt::Display + 'static>(e: E) -> tonic::Status {
+pub(crate) fn map_err<E: std::fmt::Display + 'static>(e: E) -> tonic::Status {
     use std::any::Any;
     let any = &e as &dyn Any;
     if let Some(core) = any.downcast_ref::<coord_core::error::Error>() {

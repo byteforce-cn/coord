@@ -27,6 +27,7 @@ mod tests {
     use coord_server::raft::log_store::LogStore;
     use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
     use coord_server::raft::state_machine::StateMachineStore;
+    use coord_server::raft::tso::{TsoAllocator, TsoBatch};
     use coord_server::raft::CoordRaft;
     use coord_server::raft::{new_basic_node, new_raft, RaftConfig};
     use coord_server::server::CoordNode;
@@ -521,6 +522,129 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
+        }
+    }
+
+    // ──── Test: TSO batch never reused across leader failover (#136) ────
+
+    /// 选举/转发窗口内的可重试错误（allocate 本身绝不复用：失败重试只会拿到新批）。
+    async fn tso_allocate_with_retry(alloc: &TsoAllocator, batch_size: u32) -> TsoBatch {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match alloc.allocate(batch_size).await {
+                Ok(batch) => return batch,
+                Err(
+                    e @ (coord_core::error::Error::NotLeader { .. }
+                    | coord_core::error::Error::ClusterUnavailable(_)),
+                ) => {
+                    if tokio::time::Instant::now() > deadline {
+                        panic!("TSO allocate should succeed after failover: {e}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("unexpected TSO allocate error: {e}"),
+            }
+        }
+    }
+
+    /// 判据：leader 发放的批次在换 leader 后不得被复用；follower 不得静默本地分配。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_tso_never_reuses_batch_across_leader_failover() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("coord=info,openraft=info")
+            .try_init();
+
+        let (n1, n2, n3) = start_3_node_cluster().await;
+        let mut nodes = vec![n1, n2, n3];
+        let refs: Vec<&TestNode> = nodes.iter().collect();
+        let leader_idx = wait_for_any_leader(&refs, 10_000)
+            .await
+            .expect("cluster must have a leader");
+
+        // follower 必须拒绝（不得本地写盘造成双高水位）
+        let follower = &nodes[(leader_idx + 1) % nodes.len()];
+        let follower_alloc = TsoAllocator::new(follower.raft.as_ref().clone(), follower.node_id);
+        let err = follower_alloc
+            .allocate(8)
+            .await
+            .expect_err("follower must reject TSO allocation");
+        assert!(
+            matches!(err, coord_core::error::Error::NotLeader { .. }),
+            "expected NotLeader, got {err}"
+        );
+
+        // 换 leader：完整杀掉当前 leader（drop raft core，停止其出站心跳），
+        // 等存活节点选出新 leader 后再分配。
+        let leader = nodes.swap_remove(leader_idx);
+        let leader_alloc = TsoAllocator::new(leader.raft.as_ref().clone(), leader.node_id);
+        let first = tso_allocate_with_retry(&leader_alloc, 64).await;
+        assert!(first.end_ts > first.start_ts);
+
+        // 并发分配：raft 串行化后各批不得重叠，且全部在 first 之后。
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let alloc = leader_alloc.clone();
+            handles.push(tokio::spawn(async move {
+                tso_allocate_with_retry(&alloc, 16).await
+            }));
+        }
+        let mut batches = Vec::new();
+        for handle in handles {
+            batches.push(handle.await.expect("concurrent allocate task"));
+        }
+        batches.sort_by_key(|b| b.start_ts);
+        for window in batches.windows(2) {
+            assert!(
+                window[0].end_ts <= window[1].start_ts,
+                "concurrent TSO batches overlap: {:?} / {:?}",
+                window[0],
+                window[1]
+            );
+        }
+        let highest_end = batches
+            .iter()
+            .map(|b| b.end_ts)
+            .max()
+            .unwrap_or(first.end_ts)
+            .max(first.end_ts);
+
+        // 分配器持有 Raft 句柄（Arc）：必须先释放，否则 kill 后 leader 的 core
+        // 仍被本地句柄保活、心跳继续，存活节点永远不会触发选举。
+        drop(leader_alloc);
+        leader.kill();
+
+        let survivors: Vec<&TestNode> = nodes.iter().collect();
+        let new_idx = wait_for_any_leader(&survivors, 20_000)
+            .await
+            .expect("new leader after failover");
+        let new_leader = survivors[new_idx];
+        let new_alloc = TsoAllocator::new(new_leader.raft.as_ref().clone(), new_leader.node_id);
+        let second = tso_allocate_with_retry(&new_alloc, 64).await;
+
+        assert!(
+            second.start_ts >= highest_end,
+            "TSO batch reused across failover: highest_end={highest_end} second=[{}, {})",
+            second.start_ts,
+            second.end_ts
+        );
+
+        // 持久化高水位在存活节点上收敛（apply 有短暂复制滞后）
+        for node in &survivors {
+            let mut high_water = 0;
+            for _ in 0..100 {
+                high_water = node.node.storage.tso_high_water().unwrap();
+                if high_water >= second.end_ts {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(
+                high_water >= second.end_ts,
+                "node {} high water {} did not reach {}",
+                node.node_id,
+                high_water,
+                second.end_ts
+            );
         }
     }
 
