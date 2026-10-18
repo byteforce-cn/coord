@@ -319,7 +319,10 @@
   返回既有证书（同 serial / 同私钥）；SAN 或 TTL 不同 ⇒ 等价 `RotateCert`
   （新 serial + 新密钥，旧记录 retired 保留至 `not_after`，按 serial 仍可取回）。
 - 观测：`coord_agent_pki_certs_active` / `..._certs_expiring_soon`（窗口
-  `expiry_warn_hours`，默认 6h），告警 `CoordPkiCertExpiringSoon`。
+  `expiry_warn_hours`，默认 6h），告警 `CoordPkiCertExpiringSoon`。dev 下
+  `agent_port+1/metrics` 可见这些 gauge（≤1 个 30s 采样周期），但**不等于**告警会
+  触发——dev 默认没有 Prometheus 抓取；告警判据需要真实抓取链路。
+- 开发态取证书（不依赖 grpcurl）：`docs/pki-quickstart.md`（`coord pki ca/issue/list`）。
 - **无吊销（CRL/OCSP 不在本轮）**：泄露应急 = 消费侧剔除 + CN 轮换
   （playbook：`security.md` §3.2 / runbook §4.5）；非 HSM 边界与重估触发见
   `boundaries.md` B-PKI-1。

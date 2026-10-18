@@ -187,7 +187,37 @@ try (CoordClient client = CoordClient.create(config)) {
 > `CoordClientIntegrationTest` against a real server + agent in CI (`mvn -Pit`) — so if the
 > SDK does not work for you, that is a bug we want, not something you should work around.
 
-Operations CLI: `coord member | snapshot | security | auth | capability | idgen | reset`.
+Operations CLI: `coord member | snapshot | security | auth | capability | pki | idgen | reset`.
+
+## Development PKI
+
+`coord dev` bootstraps a CA on start (CA material lives in the server KV, shared by all
+agents). `coord pki` talks to the local agent directly — no `grpcurl` needed:
+
+```bash
+coord dev --fresh --data-dir /tmp/coord-dev            # terminal 1
+coord pki ca --out ca.pem                             # terminal 2
+coord pki issue --cn orders-api --dns orders-api,orders-api.svc --ip 127.0.0.1 --ttl 1h --out-dir ./
+coord pki list --cn orders-api
+```
+
+Leaf certificates are ECDSA P-256 with KU/EKU and **SAN**; with only `--cn`, the CN is
+derived as a DNS SAN (an invalid DNS name is rejected instead of issuing a SAN-less cert).
+Verify with **both** checks:
+
+```bash
+openssl x509 -in orders-api.pem -noout -ext subjectAltName        # must be non-empty
+openssl verify -CAfile ca.pem -verify_hostname orders-api orders-api.pem
+```
+
+`openssl verify` alone is not proof: OpenSSL falls back to CN. Validators that only read
+SAN (Go ≥1.15, rustls/webpki, browsers, Envoy) need the extension. Full walkthrough:
+[`docs/pki-quickstart.md`](docs/pki-quickstart.md).
+
+Boundary: dev/test/internal verification only — no revocation (CRL/OCSP), no HSM, not a
+production trust root (`docs/production/ops/boundaries.md`, B-PKI-1). CA and certificate
+private keys live in the reserved KV namespace `/_pki/` (only the agent identity or root may
+read it via KV); snapshots contain them in plaintext unless static encryption is enabled.
 
 ## Project layout
 

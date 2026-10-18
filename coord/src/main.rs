@@ -222,6 +222,10 @@ enum Commands {
     #[command(subcommand)]
     Capability(CapabilityCmd),
 
+    /// PKI 证书运维（CA / 签发 / 列表；直连 Agent，不依赖 grpcurl）
+    #[command(subcommand)]
+    Pki(PkiCmd),
+
     /// 启动 Agent 守护进程（本地代理，Java 应用入口）
     Agent {
         /// Agent 本地 gRPC 监听地址（缺省 127.0.0.1:19527；显式提供时覆盖 --agent-config 同名字段）
@@ -825,6 +829,66 @@ enum CapabilityCmd {
         /// 目标节点地址
         #[arg(long, default_value = "127.0.0.1:50051")]
         addr: String,
+    },
+}
+
+// ──── Pki 子命令 ────
+
+/// `coord pki`：不依赖 grpcurl 的证书取用路径（直连 Agent）。
+///
+/// PKI 是 agent 侧服务；`--addr` 默认指向本机 agent（`coord dev` 默认端口）。
+/// 退出码：0 成功；2 用法错误（--ttl 非法 / 服务端 INVALID_ARGUMENT）；1 连接或其它 RPC 失败。
+#[derive(Subcommand)]
+#[command(
+    after_help = "示例:\n  coord pki ca --out ca.pem\n  coord pki issue --cn orders-api --dns orders-api,orders-api.svc --ip 127.0.0.1 --ttl 1h --out-dir ./\n  coord pki list --cn orders-api"
+)]
+enum PkiCmd {
+    /// 导出 CA 根证书（PEM；缺省写 stdout）
+    Ca {
+        /// Agent gRPC 地址
+        #[arg(long, default_value = "127.0.0.1:19527")]
+        addr: String,
+        /// 输出路径（缺省 stdout）
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// 签发终端证书（缺省把 CN 派生为 DNS SAN）
+    Issue {
+        /// Agent gRPC 地址
+        #[arg(long, default_value = "127.0.0.1:19527")]
+        addr: String,
+        /// 证书 Common Name
+        #[arg(long)]
+        cn: String,
+        /// DNS SAN（逗号分隔或重复指定；未给任何 SAN 时由 CN 派生）
+        #[arg(long, value_delimiter = ',')]
+        dns: Vec<String>,
+        /// IP SAN（逗号分隔或重复指定）
+        #[arg(long, value_delimiter = ',')]
+        ip: Vec<String>,
+        /// 有效期（如 1h / 30m / 90s / 2d，缺省 24h；0 = 服务端默认）
+        #[arg(long, default_value = "24h")]
+        ttl: String,
+        /// 证书/私钥输出目录（写 <CN>.pem 与 <CN>.key，key 权限 0600）
+        #[arg(long, default_value = ".")]
+        out_dir: PathBuf,
+        /// 元数据以 JSON 输出
+        #[arg(long, default_value = "false")]
+        json: bool,
+    },
+
+    /// 列出 CN 的证书摘要（不含私钥）
+    List {
+        /// Agent gRPC 地址
+        #[arg(long, default_value = "127.0.0.1:19527")]
+        addr: String,
+        /// 证书 Common Name
+        #[arg(long)]
+        cn: String,
+        /// 以 JSON 输出
+        #[arg(long, default_value = "false")]
+        json: bool,
     },
 }
 
@@ -1653,6 +1717,55 @@ async fn main() {
                 }
             }
         },
+
+        Commands::Pki(cmd) => {
+            let result = match cmd {
+                PkiCmd::Ca { addr, out } => {
+                    commands::cmd_pki_ca(commands::CliConn::new(&addr, cli_tls.clone()), out).await
+                }
+                PkiCmd::Issue {
+                    addr,
+                    cn,
+                    dns,
+                    ip,
+                    ttl,
+                    out_dir,
+                    json,
+                } => match commands::parse_ttl(&ttl) {
+                    Ok(ttl_seconds) => {
+                        commands::cmd_pki_issue(
+                            commands::CliConn::new(&addr, cli_tls.clone()),
+                            &cn,
+                            dns,
+                            ip,
+                            ttl_seconds,
+                            &out_dir,
+                            json,
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(2);
+                    }
+                },
+                PkiCmd::List { addr, cn, json } => {
+                    commands::cmd_pki_list(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &cn,
+                        json,
+                    )
+                    .await
+                }
+            };
+            if let Err(e) = result {
+                let usage_error = e
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(|s| s.code() == tonic::Code::InvalidArgument);
+                eprintln!("Error: {e}");
+                std::process::exit(if usage_error { 2 } else { 1 });
+            }
+        }
 
         Commands::Agent {
             agent_addr,
@@ -4102,6 +4215,60 @@ mod tests {
         assert!(is_loopback_host("::1"));
         assert!(!is_loopback_host("0.0.0.0"));
         assert!(!is_loopback_host("192.168.1.10"));
+    }
+
+    /// `pki ca/issue/list` 子命令解析（地址默认 agent 端口、DNS 逗号分隔）。
+    #[test]
+    fn test_pki_cli_parsing() {
+        use super::{Cli, Commands, PkiCmd};
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "coord",
+            "pki",
+            "issue",
+            "--cn",
+            "orders-api",
+            "--dns",
+            "orders-api,orders-api.svc",
+            "--ip",
+            "127.0.0.1,::1",
+            "--ttl",
+            "1h",
+            "--out-dir",
+            "/tmp/coord-pki-test",
+        ])
+        .expect("pki issue must parse");
+        match cli.command {
+            Commands::Pki(PkiCmd::Issue {
+                addr,
+                cn,
+                dns,
+                ip,
+                ttl,
+                out_dir,
+                json,
+            }) => {
+                assert_eq!(addr, "127.0.0.1:19527");
+                assert_eq!(cn, "orders-api");
+                assert_eq!(dns, vec!["orders-api", "orders-api.svc"]);
+                assert_eq!(ip, vec!["127.0.0.1", "::1"]);
+                assert_eq!(ttl, "1h");
+                assert_eq!(out_dir, std::path::PathBuf::from("/tmp/coord-pki-test"));
+                assert!(!json);
+            }
+            _ => panic!("expected pki issue variant"),
+        }
+
+        let cli = Cli::try_parse_from(["coord", "pki", "list", "--cn", "orders-api"])
+            .expect("pki list must parse");
+        match cli.command {
+            Commands::Pki(PkiCmd::List { cn, json, .. }) => {
+                assert_eq!(cn, "orders-api");
+                assert!(!json);
+            }
+            _ => panic!("expected pki list variant"),
+        }
     }
 
     /// `security bootstrap-token create/list/revoke` 子命令解析。
