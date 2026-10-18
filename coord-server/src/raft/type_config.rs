@@ -396,6 +396,23 @@ pub enum Command {
     /// **末尾追加**；data region raft 不应收到（收到时按普通内部记录 apply，
     /// 不影响业务 keyspace）。
     Tso(TsoOp),
+    /// v2 直写 Put：revision = 调用方 `commit_ts`（ADR-0015 D3/D11）。
+    ///
+    /// **末尾追加**；仅 `[kv_t].enabled=true` 的 v2 集群提出。
+    PutV2 {
+        key: Vec<u8>,
+        value: Vec<u8>,
+        lease_id: Option<i64>,
+        commit_ts: u64,
+    },
+    /// v2 直写 Delete：revision = `commit_ts`。
+    DeleteV2 { key: Vec<u8>, commit_ts: u64 },
+    /// v2 直写范围删除：整个区间共享同一 `commit_ts`。
+    DeleteRangeV2 {
+        key: Vec<u8>,
+        range_end: Vec<u8>,
+        commit_ts: u64,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -421,6 +438,26 @@ impl std::fmt::Display for Command {
             Command::Pd(op) => write!(f, "Pd({op:?})"),
             Command::ObjectStore(op) => write!(f, "ObjectStore({op:?})"),
             Command::Tso(op) => write!(f, "Tso({op:?})"),
+            Command::PutV2 { key, commit_ts, .. } => write!(
+                f,
+                "PutV2(key={}, commit_ts={commit_ts})",
+                String::from_utf8_lossy(key)
+            ),
+            Command::DeleteV2 { key, commit_ts } => write!(
+                f,
+                "DeleteV2(key={}, commit_ts={commit_ts})",
+                String::from_utf8_lossy(key)
+            ),
+            Command::DeleteRangeV2 {
+                key,
+                range_end,
+                commit_ts,
+            } => write!(
+                f,
+                "DeleteRangeV2(key={}, range_end={}, commit_ts={commit_ts})",
+                String::from_utf8_lossy(key),
+                String::from_utf8_lossy(range_end)
+            ),
         }
     }
 }
@@ -474,6 +511,12 @@ pub enum Response {
         start_ts: u64,
         end_ts: u64,
     },
+    /// v2 写被拒：`commit_ts <= current_revision` 且未命中已有写入
+    /// （D11.4）。用户级拒绝不返回 apply `Err`（D11.5）。
+    CommitRejected {
+        commit_ts: u64,
+        current_revision: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -500,6 +543,13 @@ impl std::fmt::Display for Response {
             Response::Tso { start_ts, end_ts } => {
                 write!(f, "Tso([{start_ts}, {end_ts}))")
             }
+            Response::CommitRejected {
+                commit_ts,
+                current_revision,
+            } => write!(
+                f,
+                "CommitRejected(commit_ts={commit_ts}, current={current_revision})"
+            ),
         }
     }
 }
