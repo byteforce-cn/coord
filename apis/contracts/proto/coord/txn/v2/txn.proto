@@ -1,0 +1,98 @@
+syntax = "proto3";
+package coord.txn.v2;
+
+// coord.txn.v2 —— serializable 跨 Region 事务（OCC；ADR-0015 D4/D12）。
+//
+// 协议口径（D12，唯一归属 ADR-0015）：
+//   1. `Begin` 固定 `start_ts`（`0` = 服务端向 TSO 申请），并创建**服务端会话**；
+//      会话不跨节点复制：协调节点崩溃/重启 ⇒ 会话丢失，`Commit` 返回
+//      `ABORTED` + `TXN_NOT_FOUND`，客户端必须重跑整个事务。事务的原子性不受影响
+//      （commit 是 Commit Sequencer 的单次决策）；
+//   2. `Read` 只在会话内有效：读在 `start_ts` 快照上执行，并**由服务端**把
+//      point key / range 谓词记入读集（客户端不能省略读集条目来规避冲突）；
+//   3. `Commit` 把读集 + 写集交给 Commit Sequencer：在 `(start_ts, commit_ts]`
+//      内校验读集/谓词是否被写过；冲突 ⇒ `ABORTED` + `TXN_CONFLICT`，不写
+//      `CommitDecision`（客户端换新 `start_ts` 重跑）；
+//   4. commit 成功即返回 `commit_ts`（决策已持久化）；各 Region 的 apply 是异步的，
+//      `commit_ts <= safe_ts` 之后的读一定能看到全部写入（见 coord.kv.v2 的
+//      `read_ts` 等待语义）。不承诺 strict serializability（D4）。
+//
+// 与 v1 `coord.txn` 的关键差异：v2 没有 `Compare`。v1 的「条件不满足 = 非错误」
+// 不适用于 OCC 冲突——冲突必须让调用方换时间戳重跑，因此是 `ABORTED` 错误。
+//
+// 上限（配置见 `[kv_t]`，默认值见 ADR-0015 D9）：
+//   - 写集序列化后 ≤ `max_txn_bytes`（4MiB），超限 `INVALID_ARGUMENT` + `TXN_TOO_LARGE`；
+//   - 读集条目 ≤ `max_read_set`（默认 4096），超限 `INVALID_ARGUMENT` + `READ_SET_TOO_LARGE`；
+//   - 单个 range 读最多扫描 `max_range` 个 key（默认 10000），超限按同一码拒绝。
+//
+// 会话 TTL：`Begin` 可指定 `ttl_ms`（0 = `[kv_t].txn_ttl_secs`）；到期会话被回收，
+// 迟到的 `Commit`/`Read` 返回 `TXN_NOT_FOUND`。长事务不得无限阻塞 split/merge 的
+// drain（ADR-0015 D4/D6）。
+//
+// 幂等：`Commit` 的 `request_id` 在会话 TTL 内去重——同一请求重试返回首次的
+// `commit_ts`，不会重复决策。
+
+option java_package = "cn.byteforce.coord.contracts.txn.v2";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/txn/v2;txnv2";
+
+import "coord/kv/v2/kv.proto";
+
+message BeginRequest {
+  int64 start_ts = 1; // 0 = 服务端申请；>0 = 调用方从 TSO 批次取得的快照时间戳
+  uint32 ttl_ms = 2; // 0 = 默认 TTL；上限由服务端钳制
+}
+
+message BeginResponse {
+  bytes txn_id = 1; // 会话标识；只在协调节点有效（重试需回到同一节点）
+  int64 start_ts = 2;
+}
+
+message ReadRequest {
+  bytes txn_id = 1;
+  bytes key = 2;
+  bytes range_end = 3; // 空 = point read；非空 = [key, range_end) 谓词读
+  int64 limit = 4; // 本次读返回条数上限（0 = 不限制，仍受 max_range 约束）
+  bool keys_only = 5;
+}
+
+message ReadResponse {
+  repeated coord.kv.v2.KeyValue kvs = 1;
+  int64 read_ts = 2; // = start_ts（回显）
+}
+
+message Mutation {
+  enum Op {
+    OP_UNSPECIFIED = 0; // 非法：Commit 拒绝（INVALID_ARGUMENT）
+    PUT = 1; // range_end 必须为空
+    DELETE = 2; // 单 key 删除；range_end 必须为空
+    DELETE_RANGE = 3; // 删除 [key, range_end)；range_end 必须非空
+  }
+  Op op = 1;
+  bytes key = 2;
+  bytes range_end = 3;
+  bytes value = 4; // PUT 必填；DELETE* 忽略
+  int64 lease_id = 5; // PUT 可选；DELETE* 忽略
+}
+
+message CommitRequest {
+  bytes txn_id = 1;
+  repeated Mutation mutations = 2; // 写集；空写集允许（只读事务仍需校验读集）
+  bytes request_id = 3; // 幂等去重键；同一 request_id 重试返回同一 commit_ts
+}
+
+message CommitResponse {
+  int64 commit_ts = 1;
+}
+
+message AbortRequest {
+  bytes txn_id = 1;
+}
+
+message AbortResponse {}
+
+service Txn {
+  rpc Begin(BeginRequest) returns (BeginResponse);
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc Commit(CommitRequest) returns (CommitResponse);
+  rpc Abort(AbortRequest) returns (AbortResponse);
+}

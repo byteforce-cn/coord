@@ -117,6 +117,14 @@ const SCOPE_BEARING_RPCS: &[&str] = &[
     "/coord.kv.KV/Range",
     "/coord.kv.KV/Delete",
     "/coord.txn.Txn/Txn",
+    // KV-T v2（ADR-0015）：一元且带 key/range 的方法。与
+    // `coord_core::grpc_auth::needs_scope_extraction` 必须保持一致
+    // （v2 Watch 仍是客户端流式：scope 判定在 handler 侧，不得进本表）。
+    "/coord.kv.v2.KV/Put",
+    "/coord.kv.v2.KV/Range",
+    "/coord.kv.v2.KV/Delete",
+    "/coord.txn.v2.Txn/Read",
+    "/coord.txn.v2.Txn/Commit",
 ];
 
 /// 生产用 scope 提取器：委托给两侧共用的 [`coord_core::grpc_auth`]。

@@ -12,7 +12,7 @@ lint:
     # 以下例外均为「与线端既有实现保持 wire 兼容」的刻意决定，
     # 不是技术债，禁止为通过 lint 而修改（见 WHITEPAPER.md）：
     - PACKAGE_VERSION_SUFFIX # 包名沿用 coord.kv 等线端包名，Major 升级才引入 .v2 新包
-    - SERVICE_SUFFIX         # 服务名 KV/Txn/Lease/Watch/Maintenance 为线端既有名称
+    - SERVICE_SUFFIX         # 服务名 KV/Txn/Lease/Watch/Maintenance 为线端既有名称；v2 刻意沿用同名（KV/Txn/Watch/Lease/Storage/TSO），便于客户端按包版本切换
     - ENUM_VALUE_PREFIX      # 枚举值与线端一致，重命名即 Breaking
     - ENUM_ZERO_VALUE_SUFFIX # 零值与线端一致（如 PUT=0），重命名即 Breaking
     # v1.1 新增：能力承诺面沿用 coord.agent 现实现的消息/服务命名

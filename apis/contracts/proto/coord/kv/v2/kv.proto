@@ -1,0 +1,92 @@
+syntax = "proto3";
+package coord.kv.v2;
+
+// coord.kv.v2 —— KV-T 的单键/范围读写面（ADR-0015 D3/D12）。
+//
+// revision 语义：
+//   - 全局 revision = `commit_ts`（TSO 发放，见 coord.tso.v2）；同一事务的
+//     所有 key 共享同一个 `commit_ts`；
+//   - `create_revision` / `mod_revision` 都是 `commit_ts`；同一 key 的
+//     `mod_revision` 单调递增；
+//   - `Range` 的 `read_ts` 是快照读时间戳；响应 `read_ts` 回显实际使用的值。
+//
+// 写路径（`Put`/`Delete`）：
+//   - `commit_ts` 必填且必须由 TSO 发放（> 0）；服务端**不**替调用方分配，
+//     因为多 key 原子性要求同一事务共享一个 `commit_ts`（跨区事务走
+//     coord.txn.v2，不直接调本服务的写接口）；
+//   - 幂等：同一 `(key/range, commit_ts)` 重放返回与首次相同的结果，不重复写
+//     changelog、不重复推进 revision（D11.6）；
+//   - `commit_ts <= current_revision` 且该 `commit_ts` 未命中已有写入 ⇒
+//     `FAILED_PRECONDITION` + `COMMIT_REJECTED`（D11.4，禁止静默写）；
+//   - `commit_ts` 落后于已 compact 水位 ⇒ `OUT_OF_RANGE`。
+//
+// 读路径：
+//   - `read_ts = 0` ⇒ 服务端取当前 `safe_ts`（已 apply 的全局水位），保证
+//     多 key 原子可见；`read_ts > safe_ts` 时等待至多 `[kv_t].read_ts_wait_ms`，
+//     超时返回 `UNAVAILABLE` + `SAFE_TS_LAG`（可重试）；
+//   - `read_ts` 早于 compact 水位 ⇒ `OUT_OF_RANGE`。
+//
+// 路由：请求可选携带 gRPC metadata `coord-routing-epoch`（十进制 u64）。与
+// 服务端缓存的 Region epoch 不一致时返回 `ABORTED` + `EPOCH_STALE`，调用方
+// 刷新路由后重试；不带该 metadata 时不校验 epoch（单 Region/boot 期路径）。
+
+option java_package = "cn.byteforce.coord.contracts.kv.v2";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/kv/v2;kvv2";
+
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2; // 空 value 表示 tombstone
+  int64 create_revision = 3; // 首次写入的 commit_ts
+  int64 mod_revision = 4; // 最近一次写入的 commit_ts
+  int64 version = 5; // 该 key 被写入的次数（从 1 开始）
+  int64 lease_id = 6; // 绑定的租约（0 = 无）
+}
+
+message PutRequest {
+  bytes key = 1;
+  bytes value = 2;
+  int64 lease_id = 3; // 可选：绑定租约；租约撤销时随 commit_ts 一起删除
+  bool prev_kv = 4; // 响应是否携带旧值
+  bytes request_id = 5; // 幂等去重键（同一 request_id 的重试返回首次结果）
+  int64 commit_ts = 6; // 必填 > 0；由 TSO 发放
+}
+
+message PutResponse {
+  KeyValue prev_kv = 1; // 仅 prev_kv=true 且此前存在时填充
+  int64 commit_ts = 2;
+}
+
+message DeleteRequest {
+  bytes key = 1;
+  bytes range_end = 2; // 空 = 单 key；非空 = 删除 [key, range_end)
+  bool prev_kv = 3;
+  bytes request_id = 4;
+  int64 commit_ts = 5; // 必填 > 0；整个区间共享同一 commit_ts
+}
+
+message DeleteResponse {
+  int64 deleted = 1;
+  repeated KeyValue prev_kvs = 2;
+  int64 commit_ts = 3;
+}
+
+message RangeRequest {
+  bytes key = 1;
+  bytes range_end = 2; // 空 = 单 key 精确查询；非空 = [key, range_end)
+  int64 limit = 3; // 最大返回条数（0 = 不限制，受服务端规模上限约束）
+  int64 read_ts = 4; // 0 = 服务端取 safe_ts
+  bool keys_only = 5;
+  bool count_only = 6;
+}
+
+message RangeResponse {
+  repeated KeyValue kvs = 1;
+  int64 count = 2; // 命中总数（count_only 时使用）
+  int64 read_ts = 3; // 实际使用的快照时间戳（回显）
+}
+
+service KV {
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Range(RangeRequest) returns (RangeResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}

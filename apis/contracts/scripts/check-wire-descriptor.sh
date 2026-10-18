@@ -47,8 +47,10 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # ── 收集两侧的 proto 文件（两侧各自全部 .proto；比对时按 package 取交集/差集）──
+# 实现侧必须递归收集：v2 包位于 coord-proto/src/proto/coord/<domain>/v2/，
+# 与契约侧同形（ADR-0015），不能再假设「一层扁平」。
 mapfile -t CONTRACT_PROTOS < <(find "$CONTRACT_DIR" -name '*.proto' | sort)
-mapfile -t INTERNAL_PROTOS < <(find "$INTERNAL_DIR" -maxdepth 1 -name '*.proto' | sort)
+mapfile -t INTERNAL_PROTOS < <(find "$INTERNAL_DIR" -name '*.proto' | sort)
 
 if [[ ${#CONTRACT_PROTOS[@]} -eq 0 ]]; then
   echo "FAIL: 契约目录下没有 .proto 文件：$CONTRACT_DIR" >&2

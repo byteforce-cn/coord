@@ -5,18 +5,34 @@
 
 pub mod kv {
     tonic::include_proto!("coord.kv");
+
+    pub mod v2 {
+        tonic::include_proto!("coord.kv.v2");
+    }
 }
 
 pub mod txn {
     tonic::include_proto!("coord.txn");
+
+    pub mod v2 {
+        tonic::include_proto!("coord.txn.v2");
+    }
 }
 
 pub mod lease {
     tonic::include_proto!("coord.lease");
+
+    pub mod v2 {
+        tonic::include_proto!("coord.lease.v2");
+    }
 }
 
 pub mod watch {
     tonic::include_proto!("coord.watch");
+
+    pub mod v2 {
+        tonic::include_proto!("coord.watch.v2");
+    }
 }
 
 pub mod maintenance {
@@ -25,6 +41,16 @@ pub mod maintenance {
 
 pub mod storage {
     tonic::include_proto!("coord.storage");
+
+    pub mod v2 {
+        tonic::include_proto!("coord.storage.v2");
+    }
+}
+
+pub mod tso {
+    pub mod v2 {
+        tonic::include_proto!("coord.tso.v2");
+    }
 }
 
 pub mod raft {

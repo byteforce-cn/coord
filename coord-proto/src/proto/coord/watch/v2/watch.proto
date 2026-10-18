@@ -1,0 +1,93 @@
+syntax = "proto3";
+package coord.watch.v2;
+
+// coord.watch.v2 —— 严格透明 Watch（ADR-0015 D5/D9/D12）。
+//
+// 事件语义：
+//   - 事件按 `commit_ts` **全局有序**；同一事务的全部 key 变更作为**一个
+//     WatchEvent**（原子批）下发，绝不在批内拆分；
+//   - 事件内容是**完整 change record**（key + value + 旧值），不依赖 Region 历史，
+//     因此 split/merge 不丢事件、不要求应用 re-list；
+//   - `start_revision` = 首个期望的 `commit_ts`（含）；`0` = 从当前 watermark+1
+//     开始。断点续订可携带 `start_cursor`（同一 shard 的精确位置），两者互斥，
+//     同时设置返回 `INVALID_ARGUMENT`；
+//   - 历史窗口（默认 24h，可配 1h–7d）不足 ⇒ 流以 `OUT_OF_RANGE` +
+//     `HISTORY_UNAVAILABLE` 终止，不静默丢事件；
+//   - 单批 ≤ 1000 条 change 或 1MB；原子多 key 批不因上限被拆（批本身超过 1MB
+//     属于事务超限，事务在 Commit 阶段已被 4MiB 上限拒绝）。
+//
+// `watermark` = `min(in-flight commit_ts) - 1`（无 in-flight 时 = max commit_ts）。
+// `sealed` 表示当前 shard 已 seal、订阅正在跨 shard 推进（对调用方是提示，
+// 不改变事件语义）。
+//
+// 取消：客户端发送 `cancel`（或直接关闭流）。服务端在响应里回显 `watch_id`；
+// 同一流上的多个 create 共享该流，取消按 `watch_id` 生效。
+
+option java_package = "cn.byteforce.coord.contracts.watch.v2";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/watch/v2;watchv2";
+
+import "coord/kv/v2/kv.proto";
+
+message WatchCreateRequest {
+  bytes key = 1; // 空 = 全 keyspace（受权限 scope 约束）
+  bytes range_end = 2; // 空 = 单 key；非空 = [key, range_end)
+  int64 start_revision = 3; // 0 = 从当前 watermark+1
+  WatchCursor start_cursor = 4; // 断点续订；与 start_revision 互斥
+  bool prev_kv = 5; // 是否携带旧值
+  EventFilter filter = 6;
+}
+
+// 服务端游标 `(shard_id, commit_ts)`：同一 shard 内精确续订。
+// 客户端应把它当作不透明令牌保存，只在重连时原样回传。
+message WatchCursor {
+  uint64 shard_id = 1;
+  int64 commit_ts = 2;
+}
+
+enum EventFilter {
+  EVENT_FILTER_UNSPECIFIED = 0; // 等同 ALL（"未设置"与"显式 ALL"语义一致）
+  ALL = 1;
+  PUTS_ONLY = 2;
+  DELETES_ONLY = 3;
+}
+
+message WatchCancelRequest {
+  int64 watch_id = 1;
+}
+
+// 一个事务 = 一个原子事件。
+message WatchEvent {
+  int64 commit_ts = 1;
+  repeated Change changes = 2;
+}
+
+message Change {
+  enum Type {
+    TYPE_UNSPECIFIED = 0; // 服务端永不发出
+    PUT = 1;
+    DELETE = 2;
+  }
+  Type type = 1;
+  bytes key = 2;
+  bytes value = 3; // DELETE 时为空
+  coord.kv.v2.KeyValue prev_kv = 4; // prev_kv=true 且此前存在时填充
+}
+
+message WatchRequest {
+  oneof request {
+    WatchCreateRequest create = 1;
+    WatchCancelRequest cancel = 2;
+  }
+}
+
+message WatchResponse {
+  int64 watch_id = 1;
+  repeated WatchEvent events = 2; // 每个元素是一个事务的原子批
+  WatchCursor cursor = 3; // 本批之后的位置；重连时回传
+  int64 watermark = 4; // 服务端当前 commit watermark
+  bool sealed = 5; // 当前 shard 已 seal
+}
+
+service Watch {
+  rpc Watch(stream WatchRequest) returns (stream WatchResponse);
+}

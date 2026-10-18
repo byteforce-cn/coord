@@ -1,0 +1,101 @@
+syntax = "proto3";
+package coord.storage.v2;
+
+// coord.storage.v2 —— 对象存储数据面（ADR-0015 D6/D7/D12）。
+//
+// 与 v1 `coord.storage` 的差异只在 revision/Region 口径，流式、配额、水位、GC
+// 语义保持不变（单一归属：docs/production/volume-object-storage.md）：
+//   - manifest 写在 Region KV，使用全局 `commit_ts`（`Put` 完成时由服务端分配，
+//     客户端不传）；`ObjectStat.commit_ts` 是最近一次 manifest 写入的 commit_ts，
+//     `create_ts` 是首次 Commit 的 commit_ts；
+//   - `Get`/`Stat` 可带 `read_ts` 做快照读（0 = 当前 safe_ts）；`read_ts` 早于
+//     manifest 的 compact 水位 ⇒ `OUT_OF_RANGE`；
+//   - chunk 文件在 Region 目录、不进 MVCC；快照恢复的 chunk rebuild 语义与 v1 相同；
+//   - `/obj/` 是**固定 Region 区间**：不参与任意 KV split/merge，SplitChecker 必须
+//     跳过；chunk 不随 KV split 迁移；对象容量/扩展管理不在本 ADR 承诺内；
+//   - 用户 key 不得占用 `/obj/` 前缀（服务端守卫与 v1 一致，返回
+//     `INVALID_ARGUMENT`）。
+//
+// 幂等/重试：`Put` 以 `(bucket, object_id)` 为键，已 Committed 的对象再次 Put
+// 返回 `ALREADY_EXISTS`（v2 仍不支持覆盖写）；上传中 leader 变更 ⇒ 整体重试。
+// `Delete` 对不存在/已删除对象返回 `NOT_FOUND`；在结果未知时重试 Delete，
+// 调用方应把 `NOT_FOUND` 视为「已删除」。
+
+option java_package = "cn.byteforce.coord.contracts.storage.v2";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/storage/v2;storagev2";
+
+message ObjectRef {
+  string bucket = 1;
+  bytes object_id = 2;
+}
+
+message PutRequest {
+  oneof part {
+    PutMeta meta = 1; // 首条：对象元数据
+    bytes chunk = 2; // 后续：数据分片（≤ chunk_size，默认 4MiB）
+  }
+}
+
+message PutMeta {
+  string bucket = 1;
+  bytes object_id = 2;
+  int64 total_size = 3; // >0 = 声明长度（Commit 须相等）；-1 = 未知（流末定长）
+}
+
+message PutResponse {
+  int64 commit_ts = 1; // manifest 提交的全局 commit_ts
+  int64 size = 2;
+  int64 chunks = 3;
+}
+
+message GetRequest {
+  string bucket = 1;
+  bytes object_id = 2;
+  int64 read_ts = 3; // 0 = safe_ts
+}
+
+message GetResponse {
+  oneof part {
+    ObjectStat stat = 1; // 首条：对象元数据（含 commit_ts）
+    bytes chunk = 2; // 后续：数据分片（≤ chunk_size）
+  }
+}
+
+message StatRequest {
+  string bucket = 1;
+  bytes object_id = 2;
+  int64 read_ts = 3;
+}
+
+message StatResponse {
+  ObjectStat stat = 1;
+}
+
+message DeleteRequest {
+  string bucket = 1;
+  bytes object_id = 2;
+  bytes request_id = 3; // 幂等去重键
+}
+
+message DeleteResponse {
+  bool deleted = 1; // 本次实际执行删除
+  int64 commit_ts = 2; // tombstone 的 commit_ts
+}
+
+message ObjectStat {
+  string bucket = 1;
+  bytes object_id = 2;
+  int64 size = 3;
+  int64 chunks = 4;
+  int64 commit_ts = 5; // 最近一次 manifest 写入的 commit_ts（0 = 不存在）
+  int64 create_ts = 6; // 首次 Commit 的 commit_ts
+  bool exists = 7; // false = 不存在或已删除
+  bool committed = 8; // 是否存在且上传完成
+}
+
+service Storage {
+  rpc Put(stream PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (stream GetResponse);
+  rpc Stat(StatRequest) returns (StatResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
