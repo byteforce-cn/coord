@@ -45,6 +45,12 @@ const AUTH_PREFIX: &[u8] = b"/_auth/";
 /// 已 Apply 的最大 Raft LogId（崩溃恢复检查点；与命令写入同一事务）
 pub(crate) const META_LAST_APPLIED: &[u8] = b"/_meta/last_applied";
 
+/// 已提交的最大 revision（u64 BE；与命令写入同一事务）。
+///
+/// v1（`RevisionMode::LogIndex`）下等于已 apply 的 log index；v2（`CommitTs`）
+/// 下等于已 apply 的最大 `commit_ts`，与 raft log index 无关。
+pub const META_CURRENT_REVISION: &[u8] = b"/_meta/current_revision";
+
 /// `AppliedLogId` 持久化编码的魔数（标识 `ALI1` 定长编码；非该魔数按水位缺失处理）。
 const APPLIED_LOG_ID_MAGIC: &[u8; 4] = b"ALI1";
 
@@ -533,12 +539,32 @@ pub struct TsoBatchOutcome {
     pub replayed: bool,
 }
 
+/// 定长 u64 BE 解码（`META_CURRENT_REVISION` / `META_COMPACT_REVISION`）。
+fn decode_u64(bytes: &[u8]) -> Option<u64> {
+    <[u8; 8]>::try_from(bytes).ok().map(u64::from_be_bytes)
+}
+
 // ──── MvccStorage ────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevisionPolicy {
+    LogIndex,
+    CommitTs,
+}
+
+/// revision 来源（ADR-0015 D3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionMode {
+    /// v1：revision ≡ raft log index（默认；ADR-0001 行为字节级不变）。
+    LogIndex,
+    /// v2：revision = 显式 `commit_ts`；log-index 记录只推进 applied。
+    CommitTs,
+}
 
 /// MVCC 版本化存储
 ///
 /// 在 StorageBackend 之上提供应用层 MVCC 语义：
-/// - revision ≡ raft log index（由 apply 传入，不再由本层分配）
+/// - v1：revision ≡ raft log index；v2：revision = `commit_ts`
 /// - Changelog 自动写入
 /// - applied 状态同事务持久化
 /// - Lease 状态表
@@ -551,19 +577,30 @@ pub struct MvccStorage<B: StorageBackend> {
     /// 单节点模式（无 raft）的 revision 分配锁：保证并发写入分配不同 revision
     /// （raft 模式下 apply 以 log index 为 revision，不需要此锁）
     standalone_lock: parking_lot::Mutex<()>,
+    revision_mode: RevisionMode,
 }
 
 impl<B: StorageBackend> MvccStorage<B> {
-    /// 创建 MvccStorage 实例
+    /// 创建 v1 实例（revision ≡ raft log index）。
     ///
     /// revision 不再从元数据恢复（revision 由 raft apply 传入）。
     /// 启动一致性校验由 `verify_consistency` 显式执行。
     pub fn new(backend: B) -> Result<Self> {
+        Self::new_with_revision_mode(backend, RevisionMode::LogIndex)
+    }
+
+    /// 创建指定 revision 语义的实例（v2 集群用 `CommitTs`）。
+    pub fn new_with_revision_mode(backend: B, revision_mode: RevisionMode) -> Result<Self> {
         Ok(Self {
             backend,
             barrier: RwLock::new(None),
             standalone_lock: parking_lot::Mutex::new(()),
+            revision_mode,
         })
+    }
+
+    pub fn revision_mode(&self) -> RevisionMode {
+        self.revision_mode
     }
 
     /// 设置存储屏障（在 Keyring 初始化后调用）
@@ -612,15 +649,96 @@ impl<B: StorageBackend> MvccStorage<B> {
         &self.backend
     }
 
-    /// 获取当前 Revision（已提交的最大 Revision）
+    /// 获取当前 Revision（已提交的最大 Revision）。
     ///
-    /// 从盘上 `META_LAST_APPLIED` 读取，无持久化条目时为 0。
+    /// 读盘上 `META_CURRENT_REVISION`。既有 v1 库没有该行：回退到
+    /// `META_LAST_APPLIED.index`（revision 曾等于 log index），下一次写入补齐。
     pub fn current_revision(&self) -> Revision {
-        self.get_applied_log_id()
+        let persisted = self
+            .backend
+            .read(|tx| tx.get(TABLE_META, META_CURRENT_REVISION))
             .ok()
             .flatten()
-            .map(|a| a.index)
-            .unwrap_or(0)
+            .and_then(|bytes| decode_u64(&bytes));
+        if let Some(revision) = persisted {
+            return revision;
+        }
+        match self.revision_mode {
+            RevisionMode::LogIndex => self
+                .get_applied_log_id()
+                .ok()
+                .flatten()
+                .map(|a| a.index)
+                .unwrap_or(0),
+            RevisionMode::CommitTs => 0,
+        }
+    }
+
+    /// 写事务内读取当前 revision（缺失时按持久化 applied 回退；CommitTs 模式为 0）。
+    fn current_revision_in_tx(tx: &mut dyn WriteTx, mode: RevisionMode) -> Result<Revision> {
+        if let Some(bytes) = tx.get(TABLE_META, META_CURRENT_REVISION)? {
+            if let Some(revision) = decode_u64(&bytes) {
+                return Ok(revision);
+            }
+        }
+        match mode {
+            RevisionMode::LogIndex => Ok(tx
+                .get(TABLE_META, META_LAST_APPLIED)?
+                .and_then(|bytes| AppliedLogId::from_bytes(&bytes))
+                .map(|a| a.index)
+                .unwrap_or(0)),
+            RevisionMode::CommitTs => Ok(0),
+        }
+    }
+
+    /// v1 语义：revision 必须是 log index 且单调；v2 下 log-index 记录
+    /// （auth/lease/PD/TSO/object store）只推进 applied，不进入 revision 空间。
+    fn accept_log_index_revision(&self, tx: &mut dyn WriteTx, revision: Revision) -> Result<()> {
+        if self.revision_mode == RevisionMode::CommitTs {
+            return Ok(());
+        }
+        let current = Self::current_revision_in_tx(tx, self.revision_mode)?;
+        if revision <= current {
+            return Err(Error::CommitRejected {
+                commit_ts: revision,
+                current_revision: current,
+            });
+        }
+        tx.insert(TABLE_META, META_CURRENT_REVISION, &revision.to_be_bytes())
+    }
+
+    /// v2 语义：`commit_ts` 必须大于 current revision（D11.4；重放已由
+    /// changelog 守卫提前返回）。
+    fn accept_commit_ts(&self, tx: &mut dyn WriteTx, commit_ts: Revision) -> Result<()> {
+        let current = Self::current_revision_in_tx(tx, self.revision_mode)?;
+        if commit_ts <= current {
+            return Err(Error::CommitRejected {
+                commit_ts,
+                current_revision: current,
+            });
+        }
+        tx.insert(TABLE_META, META_CURRENT_REVISION, &commit_ts.to_be_bytes())
+    }
+
+    fn accept_revision(
+        &self,
+        tx: &mut dyn WriteTx,
+        revision: Revision,
+        policy: RevisionPolicy,
+    ) -> Result<()> {
+        match policy {
+            RevisionPolicy::LogIndex => self.accept_log_index_revision(tx, revision),
+            RevisionPolicy::CommitTs => self.accept_commit_ts(tx, revision),
+        }
+    }
+
+    /// 内部 log-index 记录（lease/auth/PD/TSO/compact 等）：v1 下同步推进
+    /// revision（保持 revision == applied index），v2 下不触碰 revision。
+    fn note_log_index_revision(&self, tx: &mut dyn WriteTx, revision: Revision) -> Result<()> {
+        if self.revision_mode == RevisionMode::LogIndex {
+            tx.insert(TABLE_META, META_CURRENT_REVISION, &revision.to_be_bytes())?;
+        }
+        Ok(())
     }
 
     /// 读取持久化的已 Apply LogId（`META_LAST_APPLIED`）
@@ -632,8 +750,10 @@ impl<B: StorageBackend> MvccStorage<B> {
 
     /// 单独持久化 applied LogId（仅用于 Membership/Blank 等不写 KV 事务的条目）
     pub fn set_last_applied(&self, applied: AppliedLogId) -> Result<()> {
-        self.backend
-            .write(|tx| tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes()))
+        self.backend.write(|tx| {
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            self.note_log_index_revision(tx, applied.index)
+        })
     }
 
     /// 检查某 revision 的 changelog 条目是否已存在（幂等守卫）
@@ -689,11 +809,56 @@ impl<B: StorageBackend> MvccStorage<B> {
         revision: Revision,
         applied: AppliedLogId,
     ) -> Result<ApplyOutcome> {
+        self.put_at_key(
+            key,
+            value,
+            lease_id,
+            revision,
+            applied,
+            RevisionPolicy::LogIndex,
+        )
+    }
+
+    /// Put 操作（v2 直写路径）：revision = 调用方提供的 `commit_ts`。
+    ///
+    /// 同一 `commit_ts` 重放返回 replayed；`commit_ts <= current_revision`
+    /// （且未命中已有写入）→ `CommitRejected`，不静默写（D11.4/D11.6）。
+    pub fn put_at_commit_ts(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        lease_id: Option<LeaseID>,
+        commit_ts: Revision,
+        applied: AppliedLogId,
+    ) -> Result<ApplyOutcome> {
+        if commit_ts == 0 {
+            return Err(Error::InvalidArgument("commit_ts must be > 0".into()));
+        }
+        self.put_at_key(
+            key,
+            value,
+            lease_id,
+            commit_ts,
+            applied,
+            RevisionPolicy::CommitTs,
+        )
+    }
+
+    fn put_at_key(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        lease_id: Option<LeaseID>,
+        revision: Revision,
+        applied: AppliedLogId,
+        policy: RevisionPolicy,
+    ) -> Result<ApplyOutcome> {
         if self.changelog_contains_revision(revision)? {
             return Ok(ApplyOutcome::replayed());
         }
         let lid = lease_id.unwrap_or(0);
         self.backend.write(|tx| {
+            self.accept_revision(tx, revision, policy)?;
             let internal_key = encode_kv_key(key);
             let meta_key = encode_kv_meta_key(key);
 
@@ -768,10 +933,35 @@ impl<B: StorageBackend> MvccStorage<B> {
         revision: Revision,
         applied: AppliedLogId,
     ) -> Result<ApplyOutcome> {
+        self.delete_at_key(key, revision, applied, RevisionPolicy::LogIndex)
+    }
+
+    /// Delete 操作（v2 直写路径）：revision = `commit_ts`；拒绝语义同
+    /// [`Self::put_at_commit_ts`]。
+    pub fn delete_at_commit_ts(
+        &self,
+        key: &[u8],
+        commit_ts: Revision,
+        applied: AppliedLogId,
+    ) -> Result<ApplyOutcome> {
+        if commit_ts == 0 {
+            return Err(Error::InvalidArgument("commit_ts must be > 0".into()));
+        }
+        self.delete_at_key(key, commit_ts, applied, RevisionPolicy::CommitTs)
+    }
+
+    fn delete_at_key(
+        &self,
+        key: &[u8],
+        revision: Revision,
+        applied: AppliedLogId,
+        policy: RevisionPolicy,
+    ) -> Result<ApplyOutcome> {
         if self.changelog_contains_revision(revision)? {
             return Ok(ApplyOutcome::replayed());
         }
         self.backend.write(|tx| {
+            self.accept_revision(tx, revision, policy)?;
             let meta_key = encode_kv_meta_key(key);
 
             // 读取已有元数据（检查 Key 是否存在且未被删除）
@@ -810,9 +1000,11 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// 仅推进 `META_LAST_APPLIED`（小写事务；无状态变更的 Normal 条目
     /// （对象存储 no-op/冲突分支等）用它保证 applied 水位 == revision，
     /// 避免重启后整段重放）。
-    pub fn persist_applied(&self, _revision: Revision, applied: AppliedLogId) -> Result<()> {
-        self.backend
-            .write(|tx| tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes()))
+    pub fn persist_applied(&self, revision: Revision, applied: AppliedLogId) -> Result<()> {
+        self.backend.write(|tx| {
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            self.note_log_index_revision(tx, revision)
+        })
     }
 
     /// Get 操作：读取单个 Key 的最新值（经过 Barrier 解密）
@@ -1059,6 +1251,43 @@ impl<B: StorageBackend> MvccStorage<B> {
         revision: Revision,
         applied: AppliedLogId,
     ) -> Result<DeleteRangeOutcome> {
+        self.delete_range_at_key(
+            start,
+            range_end,
+            revision,
+            applied,
+            RevisionPolicy::LogIndex,
+        )
+    }
+
+    /// 范围删除（v2 直写路径）：`[start, range_end)` 共享同一 `commit_ts`。
+    pub fn delete_range_at_commit_ts(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        commit_ts: Revision,
+        applied: AppliedLogId,
+    ) -> Result<DeleteRangeOutcome> {
+        if commit_ts == 0 {
+            return Err(Error::InvalidArgument("commit_ts must be > 0".into()));
+        }
+        self.delete_range_at_key(
+            start,
+            range_end,
+            commit_ts,
+            applied,
+            RevisionPolicy::CommitTs,
+        )
+    }
+
+    fn delete_range_at_key(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        revision: Revision,
+        applied: AppliedLogId,
+        policy: RevisionPolicy,
+    ) -> Result<DeleteRangeOutcome> {
         if self.changelog_contains_revision(revision)? {
             return Ok(DeleteRangeOutcome {
                 deleted_keys: Vec::new(),
@@ -1068,6 +1297,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         let internal_start = encode_kv_key(start);
         let internal_end = encode_kv_key(range_end);
         self.backend.write(|tx| {
+            self.accept_revision(tx, revision, policy)?;
             let all = tx.iter_range(TABLE_KV, &internal_start, &internal_end)?;
             let mut deleted_keys = Vec::new();
             for (ik, _v) in all {
@@ -1186,6 +1416,8 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
 
         self.backend.write(|tx| {
+            self.accept_revision(tx, revision, RevisionPolicy::LogIndex)?;
+
             // 1. 评估所有比较条件
             let succeeded = self.evaluate_compares_in_tx(tx, compares)?;
 
@@ -1514,6 +1746,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
 
         self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
             let mut changes: Vec<KeyValueChange> = Vec::new();
 
             match op {
@@ -1625,6 +1858,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
 
         self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
             let deleted = Self::delete_keys_by_lease_in_tx(tx, lease_id, revision)?;
             let changes: Vec<KeyValueChange> = deleted
                 .into_iter()
@@ -1677,6 +1911,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
 
         self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
             match op {
                 AuthOp::UserAdd { name, hash, roles } => {
                     let key = [AUTH_USER_PREFIX, name.as_bytes()].concat();
@@ -1971,6 +2206,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
 
         self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
             match op {
                 PdOp::Enqueue {
                     op,
@@ -2123,6 +2359,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
 
         self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
             let start_ts = tx
                 .get(TABLE_KV, TSO_HIGH_WATER)?
                 .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
@@ -2290,7 +2527,9 @@ impl<B: StorageBackend> MvccStorage<B> {
         self.backend.write(|tx| {
             tx.insert(TABLE_META, META_COMPACT_REVISION, &effective.to_be_bytes())?;
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
-            Ok(())
+            // v1：compact 也消耗一个 log index，revision 跟随 applied；
+            // v2：log-index 记录不进入 revision 空间（水位由 safe_ts 决定）。
+            self.note_log_index_revision(tx, applied.index)
         })?;
 
         tracing::info!(
@@ -2498,6 +2737,115 @@ mod tests {
         let backend = RedbBackend::open(dir.path(), &config).unwrap();
         let storage = MvccStorage::new(backend).unwrap();
         (dir, storage)
+    }
+
+    fn create_commit_ts_storage() -> (TempDir, MvccStorage<RedbBackend>) {
+        let dir = TempDir::new().unwrap();
+        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
+        let storage = MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap();
+        (dir, storage)
+    }
+
+    // ──── Revision 与 log index 解耦（#138）────
+
+    #[test]
+    fn test_current_revision_uses_meta_not_log_index() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v", None, 100, applied_for(7))
+            .unwrap();
+        assert_eq!(storage.current_revision(), 100);
+        assert_eq!(storage.get_applied_log_id().unwrap().unwrap().index, 7);
+    }
+
+    #[test]
+    fn test_put_at_rejects_revision_regression() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v", None, 100, applied_for(7))
+            .unwrap();
+        let err = storage
+            .put_at_commit_ts(b"k2", b"v", None, 99, applied_for(8))
+            .expect_err("commit_ts below current revision must be rejected");
+        match err {
+            Error::CommitRejected {
+                commit_ts,
+                current_revision,
+            } => assert_eq!((commit_ts, current_revision), (99, 100)),
+            other => panic!("expected CommitRejected, got {other:?}"),
+        }
+        assert_eq!(storage.get(b"k2").unwrap(), None, "拒绝不得落盘");
+        assert_eq!(storage.current_revision(), 100);
+    }
+
+    #[test]
+    fn test_commit_ts_not_clamped_by_applied_index() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v", None, 1_000_000, applied_for(3))
+            .unwrap();
+        assert_eq!(storage.current_revision(), 1_000_000);
+        assert_eq!(
+            storage.get_kv_metadata(b"k").unwrap().unwrap().mod_revision,
+            1_000_000
+        );
+        // 内部 log-index 记录不得把 revision 钳回 log index
+        storage
+            .put_at_revision(b"/_sys/x", b"v", None, 4, applied_for(4))
+            .unwrap();
+        assert_eq!(storage.current_revision(), 1_000_000);
+    }
+
+    #[test]
+    fn test_commit_ts_replay_is_idempotent() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let first = storage
+            .put_at_commit_ts(b"k", b"v1", None, 100, applied_for(7))
+            .unwrap();
+        let replay = storage
+            .put_at_commit_ts(b"k", b"v2", None, 100, applied_for(7))
+            .unwrap();
+        assert!(!first.replayed);
+        assert!(replay.replayed, "同一 commit_ts 必须判定为重放");
+        assert_eq!(storage.get(b"k").unwrap().as_deref(), Some(&b"v1"[..]));
+        assert_eq!(
+            storage.get_kv_metadata(b"k").unwrap().unwrap().version,
+            1,
+            "重放不得重复写元数据"
+        );
+        assert_eq!(storage.current_revision(), 100);
+    }
+
+    #[test]
+    fn test_commit_ts_survives_reopen() {
+        let (dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v", None, 100, applied_for(7))
+            .unwrap();
+        drop(storage);
+        let reopened = MvccStorage::new_with_revision_mode(
+            RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap(),
+            RevisionMode::CommitTs,
+        )
+        .unwrap();
+        assert_eq!(reopened.current_revision(), 100, "重启后不倒退");
+        let err = reopened
+            .put_at_commit_ts(b"k2", b"v", None, 99, applied_for(8))
+            .expect_err("重启后仍必须拒绝回退");
+        assert!(matches!(err, Error::CommitRejected { .. }));
+    }
+
+    #[test]
+    fn test_log_index_mode_revision_matches_applied_index() {
+        let (_dir, storage) = create_storage();
+        storage
+            .put_at_revision(b"k", b"v", None, 7, applied_for(7))
+            .unwrap();
+        assert_eq!(storage.current_revision(), 7);
+        let err = storage
+            .put_at_revision(b"k2", b"v", None, 6, applied_for(8))
+            .expect_err("v1 revision 回退必须显式拒绝");
+        assert!(matches!(err, Error::CommitRejected { .. }));
     }
 
     #[test]

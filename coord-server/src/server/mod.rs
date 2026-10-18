@@ -1490,6 +1490,15 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
         Error::RevisionCompacted { revision, oldest } => tonic::Status::out_of_range(format!(
             "revision {revision} compacted; oldest available: {oldest}"
         )),
+        Error::CommitRejected {
+            commit_ts,
+            current_revision,
+        } => coord_core::error_code::attach(
+            tonic::Status::failed_precondition(format!(
+                "commit_ts {commit_ts} rejected: current revision is {current_revision}"
+            )),
+            coord_core::error_code::CoordErrorCode::CommitRejected,
+        ),
         Error::LeaseNotFound { lease_id } => {
             tonic::Status::not_found(format!("lease {lease_id} not found or expired"))
         }
@@ -3422,6 +3431,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `COMMIT_REJECTED` 必须走结构化 trailer：调用方只按码分支，
+    /// 不能依赖文案（WHITEPAPER §6.1.1）。
+    #[test]
+    fn test_commit_rejected_maps_to_failed_precondition_with_code() {
+        let err = coord_core::error::Error::CommitRejected {
+            commit_ts: 7,
+            current_revision: 9,
+        };
+        let status = map_err(err);
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            coord_core::error_code::error_code_of(&status).as_deref(),
+            Some("COMMIT_REJECTED")
+        );
+    }
 
     // ──── lease 过期 revoke 不得静默丢失（重试语义） ────
 

@@ -28,6 +28,7 @@ use coord_server::raft::type_config::{Command, Response};
 use coord_server::raft::{
     CoordRegionRaftHandle, RaftConfig, RegionRaftHandle, RegionRuntimeSpec, WatchReceiver,
 };
+use coord_server::storage::mvcc::RevisionMode;
 use tokio::sync::watch;
 
 fn find_port() -> u16 {
@@ -103,6 +104,7 @@ async fn start_three_node_one_region_cluster() -> Vec<NodeHost> {
             data_dir: region_data_dir(&base, 1),
             raft_config: raft_test_config(),
             object_store: None,
+            revision_mode: RevisionMode::LogIndex,
         };
         // 仅 n1 bootstrap initialize（成员 {n1,n2}）；n2/n3 靠复制/加入
         manager

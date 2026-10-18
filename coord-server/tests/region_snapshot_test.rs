@@ -22,7 +22,7 @@ use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
 use coord_server::raft::type_config::Command;
 use coord_server::raft::{new_raft, RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
-use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
 use coord_server::storage::snapshot::SnapshotData;
 
@@ -73,6 +73,7 @@ async fn start_single_node_single_region() -> Host {
             ..Default::default()
         }),
         object_store: None,
+        revision_mode: RevisionMode::LogIndex,
     };
     manager
         .spawn_region(&factory, &rpc, spec, true)

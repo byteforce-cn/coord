@@ -25,7 +25,7 @@ use coord_server::raft::region::{RegionManager, RegionSeed};
 use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RaftNode, WatchReceiver};
-use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
 use coord_server::storage::snapshot::SnapshotTracker;
 
@@ -136,6 +136,7 @@ async fn start_single_node_two_region_cluster() -> RegionHost {
             data_dir: region_data_dir(&base, region_id),
             raft_config: raft_test_config(),
             object_store: None,
+            revision_mode: RevisionMode::LogIndex,
         };
         manager
             .spawn_region(&factory, &rpc, spec, true)

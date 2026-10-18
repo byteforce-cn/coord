@@ -9,6 +9,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use coord_core::error::Error;
 use coord_core::storage::StorageBackend;
 use futures::Stream;
 use futures::TryStreamExt;
@@ -716,6 +717,140 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::PutV2 {
+                key,
+                value,
+                lease_id,
+                commit_ts,
+            } => {
+                match sm.put_at_commit_ts(key, value, *lease_id, *commit_ts, applied) {
+                    Ok(outcome) => {
+                        let event = if outcome.replayed {
+                            None
+                        } else {
+                            Some(ChangeEvent {
+                                revision: *commit_ts,
+                                changes: vec![KeyValueChange {
+                                    key: key.clone(),
+                                    value: Some(value.clone()),
+                                    prev_value: None,
+                                }],
+                                event_type: EventType::Put,
+                            })
+                        };
+                        Ok((
+                            Response::Put {
+                                revision: *commit_ts,
+                            },
+                            event,
+                        ))
+                    }
+                    Err(Error::CommitRejected {
+                        commit_ts,
+                        current_revision,
+                    }) => {
+                        // 拒绝也要推进 applied，否则重启后同一命令被无限重放。
+                        sm.set_last_applied(applied).map_err(io_err)?;
+                        Ok((
+                            Response::CommitRejected {
+                                commit_ts,
+                                current_revision,
+                            },
+                            None,
+                        ))
+                    }
+                    Err(e) => Err(io_err(e)),
+                }
+            }
+            Command::DeleteV2 { key, commit_ts } => {
+                match sm.delete_at_commit_ts(key, *commit_ts, applied) {
+                    Ok(outcome) => {
+                        let event = if outcome.replayed {
+                            None
+                        } else {
+                            Some(ChangeEvent {
+                                revision: *commit_ts,
+                                changes: vec![KeyValueChange {
+                                    key: key.clone(),
+                                    value: None,
+                                    prev_value: None,
+                                }],
+                                event_type: EventType::Delete,
+                            })
+                        };
+                        Ok((
+                            Response::Delete {
+                                revision: *commit_ts,
+                            },
+                            event,
+                        ))
+                    }
+                    Err(Error::CommitRejected {
+                        commit_ts,
+                        current_revision,
+                    }) => {
+                        // 拒绝也要推进 applied，否则重启后同一命令被无限重放。
+                        sm.set_last_applied(applied).map_err(io_err)?;
+                        Ok((
+                            Response::CommitRejected {
+                                commit_ts,
+                                current_revision,
+                            },
+                            None,
+                        ))
+                    }
+                    Err(e) => Err(io_err(e)),
+                }
+            }
+            Command::DeleteRangeV2 {
+                key,
+                range_end,
+                commit_ts,
+            } => {
+                match sm.delete_range_at_commit_ts(key, range_end, *commit_ts, applied) {
+                    Ok(outcome) => {
+                        let event = if outcome.replayed {
+                            None
+                        } else {
+                            Some(ChangeEvent {
+                                revision: *commit_ts,
+                                changes: outcome
+                                    .deleted_keys
+                                    .iter()
+                                    .map(|k| KeyValueChange {
+                                        key: k.clone(),
+                                        value: None,
+                                        prev_value: None,
+                                    })
+                                    .collect(),
+                                event_type: EventType::Delete,
+                            })
+                        };
+                        Ok((
+                            Response::DeleteRange {
+                                revision: *commit_ts,
+                                deleted: outcome.deleted_keys.len() as u64,
+                            },
+                            event,
+                        ))
+                    }
+                    Err(Error::CommitRejected {
+                        commit_ts,
+                        current_revision,
+                    }) => {
+                        // 拒绝也要推进 applied，否则重启后同一命令被无限重放。
+                        sm.set_last_applied(applied).map_err(io_err)?;
+                        Ok((
+                            Response::CommitRejected {
+                                commit_ts,
+                                current_revision,
+                            },
+                            None,
+                        ))
+                    }
+                    Err(e) => Err(io_err(e)),
+                }
+            }
         }
     }
 }
@@ -1139,16 +1274,166 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::mvcc::RevisionMode;
     use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
 
     fn setup_store() -> (tempfile::TempDir, StateMachineStore) {
+        setup_store_with_mode(crate::storage::mvcc::RevisionMode::LogIndex)
+    }
+
+    fn setup_store_with_mode(
+        mode: crate::storage::mvcc::RevisionMode,
+    ) -> (tempfile::TempDir, StateMachineStore) {
         let tmp = tempfile::TempDir::new().unwrap();
         let backend = RedbBackend::open(tmp.path(), &coord_core::types::StorageConfig::default())
             .expect("open redb backend");
-        let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
+        let mvcc =
+            Arc::new(MvccStorage::new_with_revision_mode(backend, mode).expect("create mvcc"));
         let tracker = Arc::new(SnapshotTracker::default());
         let store = StateMachineStore::new(mvcc, tmp.path().join("snapshots"), tracker);
         (tmp, store)
+    }
+
+    fn applied_at(index: u64) -> AppliedLogId {
+        AppliedLogId {
+            term: 1,
+            node_id: 1,
+            index,
+        }
+    }
+
+    /// v2 写命令的 revision 来自 `commit_ts`，不是 apply 的 log index。
+    #[test]
+    fn test_apply_v2_put_uses_commit_ts_not_log_index() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        let (resp, event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::PutV2 {
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                    lease_id: None,
+                    commit_ts: 1_000,
+                },
+                5,
+                applied_at(5),
+            )
+            .expect("put v2 apply");
+        match resp {
+            Response::Put { revision } => assert_eq!(revision, 1_000),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(event.is_some(), "v2 写必须产生 Watch 事件");
+        assert_eq!(store.state_machine.current_revision(), 1_000);
+        assert_eq!(
+            store
+                .state_machine
+                .get_applied_log_id()
+                .unwrap()
+                .unwrap()
+                .index,
+            5
+        );
+    }
+
+    /// v2 范围删除共享同一 commit_ts，并写入对应 revision 的事件。
+    #[test]
+    fn test_apply_v2_delete_range_shares_commit_ts() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        for (i, key) in [b"a".as_slice(), b"b".as_slice()].into_iter().enumerate() {
+            store
+                .execute_command(
+                    store.state_machine.as_ref(),
+                    &Command::PutV2 {
+                        key: key.to_vec(),
+                        value: b"v".to_vec(),
+                        lease_id: None,
+                        commit_ts: 100 + i as u64,
+                    },
+                    5 + i as u64,
+                    applied_at(5 + i as u64),
+                )
+                .expect("seed put");
+        }
+
+        let (resp, event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::DeleteRangeV2 {
+                    key: b"a".to_vec(),
+                    range_end: b"z".to_vec(),
+                    commit_ts: 200,
+                },
+                7,
+                applied_at(7),
+            )
+            .expect("delete range v2");
+        match resp {
+            Response::DeleteRange { revision, deleted } => {
+                assert_eq!((revision, deleted), (200, 2));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(
+            event.expect("delete range event").revision,
+            200,
+            "事件 revision 必须是 commit_ts"
+        );
+        assert_eq!(store.state_machine.current_revision(), 200);
+        assert_eq!(store.state_machine.get(b"a").unwrap(), None);
+    }
+
+    /// D11.5：用户级拒绝不得让 apply 返回 Err；applied 仍须前进。
+    #[test]
+    fn test_apply_v2_regressing_commit_ts_is_rejected_without_apply_error() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::PutV2 {
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                    lease_id: None,
+                    commit_ts: 1_000,
+                },
+                5,
+                applied_at(5),
+            )
+            .expect("first put");
+
+        let (resp, event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::PutV2 {
+                    key: b"k2".to_vec(),
+                    value: b"v".to_vec(),
+                    lease_id: None,
+                    commit_ts: 999,
+                },
+                6,
+                applied_at(6),
+            )
+            .expect("rejection must not fail raft apply");
+        match resp {
+            Response::CommitRejected {
+                commit_ts,
+                current_revision,
+            } => assert_eq!((commit_ts, current_revision), (999, 1_000)),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(event.is_none(), "被拒绝的写不得产生 Watch 事件");
+        assert_eq!(store.state_machine.get(b"k2").unwrap(), None);
+        assert_eq!(store.state_machine.current_revision(), 1_000);
+        assert_eq!(
+            store
+                .state_machine
+                .get_applied_log_id()
+                .unwrap()
+                .unwrap()
+                .index,
+            6,
+            "被拒绝的命令仍须推进 applied"
+        );
     }
 
     /// TSO 命令经 apply 返回分配批次；TSO 是内部记录，不上 Watch。
