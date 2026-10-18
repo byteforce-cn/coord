@@ -23,6 +23,7 @@ use base64;
 use parking_lot::RwLock;
 use rcgen::string::Ia5String;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::pki_store::{CaRecord, CertRecord, CertStatus, MemoryPkiStore, PkiStore, PkiStoreError};
@@ -734,6 +735,22 @@ impl PkiService {
         Ok(ca.cert_pem.clone())
     }
 
+    /// CA 证书 DER 的 SHA-256 指纹（大写十六进制、冒号分隔）。
+    ///
+    /// 与 `openssl x509 -in ca.pem -noout -fingerprint -sha256` 的输出逐字可比，
+    /// 便于运维在启动日志与导出的根证书之间做一致性复核。
+    pub fn ca_fingerprint_sha256(&self) -> Result<String, PkiError> {
+        let ca = self.ca.read();
+        let ca = ca.as_ref().ok_or(PkiError::CaNotInitialized)?;
+        let der = pem_to_der(&ca.cert_pem)?;
+        let digest = Sha256::digest(&der);
+        Ok(digest
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(":"))
+    }
+
     /// 检查证书是否即将过期（剩余时间 < 指定小时数）
     pub fn is_expiring_soon(&self, cert: &CertInfo, within_hours: i64) -> bool {
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -1022,9 +1039,21 @@ impl crate::service::BaseService for PkiService {
     async fn start(&self) -> crate::service::ServiceResult<()> {
         match self.init_ca(Self::DEFAULT_CA_COMMON_NAME).await {
             Ok(()) => {
+                // 指纹与取根证书方式在**启动日志里各出现一次**（不进采样循环）：
+                // 开发者/运维据此把日志与导出的 ca.pem 对上。
+                match self.ca_fingerprint_sha256() {
+                    Ok(fingerprint) => tracing::info!(
+                        "PKI CA auto-initialized: CN={} sha256={fingerprint}",
+                        Self::DEFAULT_CA_COMMON_NAME
+                    ),
+                    Err(e) => tracing::warn!(
+                        "PKI CA auto-initialized: CN={} (fingerprint unavailable: {e})",
+                        Self::DEFAULT_CA_COMMON_NAME
+                    ),
+                }
                 tracing::info!(
-                    "PKI CA auto-initialized: CN={}",
-                    Self::DEFAULT_CA_COMMON_NAME
+                    "PKI root certificate: `coord pki ca --out ca.pem` (or GetCaCert); \
+                     PKI is for dev/test/internal verification only"
                 );
                 Ok(())
             }
@@ -1078,6 +1107,26 @@ mod tests {
 
         let cert = pki.issue_cert("verify.local", 0).await.expect("issue");
         assert!(pki.verify_cert(&cert.cert_pem).expect("verify"));
+    }
+
+    #[tokio::test]
+    async fn test_ca_fingerprint_format_and_stability() {
+        let pki = make_pki();
+        pki.init_ca("Fingerprint CA").await.expect("init");
+        let fp = pki.ca_fingerprint_sha256().expect("fingerprint");
+        let parts: Vec<&str> = fp.split(':').collect();
+        assert_eq!(parts.len(), 32, "SHA-256 = 32 bytes: {fp}");
+        assert!(
+            parts
+                .iter()
+                .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit())),
+            "uppercase hex pairs: {fp}"
+        );
+        assert_eq!(
+            fp,
+            pki.ca_fingerprint_sha256().expect("stable"),
+            "same CA material => same fingerprint"
+        );
     }
 
     #[tokio::test]

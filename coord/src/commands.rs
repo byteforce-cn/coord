@@ -17,6 +17,8 @@ use coord_proto::maintenance::{
     MemberAddRequest, MemberListRequest, MemberPromoteRequest, MemberRemoveRequest, SealRequest,
     SnapshotRequest, UnsealRequest,
 };
+use coord_proto::pki::v1::pki_client::PkiClient;
+use coord_proto::pki::v1::{PkiGetCaCertRequest, PkiIssueCertRequest, PkiListCertsRequest};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tonic::service::interceptor::InterceptedService;
@@ -1824,6 +1826,207 @@ async fn build_capability_client(
     Ok(CapabilityRegistryClient::new(conn.connect_authed().await?))
 }
 
+// ──── PKI 证书运维（dev / 内部验证）────
+
+/// 解析 `--ttl`：整数秒，或 `30s` / `10m` / `1h` / `2d`（大小写不敏感）。
+///
+/// 0 = 使用服务端默认（24h）。非法输入在连接前失败（退出码 2），
+/// 避免把明显的用法错误伪装成连接/RPC 失败。
+pub fn parse_ttl(raw: &str) -> Result<u64, String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("invalid --ttl: empty (use e.g. 1h, 30m, 90s)".into());
+    }
+    let (digits, multiplier) = match text.chars().last() {
+        Some('s') | Some('S') => (&text[..text.len() - 1], 1u64),
+        Some('m') | Some('M') => (&text[..text.len() - 1], 60),
+        Some('h') | Some('H') => (&text[..text.len() - 1], 3600),
+        Some('d') | Some('D') => (&text[..text.len() - 1], 86_400),
+        _ => (text, 1),
+    };
+    let value: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --ttl {raw:?}: expected integer with optional s/m/h/d"))?;
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("invalid --ttl {raw:?}: overflow"))
+}
+
+/// 文件名安全化：CN 可含任意字符，不得直接拼进路径（防 `../` 穿越）。
+pub fn sanitize_pki_file_stem(cn: &str) -> String {
+    let stem: String = cn
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if stem.is_empty() {
+        "cert".to_string()
+    } else {
+        stem
+    }
+}
+
+/// 私钥落盘：创建即 0600，并在覆盖已有文件后再次收紧权限（`mode` 只对新建生效）。
+fn write_private_key(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)?;
+    }
+    Ok(())
+}
+
+async fn build_pki_client(
+    conn: &CliConn,
+) -> Result<PkiClient<AuthedChannel>, Box<dyn std::error::Error>> {
+    Ok(PkiClient::new(conn.connect_authed().await?))
+}
+
+/// `coord pki ca`：导出 CA 根证书（PEM）。
+pub async fn cmd_pki_ca(
+    conn: impl Into<CliConn>,
+    out: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_pki_client(&conn).await?;
+    let pem = client
+        .get_ca_cert(PkiGetCaCertRequest {})
+        .await?
+        .into_inner()
+        .ca_cert_pem;
+    match out {
+        Some(path) => {
+            std::fs::write(&path, pem.as_bytes())?;
+            println!("{}", path.display());
+        }
+        None => print!("{pem}"),
+    }
+    Ok(())
+}
+
+/// `coord pki issue`：签发证书并写入 `<out-dir>/<CN>.pem` / `.key`（key 0600）。
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_pki_issue(
+    conn: impl Into<CliConn>,
+    common_name: &str,
+    dns_names: Vec<String>,
+    ip_addresses: Vec<String>,
+    ttl_seconds: u64,
+    out_dir: &Path,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_pki_client(&conn).await?;
+    let cert = client
+        .issue_cert(PkiIssueCertRequest {
+            common_name: common_name.to_string(),
+            ttl_seconds: ttl_seconds as i64,
+            dns_names: dns_names.clone(),
+            ip_addresses: ip_addresses.clone(),
+        })
+        .await?
+        .into_inner();
+
+    std::fs::create_dir_all(out_dir)?;
+    let stem = sanitize_pki_file_stem(common_name);
+    let cert_path = out_dir.join(format!("{stem}.pem"));
+    let key_path = out_dir.join(format!("{stem}.key"));
+    std::fs::write(&cert_path, cert.cert_pem.as_bytes())?;
+    write_private_key(&key_path, cert.key_pem.as_bytes())?;
+
+    if json {
+        let out = serde_json::json!({
+            "common_name": cert.common_name,
+            "serial": cert.serial,
+            "status": cert.status,
+            "not_before": cert.not_before,
+            "not_after": cert.not_after,
+            "cert_file": cert_path.display().to_string(),
+            "key_file": key_path.display().to_string(),
+            "requested_dns_names": dns_names,
+            "requested_ip_addresses": ip_addresses,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("cert: {}", cert_path.display());
+        println!("key:  {}", key_path.display());
+        println!("serial: {}", cert.serial);
+        println!("not_before: {}", cert.not_before);
+        println!("not_after:  {}", cert.not_after);
+        println!("status: {}", cert.status);
+    }
+    Ok(())
+}
+
+/// `coord pki list`：列出 CN 的证书摘要（ListCerts 不含私钥）。
+pub async fn cmd_pki_list(
+    conn: impl Into<CliConn>,
+    common_name: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_pki_client(&conn).await?;
+    let certs = client
+        .list_certs(PkiListCertsRequest {
+            common_name: common_name.to_string(),
+        })
+        .await?
+        .into_inner()
+        .certs;
+
+    if json {
+        let rows: Vec<serde_json::Value> = certs
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "common_name": c.common_name,
+                    "serial": c.serial,
+                    "status": c.status,
+                    "not_before": c.not_before,
+                    "not_after": c.not_after,
+                    "parent_serial": c.parent_serial,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    if certs.is_empty() {
+        println!("No certificates for CN {common_name} (or all expired).");
+        return Ok(());
+    }
+    println!(
+        "{:<20} {:<9} {:<12} {:<12} {:<}",
+        "SERIAL", "STATUS", "NOT_BEFORE", "NOT_AFTER", "PARENT"
+    );
+    for c in &certs {
+        println!(
+            "{:<20} {:<9} {:<12} {:<12} {:<}",
+            c.serial, c.status, c.not_before, c.not_after, c.parent_serial
+        );
+    }
+    println!("\nTotal: {} certificate(s)", certs.len());
+    Ok(())
+}
+
 // ──── 测试 ────
 
 #[cfg(test)]
@@ -2450,5 +2653,35 @@ mod tests {
         assert!(cmd_auth_grant(&addr_str, "no-such-user", "ghost-role")
             .await
             .is_err());
+    }
+    // ──── PKI CLI 辅助 ────
+
+    #[test]
+    fn test_parse_ttl_accepts_units_and_seconds() {
+        assert_eq!(parse_ttl("1h").unwrap(), 3600);
+        assert_eq!(parse_ttl("30m").unwrap(), 1800);
+        assert_eq!(parse_ttl("90s").unwrap(), 90);
+        assert_eq!(parse_ttl("2d").unwrap(), 172_800);
+        assert_eq!(parse_ttl("3600").unwrap(), 3600);
+        assert_eq!(parse_ttl("0").unwrap(), 0);
+        assert_eq!(parse_ttl(" 15M ").unwrap(), 900);
+    }
+
+    #[test]
+    fn test_parse_ttl_rejects_invalid() {
+        for raw in ["", "abc", "1x", "1.5h", "-1h", "999999999999999999999d"] {
+            assert!(
+                parse_ttl(raw).is_err(),
+                "{raw:?} must be rejected before connecting"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_pki_file_stem_blocks_path_separators() {
+        assert_eq!(sanitize_pki_file_stem("orders-api"), "orders-api");
+        let stem = sanitize_pki_file_stem("../../etc/passwd");
+        assert!(!stem.contains('/') && !stem.contains('\\'), "{stem}");
+        assert_eq!(sanitize_pki_file_stem(""), "cert");
     }
 }

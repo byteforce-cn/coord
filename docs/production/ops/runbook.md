@@ -257,20 +257,30 @@ HMAC 与 DEK 共用材料集合，但**不参与 `Rewrap`**；迁移 = 业务按
 
 ### 4.5 PKI 证书轮换与泄露应急（G-PKI-3）
 
-> 适用 `coord.pki.v1`（agent 内置 CA）。**没有** CRL/OCSP、也**没有** revoke
-> RPC——泄露收口 = CN 轮换 + 消费侧剔除（口径与优先级见 `security.md` §3）。
+> 适用 `coord.pki.v1`。CA 材料存 server KV（多 agent 共享同一根），agent 只是签发面。
+> **没有** CRL/OCSP、也**没有** revoke RPC——泄露收口 = CN 轮换 + 消费侧剔除
+> （口径与优先级见 `security.md` §3）。
 
 **常规轮换（到期前处理 `CoordPkiCertExpiringSoon`，窗口默认 6h）**：
 
 ```bash
-# 任何 gRPC 客户端均可，下例示意 RPC 面
-# 1) 看摘要（不含私钥）
-grpcurl -d '{"common_name":"orders-api"}' <agent>:<port> coord.pki.v1.PKI/ListCerts
+# 1) 看摘要（不含私钥）；coord pki 直连 agent，不依赖 grpcurl
+coord pki list --cn orders-api
+
 # 2) 同 CN 换新材料（旧序列作废）——或换新 CN 重新 IssueCert
-grpcurl -d '{"common_name":"orders-api","ttl_seconds":2592000}' <agent>:<port> coord.pki.v1.PKI/RotateCert
+# 鉴权开启时带 CCT（dev 默认关闭鉴权，可省 -H）；服务名必须是 coord.pki.v1.Pki
+grpcurl -plaintext -H "authorization: Bearer $COORD_TOKEN" \
+  -d '{"common_name":"orders-api","ttl_seconds":2592000}' \
+  <agent>:<port> coord.pki.v1.Pki/RotateCert
+
 # 3) 验证新链
-grpcurl -d '{"cert_pem":"<新证书 PEM>"}' <agent>:<port> coord.pki.v1.PKI/VerifyCert
+grpcurl -plaintext -H "authorization: Bearer $COORD_TOKEN" \
+  -d '{"cert_pem":"<新证书 PEM>"}' \
+  <agent>:<port> coord.pki.v1.Pki/VerifyCert
 ```
+
+TLS/mTLS 集群把 `-plaintext` 换成 `-cacert <ca.pem>`（必要时 `-cert/-key`）；服务名
+写错（如 `PKI`）会得到 `unknown service`，不要照抄旧示例。
 
 **预期**：`RotateCert` 后 `GetCertByCN` 返回新 serial / 新密钥材料，
 `VerifyCert` `valid=true`；`ListCerts` 可见 active（新）+ retired（旧）并存

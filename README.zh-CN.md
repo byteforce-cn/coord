@@ -172,7 +172,36 @@ try (CoordClient client = CoordClient.create(config)) {
 > 外加 CI 中针对真实 server + agent 的 `CoordClientIntegrationTest`（`mvn -Pit`）——所以
 > SDK 对你不可用就是我们想修的 bug，而不是需要你自己绕开的问题。
 
-运维子命令：`coord member | snapshot | security | auth | capability | idgen | reset`。
+运维子命令：`coord member | snapshot | security | auth | capability | pki | idgen | reset`。
+
+## 开发态 PKI
+
+`coord dev` 启动即自举 CA（CA 材料存 server KV，多 agent 共享同一根）。`coord pki` 直连
+本机 agent，**不需要 grpcurl**：
+
+```bash
+coord dev --fresh --data-dir /tmp/coord-dev            # 终端 1
+coord pki ca --out ca.pem                             # 终端 2
+coord pki issue --cn orders-api --dns orders-api,orders-api.svc --ip 127.0.0.1 --ttl 1h --out-dir ./
+coord pki list --cn orders-api
+```
+
+终端证书为 ECDSA P-256，带 KU/EKU 与 **SAN**；只给 `--cn` 时把 CN 派生为 DNS SAN
+（CN 不是合法 DNS 名会被拒绝，而不是签出无 SAN 证书）。验收需要**两条都过**：
+
+```bash
+openssl x509 -in orders-api.pem -noout -ext subjectAltName        # 必须非空
+openssl verify -CAfile ca.pem -verify_hostname orders-api orders-api.pem
+```
+
+只跑 `openssl verify` 不算数：OpenSSL 会回退到 CN。只认 SAN 的校验方（Go ≥1.15、
+rustls/webpki、浏览器、Envoy）必须有该扩展。完整步骤见
+[`docs/pki-quickstart.md`](docs/pki-quickstart.md)。
+
+边界：仅 dev / test / 内部验证——无吊销（CRL/OCSP）、非 HSM、不是生产信任根
+（`docs/production/ops/boundaries.md` B-PKI-1）。CA 与证书私钥在保留 KV 命名空间
+`/_pki/`（鉴权开启时仅 agent 自身身份或 root 可经 KV 读取）；未开静态加密时快照会明文
+包含这些私钥。
 
 ## 项目结构
 
