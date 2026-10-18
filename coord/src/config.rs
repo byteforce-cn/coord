@@ -47,6 +47,10 @@ pub struct Config {
     /// 对象存储配置（`[object_storage]` 段；默认关闭，与 `[multi_raft]` 正交）
     #[serde(default)]
     pub object_storage: ObjectStorageConfig,
+
+    /// KV-T 配置（`[kv_t]` 段；默认关闭 = v1 行为字节级不变，ADR-0015/ADR-0001）
+    #[serde(default)]
+    pub kv_t: KvTConfig,
 }
 
 impl Config {
@@ -569,6 +573,15 @@ impl Config {
             }
         }
 
+        // 12d. KV-T（[kv_t]）：默认关闭；开启时前置能力必须齐备，且与 v1
+        //      迁移开关互斥（v2 是 greenfield，ADR-0015 D13）。
+        errs.extend(self.kv_t.validate(
+            self.multi_raft.enabled,
+            self.multi_raft.pd.enabled,
+            self.multi_raft.legacy_migration,
+            self.multi_raft.allow_unmigrated,
+        ));
+
         // 13. R-RFT-19：raft 调优段合法性（选举窗口 min ≤ max；时间参数 > 0）
         for (label, ms) in [
             (
@@ -930,6 +943,173 @@ impl Default for SecurityConfig {
             allow_plaintext_remote: false,
             agent_bootstrap_tokens: Vec::new(),
         }
+    }
+}
+
+/// KV-T 配置（`[kv_t]` 段）。
+///
+/// 默认关闭（`enabled=false`）：v1 服务注册、磁盘布局与行为字节级不变
+/// （ADR-0001）。开启后 v2 服务才可用；具体能力按 gate 分批交付（G0–G6，
+/// ADR-0015 D10），未交付的能力一律 `FAILED_PRECONDITION`。
+///
+/// 语义与默认值单一归属：ADR-0015 D9/D12。本结构只做配置承载与边界校验，
+/// 不在这里解释语义。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KvTConfig {
+    /// 总开关（false = v2 一律 `FAILED_PRECONDITION`；v1 不变）
+    pub enabled: bool,
+
+    /// TSO 批大小（默认 1024；上限 65536。批只保证唯一/单调，允许空洞）
+    pub tso_batch_size: u32,
+
+    /// Commit Sequencer 单批校验/提交条数（默认 256）
+    pub commit_sequencer_batch: u32,
+
+    /// Commit Log shard 条数阈值（默认 1_000_000；先到先 seal）
+    pub commit_log_shard_records: u64,
+
+    /// Commit Log shard 时间阈值（秒；默认 3600）
+    pub commit_log_shard_secs: u64,
+
+    /// shard seal 超时（秒；默认 300，超时告警并不阻塞已 seal 数据）
+    pub shard_seal_timeout_secs: u64,
+
+    /// Watch 保留窗口（秒；默认 86400 = 24h，范围 1h–7d）
+    pub watch_retention: u64,
+
+    /// 单事务写集上限（字节；默认 4MiB）
+    pub max_txn_bytes: u64,
+
+    /// 单事务读集条目上限（默认 4096）
+    pub max_read_set: u32,
+
+    /// 单次 range 读最多扫描的 key 数（默认 10000）
+    pub max_range: u32,
+
+    /// `read_ts > safe_ts` 时服务端等待时长（毫秒；默认 2000）
+    pub read_ts_wait_ms: u64,
+
+    /// 事务会话 TTL（秒；默认 60）
+    pub txn_ttl_secs: u64,
+}
+
+impl Default for KvTConfig {
+    fn default() -> Self {
+        // 默认值逐字等于 ADR-0015 D9（改数值允许，改语义必须新增 ADR）。
+        Self {
+            enabled: false,
+            tso_batch_size: 1024,
+            commit_sequencer_batch: 256,
+            commit_log_shard_records: 1_000_000,
+            commit_log_shard_secs: 3_600,
+            shard_seal_timeout_secs: 300,
+            watch_retention: 86_400,
+            max_txn_bytes: 4 * 1024 * 1024,
+            max_read_set: 4_096,
+            max_range: 10_000,
+            read_ts_wait_ms: 2_000,
+            txn_ttl_secs: 60,
+        }
+    }
+}
+
+impl KvTConfig {
+    /// 校验 KV-T 配置；`enabled=false` 时只校验数值边界（避免关闭时因
+    /// 无关字段阻塞启动），开启时额外要求前置能力齐备。
+    ///
+    /// 返回全部错误（一次报清），调用方与 `Config::validate` 合并。
+    pub fn validate(
+        &self,
+        multi_raft_enabled: bool,
+        pd_enabled: bool,
+        legacy_migration: bool,
+        allow_unmigrated: bool,
+    ) -> Vec<String> {
+        let mut errs = Vec::new();
+
+        if !(1..=65_536).contains(&self.tso_batch_size) {
+            errs.push(format!(
+                "kv_t.tso_batch_size must be in 1..=65536 (got {})",
+                self.tso_batch_size
+            ));
+        }
+        if !(1..=4_096).contains(&self.commit_sequencer_batch) {
+            errs.push(format!(
+                "kv_t.commit_sequencer_batch must be in 1..=4096 (got {})",
+                self.commit_sequencer_batch
+            ));
+        }
+        if self.commit_log_shard_records == 0 {
+            errs.push("kv_t.commit_log_shard_records must be > 0".to_string());
+        }
+        if self.commit_log_shard_secs == 0 {
+            errs.push("kv_t.commit_log_shard_secs must be > 0".to_string());
+        }
+        if self.shard_seal_timeout_secs == 0 {
+            errs.push("kv_t.shard_seal_timeout_secs must be > 0".to_string());
+        }
+        // D9：Watch 保留窗口 1h–7d（默认 24h）。边界包含端点。
+        if !(3_600..=604_800).contains(&self.watch_retention) {
+            errs.push(format!(
+                "kv_t.watch_retention must be in 3600..=604800 seconds (1h–7d, got {})",
+                self.watch_retention
+            ));
+        }
+        if self.max_txn_bytes == 0 {
+            errs.push("kv_t.max_txn_bytes must be > 0".to_string());
+        }
+        if self.max_read_set == 0 {
+            errs.push("kv_t.max_read_set must be > 0".to_string());
+        }
+        if self.max_range == 0 {
+            errs.push("kv_t.max_range must be > 0".to_string());
+        }
+        if self.read_ts_wait_ms > 60_000 {
+            errs.push(format!(
+                "kv_t.read_ts_wait_ms must be <= 60000 (got {})",
+                self.read_ts_wait_ms
+            ));
+        }
+        if !(1..=3_600).contains(&self.txn_ttl_secs) {
+            errs.push(format!(
+                "kv_t.txn_ttl_secs must be in 1..=3600 (got {})",
+                self.txn_ttl_secs
+            ));
+        }
+
+        if self.enabled {
+            if !multi_raft_enabled {
+                errs.push(
+                    "kv_t.enabled = true requires multi_raft.enabled = true \
+                     (KV-T runs on per-Region raft groups)"
+                        .to_string(),
+                );
+            }
+            if !pd_enabled {
+                errs.push(
+                    "kv_t.enabled = true requires multi_raft.pd.enabled = true \
+                     (Split/Merge and routing epochs need PD)"
+                        .to_string(),
+                );
+            }
+            if legacy_migration {
+                errs.push(
+                    "kv_t.enabled = true forbids multi_raft.legacy_migration = true: \
+                     v2 clusters are greenfield and never migrate v1 data (ADR-0015 D13)"
+                        .to_string(),
+                );
+            }
+            if allow_unmigrated {
+                errs.push(
+                    "kv_t.enabled = true forbids multi_raft.allow_unmigrated = true \
+                     (rescue switch is for v1 clusters only)"
+                        .to_string(),
+                );
+            }
+        }
+
+        errs
     }
 }
 
@@ -1937,6 +2117,133 @@ scheduler_paused = true
             errs.iter().any(|e| e.contains("operator_running_timeout")),
             "{errs:?}"
         );
+    }
+
+    // ──── KV-T（[kv_t]；ADR-0015 D9/D13）────
+
+    #[test]
+    fn test_kv_t_defaults_match_adr_d9() {
+        let kv = Config::default().kv_t;
+        assert!(!kv.enabled, "默认必须关闭（ADR-0001）");
+        assert_eq!(kv.tso_batch_size, 1024);
+        assert_eq!(kv.commit_sequencer_batch, 256);
+        assert_eq!(kv.commit_log_shard_records, 1_000_000);
+        assert_eq!(kv.commit_log_shard_secs, 3_600);
+        assert_eq!(kv.shard_seal_timeout_secs, 300);
+        assert_eq!(kv.watch_retention, 86_400);
+        assert_eq!(kv.max_txn_bytes, 4 * 1024 * 1024);
+        assert_eq!(kv.max_read_set, 4_096);
+        assert_eq!(kv.max_range, 10_000);
+        assert_eq!(kv.read_ts_wait_ms, 2_000);
+        assert_eq!(kv.txn_ttl_secs, 60);
+        // 默认关闭时默认配置仍然整体合法（v1 启动路径不变）。
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_kv_t_watch_retention_bounds_are_inclusive() {
+        for (value, ok) in [
+            (3_600u64, true),
+            (604_800, true),
+            (3_599, false),
+            (604_801, false),
+        ] {
+            let mut config = Config::default();
+            config.kv_t.watch_retention = value;
+            assert_eq!(
+                config.validate().is_ok(),
+                ok,
+                "watch_retention={value} 应为 {}",
+                if ok { "合法" } else { "非法" }
+            );
+        }
+    }
+
+    #[test]
+    fn test_kv_t_enabled_requires_multi_raft_and_pd() {
+        let mut config = Config::default();
+        config.kv_t.enabled = true;
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("multi_raft.enabled")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("multi_raft.pd.enabled")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_kv_t_enabled_rejects_v1_migration_switches() {
+        for (label, apply) in [("legacy_migration", 0u8), ("allow_unmigrated", 1u8)] {
+            let mut config = multi_raft_member_config(1);
+            config.multi_raft.pd.enabled = true;
+            config.kv_t.enabled = true;
+            match apply {
+                0 => config.multi_raft.legacy_migration = true,
+                _ => config.multi_raft.allow_unmigrated = true,
+            }
+            let errs = config.validate().unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.contains(label)),
+                "kv_t.enabled 与 {label} 必须互斥：{errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kv_t_enabled_with_prerequisites_is_valid() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.pd.enabled = true;
+        config.kv_t.enabled = true;
+        assert!(config.validate().is_ok(), "{:?}", config.validate().err());
+    }
+
+    #[test]
+    fn test_kv_t_rejects_out_of_range_values() {
+        let mut config = Config::default();
+        config.kv_t.tso_batch_size = 0;
+        config.kv_t.commit_sequencer_batch = 0;
+        config.kv_t.commit_log_shard_records = 0;
+        config.kv_t.commit_log_shard_secs = 0;
+        config.kv_t.shard_seal_timeout_secs = 0;
+        config.kv_t.max_txn_bytes = 0;
+        config.kv_t.max_read_set = 0;
+        config.kv_t.max_range = 0;
+        config.kv_t.txn_ttl_secs = 0;
+        config.kv_t.read_ts_wait_ms = 60_001;
+        let errs = config.validate().unwrap_err();
+        for key in [
+            "kv_t.tso_batch_size",
+            "kv_t.commit_sequencer_batch",
+            "kv_t.commit_log_shard_records",
+            "kv_t.commit_log_shard_secs",
+            "kv_t.shard_seal_timeout_secs",
+            "kv_t.max_txn_bytes",
+            "kv_t.max_read_set",
+            "kv_t.max_range",
+            "kv_t.txn_ttl_secs",
+            "kv_t.read_ts_wait_ms",
+        ] {
+            assert!(errs.iter().any(|e| e.contains(key)), "缺少 {key}：{errs:?}");
+        }
+    }
+
+    #[test]
+    fn test_kv_t_section_parses_from_toml() {
+        let toml_str = r#"
+[kv_t]
+enabled = false
+watch_retention = 7200
+max_txn_bytes = 1048576
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.kv_t.enabled);
+        assert_eq!(config.kv_t.watch_retention, 7_200);
+        assert_eq!(config.kv_t.max_txn_bytes, 1_048_576);
+        // 未写出的字段取 D9 默认值。
+        assert_eq!(config.kv_t.tso_batch_size, 1024);
     }
 
     #[test]

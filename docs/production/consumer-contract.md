@@ -1,6 +1,6 @@
 # 消费方契约页（Consumer Contract）
 
-> Owner: maintainers ｜ Last verified: 2026-10-17
+> Owner: maintainers ｜ Last verified: 2026-10-18
 
 面向**接入方**的聚合页：按服务给出「一致性 / 路由 / 失败语义 + 推荐消费范式」，
 并把每 RPC 的能力名与已接受的边界汇总为可检索的表。
@@ -82,6 +82,39 @@
   重定向）；读路径收敛口径见 `WHITEPAPER.md`。
 - Watch 断线重连的 resync 纪律见 §0.3（WHITEPAPER「watch resync rules」）。
 - Region 模式下的 watch 前缀限制与跨 region 拒绝见 `boundaries.md` B-RG-2。
+- **v1 数据面在 v2 集群不服务**（ADR-0015 D13）：v1 包冻结，不做 facade/迁移；
+  v2 见 §1.1。
+
+### 1.1 KV-T v2（`coord.<domain>.v2`，默认关闭）
+
+默认 `[kv_t].enabled=false`：v2 服务注册（reflection 可见）但每个 RPC 返回
+`FAILED_PRECONDITION`；开启后按 gate 分批可用（G0–G6，ADR-0015 D10），未交付
+能力同样 `FAILED_PRECONDITION`。语义单一归属：ADR-0015 D2–D13 + v2 proto 头注。
+
+| RPC（组） | 能力 |
+|:--|:--|
+| `coord.tso.v2.TSO/Allocate`、`GetTs` | `data:tso:allocate` |
+| `coord.kv.v2.KV/Range` | `data:kv:read` |
+| `coord.kv.v2.KV/Put` / `Delete` | `data:kv:write` / `data:kv:delete` |
+| `coord.txn.v2.Txn/Begin` / `Read` / `Commit` / `Abort` | `data:txn:execute` |
+| `coord.lease.v2.Lease/LeaseGrant` / `LeaseRevoke` / `LeaseKeepAlive` / `LeaseTimeToLive` | `data:lease:grant` / `:revoke` / `:keepalive` / `data:lease:read` |
+| `coord.watch.v2.Watch/Watch` | `data:watch:subscribe` |
+| `coord.storage.v2.Storage/Put` / `Get` / `Stat` / `Delete` | `data:storage:write` / `data:storage:read` |
+
+- **一致性**：serializable（非 strict）；`Range.read_ts=0` 取 `safe_ts`，
+  `read_ts > safe_ts` 等待至多 `read_ts_wait_ms` 后 `SAFE_TS_LAG`（可重试）。
+- **事务**：`Begin` 建服务端读集会话；冲突 `ABORTED` + `TXN_CONFLICT`（换
+  `start_ts` 重跑）；会话丢失 `TXN_NOT_FOUND`（重跑）；写集 4MiB / 读集 4096 /
+  单 range 10000 key 上限（超限 `INVALID_ARGUMENT`）。
+- **Watch**：按 `commit_ts` 全局有序、同一事务原子批；断线用
+  `WatchCursor(shard_id, commit_ts)` 续订；窗口不足 `OUT_OF_RANGE` +
+  `HISTORY_UNAVAILABLE`（须全量重同步）。
+- **路由**：可带 metadata `coord-routing-epoch`；epoch 过期返回 `ABORTED` +
+  `EPOCH_STALE`，刷新路由后重试。
+- **对象存储**：manifest 用 `commit_ts`；`/obj/` 固定 Region 区间，不参与任意
+  KV split；chunk 不随 KV split 迁移（`boundaries.md` B-KVT-3）。
+- **不承诺**：v1 数据迁移 / v1 facade；MQ v1 在 v2 集群不可用；MQ v2 未 GA；
+  严格外部实时序（`boundaries.md` B-KVT-1..8）。
 
 ## 2. Registry / Config（场景 ①）
 

@@ -150,6 +150,28 @@ enabled = false
 #                                  #  <data_dir>/objects/keys/），到期轮换只影响
 #                                  # 新写入（旧 DEK 保留解密历史，对齐 /kv/）
 
+# KV-T（[kv_t] 段；默认关闭 = v1 行为字节级不变，ADR-0015 / ADR-0001）
+#
+# 开启后 v2 数据面（coord.{tso,kv,txn,watch,lease,storage}.v2）才可用；具体
+# 能力按 gate 分批交付（G0–G6），未交付的能力一律 FAILED_PRECONDITION。
+# 前置：multi_raft.enabled = true 且 multi_raft.pd.enabled = true；
+# 与 multi_raft.legacy_migration / allow_unmigrated 互斥（v2 是 greenfield，
+# 不做 v1→v2 迁移，ADR-0015 D13）。
+# 默认值逐字等于 ADR-0015 D9；改数值可以，改语义必须新增 ADR。
+[kv_t]
+enabled = false
+# tso_batch_size = 1024              # TSO 批大小（1..=65536；允许空洞，绝不复用）
+# commit_sequencer_batch = 256       # Commit Sequencer 单批决策条数
+# commit_log_shard_records = 1000000 # Commit Log shard 条数阈值（先到先 seal）
+# commit_log_shard_secs = 3600       # Commit Log shard 时间阈值（秒）
+# shard_seal_timeout_secs = 300      # shard seal 超时（秒）
+# watch_retention = 86400            # Watch 保留窗口（秒；1h–7d）
+# max_txn_bytes = 4194304            # 单事务写集上限（4MiB）
+# max_read_set = 4096                # 单事务读集条目上限
+# max_range = 10000                  # 单次 range 读最多扫描 key 数
+# read_ts_wait_ms = 2000             # read_ts 等待 safe_ts 的上限（超时 SAFE_TS_LAG）
+# txn_ttl_secs = 60                  # 事务会话 TTL（秒）
+
 [security]
 # 生产：配置证书 + CA → raft/gRPC 强制 mTLS（缺 CA 拒绝启动，fail-closed）
 # tls_cert = "/etc/coord/server.crt"

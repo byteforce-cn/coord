@@ -2815,6 +2815,41 @@ async fn run_server(
             Vec::new()
         };
 
+    // 6.6 KV-T 门禁（[kv_t]；ADR-0015 G0）。
+    //
+    // 默认关闭：不创建后台任务、不改变 v1 服务与磁盘布局（ADR-0001）。开启时
+    // 前置（multi_raft + PD、与迁移开关互斥）已由配置校验 fail-closed 拒绝非法组合；
+    // 这里只装配门禁状态：G0 尚未交付任何 v2 能力，因此 v2 RPC 一律
+    // FAILED_PRECONDITION，直到对应 gate 把能力加入 implemented 集合并实现 handler。
+    node.set_kvt_state(coord_server::kvt::KvTState::new(
+        cfg.kv_t.enabled,
+        coord_server::kvt::KvTRuntimeConfig {
+            tso_batch_size: cfg.kv_t.tso_batch_size,
+            commit_sequencer_batch: cfg.kv_t.commit_sequencer_batch,
+            commit_log_shard_records: cfg.kv_t.commit_log_shard_records,
+            commit_log_shard_secs: cfg.kv_t.commit_log_shard_secs,
+            shard_seal_timeout_secs: cfg.kv_t.shard_seal_timeout_secs,
+            watch_retention: cfg.kv_t.watch_retention,
+            max_txn_bytes: cfg.kv_t.max_txn_bytes,
+            max_read_set: cfg.kv_t.max_read_set,
+            max_range: cfg.kv_t.max_range,
+            read_ts_wait_ms: cfg.kv_t.read_ts_wait_ms,
+            txn_ttl_secs: cfg.kv_t.txn_ttl_secs,
+        },
+    ));
+    metrics.set_kv_t_enabled(cfg.kv_t.enabled);
+    if cfg.kv_t.enabled {
+        tracing::warn!(
+            "KV-T enabled ([kv_t].enabled=true): v2 services are registered but no v2 \
+             capability is delivered yet (G0); every v2 RPC returns FAILED_PRECONDITION"
+        );
+    } else {
+        tracing::info!(
+            "KV-T disabled ([kv_t].enabled=false): v1 behavior unchanged; v2 RPCs return \
+             FAILED_PRECONDITION"
+        );
+    }
+
     let node = Arc::new(node);
 
     // 启动 Lease 过期轮询后台任务（每 200ms 清理过期 Lease 绑定的 KV key；仅 leader 执行）
@@ -2914,6 +2949,24 @@ async fn run_server(
         WatchServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
     let maintenance_svc =
         MaintenanceServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
+    // KV-T v2 服务壳（ADR-0015 G0）：**始终注册**，关闭时每个 RPC 返回
+    // FAILED_PRECONDITION（reflection 仍可见，客户端能区分"没开"与"网络故障"）。
+    // 解码上限沿用同一 4MiB，避免 v2 与 v1/鉴权层口径漂移。
+    let tso_v2_svc = coord_proto::tso::v2::tso_server::TsoServer::from_arc(Arc::clone(&node))
+        .max_decoding_message_size(MAX_DECODING_MSG);
+    let kv_v2_svc = coord_proto::kv::v2::kv_server::KvServer::from_arc(Arc::clone(&node))
+        .max_decoding_message_size(MAX_DECODING_MSG);
+    let txn_v2_svc = coord_proto::txn::v2::txn_server::TxnServer::from_arc(Arc::clone(&node))
+        .max_decoding_message_size(MAX_DECODING_MSG);
+    let lease_v2_svc =
+        coord_proto::lease::v2::lease_server::LeaseServer::from_arc(Arc::clone(&node))
+            .max_decoding_message_size(MAX_DECODING_MSG);
+    let watch_v2_svc =
+        coord_proto::watch::v2::watch_server::WatchServer::from_arc(Arc::clone(&node))
+            .max_decoding_message_size(MAX_DECODING_MSG);
+    let storage_v2_svc =
+        coord_proto::storage::v2::storage_server::StorageServer::from_arc(Arc::clone(&node))
+            .max_decoding_message_size(MAX_DECODING_MSG);
     // 对象存储（[object_storage].enabled=true 才注册；否则 reflection 不可见）
     //
     // 解码上限须容纳单 chunk 消息：4MiB chunk 的 protobuf 编码消息 = 字段头
@@ -3619,6 +3672,13 @@ async fn run_server(
                 .add_service(watch_svc.clone())
                 .add_service(maintenance_svc.clone())
                 .add_optional_service(storage_svc.clone())
+                // KV-T v2（ADR-0015 G0）：始终注册，默认关闭时全部 FAILED_PRECONDITION。
+                .add_service(tso_v2_svc.clone())
+                .add_service(kv_v2_svc.clone())
+                .add_service(txn_v2_svc.clone())
+                .add_service(lease_v2_svc.clone())
+                .add_service(watch_v2_svc.clone())
+                .add_service(storage_v2_svc.clone())
                 .add_service(auth_svc.clone())
                 .add_service(capability_svc.clone())
                 .serve_with_incoming_shutdown(stream, serve_future);
@@ -3669,6 +3729,13 @@ async fn run_server(
             .add_service(watch_svc)
             .add_service(maintenance_svc)
             .add_optional_service(storage_svc)
+            // KV-T v2（ADR-0015 G0）：始终注册，默认关闭时全部 FAILED_PRECONDITION。
+            .add_service(tso_v2_svc)
+            .add_service(kv_v2_svc)
+            .add_service(txn_v2_svc)
+            .add_service(lease_v2_svc)
+            .add_service(watch_v2_svc)
+            .add_service(storage_v2_svc)
             .add_service(auth_svc)
             .add_service(capability_svc)
             .serve_with_incoming_shutdown(

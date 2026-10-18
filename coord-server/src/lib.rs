@@ -20,6 +20,7 @@ pub mod audit;
 pub mod auth;
 pub mod bff;
 pub mod health;
+pub mod kvt;
 pub mod lease;
 pub mod metrics;
 pub mod migration;

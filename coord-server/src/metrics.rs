@@ -67,6 +67,11 @@ struct MetricsInner {
     // ── Seal 指标 ──
     pub seal_status: AtomicI64, // 0=Unsealed, 1=SealInProgress, 2=Sealed
 
+    // ── KV-T（ADR-0015）──
+    /// KV-T 开关/门禁状态：0 = `[kv_t].enabled=false`，1 = 已开启（能力仍可能
+    /// 按 gate 未交付）。用于区分"配置没开"与"开了但请求被门禁拒绝"。
+    pub kv_t_enabled: AtomicI64,
+
     // ── Multi-Raft 指标（v6.0） ──
     /// Region 总数（全局）
     pub regions_total: AtomicU64,
@@ -206,6 +211,7 @@ impl Default for MetricsInner {
             lease_active_total: AtomicI64::new(0),
             lease_expired_total: AtomicU64::new(0),
             seal_status: AtomicI64::new(0),
+            kv_t_enabled: AtomicI64::new(0),
             regions_total: AtomicU64::new(0),
             nodes_online: AtomicU64::new(0),
             region_split_total: AtomicU64::new(0),
@@ -541,6 +547,13 @@ impl Metrics {
             .store(terminal, Ordering::Relaxed);
     }
 
+    /// 记录 KV-T 开关状态（启动时由 `[kv_t].enabled` 设置）。
+    pub fn set_kv_t_enabled(&self, enabled: bool) {
+        self.inner
+            .kv_t_enabled
+            .store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+    }
+
     /// 设置本节点 Leader 数量
     pub fn set_local_leader_count(&self, count: u64) {
         self.inner
@@ -639,6 +652,13 @@ impl Metrics {
         out.push_str("# HELP coord_uptime_seconds Server uptime in seconds\n");
         out.push_str("# TYPE coord_uptime_seconds gauge\n");
         out.push_str(&format!("coord_uptime_seconds {:.3}\n", uptime));
+
+        out.push_str("\n# HELP coord_kv_t_enabled KV-T master switch ([kv_t].enabled)\n");
+        out.push_str("# TYPE coord_kv_t_enabled gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_enabled {}\n",
+            inner.kv_t_enabled.load(Ordering::Relaxed)
+        ));
 
         out.push_str("\n# HELP raft_leader_id Current Raft leader ID (0 = no leader)\n");
         out.push_str("# TYPE raft_leader_id gauge\n");

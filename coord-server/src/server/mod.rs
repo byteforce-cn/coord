@@ -263,6 +263,8 @@ pub struct CoordNode {
     /// Multi-Raft 模式下对象按 key 路由进数据 Region，各自 RegionRuntime 持
     /// 有自己的 ChunkStore；本字段仅 legacy/region 0 单 Raft 路径使用。
     pub chunk_store: Option<Arc<crate::storage::object_store::ChunkStore>>,
+    /// KV-T 门禁状态（默认 disabled；`[kv_t].enabled=true` 时由 main 注入）。
+    kvt: crate::kvt::KvTState,
 }
 
 /// KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
@@ -322,7 +324,21 @@ impl CoordNode {
             root_key_provider: None,
             object_limits: None,
             chunk_store: None,
+            kvt: crate::kvt::KvTState::disabled(),
         }
+    }
+
+    /// 注入 KV-T 运行时状态（`[kv_t]`）。
+    ///
+    /// 默认是 disabled：不注入时 v2 服务仍然注册，但每个 RPC 返回
+    /// `FAILED_PRECONDITION`（ADR-0015 G0）。必须在 `Arc::new(node)` 之前调用。
+    pub fn set_kvt_state(&mut self, state: crate::kvt::KvTState) {
+        self.kvt = state;
+    }
+
+    /// 当前 KV-T 门禁状态（v2 服务壳使用）。
+    pub fn kvt(&self) -> &crate::kvt::KvTState {
+        &self.kvt
     }
 
     /// 注入运行时资源限制（由配置层在启动时调用；默认值可直接使用）。
