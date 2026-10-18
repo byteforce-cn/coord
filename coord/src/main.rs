@@ -2842,6 +2842,20 @@ async fn run_server(
         .with_implemented([coord_server::kvt::KvTCapability::Tso]),
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
+    // 本地 TSO 批次缓存：只有开启且 region 0 raft 已装配才构造（
+    // 关闭时不起后台任务、不改启动路径，ADR-0001）。
+    if cfg.kv_t.enabled {
+        if let Some(raft) = node.raft.as_ref() {
+            node.set_tso_client(coord_server::raft::tso::TsoClient::new(
+                Arc::new(coord_server::raft::tso::TsoAllocator::new(
+                    raft.as_ref().clone(),
+                    node.node_id,
+                )),
+                cfg.kv_t.tso_batch_size,
+                Some(Arc::clone(&metrics)),
+            ));
+        }
+    }
     if cfg.kv_t.enabled {
         tracing::warn!(
             "KV-T enabled ([kv_t].enabled=true): TSO allocation (coord.tso.v2) is \

@@ -37,3 +37,4 @@ tempfile = { workspace = true }
 rcgen = { version = "0.14", features = ["x509-parser"] }
 # Spike 4 语料回归测试直接解析 YAML Value 以复刻部署分发路由（同 spike-conformance harness）
 serde_yaml = "0.9"
+async-trait = { workspace = true }

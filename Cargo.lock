@@ -574,6 +574,7 @@ dependencies = [
 name = "coord"
 version = "0.3.5"
 dependencies = [
+ "async-trait",
  "axum",
  "clap",
  "coord-agent",

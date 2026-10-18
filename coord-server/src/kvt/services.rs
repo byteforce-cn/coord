@@ -91,16 +91,23 @@ impl tso_v2::tso_server::Tso for CoordNode {
         }))
     }
 
-    /// `GetTs` 是 `Allocate(1)` 的便捷面；#137 换成本地批次缓存后不再每次过 raft。
+    /// `GetTs` 从本地批次缓存发放（一次 raft 申请一批）；follower 拒绝。
     async fn get_ts(
         &self,
         _request: Request<tso_v2::GetTsRequest>,
     ) -> Result<Response<tso_v2::GetTsResponse>, Status> {
         self.kvt().gate(KvTCapability::Tso)?;
-        let batch = allocate_tso(self, 1).await?;
-        Ok(Response::new(tso_v2::GetTsResponse {
-            ts: ts_to_i64(batch.start_ts)?,
-        }))
+        let client = self.tso_client().ok_or_else(|| {
+            attach(
+                Status::failed_precondition(
+                    "kv_t requires a region 0 raft to allocate TSO \
+                     (region 0 raft / tso client assembly missing)",
+                ),
+                CoordErrorCode::FailedPrecondition,
+            )
+        })?;
+        let ts = client.get_ts().await.map_err(tso_status)?;
+        Ok(Response::new(tso_v2::GetTsResponse { ts: ts_to_i64(ts)? }))
     }
 }
 

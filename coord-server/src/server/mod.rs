@@ -39,6 +39,7 @@ use crate::auth::service::AuthOpProposer;
 use crate::lease::LeaseManager;
 use crate::raft::log_store::LogStore;
 use crate::raft::region::{RegionHandle, RegionManager};
+use crate::raft::tso::TsoClient;
 use crate::raft::type_config::{AuthOp, Command, LeaseOp, Response};
 use crate::raft::{CoordRaft, ReadPolicy, WatchReceiver};
 use crate::security::barrier::Barrier;
@@ -265,6 +266,10 @@ pub struct CoordNode {
     pub chunk_store: Option<Arc<crate::storage::object_store::ChunkStore>>,
     /// KV-T 门禁状态（默认 disabled；`[kv_t].enabled=true` 时由 main 注入）。
     kvt: crate::kvt::KvTState,
+    /// KV-T 本地 TSO 批次缓存（仅 enabled 且 region 0 raft 已装配时注入）。
+    ///
+    /// 保持 `Option` 而非延迟构造：关闭时不得有任何 v2 装配痕迹（ADR-0001）。
+    tso_client: Option<Arc<TsoClient>>,
 }
 
 /// KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
@@ -325,6 +330,7 @@ impl CoordNode {
             object_limits: None,
             chunk_store: None,
             kvt: crate::kvt::KvTState::disabled(),
+            tso_client: None,
         }
     }
 
@@ -339,6 +345,17 @@ impl CoordNode {
     /// 当前 KV-T 门禁状态（v2 服务壳使用）。
     pub fn kvt(&self) -> &crate::kvt::KvTState {
         &self.kvt
+    }
+
+    /// 注入本地 TSO 批次缓存（`[kv_t].enabled=true` 且 region 0 raft 已装配）。
+    /// 必须在 `Arc::new(node)` 之前调用。
+    pub fn set_tso_client(&mut self, client: Arc<TsoClient>) {
+        self.tso_client = Some(client);
+    }
+
+    /// 本地 TSO 批次缓存（未装配时为 `None`，`GetTs` 据此 fail-closed）。
+    pub fn tso_client(&self) -> Option<&Arc<TsoClient>> {
+        self.tso_client.as_ref()
     }
 
     /// 注入运行时资源限制（由配置层在启动时调用；默认值可直接使用）。
