@@ -289,11 +289,33 @@ MAJOR：破坏性变更（非必要不使用；须提前 ≥ 3 个月发布废�
 > **映射以代码为准**：NotLeader 映射为 `UNAVAILABLE`（`server/mod.rs:608`）。
 > 任何文档与本表不一致时，以代码与本表为准。
 
+### 6.1.1 KV-T v2（ADR-0015）新增结构化码
+
+v2 数据面（`coord.kv.v2` / `coord.txn.v2` / `coord.watch.v2` / `coord.lease.v2` /
+`coord.storage.v2`）复用上表的传输层状态码，并新增以下 `x-coord-error-code` 值。
+两侧枚举逐字一致（`coord-core/src/error_code.rs` ↔ Java `ErrorCode`），
+**调用方只允许按码分支，禁止解析消息文本**。
+
+| 码 | gRPC Status | 语义 | 客户端动作 |
+|:---|:---|:---|:---|
+| `TXN_CONFLICT` | `ABORTED` | OCC 读集/谓词在 `(start_ts, commit_ts]` 内被写过；未写 CommitDecision | 换新 `start_ts` 重跑整个事务 |
+| `TXN_NOT_FOUND` | `ABORTED` | 事务会话不存在/已过期（协调节点重启或 TTL 到期） | 重跑整个事务 |
+| `TXN_TOO_LARGE` | `INVALID_ARGUMENT` | 写集超过 `max_txn_bytes`（默认 4MiB） | 拆事务，不可重试 |
+| `READ_SET_TOO_LARGE` | `INVALID_ARGUMENT` | 读集条目/单次 range 读超过上限 | 拆事务，不可重试 |
+| `COMMIT_REJECTED` | `FAILED_PRECONDITION` | v2 写命令 `commit_ts` 不合法（<= current_revision 且未命中已有写入） | 不可重试（不变量违规） |
+| `EPOCH_STALE` | `ABORTED` | Region 路由 epoch 已过期（split/merge 已 cutover） | 刷新路由/epoch 后重试 |
+| `HISTORY_UNAVAILABLE` | `OUT_OF_RANGE` | Watch 起始位点超出保留窗口 | 全量重同步 |
+| `SAFE_TS_LAG` | `UNAVAILABLE` | `read_ts` 等待 safe_ts 超时（Region apply 落后） | 退避重试 |
+
+v1 的「Txn 条件不满足 = 非错误」**不适用于 v2 OCC**：v2 没有 `Compare`，
+冲突必须让调用方换时间戳重跑，因此是错误（见 `coord/txn/v2/txn.proto` 头注）。
+
 ### 6.2 客户端重试纪律（承诺的语义基础）
 
 | Status | 客户端动作 |
 |:---|:---|
 | `UNAVAILABLE`（含 leader-hint） | **可安全重试**：优先按 `coord-leader-hint` 重定向；无 hint 时退避后重试集群任意节点。Leader 切换窗口期出现本错误是**正常行为**，不得上报为业务故障 |
+| `ABORTED`（v2：`TXN_CONFLICT` / `TXN_NOT_FOUND` / `EPOCH_STALE`） | **可安全重试，但必须换输入**：冲突换新 `start_ts` 重跑整个事务；会话丢失重跑；epoch 过期先刷新路由 |
 | `DEADLINE_EXCEEDED` / `RESOURCE_EXCEEDED` | 指数退避重试 |
 | `INTERNAL` / `OUT_OF_RANGE` / 其余 | **不可盲目重试**：按业务语义处理（如 OUT_OF_RANGE 需全量重同步） |
 | `UNAUTHENTICATED` | 重新认证后重试，禁止高频重试 |

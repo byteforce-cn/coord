@@ -35,6 +35,10 @@ from collections import defaultdict
 #    方法名、字段号、字段类型）。任何一侧多一项都意味着两份副本已经分叉，
 #    而"包名逐字相同即对齐"（WHITEPAPER.md 的兼容性通则）正建立在这个前提上。
 #
+# 1b) KV-T v2 契约层（`coord.<domain>.v2`，ADR-0015）—— **strict（相等）**：
+#    与 v1 同一口径：契约副本与实现副本逐字相同，v2 之间的 import 两侧同路径；
+#    若把 v2 误归入 STABLE 的 subset 层，契约删字段/增字段就不会被抓住。
+#
 # 2) STABLE 底座原语层（无 `.v1` 后缀，如 `coord.kv` / `coord.maintenance`）——
 #    **subset（契约 ⊆ 实现）**：STABLE 契约可以是**承诺的下界**。
 #    实例：`coord.maintenance` 的契约头部明确写着"v1 仅承诺 Status 探活接口；
@@ -50,7 +54,7 @@ VENDORED_PACKAGES = {"grpc.health.v1"}
 
 def mode_for_package(pkg):
     """返回 "strict" 或 "subset"（见上方分层说明）。"""
-    return "strict" if pkg.endswith(".v1") else "subset"
+    return "strict" if pkg.endswith((".v1", ".v2")) else "subset"
 
 
 

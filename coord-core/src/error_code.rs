@@ -63,6 +63,29 @@ pub enum CoordErrorCode {
     TxnCasFailed,
     /// 其他内部错误。**不可重试**。
     Internal,
+
+    // ──── KV-T v2（ADR-0015）────
+    /// OCC 校验冲突：读集/谓词在 `(start_ts, commit_ts]` 内被写过。gRPC `ABORTED`。
+    /// **可重试**：换新的 `start_ts` 重跑整个事务（不写 CommitDecision）。
+    TxnConflict,
+    /// 事务会话不存在/已过期（协调节点重启或 TTL 到期）。gRPC `ABORTED`。
+    /// **可重试**：重跑整个事务。
+    TxnNotFound,
+    /// 写集超过 `[kv_t].max_txn_bytes`。gRPC `INVALID_ARGUMENT`。**不可重试**：拆事务。
+    TxnTooLarge,
+    /// 读集条目/单次 range 读超过上限。gRPC `INVALID_ARGUMENT`。**不可重试**：拆事务。
+    ReadSetTooLarge,
+    /// v2 写命令的 `commit_ts` 不合法（<= current_revision 且未命中已有写入）。
+    /// gRPC `FAILED_PRECONDITION`。**不可重试**：不变量违规，按错误处理。
+    CommitRejected,
+    /// Region 路由 epoch 过期（split/merge 已 cutover）。gRPC `ABORTED`。
+    /// **可重试**：刷新路由/epoch 后重试。
+    EpochStale,
+    /// Watch 起始位点已超出保留窗口。gRPC `OUT_OF_RANGE`。**不可重试**：全量重同步。
+    HistoryUnavailable,
+    /// `read_ts` 等待 safe_ts 超时（Region apply 落后）。gRPC `UNAVAILABLE`。
+    /// **可重试**：退避重试。
+    SafeTsLag,
 }
 
 impl CoordErrorCode {
@@ -81,6 +104,14 @@ impl CoordErrorCode {
         Self::NotLeader,
         Self::TxnCasFailed,
         Self::Internal,
+        Self::TxnConflict,
+        Self::TxnNotFound,
+        Self::TxnTooLarge,
+        Self::ReadSetTooLarge,
+        Self::CommitRejected,
+        Self::EpochStale,
+        Self::HistoryUnavailable,
+        Self::SafeTsLag,
     ];
 
     /// wire 值（= Java `ErrorCode.protoName`）。
@@ -99,6 +130,14 @@ impl CoordErrorCode {
             Self::NotLeader => "NOT_LEADER",
             Self::TxnCasFailed => "TXN_CAS_FAILED",
             Self::Internal => "INTERNAL",
+            Self::TxnConflict => "TXN_CONFLICT",
+            Self::TxnNotFound => "TXN_NOT_FOUND",
+            Self::TxnTooLarge => "TXN_TOO_LARGE",
+            Self::ReadSetTooLarge => "READ_SET_TOO_LARGE",
+            Self::CommitRejected => "COMMIT_REJECTED",
+            Self::EpochStale => "EPOCH_STALE",
+            Self::HistoryUnavailable => "HISTORY_UNAVAILABLE",
+            Self::SafeTsLag => "SAFE_TS_LAG",
         }
     }
 }
@@ -204,6 +243,15 @@ mod tests {
             "NOT_LEADER",
             "TXN_CAS_FAILED",
             "NOT_FOUND",
+            // KV-T v2（ADR-0015）：缺任何一个，v2 错误都会在 Java 侧静默降级为 INTERNAL。
+            "TXN_CONFLICT",
+            "TXN_NOT_FOUND",
+            "TXN_TOO_LARGE",
+            "READ_SET_TOO_LARGE",
+            "COMMIT_REJECTED",
+            "EPOCH_STALE",
+            "HISTORY_UNAVAILABLE",
+            "SAFE_TS_LAG",
         ] {
             assert!(
                 CoordErrorCode::ALL.iter().any(|c| c.as_str() == name),

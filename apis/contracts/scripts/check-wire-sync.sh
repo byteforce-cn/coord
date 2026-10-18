@@ -8,6 +8,9 @@
 #   2) COMMITTED 层：proto/coord/<domain>/v1/<domain>.proto ↔
 #      coord-proto/src/proto/<domain>.proto，包名 + rpc + 字段编号逐项一致
 #      （contracts/v1.2.0 起每个 domain 一个内部副本；迁移前基线为 agent_api.proto）；
+#   2b) v2 层：proto/coord/<domain>/v2/<domain>.proto ↔
+#      coord-proto/src/proto/coord/<domain>/v2/<domain>.proto（KV-T，ADR-0015；
+#      两侧路径一致，便于 v2 之间的 import 两侧都解析到同一相对路径）；
 #   3) 目标日期校验：解析 STATUS.md，COMMITTED 服务目标日期已到而
 #      coord-proto 仍未落地契约包（package coord.<domain>.v1）→ 校验失败。
 #
@@ -80,6 +83,17 @@ for contract in "$CONTRACT_DIR"/*/v1/*.proto; do
   [[ -e "$contract" ]] || continue
   domain="$(basename "$contract" .proto)"
   check_wire "$contract" "$INTERNAL_DIR/$domain.proto" "COMMITTED/$domain"
+done
+
+# ── 2b) v2 层：proto/coord/<domain>/v2/<domain>.proto ↔ coord-proto/src/proto/coord/<domain>/v2/<domain>.proto
+#
+# KV-T（ADR-0015）的 v2 包。两侧相对路径相同，因此 v2 文件之间的 import
+# （如 `import "coord/kv/v2/kv.proto";`）在契约侧与实现侧解析到同一路径；
+# 内部副本缺失或包名/rpc/字段漂移一律置红。
+for contract in "$CONTRACT_DIR"/*/v2/*.proto; do
+  [[ -e "$contract" ]] || continue
+  domain="$(basename "$contract" .proto)"
+  check_wire "$contract" "$INTERNAL_DIR/coord/$domain/v2/$domain.proto" "KV-T/$domain.v2"
 done
 
 # ── 3) 目标日期校验：STATUS.md 中 COMMITTED 服务逾期未迁移至契约包 → 失败

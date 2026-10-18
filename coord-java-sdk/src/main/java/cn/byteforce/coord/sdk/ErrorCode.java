@@ -49,6 +49,24 @@ public enum ErrorCode {
     TXN_CAS_FAILED("TXN_CAS_FAILED"),
     INTERNAL("INTERNAL"),
 
+    // ──── KV-T v2（ADR-0015）────
+    /** OCC 冲突（读集/谓词被写过）。gRPC ABORTED；换 start_ts 重跑整个事务。 */
+    TXN_CONFLICT("TXN_CONFLICT"),
+    /** 事务会话不存在/已过期。gRPC ABORTED；重跑整个事务。 */
+    TXN_NOT_FOUND("TXN_NOT_FOUND"),
+    /** 写集超过 max_txn_bytes。gRPC INVALID_ARGUMENT；拆事务。 */
+    TXN_TOO_LARGE("TXN_TOO_LARGE"),
+    /** 读集/range 读超限。gRPC INVALID_ARGUMENT；拆事务。 */
+    READ_SET_TOO_LARGE("READ_SET_TOO_LARGE"),
+    /** commit_ts 不合法（CommitRejected）。gRPC FAILED_PRECONDITION；不可重试。 */
+    COMMIT_REJECTED("COMMIT_REJECTED"),
+    /** Region 路由 epoch 过期。gRPC ABORTED；刷新路由后重试。 */
+    EPOCH_STALE("EPOCH_STALE"),
+    /** Watch 位点超出保留窗口。gRPC OUT_OF_RANGE；全量重同步。 */
+    HISTORY_UNAVAILABLE("HISTORY_UNAVAILABLE"),
+    /** read_ts 等待 safe_ts 超时。gRPC UNAVAILABLE；退避重试。 */
+    SAFE_TS_LAG("SAFE_TS_LAG"),
+
     // ──── Client-local codes (never emitted by the server) ────
     PROTOCOL_MISMATCH("PROTOCOL_MISMATCH"),
     AGENT_UNAVAILABLE("AGENT_UNAVAILABLE"),

@@ -1,0 +1,72 @@
+syntax = "proto3";
+package coord.lease.v2;
+
+// coord.lease.v2 —— 全局租约（ADR-0015 D3/D6/D12）。
+//
+// 语义：
+//   - `lease_id` 全局唯一，租约表在 region 0（system raft）；
+//   - 绑定的 key 落在各业务 Region；`Revoke`/到期清理是**跨区写**：由 Commit
+//     Sequencer 分配一个 `commit_ts`，把这些 key 的删除作为一个原子事务应用
+//     （同一 commit_ts，全部可见或全不可见）；
+//   - `Revoke` 幂等：对已撤销/已过期的 lease 返回成功（`commit_ts` = 0 表示
+//     本次没有新决策），不会重复删除；
+//   - `KeepAlive` 续期只延长 TTL，不产生 commit_ts（不是数据面写）；
+//   - 租约 TTL 与 commit_ts 的关系：到期清理取得的 `commit_ts` 必须大于租约
+//     最后一次续期时观测到的 `read_ts`，避免删掉续期后写入的 key；
+//   - split/merge 搬迁 Region 时只搬 key，租约元数据始终在 region 0；搬迁前后
+//     `lease_id` 不变，revoke 的跨区清理按 key 当前 epoch 路由。
+//
+// 错误：非法 TTL/lease_id ⇒ `INVALID_ARGUMENT`；不存在的 lease 在
+// `TimeToLive`/`KeepAlive` 上返回 `NOT_FOUND`，在 `Revoke` 上幂等成功。
+
+option java_package = "cn.byteforce.coord.contracts.lease.v2";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/lease/v2;leasev2";
+
+message LeaseGrantRequest {
+  int64 ttl_seconds = 1; // 必填 > 0；上限由服务端校验
+  int64 lease_id = 2; // 0 = 自动分配；>0 = 指定（冲突返回 ALREADY_EXISTS）
+  bytes request_id = 3; // 幂等去重键
+}
+
+message LeaseGrantResponse {
+  int64 lease_id = 1;
+  int64 ttl_seconds = 2;
+  int64 granted_ts = 3; // 发放时的 TSO（只读参考，不参与 revision 语义）
+}
+
+message LeaseRevokeRequest {
+  int64 lease_id = 1;
+  bytes request_id = 2;
+}
+
+message LeaseRevokeResponse {
+  int64 commit_ts = 1; // 绑定的 key 被删除的 commit_ts；0 = 无新决策（幂等重放/本就过期）
+}
+
+message LeaseKeepAliveRequest {
+  int64 lease_id = 1;
+}
+
+message LeaseKeepAliveResponse {
+  int64 lease_id = 1;
+  int64 ttl_seconds = 2; // 剩余 TTL
+}
+
+message LeaseTimeToLiveRequest {
+  int64 lease_id = 1;
+  bool keys = 2; // 是否返回绑定的 key 列表
+}
+
+message LeaseTimeToLiveResponse {
+  int64 lease_id = 1;
+  int64 ttl_seconds = 2; // 剩余 TTL；<=0 表示已过期
+  int64 granted_ttl_seconds = 3;
+  repeated bytes keys = 4; // keys=true 时填充；受服务端返回上限约束
+}
+
+service Lease {
+  rpc LeaseGrant(LeaseGrantRequest) returns (LeaseGrantResponse);
+  rpc LeaseRevoke(LeaseRevokeRequest) returns (LeaseRevokeResponse);
+  rpc LeaseKeepAlive(stream LeaseKeepAliveRequest) returns (stream LeaseKeepAliveResponse);
+  rpc LeaseTimeToLive(LeaseTimeToLiveRequest) returns (LeaseTimeToLiveResponse);
+}

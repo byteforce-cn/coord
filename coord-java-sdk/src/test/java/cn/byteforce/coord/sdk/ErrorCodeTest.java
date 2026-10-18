@@ -29,7 +29,16 @@ class ErrorCodeTest {
             "UNAVAILABLE",
             "NOT_LEADER",
             "TXN_CAS_FAILED",
-            "INTERNAL");
+            "INTERNAL",
+            // ── KV-T v2（ADR-0015）──
+            "TXN_CONFLICT",
+            "TXN_NOT_FOUND",
+            "TXN_TOO_LARGE",
+            "READ_SET_TOO_LARGE",
+            "COMMIT_REJECTED",
+            "EPOCH_STALE",
+            "HISTORY_UNAVAILABLE",
+            "SAFE_TS_LAG");
 
     @Test
     void shouldHaveAllRequiredErrorCodes() {
@@ -48,6 +57,15 @@ class ErrorCodeTest {
                 ErrorCode.NOT_LEADER,
                 ErrorCode.TXN_CAS_FAILED,
                 ErrorCode.INTERNAL,
+                // ──── KV-T v2（ADR-0015）────
+                ErrorCode.TXN_CONFLICT,
+                ErrorCode.TXN_NOT_FOUND,
+                ErrorCode.TXN_TOO_LARGE,
+                ErrorCode.READ_SET_TOO_LARGE,
+                ErrorCode.COMMIT_REJECTED,
+                ErrorCode.EPOCH_STALE,
+                ErrorCode.HISTORY_UNAVAILABLE,
+                ErrorCode.SAFE_TS_LAG,
                 // ──── SDK 本地码 ────
                 ErrorCode.PROTOCOL_MISMATCH,
                 ErrorCode.AGENT_UNAVAILABLE,

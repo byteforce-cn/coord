@@ -35,6 +35,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "src/proto/workflow.proto",
                 "src/proto/scheduler.proto",
                 "src/proto/featureflags.proto",
+                // ── KV-T v2 契约面（package coord.<domain>.v2；ADR-0015）──
+                // 路径与契约副本一致（apis/contracts/proto/coord/<domain>/v2/），
+                // 两份副本逐字相同，便于 `check-wire-descriptor.sh` 按 package
+                // 比对，且 v2 之间的 import 在两侧都解析到同一相对路径。
+                "src/proto/coord/tso/v2/tso.proto",
+                "src/proto/coord/kv/v2/kv.proto",
+                "src/proto/coord/txn/v2/txn.proto",
+                "src/proto/coord/watch/v2/watch.proto",
+                "src/proto/coord/lease/v2/lease.proto",
+                "src/proto/coord/storage/v2/storage.proto",
                 // ── 内部面：Handshake / Health / Replica（不建对外契约包）
                 "src/proto/agent_api.proto",
                 "src/proto/plugin.proto",

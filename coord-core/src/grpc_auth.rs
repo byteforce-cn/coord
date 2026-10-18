@@ -53,6 +53,28 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         // ── Watch ──
         "/coord.watch.Watch/Watch" => Some("data:watch:subscribe"),
 
+        // ── KV-T v2（ADR-0015）──
+        // 能力名与 v1 同义复用（同一份数据权限），不新增 data:kv:v2:* 之类；
+        // 新增的只有 v2 才引入的原语：TSO 批次与租约只读查询。
+        "/coord.tso.v2.TSO/Allocate" => Some("data:tso:allocate"),
+        "/coord.tso.v2.TSO/GetTs" => Some("data:tso:allocate"),
+        "/coord.kv.v2.KV/Put" => Some("data:kv:write"),
+        "/coord.kv.v2.KV/Range" => Some("data:kv:read"),
+        "/coord.kv.v2.KV/Delete" => Some("data:kv:delete"),
+        "/coord.txn.v2.Txn/Begin" => Some("data:txn:execute"),
+        "/coord.txn.v2.Txn/Read" => Some("data:txn:execute"),
+        "/coord.txn.v2.Txn/Commit" => Some("data:txn:execute"),
+        "/coord.txn.v2.Txn/Abort" => Some("data:txn:execute"),
+        "/coord.watch.v2.Watch/Watch" => Some("data:watch:subscribe"),
+        "/coord.lease.v2.Lease/LeaseGrant" => Some("data:lease:grant"),
+        "/coord.lease.v2.Lease/LeaseRevoke" => Some("data:lease:revoke"),
+        "/coord.lease.v2.Lease/LeaseKeepAlive" => Some("data:lease:keepalive"),
+        "/coord.lease.v2.Lease/LeaseTimeToLive" => Some("data:lease:read"),
+        "/coord.storage.v2.Storage/Get" => Some("data:storage:read"),
+        "/coord.storage.v2.Storage/Stat" => Some("data:storage:read"),
+        "/coord.storage.v2.Storage/Put" => Some("data:storage:write"),
+        "/coord.storage.v2.Storage/Delete" => Some("data:storage:write"),
+
         // ── 对象存储（coord.storage，Server 侧数据面）──
         "/coord.storage.Storage/Get" => Some("data:storage:read"),
         "/coord.storage.Storage/Stat" => Some("data:storage:read"),
@@ -303,7 +325,17 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
 pub fn needs_scope_extraction(rpc_method: &str) -> bool {
     matches!(
         rpc_method,
-        "/coord.kv.KV/Put" | "/coord.kv.KV/Range" | "/coord.kv.KV/Delete" | "/coord.txn.Txn/Txn"
+        "/coord.kv.KV/Put"
+            | "/coord.kv.KV/Range"
+            | "/coord.kv.KV/Delete"
+            | "/coord.txn.Txn/Txn"
+            // KV-T v2：一元且携带 key/range 的方法。`Txn.Begin`/`Abort` 只带会话
+            // 标识，`Commit` 带写集（必须判 scope）；`Txn.Read` 带读 key。
+            | "/coord.kv.v2.KV/Put"
+            | "/coord.kv.v2.KV/Range"
+            | "/coord.kv.v2.KV/Delete"
+            | "/coord.txn.v2.Txn/Read"
+            | "/coord.txn.v2.Txn/Commit"
     )
 }
 
@@ -328,6 +360,10 @@ pub fn is_streaming_rpc(rpc_method: &str) -> bool {
         rpc_method,
         // 服务端流
         "/coord.watch.Watch/Watch"
+            | "/coord.watch.v2.Watch/Watch"
+            | "/coord.lease.v2.Lease/LeaseKeepAlive"
+            | "/coord.storage.v2.Storage/Put"
+            | "/coord.storage.v2.Storage/Get"
             | "/coord.registry.v1.Registry/Watch"
             | "/coord.config.v1.Config/Watch"
             | "/coord.election.v1.LeaderElection/Watch"
@@ -475,7 +511,10 @@ pub fn scope_allows(grant_scopes: &[String], accesses: &[ScopeAccess]) -> bool {
 /// 钉住「延后集合 ⊆ 流式集合 ∩ 有能力的集合」「延后集合 ∩ 缓存集合 = ∅」；
 /// `coord-core` 侧 `deferred_and_buffered_scope_sets_are_disjoint` 钉住互斥。
 pub fn is_deferred_scope_rpc(rpc_method: &str) -> bool {
-    matches!(rpc_method, "/coord.watch.Watch/Watch")
+    matches!(
+        rpc_method,
+        "/coord.watch.Watch/Watch" | "/coord.watch.v2.Watch/Watch"
+    )
 }
 
 /// 鉴权层交给**流式 handler** 的授权快照（见 [`is_deferred_scope_rpc`]）。
@@ -583,6 +622,46 @@ pub fn extract_scope_access(rpc_method: &str, body: &[u8]) -> Result<Vec<ScopeAc
                         accesses.push(ScopeAccess::from_range(r.key.clone(), r.range_end.clone()))
                     }
                     None => {}
+                }
+            }
+            Ok(accesses)
+        }
+        // ── KV-T v2（ADR-0015）：与 v1 同语义的 key/range 提取 ──
+        "/coord.kv.v2.KV/Put" => {
+            let req = coord_proto::kv::v2::PutRequest::decode(payload)
+                .map_err(|e| format!("failed to parse kv.v2 PutRequest body: {e}"))?;
+            Ok(vec![ScopeAccess::point(req.key)])
+        }
+        "/coord.kv.v2.KV/Range" => {
+            let req = coord_proto::kv::v2::RangeRequest::decode(payload)
+                .map_err(|e| format!("failed to parse kv.v2 RangeRequest body: {e}"))?;
+            Ok(vec![ScopeAccess::from_range(req.key, req.range_end)])
+        }
+        "/coord.kv.v2.KV/Delete" => {
+            let req = coord_proto::kv::v2::DeleteRequest::decode(payload)
+                .map_err(|e| format!("failed to parse kv.v2 DeleteRequest body: {e}"))?;
+            Ok(vec![ScopeAccess::from_range(req.key, req.range_end)])
+        }
+        "/coord.txn.v2.Txn/Read" => {
+            let req = coord_proto::txn::v2::ReadRequest::decode(payload)
+                .map_err(|e| format!("failed to parse txn.v2 ReadRequest body: {e}"))?;
+            Ok(vec![ScopeAccess::from_range(req.key, req.range_end)])
+        }
+        "/coord.txn.v2.Txn/Commit" => {
+            let req = coord_proto::txn::v2::CommitRequest::decode(payload)
+                .map_err(|e| format!("failed to parse txn.v2 CommitRequest body: {e}"))?;
+            use coord_proto::txn::v2::mutation::Op;
+            let mut accesses = Vec::with_capacity(req.mutations.len());
+            for m in &req.mutations {
+                match m.op() {
+                    Op::Put | Op::Delete => accesses.push(ScopeAccess::point(m.key.clone())),
+                    Op::DeleteRange => {
+                        accesses.push(ScopeAccess::from_range(m.key.clone(), m.range_end.clone()))
+                    }
+                    // 未指定 op 的写集是畸形请求：按失败关闭拒绝。
+                    Op::Unspecified => {
+                        return Err("txn.v2 mutation op is unspecified".to_string());
+                    }
                 }
             }
             Ok(accesses)
@@ -924,6 +1003,49 @@ mod tests {
         assert_eq!(
             accesses,
             vec![ScopeAccess::range(b"/app/".to_vec(), b"/app0".to_vec())]
+        );
+    }
+
+    /// KV-T v2：写集里的每个 mutation 都必须进入 scope 判定；未指定 op 的
+    /// 畸形请求按失败关闭拒绝（不得被当成"不触碰任何 key"而放行）。
+    #[test]
+    fn txn_v2_commit_scope_covers_every_mutation() {
+        use coord_proto::txn::v2::mutation::Op;
+        let commit = coord_proto::txn::v2::CommitRequest {
+            txn_id: b"t1".to_vec(),
+            mutations: vec![
+                coord_proto::txn::v2::Mutation {
+                    op: Op::Put as i32,
+                    key: b"/app/a".to_vec(),
+                    ..Default::default()
+                },
+                coord_proto::txn::v2::Mutation {
+                    op: Op::DeleteRange as i32,
+                    key: b"/app/b".to_vec(),
+                    range_end: b"/appc".to_vec(),
+                    ..Default::default()
+                },
+            ],
+            request_id: Vec::new(),
+        };
+        let accesses = extract_scope_access("/coord.txn.v2.Txn/Commit", &commit.encode_to_vec())
+            .expect("v2 commit body should parse");
+        assert_eq!(
+            accesses,
+            vec![
+                ScopeAccess::point(b"/app/a".to_vec()),
+                ScopeAccess::range(b"/app/b".to_vec(), b"/appc".to_vec()),
+            ]
+        );
+
+        let malformed = coord_proto::txn::v2::CommitRequest {
+            txn_id: b"t2".to_vec(),
+            mutations: vec![coord_proto::txn::v2::Mutation::default()],
+            request_id: Vec::new(),
+        };
+        assert!(
+            extract_scope_access("/coord.txn.v2.Txn/Commit", &malformed.encode_to_vec()).is_err(),
+            "unspecified op 必须按失败关闭拒绝"
         );
     }
 

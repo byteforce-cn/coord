@@ -1,0 +1,46 @@
+syntax = "proto3";
+package coord.tso.v2;
+
+// 全局时间戳（TSO）——ADR-0015 D2/D12 的 wire 面。
+//
+// 语义（唯一归属：ADR-0015；本文件只写 wire 约定）：
+//   - 批次 `[start_ts, end_ts)` 全局唯一、单调递增；允许空洞，**绝不复用**；
+//   - 批次由 region 0 system raft 持久化高水位后发放；重启/换 leader 丢弃未用完
+//     部分，新批 start 必须大于所有已发放值（由服务端保证，客户端不参与）；
+//   - `Allocate` 必须由 region 0 leader 处理；非 leader 返回 `NOT_LEADER`；
+//     客户端缓存批次（`tso_batch_size`），耗尽后重新申请；
+//   - `GetTs` 是 `Allocate(1)` 的便捷面：任意节点可从本地批次缓存直接发放，
+//     不产生跨节点往返；缓存耗尽时内部向 leader 申请，必要时失败返回
+//     `UNAVAILABLE`（可重试）。
+//
+// 客户端缓存纪律：批次是**进程内内存态**，重启即丢弃；不得持久化后复用。
+// 服务端不依赖客户端持久化——即使客户端丢掉整批，服务端也不会把同一段再发一次。
+
+option java_package = "cn.byteforce.coord.contracts.tso.v2";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/tso/v2;tsov2";
+
+// 申请一批时间戳。`batch_size = 0` 等价于 1；上限由 `[kv_t].tso_batch_size`
+// 与 D9 约束（服务端超限返回 `INVALID_ARGUMENT`，不静默截断）。
+message AllocateRequest {
+  uint32 batch_size = 1;
+}
+
+// 批次是左闭右开区间：`start_ts` 可用，`end_ts` 不可用。
+message AllocateResponse {
+  int64 start_ts = 1;
+  int64 end_ts = 2;
+}
+
+message GetTsRequest {}
+
+// 单个时间戳；等价于从本地批次缓存取一个值。调用方把它用作
+// `read_ts` / `start_ts` / `commit_ts` 时，必须视为**一次性**值：
+// 同一值可以给多个读复用（快照读），但不得在两个独立的写事务里复用。
+message GetTsResponse {
+  int64 ts = 1;
+}
+
+service TSO {
+  rpc Allocate(AllocateRequest) returns (AllocateResponse);
+  rpc GetTs(GetTsRequest) returns (GetTsResponse);
+}

@@ -149,6 +149,10 @@ while IFS= read -r f; do
   case "$rel" in
     grpc/health/*) continue ;;                       # 第三方标准 proto，随附
     coord/kv/*|coord/txn/*|coord/lease/*|coord/watch/*|coord/maintenance/*) continue ;;
+    # KV-T v2 数据面（ADR-0015）：greenfield v2 的 SDK 客户端由 G6（#172）交付。
+    # 在这些客户端存在之前，不为骗过本门而建空壳 impl（“有 impl”不等于“有消费面”）；
+    # v1 同名域（coord.kv / txn / watch / lease / storage）仍受本门约束。
+    coord/tso/v2/*|coord/kv/v2/*|coord/txn/v2/*|coord/watch/v2/*|coord/lease/v2/*|coord/storage/v2/*) continue ;;
   esac
   [[ -z "$pkg" ]] && continue
   expected_pkgs+=("$pkg")
