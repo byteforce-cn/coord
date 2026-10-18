@@ -345,6 +345,39 @@ async fn test_auth_enforcement_full_matrix() {
         .expect("reader token should allow Range");
     assert_eq!(range.into_inner().kvs.len(), 1);
 
+    // 负控制（#121）：KV 读权限不得读走 PKI 信任根 / 证书私钥。
+    // 前缀区间读与单键点查都必须 PERMISSION_DENIED（不是 UNAUTHENTICATED）。
+    for (key, range_end) in [
+        (b"/_pki/".to_vec(), b"/_pki0".to_vec()),
+        (b"/_pki/v1/ca".to_vec(), Vec::new()),
+        (b"/_idgen/nodes/".to_vec(), b"/_idgen/nodes0".to_vec()),
+    ] {
+        let denied = kv
+            .range(with_token(
+                RangeRequest {
+                    key,
+                    range_end,
+                    limit: 0,
+                    revision: 0,
+                    keys_only: false,
+                    count_only: false,
+                },
+                &reader_cct,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            denied.code(),
+            tonic::Code::PermissionDenied,
+            "reader KV Range into internal reserved namespace must be denied, got: {denied}"
+        );
+        assert!(
+            denied.message().contains("reserved internal namespace"),
+            "denial must name the reserved namespace: {}",
+            denied.message()
+        );
+    }
+
     // 写拒绝（PERMISSION_DENIED，非 UNAUTHENTICATED）
     let denied = kv
         .put(with_token(

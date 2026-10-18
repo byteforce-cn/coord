@@ -439,3 +439,113 @@ do:
         dev.logs()
     );
 }
+
+/// dev 指标接线端到端：`/metrics` 与 `AgentServer` 必须共用同一个 `AgentMetrics`。
+///
+/// 判据（两条缺一不可）：
+/// 1. PKI 采样任务写入的 gauge 在 `/metrics` 可见（`certs_active=1`、
+///    `expiring_soon=1`、窗口 6h）——1h 证书天然落在 6h 窗口内；
+/// 2. 非 PKI 的 gRPC 计数（由 `AgentServer` 中间件写入）也可见——防止只修 PKI
+///    表象而漏掉同一实例问题。
+///
+/// 等待窗口取一个采样周期 + 余量（30s + 5s），不写固定 sleep：轮询到条件满足即返回。
+#[tokio::test(flavor = "multi_thread")]
+async fn dev_mode_metrics_share_one_registry() {
+    use coord_proto::kv::kv_client::KvClient;
+    use coord_proto::kv::PutRequest;
+    use coord_proto::pki::v1::pki_client::PkiClient;
+    use coord_proto::pki::v1::PkiIssueCertRequest;
+
+    let (grpc_port, agent_port) = pick_dev_ports();
+    let agent_addr = format!("127.0.0.1:{agent_port}");
+    let mut dev = spawn_dev(grpc_port, agent_port);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if tokio::net::TcpStream::connect(&agent_addr).await.is_ok() {
+            break;
+        }
+        if let Ok(Some(status)) = dev.child.try_wait() {
+            panic!("coord dev exited early ({status}); logs:\n{}", dev.logs());
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!(
+                "agent gRPC {agent_addr} not ready within 30s; logs:\n{}",
+                dev.logs()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
+        .unwrap()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .connect()
+        .await
+        .expect("connect to dev agent");
+
+    // 1h 证书：TTL < 6h 告警窗口 ⇒ expiring_soon 必然为 1。
+    PkiClient::new(channel.clone())
+        .issue_cert(PkiIssueCertRequest {
+            common_name: "metrics-e2e".into(),
+            ttl_seconds: 3600,
+        })
+        .await
+        .expect("IssueCert must succeed in dev mode");
+
+    // 非 PKI gauge：gRPC 中间件（AgentServer 侧实例）计数一次 Put。
+    KvClient::new(channel)
+        .put(PutRequest {
+            key: b"/dev-metrics-e2e/key".to_vec(),
+            value: b"v".to_vec(),
+            lease_id: 0,
+            prev_kv: false,
+            request_id: vec![],
+        })
+        .await
+        .expect("KV.Put must succeed in dev mode");
+
+    let metrics_addr = format!("127.0.0.1:{}", agent_port + 1);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(35);
+    let mut last = String::new();
+    loop {
+        if let Ok(body) = http_get(&metrics_addr, "/metrics").await {
+            last = body;
+            let has_pki = last.contains("coord_agent_pki_certs_active 1")
+                && last.contains("coord_agent_pki_certs_expiring_soon 1")
+                && last.contains("coord_agent_pki_expiry_warn_window_hours 6");
+            let has_grpc = last.lines().any(|line| {
+                line.starts_with("coord_agent_grpc_requests_total{method=\"put\"}")
+                    && line
+                        .split_whitespace()
+                        .last()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .is_some_and(|v| v >= 1)
+            });
+            if has_pki && has_grpc {
+                break;
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!(
+                "metrics did not reflect agent-side gauges within one sampling period;\n\
+                 last /metrics body:\n{last}\nlogs:\n{}",
+                dev.logs()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// 最小 HTTP/1.0 GET（dev 的 /metrics 明文端点；避免为一条断言引入额外依赖）。
+async fn http_get(addr: &str, path: &str) -> Result<String, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    stream
+        .write_all(format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\n\r\n").as_bytes())
+        .await?;
+    let mut body = Vec::new();
+    stream.read_to_end(&mut body).await?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}

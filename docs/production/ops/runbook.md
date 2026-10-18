@@ -286,6 +286,15 @@ grpcurl -d '{"cert_pem":"<新证书 PEM>"}' <agent>:<port> coord.pki.v1.PKI/Veri
 3. **负控制验证**：用旧证书做一次验证/连接——**必须失败**；
 4. **归档**：CN / 旧 serial / 新 serial / 时间 / 执行人（演练记录按 §7）。
 
+**内部键空间与升级**：CA 与证书私钥落在 `/_pki/`（普通 KV 键）。鉴权开启时
+`/_pki/` 与 `/_lease/`、`/_idgen/`、`/_pd/` 同属内部保留命名空间：仅 agent 自身
+身份 / root 可经 KV 面访问，普通 `data:kv:read` 一律 `PERMISSION_DENIED`（`Watch`
+同样拒绝）。升级到带 SAN 的版本后，旧 dev 数据目录中的无 SAN 记录会在下一次
+`IssueCert` 时按「参数一致才幂等」自动替换；也可 `--fresh` 或换 CN 立即重来。
+
+**备份注意**：快照与导出是**全量 KV 对**，包含 `/_pki/` 的 CA 与证书私钥；未开
+静态加密时以明文导出。备份文件的保管等级等同信任根私钥。
+
 **判据（自动化）**：`coord-agent/src/pki.rs` 单测
 `test_rotate_cert_replaces_expired_record`、
 `test_concurrent_rotate_no_lost_update`、

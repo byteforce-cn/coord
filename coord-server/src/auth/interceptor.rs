@@ -27,6 +27,7 @@ use tower::{Layer, Service, ServiceExt};
 use crate::auth::manager::AuthManager;
 use crate::auth::revocation::RevocationStore;
 use crate::auth::token_signing::TokenSigningKeyring;
+use crate::auth::AGENT_SELF_ROLE;
 use crate::metrics::Metrics;
 
 // ──── Trusted Agent Identification ────
@@ -34,6 +35,42 @@ use crate::metrics::Metrics;
 /// Trusted agent CN prefixes:
 const TRUSTED_AGENT_CN_PREFIXES: &[&str] = &["coord-agent-"];
 const TRUSTED_AGENT_CLUSTER_CN: &str = "coord-agent-cluster";
+
+/// 服务端内部保留的 KV 命名空间（客户端 KV 面不可直接读写）。
+///
+/// 这些键空间由 server/agent 自身维护：`/_pki/` 含 **CA 与证书私钥**，
+/// `/_lease/` `/_idgen/` `/_pd/` 是状态机簿记。若允许 `data:kv:read` 直读，
+/// PKI 的 `pki:*` 授权可被 KV 读权限旁路（拿走信任根私钥 = 可自签任意身份）。
+/// 放行主体仅限 agent 自身身份（[`AGENT_SELF_ROLE`]）与 root。
+const RESERVED_INTERNAL_KV_PREFIXES: &[&[u8]] = &[b"/_pki/", b"/_lease/", b"/_idgen/", b"/_pd/"];
+
+/// 一次 KV 访问是否触碰内部保留命名空间；命中返回该前缀（用于错误消息）。
+pub fn reserved_internal_prefix(access: &ScopeAccess) -> Option<&'static str> {
+    for prefix in RESERVED_INTERNAL_KV_PREFIXES {
+        let Some(upper) = coord_core::auth::trie::prefix_successor(prefix) else {
+            continue;
+        };
+        let touches = if access.range_end.is_empty() {
+            access.key.starts_with(prefix)
+        } else if access.range_end.as_slice() == b"\0" {
+            // 无上界区间：只要起点位于前缀上界之前，就覆盖该前缀
+            access.key.as_slice() < upper.as_slice()
+        } else {
+            // [key, range_end) 与前缀 [prefix, upper) 相交
+            access.key.as_slice() < upper.as_slice() && access.range_end.as_slice() > *prefix
+        };
+        if touches {
+            return Some(std::str::from_utf8(prefix).unwrap_or("(non-utf8)"));
+        }
+    }
+    None
+}
+
+/// 按请求的 `(key, range_end)` 判定是否触碰内部保留命名空间（Watch 等非
+/// scope-extraction 路径复用）。
+pub fn reserved_internal_kv_namespace(key: &[u8], range_end: &[u8]) -> Option<&'static str> {
+    reserved_internal_prefix(&ScopeAccess::from_range(key.to_vec(), range_end.to_vec()))
+}
 
 /// Determine if a peer certificate CN represents a trusted agent.
 ///
@@ -350,6 +387,26 @@ impl ServerAuthInterceptor {
                 reason: "CCT has been revoked".into(),
                 trusted_agent: false,
             };
+        }
+
+        // 4.5 内部保留命名空间：仅 agent 自身身份 / root 可经 KV 面访问。
+        // 必须在 graded scope（trusted-agent 快速路径）之前判定：否则 mTLS
+        // 信任 + 低风险读会跳过整段授权，KV 读权限仍可旁路 PKI。
+        if let Some(ns) = accesses.iter().find_map(reserved_internal_prefix) {
+            let privileged = cct
+                .payload
+                .roles
+                .iter()
+                .any(|role| role == AGENT_SELF_ROLE || role == coord_core::auth::ROOT_ROLE);
+            if !privileged {
+                return ServerAuthResult::Deny {
+                    reason: format!(
+                        "KV access to reserved internal namespace {ns} is not allowed; \
+                         use the coord.pki.v1 service (PKI private keys are internal)"
+                    ),
+                    trusted_agent: false,
+                };
+            }
         }
 
         // 5. Determine caller identity
@@ -1079,6 +1136,78 @@ mod tests {
 
         let result = interceptor.validate(None, None, "data:kv:read", None);
         assert!(matches!(result, ServerAuthResult::Deny { .. }));
+    }
+
+    #[test]
+    fn test_reserved_internal_kv_namespace_denied_for_kv_reader() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true);
+        let cct = make_test_cct(&keyring, vec!["reader"], std::collections::HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        let accesses = vec![ScopeAccess::range(b"/_pki/".to_vec(), b"/_pki0".to_vec())];
+        match interceptor.validate_scope_access(Some(&auth_header), None, "data:kv:read", &accesses)
+        {
+            ServerAuthResult::Deny { reason, .. } => {
+                assert!(
+                    reason.contains("/_pki/"),
+                    "denial must name the namespace: {reason}"
+                );
+            }
+            other => panic!("expected Deny, got: {other:?}"),
+        }
+
+        // 点查同样拒绝
+        let accesses = vec![ScopeAccess::point(b"/_pki/v1/ca".to_vec())];
+        assert!(matches!(
+            interceptor.validate_scope_access(Some(&auth_header), None, "data:kv:read", &accesses),
+            ServerAuthResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn test_reserved_internal_kv_namespace_allowed_for_agent_self() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true);
+        // agent 自身身份：角色 + 该能力上的空 scope override（match-all）。
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("data:kv:read".to_string(), String::new());
+        let cct = make_test_cct(&keyring, vec![AGENT_SELF_ROLE], overrides);
+        let auth_header = format!("Bearer {cct}");
+
+        let accesses = vec![ScopeAccess::point(b"/_pki/v1/ca".to_vec())];
+        assert!(
+            interceptor
+                .validate_scope_access(Some(&auth_header), None, "data:kv:read", &accesses)
+                .is_allow(),
+            "agent self identity must keep reading PKI state"
+        );
+    }
+
+    #[test]
+    fn test_reserved_internal_range_only_denied_when_intersecting() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true);
+        let cct = make_test_cct(&keyring, vec!["reader"], std::collections::HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        // 全库扫描（无上界）覆盖 /_pki/ ⇒ 拒绝；命中 /_zzz 之后 ⇒ 不因保留前缀拒绝
+        let scan = vec![ScopeAccess::range(vec![0u8], b"\0".to_vec())];
+        assert!(matches!(
+            interceptor.validate_scope_access(Some(&auth_header), None, "data:kv:read", &scan),
+            ServerAuthResult::Deny { .. }
+        ));
+        let after = vec![ScopeAccess::range(b"/_zzz".to_vec(), b"/_zzz0".to_vec())];
+        // 不是保留前缀 ⇒ 不触发 reserved 拒绝（仍会因缺角色授权被拒，故只断言原因不是 reserved）
+        match interceptor.validate_scope_access(Some(&auth_header), None, "data:kv:read", &after) {
+            ServerAuthResult::Deny { reason, .. } => {
+                assert!(!reason.contains("reserved internal namespace"), "{reason}");
+            }
+            ServerAuthResult::Allow { .. } => {}
+        }
     }
 
     #[test]
