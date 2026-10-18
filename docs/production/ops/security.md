@@ -98,9 +98,16 @@ PKI 的读取面有两档，**不得混同**：
 
 **用途 scope（CN 命名约定）**：建议 `<服务>-<用途>`（如 `orders-api` /
 `orders-signer`），让同一服务的不同用途落到不同 CN、可分别轮换/撤销。
-**能力名与 CN 是两层**：gRPC 能力（`coord:pki:*`，见
-`coord-core/src/grpc_auth.rs::rpc_capability`）控制**谁能调 RPC**，消费侧的 CN
-校验控制**签出来的身份被谁接受**——两侧分别配置，不互相替代。
+**能力名与 CN 是两层**：gRPC 能力（`pki:ca:init` / `pki:cert:issue` /
+`pki:cert:rotate` / `pki:cert:read`，见 `coord-core/src/grpc_auth.rs::rpc_capability`）
+控制**谁能调 RPC**，消费侧的 CN 校验控制**签出来的身份被谁接受**——两侧分别配置，
+不互相替代。
+
+**KV 面不得旁路 PKI**：`/_pki/`（CA 与证书私钥）、`/_lease/`、`/_idgen/`、
+`/_pd/` 是内部保留命名空间。鉴权开启时，只有 agent 自身身份（`agent-self-role`）
+与 root 可经 `coord.kv.KV` / `coord.txn.Txn` 访问；普通 `data:kv:read` 的
+区间读/点查一律 `PERMISSION_DENIED`（`Watch` 同样拒绝订阅）。负控制：
+`coord/tests/auth_enforcement_test.rs::test_auth_enforcement_full_matrix`。
 
 ### 3.2 吊销 / 泄露应急：CN 轮换 playbook（revocation 实现不在本轮）
 

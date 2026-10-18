@@ -2009,8 +2009,8 @@ impl AgentServer {
                 if let Some(metrics) = self.metrics.clone() {
                     tokio::spawn(async move {
                         let tick = std::time::Duration::from_secs(30);
+                        // 先采再睡：t≈0 就有值，避免「刚签发完等 30 秒才可见」。
                         loop {
-                            tokio::time::sleep(tick).await;
                             match sampler_svc.cert_expiry_snapshot().await {
                                 Ok((total, expiring)) => {
                                     metrics.set_pki_cert_stats(
@@ -2023,6 +2023,7 @@ impl AgentServer {
                                     tracing::warn!("pki expiry snapshot failed: {e}");
                                 }
                             }
+                            tokio::time::sleep(tick).await;
                         }
                     });
                 }

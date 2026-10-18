@@ -2687,6 +2687,17 @@ impl Watch for CoordNode {
             ));
         }
 
+        // 内部保留命名空间守卫：Watch 不得订阅 PKI / 租约 / ID / PD 簿记。
+        // 鉴权层只覆盖一元 KV/Txn（流式 body 不可预读），Watch 在这里闭合。
+        if let Some(ns) = crate::auth::interceptor::reserved_internal_kv_namespace(
+            &create_req.key,
+            &create_req.range_end,
+        ) {
+            return Err(tonic::Status::permission_denied(format!(
+                "watch on reserved internal namespace {ns} is not supported"
+            )));
+        }
+
         // 解析 Watch 目标——legacy 用节点级 dispatcher + storage；
         // region 模式路由到所属 Region 的 per-Region dispatcher + MVCC（per-Region
         // revision 语义）；跨 Region 区间/前缀在此显式拒绝（resolve_watch_target）。

@@ -4001,16 +4001,18 @@ async fn run_dev(
 
     // 启动 Agent HTTP health/metrics 端点（对标 run_agent 的行为）
     // R-AGT-20：共享就绪位（连接探针实时回写，非启动快照）
+    // 同一个实例必须同时交给 /metrics 与 AgentServer：两套 AgentMetrics 会让
+    // 采样任务写入的 agent 侧 gauge（PKI 到期分布等）在 /metrics 上恒为 0。
     let agent_metrics = coord_agent::metrics::AgentMetrics::new();
     let agent_ready_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let _agent_health_handle = coord_agent::health::start_health_server(
         &agent_config.http_addr,
-        agent_metrics,
+        agent_metrics.clone(),
         Arc::clone(&agent_ready_flag),
     );
 
     let agent_server = coord_agent::AgentServer::new(agent_config)
-        .with_metrics(coord_agent::metrics::AgentMetrics::new())
+        .with_metrics(agent_metrics)
         .with_ready_flag(agent_ready_flag)
         // dev 专用放行（见 ADR-0008）：非 loopback 明文绑定仅经本调用链可达。
         .with_dev_allow_insecure_non_loopback(allow_insecure)
