@@ -101,12 +101,9 @@ const PD_QUEUE_MAX_TERMINAL: usize = 512;
 
 // ──── TSO（region 0 system raft，#136）────
 
-/// TSO 内部记录前缀（region 0 MVCC，`TABLE_KV` 原始行）。
-///
-/// 选 `/_sys/` 而不是 `/_meta/`：快照导出按 `/_sys/*` 整域携带（`/_sys/auth/`
-/// 之外），高水位随快照/恢复一起走——装快照后不得回退（否则会重发旧批）。
-/// 非 `/kv/` 前缀 → 不加密；无 KvMetadata → 不经 compaction 清理。
-pub const TSO_PREFIX: &[u8] = b"/_sys/tso/";
+// 记录选 `/_sys/` 而不是 `/_meta/`：快照导出按 `/_sys/*` 整域携带
+// （`/_sys/auth/` 之外），高水位随快照/恢复一起走——装快照后不得回退（否则会
+// 重发旧批）。非 `/kv/` 前缀 → 不加密；无 KvMetadata → 不经 compaction 清理。
 
 /// 下一个未发放的时间戳（u64 BE；缺失 = 1）。0 是协议里的「由服务端决定」
 /// 哨兵，不得发放。

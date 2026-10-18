@@ -579,6 +579,35 @@ mod tests {
         let leader_alloc = TsoAllocator::new(leader.raft.as_ref().clone(), leader.node_id);
         let first = tso_allocate_with_retry(&leader_alloc, 64).await;
         assert!(first.end_ts > first.start_ts);
+
+        // 并发分配：raft 串行化后各批不得重叠，且全部在 first 之后。
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let alloc = leader_alloc.clone();
+            handles.push(tokio::spawn(async move {
+                tso_allocate_with_retry(&alloc, 16).await
+            }));
+        }
+        let mut batches = Vec::new();
+        for handle in handles {
+            batches.push(handle.await.expect("concurrent allocate task"));
+        }
+        batches.sort_by_key(|b| b.start_ts);
+        for window in batches.windows(2) {
+            assert!(
+                window[0].end_ts <= window[1].start_ts,
+                "concurrent TSO batches overlap: {:?} / {:?}",
+                window[0],
+                window[1]
+            );
+        }
+        let highest_end = batches
+            .iter()
+            .map(|b| b.end_ts)
+            .max()
+            .unwrap_or(first.end_ts)
+            .max(first.end_ts);
+
         // 分配器持有 Raft 句柄（Arc）：必须先释放，否则 kill 后 leader 的 core
         // 仍被本地句柄保活、心跳继续，存活节点永远不会触发选举。
         drop(leader_alloc);
@@ -593,10 +622,8 @@ mod tests {
         let second = tso_allocate_with_retry(&new_alloc, 64).await;
 
         assert!(
-            second.start_ts >= first.end_ts,
-            "TSO batch reused across failover: first=[{}, {}) second=[{}, {})",
-            first.start_ts,
-            first.end_ts,
+            second.start_ts >= highest_end,
+            "TSO batch reused across failover: highest_end={highest_end} second=[{}, {})",
             second.start_ts,
             second.end_ts
         );
