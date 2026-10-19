@@ -322,6 +322,9 @@ pub struct KvMetadata {
     pub deleted: bool,
 }
 
+/// 历史/实时 Range 返回的一行：`(key, value, metadata)`。
+pub type VersionedKv = (Vec<u8>, Vec<u8>, KvMetadata);
+
 impl KvMetadata {
     /// 序列化为 33 字节固定格式：
     /// version(8BE) | create_revision(8BE) | mod_revision(8BE) | lease_id(8BE) | deleted(1)
@@ -1148,7 +1151,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         start: &[u8],
         range_end: &[u8],
         limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Vec<u8>, KvMetadata)>, Revision)> {
+    ) -> Result<(Vec<VersionedKv>, Revision)> {
         let internal_start = encode_kv_key(start);
         let internal_end = encode_kv_key(range_end);
         self.backend.read(|tx| {
@@ -1231,7 +1234,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         range_end: &[u8],
         limit: usize,
         target_revision: Revision,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>, KvMetadata)>> {
+    ) -> Result<Vec<VersionedKv>> {
         let historical = self.replay_historical_range(start, range_end, target_revision)?;
         let mut results = Vec::new();
         for (key, value) in historical.view {
