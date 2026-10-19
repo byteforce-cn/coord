@@ -522,8 +522,8 @@ struct HistoricalRangeView {
     view: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
     /// key → 最后一次 <= target revision 的写入 revision（含 delete）
     last_write: std::collections::BTreeMap<Vec<u8>, Revision>,
-    /// key → target revision 之后的写入次数（version 回推用）
-    writes_after: std::collections::HashMap<Vec<u8>, u64>,
+    /// key → target revision 之后的写入事件 `(revision, is_delete)`（version 回推用）
+    post_events: std::collections::HashMap<Vec<u8>, Vec<(Revision, bool)>>,
 }
 
 // ──── Compact ────
@@ -1248,8 +1248,30 @@ impl<B: StorageBackend> MvccStorage<B> {
                     String::from_utf8_lossy(&key)
                 ))
             })?;
-            let writes_after = historical.writes_after.get(&key).copied().unwrap_or(0);
-            let metadata = if writes_after == 0 {
+            // version 只能被“生效的”写入推进；对不存在 key 的 delete 会写
+            // changelog 但不增加 version。从 T 时刻的存在状态向后模拟，才能
+            // 把 no-op delete 排除掉（只数事件条数会低估 version）。
+            let effective_after = historical
+                .post_events
+                .get(&key)
+                .map(|events| {
+                    let mut exists = true; // 调用方只对 T 时刻存在的 key 建元数据
+                    let mut count = 0i64;
+                    for &(_, is_delete) in events {
+                        if is_delete {
+                            if exists {
+                                count += 1;
+                                exists = false;
+                            }
+                        } else {
+                            count += 1;
+                            exists = true;
+                        }
+                    }
+                    count
+                })
+                .unwrap_or(0);
+            let metadata = if effective_after == 0 {
                 if current.deleted {
                     return Err(Error::Internal(format!(
                         "historical metadata for key {} at revision {target_revision} is not \
@@ -1262,13 +1284,13 @@ impl<B: StorageBackend> MvccStorage<B> {
             } else {
                 let version = current
                     .version
-                    .checked_sub(writes_after as i64)
+                    .checked_sub(effective_after)
                     .ok_or_else(|| {
                         Error::Internal(format!(
                             "historical metadata for key {} at revision {target_revision} is not \
                          reconstructable: {} write(s) after the target exceed current version {}",
                             String::from_utf8_lossy(&key),
-                            writes_after,
+                            effective_after,
                             current.version
                         ))
                     })?;
@@ -1310,7 +1332,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         self.ensure_history_reconstructable(target_revision)?;
         let end_key = encode_changelog_key(target_revision.saturating_add(1));
 
-        let (mut view, changed_after, last_write, writes_after) = self.backend.read(|tx| {
+        let (mut view, changed_after, last_write, post_events) = self.backend.read(|tx| {
             let entries = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
             // BTreeMap 保持 Key 字典序
             let mut view: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
@@ -1321,8 +1343,8 @@ impl<B: StorageBackend> MvccStorage<B> {
             // key → 最后一次 <= T 的写入 revision（含 delete）
             let mut last_write: std::collections::BTreeMap<Vec<u8>, Revision> =
                 std::collections::BTreeMap::new();
-            // key → T 之后的写入次数（version 回推用）
-            let mut writes_after: std::collections::HashMap<Vec<u8>, u64> =
+            // key → T 之后的写入事件（version 回推用；必须保留 delete 顺序）
+            let mut post_events: std::collections::HashMap<Vec<u8>, Vec<(Revision, bool)>> =
                 std::collections::HashMap::new();
             for (ch_key, ch_value) in entries {
                 let is_after = ch_key.as_slice() >= end_key.as_slice();
@@ -1336,7 +1358,10 @@ impl<B: StorageBackend> MvccStorage<B> {
                         }
                         if is_after {
                             changed_after.insert(change.key.clone());
-                            *writes_after.entry(change.key.clone()).or_insert(0) += 1;
+                            post_events
+                                .entry(change.key.clone())
+                                .or_default()
+                                .push((event.revision, change.value.is_none()));
                             continue;
                         }
                         last_write.insert(change.key.clone(), event.revision);
@@ -1351,7 +1376,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     }
                 }
             }
-            Ok((view, changed_after, last_write, writes_after))
+            Ok((view, changed_after, last_write, post_events))
         })?;
 
         // 补齐：在保留窗口内没有任何写入的 Key，其 T 时刻状态 = 当前状态。
@@ -1410,7 +1435,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         Ok(HistoricalRangeView {
             view,
             last_write,
-            writes_after,
+            post_events,
         })
     }
 
@@ -3296,6 +3321,35 @@ mod tests {
                 .is_empty(),
             "delete@30 must remove the key from the revision-35 view"
         );
+    }
+
+    #[test]
+    fn test_range_at_revision_metadata_ignores_noop_deletes_after_target() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v1", None, 10, applied_for(1))
+            .unwrap();
+        // 第一次 delete 生效（version 2），第二次对不存在 key 的 delete 是
+        // no-op：写 changelog 但不增加 version。
+        storage
+            .delete_at_commit_ts(b"k", 20, applied_for(2))
+            .unwrap();
+        storage
+            .delete_at_commit_ts(b"k", 30, applied_for(3))
+            .unwrap();
+
+        let results = storage
+            .range_at_revision_with_metadata(b"a", b"z", 0, 15)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        let (_, value, meta) = &results[0];
+        assert_eq!(value, b"v1");
+        assert_eq!(
+            meta.version, 1,
+            "no-op deletes after the target must not be subtracted from version"
+        );
+        assert_eq!(meta.create_revision, 10);
+        assert_eq!(meta.mod_revision, 10);
     }
 
     #[test]
