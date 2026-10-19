@@ -24,6 +24,7 @@ use coord_core::error::Error;
 use coord_core::error_code::{attach, CoordErrorCode};
 use coord_core::kv_range::RangeSemantics;
 
+use super::lease as lease_rpc;
 use super::txn::{ReadIntent, ReadSetLimit, SessionError};
 use super::KvTCapability;
 use crate::raft::tso::{normalize_batch_size, TsoAllocator, TsoBatch};
@@ -47,7 +48,7 @@ type ShellStream<T> = tokio_stream::Empty<Result<T, Status>>;
 
 /// TSO 分配链路的错误映射：先结构化分类（NOT_LEADER / INVALID_ARGUMENT /
 /// UNAVAILABLE），再交给通用 `map_err` 脱敏。
-fn tso_status(err: Error) -> Status {
+pub(super) fn tso_status(err: Error) -> Status {
     let code = match &err {
         Error::NotLeader { .. } | Error::NotLeaderNoHint => Some(CoordErrorCode::NotLeader),
         Error::InvalidArgument(_) => Some(CoordErrorCode::InvalidArgument),
@@ -317,19 +318,10 @@ impl kv_v2::kv_server::Kv for CoordNode {
         let metadata = request.metadata().clone();
         let req = request.into_inner();
         let commit_ts = require_positive_ts("commit_ts", req.commit_ts)?;
-        if req.lease_id != 0 {
-            // v2 Lease 未交付前绑定 lease 会让 v1 的按 log-index 吊销删除
-            // CommitTs 数据（不推进 revision），破坏 D11.2/7。
-            return Err(attach(
-                Status::failed_precondition(
-                    "kv.v2 lease binding requires coord.lease.v2 (#145); \
-                     retry with lease_id=0",
-                ),
-                CoordErrorCode::FailedPrecondition,
-            ));
-        }
         self.guard_object_write_key(&req.key)?;
 
+        // 幂等重放必须先于租约存活校验：原请求成功后租约可能已 revoke，
+        // 用同一 request_id 重试应回放首次结果，而不是变成 FAILED_PRECONDITION。
         let idem_key = (!req.request_id.is_empty())
             .then(|| crate::server::v2_idempotency_key(b"put", &metadata, &req.request_id));
         if let Some(key) = &idem_key {
@@ -340,6 +332,15 @@ impl kv_v2::kv_server::Kv for CoordNode {
                 }));
             }
         }
+
+        // 绑定前 fail-closed：未知/已吊销/已过期租约不得写入新 key（否则
+        // revoke 之后写入的数据会失去清理语义）。
+        let lease_id = if req.lease_id != 0 {
+            lease_rpc::require_live_lease(self, req.lease_id)?;
+            Some(req.lease_id)
+        } else {
+            None
+        };
 
         let target = self.kv_target_for_key(&req.key)?;
         self.guard_key_in_target(&target, &req.key)?;
@@ -370,7 +371,7 @@ impl kv_v2::kv_server::Kv for CoordNode {
             let cmd = Command::PutV2 {
                 key: req.key.clone(),
                 value: req.value.clone(),
-                lease_id: None,
+                lease_id,
                 commit_ts,
             };
             let resp = self
@@ -406,7 +407,7 @@ impl kv_v2::kv_server::Kv for CoordNode {
                 .put_at_commit_ts(
                     &req.key,
                     &req.value,
-                    None,
+                    lease_id,
                     commit_ts,
                     crate::storage::mvcc::AppliedLogId::standalone(commit_ts),
                 )
@@ -923,34 +924,39 @@ impl txn_v2::txn_server::Txn for CoordNode {
 
 #[tonic::async_trait]
 impl lease_v2::lease_server::Lease for CoordNode {
-    type LeaseKeepAliveStream = ShellStream<lease_v2::LeaseKeepAliveResponse>;
+    type LeaseKeepAliveStream =
+        tokio_stream::wrappers::ReceiverStream<Result<lease_v2::LeaseKeepAliveResponse, Status>>;
 
     async fn lease_grant(
         &self,
-        _request: Request<lease_v2::LeaseGrantRequest>,
+        request: Request<lease_v2::LeaseGrantRequest>,
     ) -> Result<Response<lease_v2::LeaseGrantResponse>, Status> {
-        Err(shell(KvTCapability::Lease, self))
+        self.kvt().gate(KvTCapability::Lease)?;
+        lease_rpc::grant(self, request.into_inner()).await
     }
 
     async fn lease_revoke(
         &self,
-        _request: Request<lease_v2::LeaseRevokeRequest>,
+        request: Request<lease_v2::LeaseRevokeRequest>,
     ) -> Result<Response<lease_v2::LeaseRevokeResponse>, Status> {
-        Err(shell(KvTCapability::Lease, self))
+        self.kvt().gate(KvTCapability::Lease)?;
+        lease_rpc::revoke(self, request.into_inner()).await
     }
 
     async fn lease_keep_alive(
         &self,
-        _request: Request<Streaming<lease_v2::LeaseKeepAliveRequest>>,
+        request: Request<Streaming<lease_v2::LeaseKeepAliveRequest>>,
     ) -> Result<Response<Self::LeaseKeepAliveStream>, Status> {
-        Err(shell(KvTCapability::Lease, self))
+        self.kvt().gate(KvTCapability::Lease)?;
+        lease_rpc::keep_alive(self, request)
     }
 
     async fn lease_time_to_live(
         &self,
-        _request: Request<lease_v2::LeaseTimeToLiveRequest>,
+        request: Request<lease_v2::LeaseTimeToLiveRequest>,
     ) -> Result<Response<lease_v2::LeaseTimeToLiveResponse>, Status> {
-        Err(shell(KvTCapability::Lease, self))
+        self.kvt().gate(KvTCapability::Lease)?;
+        lease_rpc::time_to_live(self, request.into_inner()).await
     }
 }
 

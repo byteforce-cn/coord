@@ -270,6 +270,12 @@ pub struct StateMachineStore {
     /// 日志并收到广播——因此无论哪个节点最终成为某 Region 的 leader，都能
     /// 看到广播并完成删除（幂等）。
     pub lease_revoke_tx: Option<tokio::sync::mpsc::UnboundedSender<i64>>,
+    /// v2 Lease Revoke 广播（可选，仅 region 0 状态机设置）。
+    ///
+    /// `LeaseV2Op::Revoke` apply 后广播 `(lease_id, commit_ts)`；各节点上的
+    /// revoker 只清理自己担任 leader 的数据 Region。广播携带清理时间戳，
+    /// 启动扫描从租约表读取同一个值，重启续跑无需额外状态。
+    pub lease_v2_revoke_tx: Option<tokio::sync::mpsc::UnboundedSender<(i64, u64)>>,
     /// 对象存储 chunk 文件存储（本 raft 数据目录下；`Command::ObjectStore`
     /// apply 时写/删 chunk 文件）。None = 未启用对象存储（收到 ObjectStore 命令
     /// 即配置不一致，apply 报错）。
@@ -365,6 +371,7 @@ impl StateMachineStore {
             session_manager: None,
             metrics: None,
             lease_revoke_tx: None,
+            lease_v2_revoke_tx: None,
             object_chunk_store: None,
         }
     }
@@ -377,6 +384,11 @@ impl StateMachineStore {
     /// 设置 Lease Revoke 广播通道（仅 region 0 状态机调用）
     pub fn set_lease_revoke_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<i64>) {
         self.lease_revoke_tx = Some(tx);
+    }
+
+    /// 设置 v2 Lease Revoke 广播通道（仅 region 0 状态机调用）
+    pub fn set_lease_v2_revoke_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<(i64, u64)>) {
+        self.lease_v2_revoke_tx = Some(tx);
     }
 
     /// 设置 Watch 事件分发器（通常在 Leader 选举后调用）
@@ -592,6 +604,76 @@ impl StateMachineStore {
                     }),
                 ))
             }
+            Command::LeaseV2(op) => {
+                let (result, _outcome) = sm
+                    .apply_lease_v2_op(op, revision, applied)
+                    .map_err(io_err)?;
+                let response = match result {
+                    crate::storage::mvcc::LeaseV2Apply::Grant {
+                        lease_id,
+                        granted_ts,
+                        ttl,
+                        created,
+                    } => Response::LeaseV2Grant {
+                        lease_id,
+                        granted_ts,
+                        ttl_seconds: ttl,
+                        created,
+                    },
+                    crate::storage::mvcc::LeaseV2Apply::KeepAlive { ok } => {
+                        Response::LeaseV2KeepAlive { ok }
+                    }
+                    crate::storage::mvcc::LeaseV2Apply::Revoke { commit_ts } => {
+                        Response::LeaseV2Revoke { commit_ts }
+                    }
+                };
+                Ok((response, None))
+            }
+            Command::DeleteKeysByLeaseV2 {
+                lease_id,
+                commit_ts,
+            } => match sm.delete_keys_by_lease_at_commit_ts(*lease_id, *commit_ts, applied) {
+                Ok((outcome, deleted)) => {
+                    let event = if outcome.replayed {
+                        None
+                    } else {
+                        Some(ChangeEvent {
+                            revision: *commit_ts,
+                            changes: deleted
+                                .iter()
+                                .map(|key| KeyValueChange {
+                                    key: key.clone(),
+                                    value: None,
+                                    prev_value: None,
+                                })
+                                .collect(),
+                            event_type: EventType::Lease,
+                        })
+                    };
+                    Ok((
+                        Response::DeleteRange {
+                            revision: *commit_ts,
+                            deleted: deleted.len() as u64,
+                        },
+                        event,
+                    ))
+                }
+                Err(Error::CommitRejected {
+                    commit_ts,
+                    current_revision,
+                }) => {
+                    // 拒绝也要推进 applied，否则重启后同一命令被无限重放。
+                    sm.set_last_applied(applied).map_err(io_err)?;
+                    Ok((
+                        Response::CommitRejected {
+                            commit_ts,
+                            current_revision,
+                        },
+                        None,
+                    ))
+                }
+                Err(e) => Err(io_err(e)),
+            },
             Command::Lease(op) => {
                 let (outcome, changes) =
                     sm.apply_lease_op(op, revision, applied).map_err(io_err)?;
@@ -929,6 +1011,20 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             let _ = tx.send(*id);
                         }
                     }
+                    if let Some(tx) = &self.lease_v2_revoke_tx {
+                        if let crate::raft::type_config::Command::LeaseV2(
+                            crate::raft::type_config::LeaseV2Op::Revoke {
+                                lease_id,
+                                commit_ts,
+                                ..
+                            },
+                        ) = cmd
+                        {
+                            if *commit_ts > 0 {
+                                let _ = tx.send((*lease_id, *commit_ts));
+                            }
+                        }
+                    }
 
                     // 分发 Watch 事件（非阻塞；replayed 时事件为 None）
                     if let (Some(dispatcher), Some(event)) = (&self.watch_dispatcher, change_event)
@@ -1074,6 +1170,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             session_manager: None,
             metrics: self.metrics.clone(),
             lease_revoke_tx: None,
+            lease_v2_revoke_tx: None,
             object_chunk_store: self.object_chunk_store.clone(),
         }
     }

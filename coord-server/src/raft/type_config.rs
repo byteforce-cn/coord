@@ -30,6 +30,38 @@ pub enum LeaseOp {
     Revoke { id: i64, delete_keys: bool },
 }
 
+/// v2 租约操作（仅 region 0 system raft；apply 持久化到 `/_leasev2/{id}`）。
+///
+/// 与 v1 [`LeaseOp`] 分离：v1 的 revision ≡ log index，v2 的数据删除必须使用
+/// TSO 分配的 `commit_ts`，两者不能共用记录格式与清理路径。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum LeaseV2Op {
+    /// 发放租约：`lease_id`/`granted_ts` 由 leader 从 TSO 取得后入日志，
+    /// apply 不重新分配（确定性）。
+    Grant {
+        lease_id: i64,
+        ttl_seconds: i64,
+        granted_ts: u64,
+        deadline_wall_ms: i64,
+        request_id: Vec<u8>,
+    },
+    /// 续约：只延长 deadline，不产生 commit_ts。
+    KeepAlive {
+        lease_id: i64,
+        deadline_wall_ms: i64,
+    },
+    /// 吊销/到期：记录清理时间戳。已吊销记录收到更高时间戳时视为清理重试
+    /// （`COMMIT_REJECTED` 后由 revoker 重新取 TSO）。
+    Revoke {
+        lease_id: i64,
+        commit_ts: u64,
+        /// 到期 worker 观测到的 deadline；apply 时若记录已被续期（deadline
+        /// 更晚）则放弃本次到期清理。0 = 显式 revoke / 清理重试，不做该守卫。
+        expected_deadline_wall_ms: i64,
+        request_id: Vec<u8>,
+    },
+}
+
 /// 鉴权元数据操作（入 raft 日志，apply 持久化到 `/_sys/auth/` 前缀）
 ///
 /// 用户/角色/吊销登记全部经 raft 达成集群一致；`AuthManager` 内存表为 apply
@@ -422,6 +454,14 @@ pub enum Command {
     ///
     /// **末尾追加**；`fence_ts` 是 TSO 分配边界，节点经 raft apply 收敛。
     PublishSafeTs { fence_ts: u64 },
+    /// v2 租约生命周期（仅 region 0 system raft 提出）。
+    ///
+    /// **末尾追加**；租约表与业务 keyspace 分离，apply 不推进 revision。
+    LeaseV2(LeaseV2Op),
+    /// 数据 Region 按 `KvMetadata.lease_id` 在 `commit_ts` 上删除绑定 Key。
+    ///
+    /// **末尾追加**；只由 v2 Lease revoke/到期触发。
+    DeleteKeysByLeaseV2 { lease_id: i64, commit_ts: u64 },
 }
 
 impl std::fmt::Display for Command {
@@ -472,6 +512,16 @@ impl std::fmt::Display for Command {
             }
             Command::PublishSafeTs { fence_ts } => {
                 write!(f, "PublishSafeTs(fence_ts={fence_ts})")
+            }
+            Command::LeaseV2(op) => write!(f, "LeaseV2({op:?})"),
+            Command::DeleteKeysByLeaseV2 {
+                lease_id,
+                commit_ts,
+            } => {
+                write!(
+                    f,
+                    "DeleteKeysByLeaseV2(lease_id={lease_id}, commit_ts={commit_ts})"
+                )
             }
         }
     }
@@ -540,6 +590,23 @@ pub enum Response {
     SafeTsPublished {
         fence_ts: u64,
     },
+    /// v2 租约发放结果：`created=false` = 显式 id 已被不同请求占用
+    /// （handler 报 `ALREADY_EXISTS`）；`request_id` 命中既有记录时回放首次
+    /// id/granted_ts 且 `created=true`。
+    LeaseV2Grant {
+        lease_id: i64,
+        granted_ts: u64,
+        ttl_seconds: i64,
+        created: bool,
+    },
+    /// v2 续约结果：`ok=false` 表示记录不存在或已吊销（不写 Err）。
+    LeaseV2KeepAlive {
+        ok: bool,
+    },
+    /// v2 吊销结果：0 = 本次没有新决策（幂等/未知/已吊销）。
+    LeaseV2Revoke {
+        commit_ts: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -578,6 +645,19 @@ impl std::fmt::Display for Response {
             }
             Response::SafeTsPublished { fence_ts } => {
                 write!(f, "SafeTsPublished(fence_ts={fence_ts})")
+            }
+            Response::LeaseV2Grant {
+                lease_id,
+                granted_ts,
+                ttl_seconds,
+                created,
+            } => write!(
+                f,
+                "LeaseV2Grant(id={lease_id}, granted_ts={granted_ts}, ttl={ttl_seconds}, created={created})"
+            ),
+            Response::LeaseV2KeepAlive { ok } => write!(f, "LeaseV2KeepAlive(ok={ok})"),
+            Response::LeaseV2Revoke { commit_ts } => {
+                write!(f, "LeaseV2Revoke(commit_ts={commit_ts})")
             }
         }
     }
