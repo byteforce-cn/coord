@@ -19,10 +19,12 @@ use coord_proto::watch::v2 as watch_v2;
 
 use coord_core::error::Error;
 use coord_core::error_code::{attach, CoordErrorCode};
+use coord_core::kv_range::RangeSemantics;
 
 use super::KvTCapability;
 use crate::raft::tso::{normalize_batch_size, TsoAllocator, TsoBatch};
-use crate::server::CoordNode;
+use crate::raft::type_config::{Command, Response as RaftResponse};
+use crate::server::{map_err, CoordNode};
 
 /// 门禁 + 未实现哨兵。
 fn shell(capability: KvTCapability, node: &CoordNode) -> Status {
@@ -113,13 +115,198 @@ impl tso_v2::tso_server::Tso for CoordNode {
 
 // ──── coord.kv.v2 ────
 
+/// 结构化错误映射：v2 调用方只按 trailer 码分支，不得解析消息文本。
+fn v2_status(err: Error) -> Status {
+    let code = match &err {
+        Error::InvalidArgument(_) => Some(CoordErrorCode::InvalidArgument),
+        Error::RevisionCompacted { .. } => Some(CoordErrorCode::OutOfRange),
+        Error::CommitRejected { .. } => Some(CoordErrorCode::CommitRejected),
+        _ => None,
+    };
+    let status = crate::server::map_err(err);
+    match code {
+        Some(code) => attach(status, code),
+        None => status,
+    }
+}
+
+fn require_positive_ts(name: &str, ts: i64) -> Result<u64, Status> {
+    if ts <= 0 {
+        return Err(attach(
+            Status::invalid_argument(format!("{name} must be > 0")),
+            CoordErrorCode::InvalidArgument,
+        ));
+    }
+    Ok(ts as u64)
+}
+
+fn to_kv_v2(
+    key: &[u8],
+    value: &[u8],
+    meta: Option<&crate::storage::mvcc::KvMetadata>,
+) -> kv_v2::KeyValue {
+    match meta {
+        Some(m) => kv_v2::KeyValue {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            create_revision: m.create_revision,
+            mod_revision: m.mod_revision,
+            version: m.version,
+            lease_id: m.lease_id,
+        },
+        None => kv_v2::KeyValue {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            create_revision: 0,
+            mod_revision: 0,
+            version: 1,
+            lease_id: 0,
+        },
+    }
+}
+
+/// v2 / v1 KeyValue 字段一一对应；幂等缓存复用 v1 容器，转换必须无信息损失。
+fn kv_v2_to_v1(kv: &kv_v2::KeyValue) -> coord_proto::kv::KeyValue {
+    coord_proto::kv::KeyValue {
+        key: kv.key.clone(),
+        value: kv.value.clone(),
+        create_revision: kv.create_revision,
+        mod_revision: kv.mod_revision,
+        version: kv.version,
+        lease_id: kv.lease_id,
+    }
+}
+
+fn kv_v1_to_v2(kv: &coord_proto::kv::KeyValue) -> kv_v2::KeyValue {
+    kv_v2::KeyValue {
+        key: kv.key.clone(),
+        value: kv.value.clone(),
+        create_revision: kv.create_revision,
+        mod_revision: kv.mod_revision,
+        version: kv.version,
+        lease_id: kv.lease_id,
+    }
+}
+
+fn record_commit_rejected(node: &CoordNode) {
+    if let Some(metrics) = node.metrics() {
+        metrics.inc_kv_v2_commit_rejected();
+    }
+}
+
 #[tonic::async_trait]
 impl kv_v2::kv_server::Kv for CoordNode {
     async fn put(
         &self,
-        _request: Request<kv_v2::PutRequest>,
+        request: Request<kv_v2::PutRequest>,
     ) -> Result<Response<kv_v2::PutResponse>, Status> {
-        Err(shell(KvTCapability::Kv, self))
+        self.kvt().gate(KvTCapability::Kv)?;
+        self.ensure_writable()?;
+
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let commit_ts = require_positive_ts("commit_ts", req.commit_ts)?;
+        if req.lease_id != 0 {
+            // v2 Lease 未交付前绑定 lease 会让 v1 的按 log-index 吊销删除
+            // CommitTs 数据（不推进 revision），破坏 D11.2/7。
+            return Err(attach(
+                Status::failed_precondition(
+                    "kv.v2 lease binding requires coord.lease.v2 (#145); \
+                     retry with lease_id=0",
+                ),
+                CoordErrorCode::FailedPrecondition,
+            ));
+        }
+        self.guard_object_write_key(&req.key)?;
+
+        let idem_key = (!req.request_id.is_empty())
+            .then(|| crate::server::v2_idempotency_key(b"put", &metadata, &req.request_id));
+        if let Some(key) = &idem_key {
+            if let Some(entry) = self.check_idempotent_entry(key) {
+                return Ok(Response::new(kv_v2::PutResponse {
+                    prev_kv: entry.prev_kv.as_ref().map(kv_v1_to_v2),
+                    commit_ts: entry.revision,
+                }));
+            }
+        }
+
+        let target = self.kv_target_for_key(&req.key)?;
+        self.guard_key_in_target(&target, &req.key)?;
+
+        let prev_kv = if req.prev_kv {
+            target
+                .mvcc
+                .get(&req.key)
+                .map_err(map_err)?
+                .map(|prev_value| {
+                    let meta = target.mvcc.get_kv_metadata(&req.key).map_err(map_err)?;
+                    Ok::<_, Status>(to_kv_v2(&req.key, &prev_value, meta.as_ref()))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+
+        if let Some(raft) = &target.raft {
+            let cmd = Command::PutV2 {
+                key: req.key.clone(),
+                value: req.value.clone(),
+                lease_id: None,
+                commit_ts,
+            };
+            let resp = self
+                .client_write_with_timeout(raft, cmd, target.region_id)
+                .await?;
+            match resp.response() {
+                RaftResponse::Put { revision } => {
+                    if *revision != commit_ts {
+                        return Err(Status::internal(format!(
+                            "raft applied commit_ts {revision}, expected {commit_ts}"
+                        )));
+                    }
+                }
+                RaftResponse::CommitRejected {
+                    commit_ts,
+                    current_revision,
+                } => {
+                    record_commit_rejected(self);
+                    return Err(v2_status(Error::CommitRejected {
+                        commit_ts: *commit_ts,
+                        current_revision: *current_revision,
+                    }));
+                }
+                other => {
+                    return Err(Status::internal(format!(
+                        "unexpected raft response for PutV2: {other:?}"
+                    )))
+                }
+            }
+        } else {
+            target
+                .mvcc
+                .put_at_commit_ts(
+                    &req.key,
+                    &req.value,
+                    None,
+                    commit_ts,
+                    crate::storage::mvcc::AppliedLogId::standalone(commit_ts),
+                )
+                .map_err(|err| {
+                    if matches!(err, Error::CommitRejected { .. }) {
+                        record_commit_rejected(self);
+                    }
+                    v2_status(err)
+                })?;
+        }
+
+        if let Some(key) = idem_key {
+            self.cache_idempotent_put(key, commit_ts as i64, prev_kv.as_ref().map(kv_v2_to_v1));
+        }
+
+        Ok(Response::new(kv_v2::PutResponse {
+            prev_kv,
+            commit_ts: commit_ts as i64,
+        }))
     }
 
     async fn range(
@@ -131,9 +318,166 @@ impl kv_v2::kv_server::Kv for CoordNode {
 
     async fn delete(
         &self,
-        _request: Request<kv_v2::DeleteRequest>,
+        request: Request<kv_v2::DeleteRequest>,
     ) -> Result<Response<kv_v2::DeleteResponse>, Status> {
-        Err(shell(KvTCapability::Kv, self))
+        self.kvt().gate(KvTCapability::Kv)?;
+        self.ensure_writable()?;
+
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let commit_ts = require_positive_ts("commit_ts", req.commit_ts)?;
+        let is_range = RangeSemantics::of(&req.key, &req.range_end).is_interval();
+        if is_range {
+            self.guard_object_write_range(&req.key, &req.range_end)?;
+        } else {
+            self.guard_object_write_key(&req.key)?;
+        }
+
+        let idem_key = (!req.request_id.is_empty())
+            .then(|| crate::server::v2_idempotency_key(b"delete", &metadata, &req.request_id));
+        if let Some(key) = &idem_key {
+            if let Some(entry) = self.check_idempotent_entry(key) {
+                return Ok(Response::new(kv_v2::DeleteResponse {
+                    deleted: entry.deleted,
+                    prev_kvs: entry.prev_kvs.iter().map(kv_v1_to_v2).collect(),
+                    commit_ts: entry.revision,
+                }));
+            }
+        }
+
+        let target = self.kv_target_for_key(&req.key)?;
+        if is_range {
+            self.guard_range_in_target(&target, &req.key, &req.range_end)?;
+        } else {
+            self.guard_key_in_target(&target, &req.key)?;
+        }
+
+        let max_range = self.kvt().config().max_range as usize;
+        let live = if is_range {
+            None
+        } else {
+            target.mvcc.get(&req.key).map_err(map_err)?
+        };
+        let prev_kvs: Vec<kv_v2::KeyValue> = if req.prev_kv {
+            if is_range {
+                target
+                    .mvcc
+                    .range_in(&req.key, &req.range_end, max_range)
+                    .map_err(map_err)?
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let meta = target.mvcc.get_kv_metadata(&k).ok().flatten();
+                        to_kv_v2(&k, &v, meta.as_ref())
+                    })
+                    .collect()
+            } else {
+                live.iter()
+                    .map(|value| {
+                        let meta = target.mvcc.get_kv_metadata(&req.key).ok().flatten();
+                        to_kv_v2(&req.key, value, meta.as_ref())
+                    })
+                    .collect()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let (deleted, revision): (i64, u64) = if let Some(raft) = &target.raft {
+            let cmd = if is_range {
+                Command::DeleteRangeV2 {
+                    key: req.key.clone(),
+                    range_end: req.range_end.clone(),
+                    commit_ts,
+                }
+            } else {
+                Command::DeleteV2 {
+                    key: req.key.clone(),
+                    commit_ts,
+                }
+            };
+            let resp = self
+                .client_write_with_timeout(raft, cmd, target.region_id)
+                .await?;
+            match resp.response() {
+                RaftResponse::Delete { revision } => {
+                    if *revision != commit_ts {
+                        return Err(Status::internal(format!(
+                            "raft applied commit_ts {revision}, expected {commit_ts}"
+                        )));
+                    }
+                    (if live.is_some() { 1 } else { 0 }, *revision)
+                }
+                RaftResponse::DeleteRange { revision, deleted } => {
+                    if *revision != commit_ts {
+                        return Err(Status::internal(format!(
+                            "raft applied commit_ts {revision}, expected {commit_ts}"
+                        )));
+                    }
+                    (*deleted as i64, *revision)
+                }
+                RaftResponse::CommitRejected {
+                    commit_ts,
+                    current_revision,
+                } => {
+                    record_commit_rejected(self);
+                    return Err(v2_status(Error::CommitRejected {
+                        commit_ts: *commit_ts,
+                        current_revision: *current_revision,
+                    }));
+                }
+                other => {
+                    return Err(Status::internal(format!(
+                        "unexpected raft response for DeleteV2: {other:?}"
+                    )))
+                }
+            }
+        } else if is_range {
+            let outcome = target
+                .mvcc
+                .delete_range_at_commit_ts(
+                    &req.key,
+                    &req.range_end,
+                    commit_ts,
+                    crate::storage::mvcc::AppliedLogId::standalone(commit_ts),
+                )
+                .map_err(|err| {
+                    if matches!(err, Error::CommitRejected { .. }) {
+                        record_commit_rejected(self);
+                    }
+                    v2_status(err)
+                })?;
+            (outcome.deleted_keys.len() as i64, commit_ts)
+        } else {
+            target
+                .mvcc
+                .delete_at_commit_ts(
+                    &req.key,
+                    commit_ts,
+                    crate::storage::mvcc::AppliedLogId::standalone(commit_ts),
+                )
+                .map_err(|err| {
+                    if matches!(err, Error::CommitRejected { .. }) {
+                        record_commit_rejected(self);
+                    }
+                    v2_status(err)
+                })?;
+            (if live.is_some() { 1 } else { 0 }, commit_ts)
+        };
+
+        if let Some(key) = idem_key {
+            self.cache_idempotent_delete(
+                key,
+                deleted,
+                prev_kvs.iter().map(kv_v2_to_v1).collect(),
+                revision as i64,
+            );
+        }
+
+        Ok(Response::new(kv_v2::DeleteResponse {
+            deleted,
+            prev_kvs,
+            commit_ts: revision as i64,
+        }))
     }
 }
 
