@@ -111,6 +111,12 @@
 - **事务**：`Begin` 建服务端读集会话；冲突 `ABORTED` + `TXN_CONFLICT`（换
   `start_ts` 重跑）；会话丢失 `TXN_NOT_FOUND`（重跑）；写集 4MiB / 读集 4096 /
   单 range 10000 key 上限（超限 `INVALID_ARGUMENT`）。
+- **Lease v2**：Grant/Revoke/KeepAlive/TimeToLive 由 region 0 leader 服务；租约
+  元数据在 region 0，绑定关系由各数据 Region 的 `KvMetadata.lease_id` 维护。
+  `Revoke` 返回清理决策的 `commit_ts`（未知/已吊销 lease 幂等返回 0）；跨 Region
+  删除最终一致（数据 Region 已 apply 更高 `commit_ts` 时服务端重取 TSO 重试）。
+  `Put(lease_id>0)` 对未知/已吊销/已过期 lease 返回 `FAILED_PRECONDITION`。
+  `LeaseTimeToLive(keys=true)` 从请求节点的数据 Region 副本收集绑定 key（有上限）。
 - **Watch**：按 `commit_ts` 全局有序、同一事务原子批；断线用
   `WatchCursor(shard_id, commit_ts)` 续订；窗口不足 `OUT_OF_RANGE` +
   `HISTORY_UNAVAILABLE`（须全量重同步）。
