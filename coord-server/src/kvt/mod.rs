@@ -13,6 +13,7 @@
 
 use std::collections::BTreeSet;
 
+pub mod safe_ts;
 mod services;
 
 use coord_core::error_code::{attach, CoordErrorCode};

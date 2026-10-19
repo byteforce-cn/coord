@@ -181,6 +181,15 @@ impl TsoClient {
     /// 非 leader → `NotLeader`（并丢弃未用完的批，换 leader 后不再发放旧值）；
     /// 选举窗口 → 有界重试后返回 `ClusterUnavailable`。
     pub async fn get_ts(&self) -> Result<u64> {
+        self.get_ts_above(0).await
+    }
+
+    /// 取一个 **大于 `floor`** 的 TSO。
+    ///
+    /// `floor` 是已发布的 safe-point fence：`<= floor` 的 `commit_ts` 写入必被
+    /// 数据 Region 拒绝，继续发放只会让调用方重试。跳过这些值只产生空洞
+    /// （D2/D12.4 允许），不会重复发放。
+    pub async fn get_ts_above(&self, floor: u64) -> Result<u64> {
         if !self.source.is_leader().await {
             if self.was_leader.swap(false, Ordering::AcqRel) {
                 self.discard_batch();
@@ -193,12 +202,33 @@ impl TsoClient {
         self.was_leader.store(true, Ordering::Release);
 
         loop {
+            self.skip_to_above(floor);
             if self.needs_refill() {
                 self.refill().await?;
+                continue;
             }
             if let Some(ts) = self.claim() {
-                return Ok(ts);
+                if ts > floor {
+                    return Ok(ts);
+                }
             }
+        }
+    }
+
+    /// 丢弃缓存中 `<= floor` 的值；跳过批尾时清空，由 loop 的 refill 接续。
+    fn skip_to_above(&self, floor: u64) {
+        if floor == 0 {
+            return;
+        }
+        let remaining = {
+            let mut cache = self.cache.lock();
+            if cache.next <= floor {
+                cache.next = floor.saturating_add(1).min(cache.end);
+            }
+            cache.end.saturating_sub(cache.next)
+        };
+        if let Some(metrics) = &self.metrics {
+            metrics.set_tso_batch_remaining(remaining);
         }
     }
 
@@ -431,6 +461,19 @@ mod tests {
         }
         assert_eq!(issued, (1..=10).collect::<Vec<_>>());
         assert_eq!(source.allocate_calls(), 1, "一批 64 个应只过一次 raft");
+    }
+
+    #[tokio::test]
+    async fn test_get_ts_above_skips_values_at_or_below_floor() {
+        let source = FakeSource::new();
+        let client = TsoClient::new(Arc::new(source.clone()), 8, None);
+
+        assert_eq!(client.get_ts_above(5).await.unwrap(), 6);
+        assert_eq!(client.cached_range(), (7, 9));
+        assert_eq!(source.allocate_calls(), 1, "同一批内跳值不应重新申请");
+
+        assert_eq!(client.get_ts_above(20).await.unwrap(), 21);
+        assert!(client.cached_range().0 > 20);
     }
 
     #[tokio::test]

@@ -3336,6 +3336,23 @@ async fn run_server(
         tracing::info!("SIGHUP config reload is not supported on this platform");
     }
 
+    // 7.5 KV-T safe_ts 推进器（#142）：region 0 leader 发布 TSO 分配高水位
+    //     fence，各节点把本地领导的 Region 水位抬到 fence。关闭 kv_t / 无
+    //     Multi-Raft 时不启动（v1 行为不变）。
+    let _safe_ts_advancer =
+        if cfg.kv_t.enabled && node.region_manager.is_some() && node.raft.is_some() {
+            tracing::info!(
+                "KV-T safe-ts advancer started (interval={:?})",
+                coord_server::kvt::safe_ts::SAFE_TS_ADVANCE_INTERVAL
+            );
+            Some(coord_server::kvt::safe_ts::start_advancer(
+                Arc::clone(&node),
+                coord_server::kvt::safe_ts::SAFE_TS_ADVANCE_INTERVAL,
+            ))
+        } else {
+            None
+        };
+
     // 8. 启动 Changelog Compaction 后台任务（leader 经 raft 提案
     //    compact revision（节点一致）+ 定时 redb 文件级 compact 空间回收）
     let compaction_config = CompactionConfig::default();
@@ -3344,11 +3361,20 @@ async fn run_server(
     let auto_compact = compaction_config.auto_compact;
     let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
         node.clone();
-    let _compaction_mgr = CompactionManager::start(
+    // safe_ts 只在 kv_t 开启时约束 compaction；关闭时传 None，v1 的
+    //「current_revision - retention」逐字节不变（ADR-0001）。
+    let safe_ts_source: Option<Arc<dyn coord_server::storage::compaction::SafeTsSource>> =
+        if cfg.kv_t.enabled {
+            Some(node.clone())
+        } else {
+            None
+        };
+    let _compaction_mgr = CompactionManager::start_with_safe_ts(
         Arc::clone(&mvcc),
         compaction_config,
         Some(compaction_proposer),
         Some(Arc::clone(&metrics)),
+        safe_ts_source.clone(),
     );
     tracing::info!(
         "Compaction manager started: auto_compact={}, interval={:?}, retention={} revs",
@@ -3377,11 +3403,12 @@ async fn run_server(
                             &rt,
                         ),
                     );
-                let mgr = coord_server::storage::compaction::CompactionManager::start(
+                let mgr = coord_server::storage::compaction::CompactionManager::start_with_safe_ts(
                     Arc::clone(&rt.mvcc),
                     coord_server::storage::compaction::CompactionConfig::default(),
                     Some(proposer),
                     Some(Arc::clone(&metrics)),
+                    safe_ts_source.clone(),
                 );
                 tracing::info!("Region {rid} compaction manager started");
                 mgrs.push(mgr);

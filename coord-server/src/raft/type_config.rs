@@ -413,6 +413,15 @@ pub enum Command {
         range_end: Vec<u8>,
         commit_ts: u64,
     },
+    /// 把数据 Region 的已 apply 水位抬到安全点 fence（不写数据/changelog）。
+    ///
+    /// **末尾追加**；仅 `[kv_t].enabled=true` 的 v2 集群提出。之后
+    /// `commit_ts <= commit_ts` 的写入会被 `CommitRejected`（safe-point 语义）。
+    AdvanceSafeTs { commit_ts: u64 },
+    /// 发布全局 safe-point fence（仅 region 0 system raft 提出）。
+    ///
+    /// **末尾追加**；`fence_ts` 是 TSO 分配边界，节点经 raft apply 收敛。
+    PublishSafeTs { fence_ts: u64 },
 }
 
 impl std::fmt::Display for Command {
@@ -458,6 +467,12 @@ impl std::fmt::Display for Command {
                 String::from_utf8_lossy(key),
                 String::from_utf8_lossy(range_end)
             ),
+            Command::AdvanceSafeTs { commit_ts } => {
+                write!(f, "AdvanceSafeTs(commit_ts={commit_ts})")
+            }
+            Command::PublishSafeTs { fence_ts } => {
+                write!(f, "PublishSafeTs(fence_ts={fence_ts})")
+            }
         }
     }
 }
@@ -517,6 +532,14 @@ pub enum Response {
         commit_ts: u64,
         current_revision: u64,
     },
+    /// 数据 Region 已 apply 水位抬升结果（#142）。
+    SafeTsAdvanced {
+        revision: u64,
+    },
+    /// region 0 安全点 fence 发布结果（#142；实际生效值）。
+    SafeTsPublished {
+        fence_ts: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -550,6 +573,12 @@ impl std::fmt::Display for Response {
                 f,
                 "CommitRejected(commit_ts={commit_ts}, current={current_revision})"
             ),
+            Response::SafeTsAdvanced { revision } => {
+                write!(f, "SafeTsAdvanced(revision={revision})")
+            }
+            Response::SafeTsPublished { fence_ts } => {
+                write!(f, "SafeTsPublished(fence_ts={fence_ts})")
+            }
         }
     }
 }

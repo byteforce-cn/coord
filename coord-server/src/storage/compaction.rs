@@ -63,6 +63,15 @@ pub trait CompactProposer: Send + Sync {
     async fn propose(&self, revision: u64) -> std::result::Result<u64, String>;
 }
 
+/// safe_ts 来源（ADR-0015 D3：compaction 水位 = safe_ts）。
+///
+/// `None`（v1 / 单测）时退回 `storage.current_revision() - retention`，与
+/// #139 的过渡口径一致；`[kv_t].enabled=true` 的 Multi-Raft 节点注入
+/// `CoordNode::safe_ts`，保证不删除仍在全局安全点内的历史。
+pub trait SafeTsSource: Send + Sync {
+    fn safe_ts(&self) -> u64;
+}
+
 // ──── CompactionManager ────
 
 /// Compaction 管理器
@@ -97,12 +106,24 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
         proposer: Option<Arc<dyn CompactProposer>>,
         metrics: Option<Arc<Metrics>>,
     ) -> Self {
+        Self::start_with_safe_ts(storage, config, proposer, metrics, None)
+    }
+
+    /// 与 [`Self::start`] 相同，但自动压缩的 cutoff 以 `safe_ts` 为上界。
+    pub fn start_with_safe_ts(
+        storage: Arc<MvccStorage<B>>,
+        config: CompactionConfig,
+        proposer: Option<Arc<dyn CompactProposer>>,
+        metrics: Option<Arc<Metrics>>,
+        safe_ts: Option<Arc<dyn SafeTsSource>>,
+    ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<CompactionTrigger>();
 
         let storage_clone = Arc::clone(&storage);
         let config_clone = config.clone();
         let interval = config.interval;
         let metrics_clone = metrics.clone();
+        let safe_ts_clone = safe_ts.clone();
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -111,11 +132,12 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        Self::run_cycle(
+                        Self::run_cycle_with_safe_ts(
                             &storage_clone,
                             &config_clone,
                             proposer.as_deref(),
                             metrics_clone.as_ref(),
+                            safe_ts_clone.as_deref(),
                         )
                         .await;
                     }
@@ -123,11 +145,12 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
                         match msg {
                             Some(CompactionTrigger::Full) => {
                                 tracing::info!("Manual compaction triggered");
-                                Self::run_cycle(
+                                Self::run_cycle_with_safe_ts(
                                     &storage_clone,
                                     &config_clone,
                                     proposer.as_deref(),
                                     metrics_clone.as_ref(),
+                                    safe_ts_clone.as_deref(),
                                 )
                                 .await;
                             }
@@ -149,19 +172,34 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
         }
     }
 
-    /// 单轮 Compaction：自动压缩（leader 提案）+ 文件级 compact
+    /// 单轮 Compaction（无 safe_ts 来源；v1 行为 / 单测入口）。
+    #[cfg(test)]
     async fn run_cycle(
         storage: &MvccStorage<B>,
         config: &CompactionConfig,
         proposer: Option<&dyn CompactProposer>,
         metrics: Option<&Arc<Metrics>>,
     ) {
-        // 1. 自动压缩：仅 leader 提案（节点一致），单节点模式直接 apply
+        Self::run_cycle_with_safe_ts(storage, config, proposer, metrics, None).await;
+    }
+
+    /// 单轮 Compaction：自动压缩（leader 提案）+ 文件级 compact
+    async fn run_cycle_with_safe_ts(
+        storage: &MvccStorage<B>,
+        config: &CompactionConfig,
+        proposer: Option<&dyn CompactProposer>,
+        metrics: Option<&Arc<Metrics>>,
+        safe_ts: Option<&dyn SafeTsSource>,
+    ) {
+        // 1. 自动压缩：仅 leader 提案（节点一致），单节点模式直接 apply。
+        //    水位不得越过 safe_ts：`safe_ts < current` 时按 safe_ts - retention
+        //    截断，否则会删掉仍可能被跨区快照读到的历史（ADR-0015 D3）。
         if config.auto_compact {
             if let Some(p) = proposer {
                 if p.can_propose().await {
                     let current = storage.current_revision();
-                    let cutoff = current.saturating_sub(config.changelog_retention_revisions);
+                    let base = safe_ts.map(|s| s.safe_ts().min(current)).unwrap_or(current);
+                    let cutoff = base.saturating_sub(config.changelog_retention_revisions);
                     if cutoff > 0 {
                         match storage.compacted_revision() {
                             Ok(prev) if cutoff > prev => {
@@ -367,6 +405,49 @@ mod tests {
         );
         // 保留窗口内的条目仍在
         assert!(storage.changelog_contains_revision(current).unwrap());
+    }
+
+    struct FixedSafeTs(u64);
+
+    impl SafeTsSource for FixedSafeTs {
+        fn safe_ts(&self) -> u64 {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_cycle_cutoff_is_clamped_to_safe_ts() {
+        let (_tmp, storage) = setup_storage();
+        for i in 0..60u32 {
+            storage
+                .put(format!("/safe{:03}", i).as_bytes(), b"v", None)
+                .unwrap();
+        }
+        assert!(storage.current_revision() >= 60);
+
+        let config = CompactionConfig {
+            changelog_retention_revisions: 10,
+            interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let proposer = Arc::new(StandaloneProposer {
+            storage: Arc::clone(&storage),
+        });
+        let safe_ts = Arc::new(FixedSafeTs(40));
+        CompactionManager::<RedbBackend>::run_cycle_with_safe_ts(
+            &storage,
+            &config,
+            Some(proposer.as_ref()),
+            None,
+            Some(safe_ts.as_ref()),
+        )
+        .await;
+
+        assert_eq!(
+            storage.compacted_revision().unwrap(),
+            30,
+            "cutoff must be safe_ts - retention, not current - retention"
+        );
     }
 
     #[tokio::test]
