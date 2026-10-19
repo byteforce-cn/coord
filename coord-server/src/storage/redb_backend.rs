@@ -253,6 +253,16 @@ impl ReadTx for RedbReadTx {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.iter_range_limited(table_name, start, end, 0)
+    }
+
+    fn iter_range_limited(
+        &self,
+        table_name: &str,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let table_def = resolve_table(table_name)?;
         let table = self
             .tx
@@ -276,6 +286,10 @@ impl ReadTx for RedbReadTx {
                 break;
             }
             results.push((key_bytes.to_vec(), val_bytes.to_vec()));
+            // 有界扫描：到预算即停，不物化区间剩余部分。
+            if limit > 0 && results.len() >= limit {
+                break;
+            }
         }
 
         Ok(results)
@@ -343,6 +357,16 @@ impl ReadTx for RedbWriteTx {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.iter_range_limited(table_name, start, end, 0)
+    }
+
+    fn iter_range_limited(
+        &self,
+        table_name: &str,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let table_def = resolve_table(table_name)?;
         let table = self
             .tx
@@ -366,6 +390,10 @@ impl ReadTx for RedbWriteTx {
                 break;
             }
             results.push((key_bytes.to_vec(), val_bytes.to_vec()));
+            // 有界扫描：到预算即停，不物化区间剩余部分。
+            if limit > 0 && results.len() >= limit {
+                break;
+            }
         }
 
         Ok(results)
