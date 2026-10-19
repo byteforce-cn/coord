@@ -555,6 +555,12 @@ pub enum Command {
     ///
     /// **末尾追加**；决策写 `/_sys/seq/`（随 `/_sys/*` 快照域恢复）。
     Sequencer(SequencerOp),
+    /// 数据 Region 应用一批已决策事务（#148；仅数据 Region raft 提出）。
+    ///
+    /// **末尾追加**；`mutations` 只含本 Region 的 key，空切片用于推进游标。
+    ApplyCommitDecisions {
+        decisions: Vec<CommitDecisionApply>,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -618,6 +624,9 @@ impl std::fmt::Display for Command {
             }
             Command::Sequencer(SequencerOp::ValidateAndCommit { txns }) => {
                 write!(f, "Sequencer(txns={})", txns.len())
+            }
+            Command::ApplyCommitDecisions { decisions } => {
+                write!(f, "ApplyCommitDecisions(decisions={})", decisions.len())
             }
         }
     }
@@ -707,6 +716,12 @@ pub enum Response {
     Sequencer {
         outcomes: Vec<SequencerOutcome>,
     },
+    /// 数据 Region 应用决策的进度（#148）：`through_ts` 之后仍有未应用决策时
+    /// 说明卡在坏决策之前（游标未推进）。
+    CommitDecisionsApplied {
+        through_ts: u64,
+        decisions: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -762,6 +777,13 @@ impl std::fmt::Display for Response {
             Response::Sequencer { outcomes } => {
                 write!(f, "Sequencer(outcomes={})", outcomes.len())
             }
+            Response::CommitDecisionsApplied {
+                through_ts,
+                decisions,
+            } => write!(
+                f,
+                "CommitDecisionsApplied(through={through_ts}, decisions={decisions})"
+            ),
         }
     }
 }

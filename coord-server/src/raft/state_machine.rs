@@ -700,6 +700,31 @@ impl StateMachineStore {
                 }
                 Ok((Response::Sequencer { outcomes }, None))
             }
+            Command::ApplyCommitDecisions { decisions } => {
+                let result = sm
+                    .apply_commit_decisions(decisions, revision, applied)
+                    .map_err(io_err)?;
+                let expected = decisions
+                    .last()
+                    .map(|decision| decision.commit_ts)
+                    .unwrap_or(0);
+                if result.through_ts < expected {
+                    // 漂移/坏决策：不推进游标，safe_ts 会被下一条 pending 决策封住，
+                    // 由运维/后续修复；不得让 apply 返回 Err 把 raft 卡死。
+                    tracing::error!(
+                        through_ts = result.through_ts,
+                        expected_ts = expected,
+                        "commit decision apply stopped before the end of the batch"
+                    );
+                }
+                Ok((
+                    Response::CommitDecisionsApplied {
+                        through_ts: result.through_ts,
+                        decisions: result.decisions,
+                    },
+                    None,
+                ))
+            }
             Command::Lease(op) => {
                 let (outcome, changes) =
                     sm.apply_lease_op(op, revision, applied).map_err(io_err)?;
