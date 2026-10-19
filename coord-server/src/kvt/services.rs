@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use futures::{StreamExt, TryStreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 use coord_proto::kv::v2 as kv_v2;
@@ -241,9 +242,17 @@ async fn wait_for_safe_ts(node: &CoordNode, read_ts: u64, wait_ms: u64) -> Resul
     }
 }
 
+/// 单次 Range 同时在飞的 Region 分段数上限。
+///
+/// 分段读取是网络 + ReadIndex RPC；不设上界时一个大范围会把所有 Region 同时
+/// 打到饱和。`buffered` 保持分段顺序，因此合并结果仍按 key 有序。
+const RANGE_FANOUT_CONCURRENCY: usize = 8;
+
 /// 读取一个 Region 分段在 `read_ts` 上的精确快照。
 ///
 /// 每段独立过 ReadIndex 屏障（确认本 Region 的 leader / apply 水位）；
+/// 屏障要求本节点是该 Region 的 leader，因此多节点 leader 分散时的跨节点读
+/// 转发缺口见 ADR-0015 D10 / #188。
 /// `read_ts == current` 时走实时读，但若读事务的 revision 已越过 `read_ts`
 /// 则退回精确历史视图，保证返回行 `mod_revision <= read_ts`。
 async fn read_kv_range_segment(
@@ -488,30 +497,42 @@ impl kv_v2::kv_server::Kv for CoordNode {
         let reads = segments
             .into_iter()
             .map(|seg| read_kv_range_segment(self, seg, read_ts, scan_limit));
-        let parts = futures::future::try_join_all(reads).await?;
-        let mut kvs: Vec<kv_v2::KeyValue> = parts.into_iter().flatten().collect();
-        // 分段互不相交且按 key 有序；去重只是防御边界重复。
-        kvs.dedup_by(|a, b| a.key == b.key);
-        if self.object_enabled() {
-            kvs.retain(|kv| !crate::storage::object_store::key_in_object_space(&kv.key));
-        }
+        let mut parts = futures::stream::iter(reads).buffered(RANGE_FANOUT_CONCURRENCY);
 
-        if req.count_only {
-            if max_range > 0 && kvs.len() > max_range {
-                return Err(attach(
-                    Status::invalid_argument(format!(
-                        "range scan exceeds max {max_range}; narrow the range"
-                    )),
-                    CoordErrorCode::ReadSetTooLarge,
-                ));
+        let mut kvs: Vec<kv_v2::KeyValue> = Vec::new();
+        let mut total = 0usize;
+        while let Some(part) = parts.try_next().await? {
+            let mut part = part;
+            if self.object_enabled() {
+                part.retain(|kv| !crate::storage::object_store::key_in_object_space(&kv.key));
             }
-        } else if limit > 0 && kvs.len() > limit {
-            // limit 是整请求上限：各分段自己的 limit 只是读取上限，
-            // 必须在这里按 key 序截断（limit=0 表示不限制）。
-            kvs.truncate(limit);
+            if req.count_only {
+                // count_only 只需要总数：逐段累加并及时失败，不把所有行留在内存。
+                total = total.saturating_add(part.len());
+                if max_range > 0 && total > max_range {
+                    return Err(attach(
+                        Status::invalid_argument(format!(
+                            "range scan exceeds max {max_range}; narrow the range"
+                        )),
+                        CoordErrorCode::ReadSetTooLarge,
+                    ));
+                }
+            } else {
+                kvs.extend(part);
+                if limit > 0 && kvs.len() >= limit {
+                    // 分段按 key 有序：已拿到全局前 limit 条，后续分段无需再读。
+                    kvs.truncate(limit);
+                    break;
+                }
+            }
         }
+        drop(parts);
 
-        let count = kvs.len() as i64;
+        let count = if req.count_only {
+            total as i64
+        } else {
+            kvs.len() as i64
+        };
         if req.keys_only {
             for kv in &mut kvs {
                 kv.value.clear();

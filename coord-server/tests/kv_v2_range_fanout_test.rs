@@ -24,7 +24,7 @@ use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
 use coord_server::raft::type_config::{Command, Response};
 use coord_server::raft::{RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
-use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
+use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
 use tempfile::TempDir;
 use tonic::Code;
@@ -314,6 +314,20 @@ async fn test_range_limit_count_and_keys_only_are_global() {
     );
     assert_eq!(r.count, 3, "limit 是整请求上限，不是每段上限");
 
+    // limit 跨越 Region 1 → 2 的边界：仍按 key 序取全局前 N。
+    let r = fx.range(b"a", b"zzz", 400, 5, false, false).await.unwrap();
+    assert_eq!(
+        keys(&r),
+        vec![
+            b"a".to_vec(),
+            b"a2".to_vec(),
+            b"a3".to_vec(),
+            b"b".to_vec(),
+            b"d".to_vec()
+        ]
+    );
+    assert_eq!(r.count, 5);
+
     let r = fx.range(b"a", b"zzz", 400, 0, true, false).await.unwrap();
     assert_eq!(r.kvs.len(), 8);
     assert!(r.kvs.iter().all(|kv| kv.value.is_empty()));
@@ -377,4 +391,23 @@ async fn test_v1_cross_region_range_is_still_rejected() {
     .await
     .expect_err("v1 cross-region range stays unsupported");
     assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_range_fails_closed_when_one_segment_read_is_compacted() {
+    let fx = standard_data().await;
+    // 只压缩 Region 2；读快照落在压缩水位之前 → 该分段 OUT_OF_RANGE。
+    fx.manager
+        .runtime(2)
+        .unwrap()
+        .mvcc
+        .apply_compact(300, AppliedLogId::standalone(999))
+        .unwrap();
+
+    let err = fx
+        .range(b"a", b"zzz", 200, 0, false, false)
+        .await
+        .expect_err("a failing segment must fail the whole request");
+    assert_eq!(err.code(), Code::OutOfRange, "{err:?}");
+    assert_eq!(error_code_of(&err).as_deref(), Some("OUT_OF_RANGE"));
 }

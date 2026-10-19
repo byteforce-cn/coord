@@ -24,7 +24,9 @@
 
 - **超限错误码用 `READ_SET_TOO_LARGE`，不是 `RESOURCE_EXHAUSTED`**：issue #143 正文提到 `RESOURCE_EXHAUSTED`，但 ADR-0015 D12.2、consumer contract 与 G1 已有测试都固定 `INVALID_ARGUMENT + READ_SET_TOO_LARGE`。`RESOURCE_EXHAUSTED` 在 consumer contract 里是「配额/背压，不重试」，会改变调用方重试矩阵。按 ADR 执行；若未来要改，是独立的契约变更。
 - **`prev_kv` 不在 v2 Range 面**：`kv.v2.RangeRequest` 没有 `prev_kv` 字段（只有 `Delete` 有）；issue 的 `prev_kv` 一项对 Range 不适用，Delete-range 的既有路径本次不动。
-- **分段在单个请求内只取一次路由快照**：split/merge 期间的 routing epoch/cutover 校验归 #161/#167；本计划不引入 epoch 重试。
+- **分段不引入跨分段 epoch 校验**：split/merge 期间的 routing epoch/cutover 校验归 #161/#167；本计划不加入 epoch 重试（分段循环会重新读取 `key_index`/`meta`，缺口仍 fail-closed）。
+- **扇出在请求节点本地执行**：每段 ReadIndex 屏障要求本节点是该 Region 的 leader；多节点 leader 分散时的跨节点读转发缺口跟踪于 #188，ADR-0015 D10 已登记该限制。
+- **扇出并发上限 8**：`buffered(8)` 保持分段顺序；非 `count_only` 读在拿到全局前 `limit` 条后停止消费后续分段，`count_only` 逐段计数并超限即失败——避免 `Region 数 × limit` 的行缓冲。
 - **`count_only` 每段最多读 `max_range + 1` 行**：并行分段无法共享剩余预算；`max_range` 默认 1 万、Region 数有限，最坏内存是 `段数 × (max_range+1)`。拼接后一旦总数超过 `max_range` 立即返回 `READ_SET_TOO_LARGE`。
 - **`read_ts=0` 的段仍先过 ReadIndex 屏障**：保持 G1「空快照也确认目标 Region 身份」的既有行为，不因扇出改变错误面。
 - **末 Region 无上界**：`RegionMeta.end_key` 为空表示 keyspace 末尾；该段的终点取请求终点，而不是无限扫描。
