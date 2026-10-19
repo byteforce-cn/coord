@@ -402,6 +402,17 @@ impl SequencerMutation {
     }
 }
 
+/// 一个数据 Region 要应用的决策切片（#148）。
+///
+/// `mutations` 只包含属于目标 Region 的 key；没有本 Region key 的决策也保留
+/// 空条目，让该 Region 的已应用游标随全局决策顺序前进（否则空闲 Region 会
+/// 永久钉住 safe_ts）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitDecisionApply {
+    pub commit_ts: u64,
+    pub mutations: Vec<SequencerMutation>,
+}
+
 /// 一条待 Commit Sequencer 校验的事务。
 ///
 /// `commit_ts` 由 region 0 leader 从 TSO 取号后写入日志；apply 只校验/落盘它，
