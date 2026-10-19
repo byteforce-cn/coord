@@ -91,6 +91,14 @@ struct MetricsInner {
     pub kv_v2_safe_ts_wait_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的累计毫秒
     pub kv_v2_safe_ts_wait_millis_total: AtomicU64,
+    /// Commit Sequencer apply 的批数（#146）
+    pub kvt_sequencer_batches_total: AtomicU64,
+    /// Commit Sequencer 校验/决策的事务数
+    pub kvt_sequencer_txns_total: AtomicU64,
+    /// 读集冲突条数（冲突率 = conflicts / txns）
+    pub kvt_sequencer_conflicts_total: AtomicU64,
+    /// 校验累计耗时微秒（平均批大小/耗时可从计数推导）
+    pub kvt_sequencer_validation_us_total: AtomicU64,
 
     // ── Multi-Raft 指标（v6.0） ──
     /// Region 总数（全局）
@@ -248,6 +256,10 @@ impl Default for MetricsInner {
             kv_t_safe_ts_fence: AtomicU64::new(0),
             kv_v2_safe_ts_wait_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_millis_total: AtomicU64::new(0),
+            kvt_sequencer_batches_total: AtomicU64::new(0),
+            kvt_sequencer_txns_total: AtomicU64::new(0),
+            kvt_sequencer_conflicts_total: AtomicU64::new(0),
+            kvt_sequencer_validation_us_total: AtomicU64::new(0),
             regions_total: AtomicU64::new(0),
             nodes_online: AtomicU64::new(0),
             region_split_total: AtomicU64::new(0),
@@ -616,6 +628,22 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 记录一批 Commit Sequencer apply（事务数 / 冲突数 / 耗时微秒）。
+    pub fn record_sequencer_batch(&self, txns: u64, conflicts: u64, duration_us: u64) {
+        self.inner
+            .kvt_sequencer_batches_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .kvt_sequencer_txns_total
+            .fetch_add(txns, Ordering::Relaxed);
+        self.inner
+            .kvt_sequencer_conflicts_total
+            .fetch_add(conflicts, Ordering::Relaxed);
+        self.inner
+            .kvt_sequencer_validation_us_total
+            .fetch_add(duration_us, Ordering::Relaxed);
+    }
+
     /// v2 KV 写被 `CommitRejected` 拒绝计数 +1。
     pub fn inc_kv_v2_commit_rejected(&self) {
         self.inner
@@ -810,6 +838,36 @@ impl Metrics {
         out.push_str(&format!(
             "coord_tso_leader_changes_total {}\n",
             inner.tso_leader_changes_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kvt_sequencer_batches_total Commit Sequencer apply batches\n");
+        out.push_str("# TYPE coord_kvt_sequencer_batches_total counter\n");
+        out.push_str(&format!(
+            "coord_kvt_sequencer_batches_total {}\n",
+            inner.kvt_sequencer_batches_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kvt_sequencer_txns_total Transactions validated by the Commit Sequencer\n");
+        out.push_str("# TYPE coord_kvt_sequencer_txns_total counter\n");
+        out.push_str(&format!(
+            "coord_kvt_sequencer_txns_total {}\n",
+            inner.kvt_sequencer_txns_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kvt_sequencer_conflicts_total OCC read-set conflicts returned by the Commit Sequencer\n");
+        out.push_str("# TYPE coord_kvt_sequencer_conflicts_total counter\n");
+        out.push_str(&format!(
+            "coord_kvt_sequencer_conflicts_total {}\n",
+            inner.kvt_sequencer_conflicts_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kvt_sequencer_validation_us_total Commit Sequencer validation time (microseconds)\n");
+        out.push_str("# TYPE coord_kvt_sequencer_validation_us_total counter\n");
+        out.push_str(&format!(
+            "coord_kvt_sequencer_validation_us_total {}\n",
+            inner
+                .kvt_sequencer_validation_us_total
+                .load(Ordering::Relaxed)
         ));
 
         out.push_str(
@@ -1515,6 +1573,18 @@ mod tests {
         assert!(output.contains("coord_tso_leader_changes_total 1"));
         assert!(output.contains("coord_kv_v2_commit_rejected_total 1"));
         assert!(output.contains("coord_kv_v2_safe_ts_lag_total 1"));
+    }
+
+    #[test]
+    fn test_metrics_kv_t_sequencer_counters() {
+        let m = Metrics::new();
+        m.record_sequencer_batch(256, 3, 1_500);
+        m.record_sequencer_batch(4, 0, 250);
+        let output = m.render_prometheus_text();
+        assert!(output.contains("coord_kvt_sequencer_batches_total 2"));
+        assert!(output.contains("coord_kvt_sequencer_txns_total 260"));
+        assert!(output.contains("coord_kvt_sequencer_conflicts_total 3"));
+        assert!(output.contains("coord_kvt_sequencer_validation_us_total 1750"));
     }
 
     #[test]
