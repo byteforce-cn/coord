@@ -176,7 +176,9 @@ pub enum SequencerRangeQuery {
     Clear,
     /// 区间内的索引项超过扫描预算：调用方必须 fail-closed（#149 拒绝事务），
     /// 不能当作 `Clear`。`scanned` 是本次实际检查的上界数。
-    Exceeded { scanned: usize },
+    Exceeded {
+        scanned: usize,
+    },
 }
 
 /// 索引追赶/重建的统计（启动日志与运维排查）。
@@ -3332,10 +3334,8 @@ impl<B: StorageBackend> MvccStorage<B> {
     ) -> Result<u64> {
         for mutation in &decision.mutations {
             let key = mutation.key();
-            let hash_key = prefixed_hash_key(
-                SEQUENCER_KEY_INDEX_PREFIX,
-                &sequencer_hash(b"key", &[key]),
-            );
+            let hash_key =
+                prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
             let range_key = prefixed_key(SEQUENCER_RANGE_INDEX_PREFIX, key);
             for index_key in [hash_key, range_key] {
                 let prev = tx
@@ -3376,21 +3376,17 @@ impl<B: StorageBackend> MvccStorage<B> {
         key: &[u8],
         start_ts: Revision,
     ) -> Result<Option<SequencerIndexHit>> {
-        let index_key = prefixed_hash_key(
-            SEQUENCER_KEY_INDEX_PREFIX,
-            &sequencer_hash(b"key", &[key]),
-        );
-        let write_ts = self.backend.read(|tx| {
-            Ok(tx
-                .get(TABLE_KV, &index_key)?
-                .and_then(|b| decode_u64(&b)))
-        })?;
-        Ok(write_ts.filter(|ts| *ts > start_ts).map(|commit_ts| {
-            SequencerIndexHit {
+        let index_key =
+            prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
+        let write_ts = self
+            .backend
+            .read(|tx| Ok(tx.get(TABLE_KV, &index_key)?.and_then(|b| decode_u64(&b))))?;
+        Ok(write_ts
+            .filter(|ts| *ts > start_ts)
+            .map(|commit_ts| SequencerIndexHit {
                 key: key.to_vec(),
                 commit_ts,
-            }
-        }))
+            }))
     }
 
     /// range 谓词校验：`[start, end)` 在 `(start_ts, ·]` 内是否有写。
@@ -3421,9 +3417,9 @@ impl<B: StorageBackend> MvccStorage<B> {
         } else {
             max_entries.saturating_add(1)
         };
-        let rows = self.backend.read(|tx| {
-            tx.iter_range_limited(TABLE_KV, &scan_start, &scan_end, fetch_limit)
-        })?;
+        let rows = self
+            .backend
+            .read(|tx| tx.iter_range_limited(TABLE_KV, &scan_start, &scan_end, fetch_limit))?;
         if max_entries > 0 && rows.len() > max_entries {
             return Ok(SequencerRangeQuery::Exceeded {
                 scanned: max_entries,
@@ -3455,6 +3451,106 @@ impl<B: StorageBackend> MvccStorage<B> {
             Some(hit) => SequencerRangeQuery::Hit(hit),
             None => SequencerRangeQuery::Clear,
         })
+    }
+
+    /// 校验索引已覆盖的最大 `commit_ts`（缺失 = 0）。
+    pub fn sequencer_index_last_ts(&self) -> Result<u64> {
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, SEQUENCER_INDEX_LAST_TS)?
+                .and_then(|b| decode_u64(&b))
+                .unwrap_or(0))
+        })
+    }
+
+    /// 从决策日志按批补齐校验索引。
+    ///
+    /// 正常提交与索引在同一事务里推进，这里通常无事可做；索引丢失、旧快照或
+    /// 人工清理后由它恢复。`batch` 是每批处理的决策数（内存上界），返回追赶量。
+    pub fn catch_up_sequencer_index(&self, batch: usize) -> Result<SequencerIndexRebuild> {
+        let batch = batch.max(1);
+        let last_commit_ts = self.sequencer_last_commit_ts()?;
+        let from_ts = self.sequencer_index_last_ts()?;
+        let mut stats = SequencerIndexRebuild {
+            from_ts,
+            to_ts: from_ts,
+            decisions: 0,
+            keys: 0,
+        };
+        let mut marker = from_ts;
+
+        while marker < last_commit_ts {
+            let rows = self.backend.read(|tx| {
+                let start = encode_sequencer_decision_key(marker.saturating_add(1));
+                let end = prefix_upper_bound(SEQUENCER_DECISION_PREFIX);
+                tx.iter_range_limited(TABLE_KV, &start, &end, batch)
+            })?;
+            if rows.is_empty() {
+                break;
+            }
+
+            let mut keys = 0u64;
+            let mut last_ts = marker;
+            self.backend.write(|tx| {
+                for (key, value) in &rows {
+                    let commit_ts = key
+                        .strip_prefix(SEQUENCER_DECISION_PREFIX)
+                        .filter(|suffix| suffix.len() == 8)
+                        .and_then(|suffix| <[u8; 8]>::try_from(suffix).ok())
+                        .map(u64::from_be_bytes)
+                        .ok_or_else(|| {
+                            Error::Internal("decode sequencer decision key: bad suffix".to_string())
+                        })?;
+                    let decision: SequencerDecision = crate::storage::envelope::decode(value)
+                        .map_err(|e| Error::Internal(format!("decode sequencer decision: {e}")))?;
+                    if decision.commit_ts != commit_ts {
+                        return Err(Error::Internal(format!(
+                            "sequencer decision key/record mismatch: key={commit_ts} record={}",
+                            decision.commit_ts
+                        )));
+                    }
+                    keys += Self::sequencer_index_writes_in_tx(tx, &decision)?;
+                    last_ts = commit_ts;
+                }
+                // 并发提交可能已把水位推得更高；只前进，不回退。
+                let current = tx
+                    .get(TABLE_KV, SEQUENCER_INDEX_LAST_TS)?
+                    .and_then(|b| decode_u64(&b))
+                    .unwrap_or(0);
+                if last_ts > current {
+                    tx.insert(TABLE_KV, SEQUENCER_INDEX_LAST_TS, &last_ts.to_be_bytes())?;
+                }
+                Ok(())
+            })?;
+
+            stats.decisions += rows.len() as u64;
+            stats.keys += keys;
+            stats.to_ts = last_ts;
+            marker = last_ts;
+            if rows.len() < batch {
+                break;
+            }
+        }
+        Ok(stats)
+    }
+
+    /// 清空两个校验索引后从决策日志全量重建。
+    ///
+    /// 索引是派生数据，重建必须与原始索引等价；正常启动只做追赶，不调用本方法。
+    pub fn rebuild_sequencer_validation_index(
+        &self,
+        batch: usize,
+    ) -> Result<SequencerIndexRebuild> {
+        self.backend.write(|tx| {
+            for prefix in [SEQUENCER_KEY_INDEX_PREFIX, SEQUENCER_RANGE_INDEX_PREFIX] {
+                for (key, _) in tx.iter_prefix(TABLE_KV, prefix)? {
+                    tx.remove(TABLE_KV, &key)?;
+                }
+            }
+            tx.remove(TABLE_KV, SEQUENCER_INDEX_LAST_TS)?;
+            Ok(())
+        })?;
+        self.catch_up_sequencer_index(batch)
     }
 
     // ──── SafeTs fence / applied watermark（#142）────
@@ -6894,9 +6990,7 @@ mod tests {
                         value: value.to_vec(),
                         lease_id: None,
                     },
-                    None => SequencerMutation::Delete {
-                        key: key.to_vec(),
-                    },
+                    None => SequencerMutation::Delete { key: key.to_vec() },
                 })
                 .collect(),
         }
@@ -6908,11 +7002,7 @@ mod tests {
                 b"i1",
                 1,
                 10,
-                &[
-                    (b"a", Some(b"1")),
-                    (b"b", Some(b"1")),
-                    (b"d", Some(b"1")),
-                ],
+                &[(b"a", Some(b"1")), (b"b", Some(b"1")), (b"d", Some(b"1"))],
             ),
             seq_index_writes(b"i2", 1, 12, &[(b"a", Some(b"2")), (b"c", None)]),
             seq_index_writes(b"i3", 1, 15, &[(b"e", Some(b"3"))]),
@@ -7001,9 +7091,7 @@ mod tests {
         }
 
         assert_eq!(
-            storage
-                .sequencer_range_query(b"k0", b"k9", 0, 3)
-                .unwrap(),
+            storage.sequencer_range_query(b"k0", b"k9", 0, 3).unwrap(),
             SequencerRangeQuery::Exceeded { scanned: 3 }
         );
         let hit = SequencerRangeQuery::Hit(SequencerIndexHit {
@@ -7011,22 +7099,16 @@ mod tests {
             commit_ts: 14,
         });
         assert_eq!(
-            storage
-                .sequencer_range_query(b"k0", b"k9", 0, 5)
-                .unwrap(),
+            storage.sequencer_range_query(b"k0", b"k9", 0, 5).unwrap(),
             hit
         );
         assert_eq!(
-            storage
-                .sequencer_range_query(b"k0", b"k9", 0, 0)
-                .unwrap(),
+            storage.sequencer_range_query(b"k0", b"k9", 0, 0).unwrap(),
             hit,
             "limit 0 means unbounded"
         );
         assert_eq!(
-            storage
-                .sequencer_range_query(b"k0", b"k9", 14, 3)
-                .unwrap(),
+            storage.sequencer_range_query(b"k0", b"k9", 14, 3).unwrap(),
             SequencerRangeQuery::Exceeded { scanned: 3 },
             "an exhausted budget must never be reported as Clear"
         );
@@ -7071,9 +7153,7 @@ mod tests {
             }
             let replace = match &best {
                 None => true,
-                Some((best_key, best_ts)) => {
-                    *ts > *best_ts || (*ts == *best_ts && key < best_key)
-                }
+                Some((best_key, best_ts)) => *ts > *best_ts || (*ts == *best_ts && key < best_key),
             };
             if replace {
                 best = Some((key.clone(), *ts));
@@ -7165,5 +7245,135 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn clear_sequencer_indexes(storage: &MvccStorage<RedbBackend>) {
+        storage
+            .backend()
+            .write(|tx| {
+                for prefix in [SEQUENCER_KEY_INDEX_PREFIX, SEQUENCER_RANGE_INDEX_PREFIX] {
+                    for (key, _) in tx.iter_prefix(TABLE_KV, prefix)? {
+                        tx.remove(TABLE_KV, &key)?;
+                    }
+                }
+                tx.remove(TABLE_KV, SEQUENCER_INDEX_LAST_TS)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_sequencer_index_catch_up_after_lag() {
+        let (_dir, storage) = create_commit_ts_storage();
+        seq_index_seed(&storage);
+        let seed_writes = vec![
+            (b"a".to_vec(), 10),
+            (b"b".to_vec(), 10),
+            (b"d".to_vec(), 10),
+            (b"a".to_vec(), 12),
+            (b"c".to_vec(), 12),
+            (b"e".to_vec(), 15),
+        ];
+        let assert_index_matches = || {
+            for (start, end, start_ts) in [
+                (&b"a"[..], &b"e"[..], 0),
+                (&b"b"[..], &b"d"[..], 11),
+                (&b"a"[..], &b""[..], 0),
+            ] {
+                assert_eq!(
+                    storage
+                        .sequencer_range_query(start, end, start_ts, 0)
+                        .unwrap(),
+                    brute_range(&seed_writes, start, end, start_ts)
+                );
+            }
+        };
+        assert_index_matches();
+
+        clear_sequencer_indexes(&storage);
+        assert_eq!(
+            storage.sequencer_range_query(b"a", b"", 0, 0).unwrap(),
+            SequencerRangeQuery::Clear,
+            "an index that lost its rows must not report stale hits"
+        );
+        assert_eq!(storage.sequencer_index_last_ts().unwrap(), 0);
+
+        let first = storage.catch_up_sequencer_index(2).unwrap();
+        assert_eq!(
+            first,
+            SequencerIndexRebuild {
+                from_ts: 0,
+                to_ts: 15,
+                decisions: 3,
+                keys: 6,
+            }
+        );
+        assert_index_matches();
+        assert_eq!(
+            storage.sequencer_point_query(b"e", 14).unwrap(),
+            Some(SequencerIndexHit {
+                key: b"e".to_vec(),
+                commit_ts: 15,
+            })
+        );
+        assert_eq!(storage.sequencer_index_last_ts().unwrap(), 15);
+
+        let caught_up = storage.catch_up_sequencer_index(2).unwrap();
+        assert_eq!(caught_up.decisions, 0);
+        assert_eq!(caught_up.from_ts, 15);
+        assert_eq!(caught_up.to_ts, 15);
+
+        clear_sequencer_indexes(&storage);
+        let rebuilt = storage.rebuild_sequencer_validation_index(2).unwrap();
+        assert_eq!(
+            rebuilt,
+            SequencerIndexRebuild {
+                from_ts: 0,
+                to_ts: 15,
+                decisions: 3,
+                keys: 6,
+            }
+        );
+        assert_index_matches();
+        assert_eq!(storage.sequencer_index_last_ts().unwrap(), 15);
+    }
+
+    #[test]
+    fn test_sequencer_index_survives_reopen_and_snapshot() {
+        use crate::storage::snapshot::{export_snapshot_data, import_snapshot_data};
+
+        let (dir, storage) = create_commit_ts_storage();
+        seq_index_seed(&storage);
+        drop(storage);
+
+        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
+        let reopened =
+            MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap();
+        assert_eq!(
+            reopened.sequencer_range_query(b"a", b"e", 0, 0).unwrap(),
+            SequencerRangeQuery::Hit(SequencerIndexHit {
+                key: b"a".to_vec(),
+                commit_ts: 12,
+            })
+        );
+        assert_eq!(reopened.sequencer_index_last_ts().unwrap(), 15);
+
+        let data = export_snapshot_data(&reopened, 1, 1).unwrap();
+        assert!(
+            data.sys_entries
+                .iter()
+                .any(|entry| entry.internal_key.starts_with(SEQUENCER_RANGE_INDEX_PREFIX)),
+            "the ordered index must travel in the /_sys/ snapshot domain"
+        );
+        let (_restored_dir, restored) = create_commit_ts_storage();
+        import_snapshot_data(&restored, &data).unwrap();
+        assert_eq!(
+            restored.sequencer_range_query(b"b", b"d", 11, 0).unwrap(),
+            SequencerRangeQuery::Hit(SequencerIndexHit {
+                key: b"c".to_vec(),
+                commit_ts: 12,
+            })
+        );
+        assert_eq!(restored.sequencer_index_last_ts().unwrap(), 15);
     }
 }
