@@ -118,6 +118,15 @@ const TSO_HIGH_WATER: &[u8] = b"/_sys/tso/high_water";
 /// 最近一次分配的批次（信封 V2；重放同一 revision 时原样返回）。
 const TSO_LAST_BATCH: &[u8] = b"/_sys/tso/last_batch";
 
+// ──── SafeTs fence（region 0 system raft，#142）────
+
+/// 已发布的安全点 fence（u64 BE；缺失 = 0）。
+///
+/// 选 `/_sys/`：快照按 `/_sys/*` 整域携带，恢复后不得回退（否则已经拒绝过的
+/// 旧 `commit_ts` 会在恢复后重新被接受）。不在 `/_meta/` 是因为快照只逐项挑选
+/// meta 键，`/_sys/` 是整域导出。
+const SAFE_TS_FENCE: &[u8] = b"/_sys/kv_t/safe_ts_fence";
+
 /// 单次 TSO 批次分配记录（重放幂等：同 revision 必须返回同一区间）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct TsoBatchRecord {
@@ -2696,6 +2705,84 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    // ──── SafeTs fence / applied watermark（#142）────
+
+    /// 读取已发布的安全点 fence（缺失 = 0）。
+    pub fn safe_ts_fence(&self) -> Result<Revision> {
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, SAFE_TS_FENCE)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0))
+        })
+    }
+
+    /// 发布安全点 fence（region 0 system raft）。
+    ///
+    /// `fence_ts` 是 TSO 分配边界（下一未发放值），不是某个 key 的
+    /// `commit_ts`：它只声明「fence 之后不再接受 `commit_ts <= fence_ts` 的写」。
+    /// 只前进；同一 applied 重放返回当前值。
+    pub fn set_safe_ts_fence(
+        &self,
+        fence_ts: Revision,
+        applied: AppliedLogId,
+    ) -> Result<Revision> {
+        self.backend.write(|tx| {
+            let prev = tx
+                .get(TABLE_KV, SAFE_TS_FENCE)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0);
+            if Self::applied_contains(tx, applied)? {
+                return Ok(prev);
+            }
+            let effective = prev.max(fence_ts);
+            if effective > prev {
+                tx.insert(TABLE_KV, SAFE_TS_FENCE, &effective.to_be_bytes())?;
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(effective)
+        })
+    }
+
+    /// 把已 apply 水位抬到 `commit_ts`（不写数据/changelog）。
+    ///
+    /// 这是 safe-point fence 在数据 Region 的落地：之后 `commit_ts <= 水位` 的
+    /// 写入会被 `accept_commit_ts` 拒绝，因此 fence 一旦被 `safe_ts` 覆盖，
+    /// 该 Region 的历史在 fence 之前就固定了。只前进；同一 applied 重放幂等。
+    pub fn advance_commit_ts_watermark(
+        &self,
+        commit_ts: Revision,
+        applied: AppliedLogId,
+    ) -> Result<Revision> {
+        self.backend.write(|tx| {
+            let current_before = Self::current_revision_in_tx(tx, self.revision_mode)?;
+            if Self::applied_contains(tx, applied)? {
+                return Ok(current_before);
+            }
+            self.note_log_index_revision(tx, applied.index)?;
+            let current = Self::current_revision_in_tx(tx, self.revision_mode)?;
+            let effective = if self.revision_mode == RevisionMode::CommitTs {
+                current.max(commit_ts)
+            } else {
+                current
+            };
+            if effective > current {
+                tx.insert(TABLE_META, META_CURRENT_REVISION, &effective.to_be_bytes())?;
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(effective)
+        })
+    }
+
+    /// 该 applied 是否已持久化（同一命令重放时直接返回当前水位，不再抬）。
+    fn applied_contains(tx: &dyn ReadTx, applied: AppliedLogId) -> Result<bool> {
+        Ok(tx
+            .get(TABLE_META, META_LAST_APPLIED)?
+            .and_then(|bytes| AppliedLogId::from_bytes(&bytes))
+            .map(|last| applied.index <= last.index)
+            .unwrap_or(false))
+    }
+
     /// 读取 region 0 PD 全局队列快照（按 op_id 升序；执行器/测试/审计读取）
     pub fn pd_queue_entries(&self) -> Result<Vec<crate::raft::type_config::PdQueueEntry>> {
         use crate::raft::type_config::PdQueueEntry;
@@ -3122,6 +3209,82 @@ mod tests {
             .expect_err("different value at the same commit_ts must be rejected");
         assert!(matches!(err, Error::CommitRejected { commit_ts: 100, .. }));
         assert_eq!(storage.get(b"k").unwrap().as_deref(), Some(&b"v1"[..]));
+    }
+
+    #[test]
+    fn test_advance_commit_ts_watermark_is_monotonic_persistent_and_replay_safe() {
+        let (dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v", None, 100, applied_for(1))
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .advance_commit_ts_watermark(150, applied_for(2))
+                .unwrap(),
+            150
+        );
+        assert_eq!(storage.current_revision(), 150);
+        assert_eq!(storage.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+        assert!(
+            !storage.changelog_contains_revision(150).unwrap(),
+            "fence 不是 commit，不得写 changelog"
+        );
+
+        // 只前进不后退；同一 applied 重放返回当前水位。
+        assert_eq!(
+            storage
+                .advance_commit_ts_watermark(120, applied_for(3))
+                .unwrap(),
+            150
+        );
+        assert_eq!(
+            storage
+                .advance_commit_ts_watermark(120, applied_for(3))
+                .unwrap(),
+            150
+        );
+        assert_eq!(storage.current_revision(), 150);
+
+        let err = storage
+            .put_at_commit_ts(b"k2", b"v", None, 149, applied_for(4))
+            .expect_err("commit_ts below the fence must be rejected");
+        assert!(matches!(
+            err,
+            Error::CommitRejected {
+                commit_ts: 149,
+                current_revision: 150
+            }
+        ));
+
+        drop(storage);
+        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
+        let reopened =
+            MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap();
+        assert_eq!(reopened.current_revision(), 150);
+        assert_eq!(reopened.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+    }
+
+    #[test]
+    fn test_safe_ts_fence_is_monotonic_and_persistent() {
+        let (dir, storage) = create_storage();
+        assert_eq!(storage.safe_ts_fence().unwrap(), 0);
+
+        assert_eq!(
+            storage.set_safe_ts_fence(900, applied_for(1)).unwrap(),
+            900
+        );
+        assert_eq!(
+            storage.set_safe_ts_fence(800, applied_for(2)).unwrap(),
+            900,
+            "fence 只前进"
+        );
+        assert_eq!(storage.safe_ts_fence().unwrap(), 900);
+
+        drop(storage);
+        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
+        let reopened = MvccStorage::new(backend).unwrap();
+        assert_eq!(reopened.safe_ts_fence().unwrap(), 900);
     }
 
     #[test]

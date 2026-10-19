@@ -718,6 +718,20 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::PublishSafeTs { fence_ts } => {
+                // #142：fence 是内部记录（不写 changelog、不上 Watch）；
+                // 只抬水位 + applied，重放由 applied-index 守卫幂等。
+                let effective = sm.set_safe_ts_fence(*fence_ts, applied).map_err(io_err)?;
+                Ok((Response::SafeTsPublished { fence_ts: effective }, None))
+            }
+            Command::AdvanceSafeTs { commit_ts } => {
+                // 数据 Region 的 safe-point fence：只抬 META_CURRENT_REVISION，
+                // 不产生数据/事件；之后的旧 commit_ts 写入由存储层拒绝。
+                let revision = sm
+                    .advance_commit_ts_watermark(*commit_ts, applied)
+                    .map_err(io_err)?;
+                Ok((Response::SafeTsAdvanced { revision }, None))
+            }
             Command::PutV2 {
                 key,
                 value,
@@ -1414,6 +1428,60 @@ mod tests {
             other => panic!("unexpected response: {other:?}"),
         }
         assert_eq!(store.state_machine.compacted_revision().unwrap(), 1_000);
+    }
+
+    /// #142：safe-point fence 只抬水位，不写数据/changelog，也不产生 Watch 事件。
+    #[test]
+    fn test_apply_safe_ts_fence_and_watermark() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+
+        let (resp, event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::AdvanceSafeTs { commit_ts: 1_500 },
+                5,
+                applied_at(5),
+            )
+            .expect("advance watermark apply");
+        match resp {
+            Response::SafeTsAdvanced { revision } => assert_eq!(revision, 1_500),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(event.is_none(), "fence 不得产生 Watch 事件");
+        assert_eq!(store.state_machine.current_revision(), 1_500);
+        assert!(!store
+            .state_machine
+            .changelog_contains_revision(1_500)
+            .unwrap());
+
+        let (resp, event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::PublishSafeTs { fence_ts: 2_000 },
+                6,
+                applied_at(6),
+            )
+            .expect("publish fence apply");
+        match resp {
+            Response::SafeTsPublished { fence_ts } => assert_eq!(fence_ts, 2_000),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(event.is_none());
+        assert_eq!(store.state_machine.safe_ts_fence().unwrap(), 2_000);
+
+        // 同一 applied 重放：不报错、不倒退。
+        let (resp, _) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::PublishSafeTs { fence_ts: 1_000 },
+                6,
+                applied_at(6),
+            )
+            .expect("publish replay must not fail raft");
+        match resp {
+            Response::SafeTsPublished { fence_ts } => assert_eq!(fence_ts, 2_000),
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     /// D11.5：用户级拒绝不得让 apply 返回 Err；applied 仍须前进。
