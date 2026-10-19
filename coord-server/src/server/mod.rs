@@ -1507,6 +1507,10 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
     use coord_core::error::Error;
     match e {
         Error::InvalidArgument(m) => tonic::Status::invalid_argument(m.clone()),
+        Error::FailedPrecondition(m) => coord_core::error_code::attach(
+            tonic::Status::failed_precondition(m.clone()),
+            coord_core::error_code::CoordErrorCode::FailedPrecondition,
+        ),
         Error::NotFound { resource, key } => {
             tonic::Status::not_found(format!("{resource} not found: {key}"))
         }

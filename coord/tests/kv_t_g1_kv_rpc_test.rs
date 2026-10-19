@@ -8,9 +8,13 @@
 mod tests {
     use std::net::SocketAddr;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
+    use async_trait::async_trait;
+
+    use coord_core::error::Result as CoordResult;
     use coord_core::error_code::error_code_of;
     use coord_core::storage::StorageBackend;
     use coord_core::types::StorageConfig;
@@ -23,7 +27,9 @@ mod tests {
         RangeRequest as RangeRequestV2,
     };
     use coord_proto::kv::{PutRequest as PutRequestV1, RangeRequest as RangeRequestV1};
+    use coord_proto::tso::v2::tso_server::TsoServer;
     use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
+    use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
     use coord_server::server::CoordNode;
     use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
     use coord_server::storage::redb_backend::RedbBackend;
@@ -48,6 +54,36 @@ mod tests {
         }
     }
 
+    /// 进程内 TSO 源：测试只验证 client 走 GetTs 链路，不启动 region 0 raft。
+    struct FakeTso {
+        high_water: AtomicU64,
+    }
+
+    impl FakeTso {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                high_water: AtomicU64::new(1),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TsoSource for FakeTso {
+        async fn is_leader(&self) -> bool {
+            true
+        }
+
+        async fn allocate(&self, batch_size: u32) -> CoordResult<TsoBatch> {
+            let start = self
+                .high_water
+                .fetch_add(u64::from(batch_size), Ordering::SeqCst);
+            Ok(TsoBatch {
+                start_ts: start,
+                end_ts: start + u64::from(batch_size),
+            })
+        }
+    }
+
     fn config(wait_ms: u64) -> KvTRuntimeConfig {
         KvTRuntimeConfig {
             read_ts_wait_ms: wait_ms,
@@ -69,6 +105,9 @@ mod tests {
         node.set_kvt_state(
             KvTState::new(enabled, config).with_implemented(capabilities.iter().copied()),
         );
+        if enabled {
+            node.set_tso_client(TsoClient::new(FakeTso::new(), 8, None));
+        }
         let node = Arc::new(node);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -78,7 +117,8 @@ mod tests {
         let handle = tokio::spawn(async move {
             Server::builder()
                 .add_service(KvV1Server::from_arc(Arc::clone(&server_node)))
-                .add_service(KvV2Server::from_arc(server_node))
+                .add_service(KvV2Server::from_arc(Arc::clone(&server_node)))
+                .add_service(TsoServer::from_arc(server_node))
                 .serve_with_incoming_shutdown(
                     tokio_stream::wrappers::TcpListenerStream::new(listener),
                     async {
@@ -575,5 +615,44 @@ mod tests {
         server.shutdown().await;
     }
 
-    // Task 4 会在这里补充客户端用例。
+    #[tokio::test]
+    async fn test_client_v2_gets_ts_then_reads_own_write() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let server = start_server(
+            tmpdir.path(),
+            RevisionMode::CommitTs,
+            true,
+            &[KvTCapability::Kv, KvTCapability::Tso],
+            config(50),
+        )
+        .await;
+
+        let client = coord_client::Client::connect_direct(coord_client::Config::new(vec![server
+            .addr
+            .to_string()]))
+        .await
+        .expect("connect client");
+        let kv = client.kv_v2();
+
+        let commit_ts = kv.get_commit_ts().await.expect("get ts");
+        assert!(commit_ts >= 1);
+        let (prev, written_ts) = kv
+            .put(b"client-key", b"client-value", commit_ts, false, b"")
+            .await
+            .expect("client v2 put");
+        assert!(prev.is_none());
+        assert_eq!(written_ts, commit_ts);
+
+        let (kvs, count, read_ts) = kv
+            .range(b"client-key", b"", 0, commit_ts, false, false)
+            .await
+            .expect("client v2 range");
+        assert_eq!(count, 1);
+        assert_eq!(read_ts, commit_ts);
+        assert_eq!(kvs[0].value, b"client-value");
+        assert_eq!(kvs[0].mod_revision, commit_ts as i64);
+
+        drop(client);
+        server.shutdown().await;
+    }
 }

@@ -18,6 +18,10 @@ pub enum Error {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// 前置条件不满足（如 v2 `COMMIT_REJECTED`、能力未启用）。不可重试。
+    #[error("failed precondition: {0}")]
+    FailedPrecondition(String),
+
     /// 资源不存在
     #[error("{resource} not found: {key}")]
     NotFound { resource: &'static str, key: String },
