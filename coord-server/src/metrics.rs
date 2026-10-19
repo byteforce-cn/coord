@@ -83,6 +83,14 @@ struct MetricsInner {
     pub kv_v2_commit_rejected_total: AtomicU64,
     /// v2 KV `read_ts` 等待 safe_ts 超时次数（`SAFE_TS_LAG`，可重试）
     pub kv_v2_safe_ts_lag_total: AtomicU64,
+    /// 当前全局 safe_ts（各数据 Region 已 apply 水位的最小值；0 = 尚未观测）
+    pub kv_t_safe_ts: AtomicU64,
+    /// region 0 已发布的 safe-point fence（TSO 分配边界；0 = 未发布）
+    pub kv_t_safe_ts_fence: AtomicU64,
+    /// v2 KV 读等待 safe_ts 的请求次数
+    pub kv_v2_safe_ts_wait_total: AtomicU64,
+    /// v2 KV 读等待 safe_ts 的累计毫秒
+    pub kv_v2_safe_ts_wait_millis_total: AtomicU64,
 
     // ── Multi-Raft 指标（v6.0） ──
     /// Region 总数（全局）
@@ -190,6 +198,10 @@ pub struct RegionMetrics {
     pub put_latency_us: AtomicU64,
     /// Put 操作调用次数
     pub put_count: AtomicU64,
+    /// 该 Region 已 apply 的最大 commit_ts（safe_ts 聚合输入）
+    pub applied_revision: AtomicU64,
+    /// 该 Region 落后于本轮最大 applied revision 的差值
+    pub apply_lag: AtomicU64,
 }
 
 impl RegionMetrics {
@@ -203,6 +215,8 @@ impl RegionMetrics {
             is_leader: AtomicU64::new(0),
             put_latency_us: AtomicU64::new(0),
             put_count: AtomicU64::new(0),
+            applied_revision: AtomicU64::new(0),
+            apply_lag: AtomicU64::new(0),
         }
     }
 }
@@ -230,6 +244,10 @@ impl Default for MetricsInner {
             tso_leader_changes_total: AtomicU64::new(0),
             kv_v2_commit_rejected_total: AtomicU64::new(0),
             kv_v2_safe_ts_lag_total: AtomicU64::new(0),
+            kv_t_safe_ts: AtomicU64::new(0),
+            kv_t_safe_ts_fence: AtomicU64::new(0),
+            kv_v2_safe_ts_wait_total: AtomicU64::new(0),
+            kv_v2_safe_ts_wait_millis_total: AtomicU64::new(0),
             regions_total: AtomicU64::new(0),
             nodes_online: AtomicU64::new(0),
             region_split_total: AtomicU64::new(0),
@@ -605,6 +623,28 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 发布当前全局 safe_ts（gauge）。
+    pub fn set_kv_t_safe_ts(&self, ts: u64) {
+        self.inner.kv_t_safe_ts.store(ts, Ordering::Relaxed);
+    }
+
+    /// 发布 region 0 的 safe-point fence（gauge）。
+    pub fn set_kv_t_safe_ts_fence(&self, ts: u64) {
+        self.inner
+            .kv_t_safe_ts_fence
+            .store(ts, Ordering::Relaxed);
+    }
+
+    /// v2 KV 读等待 safe_ts：请求数 +1、累计等待毫秒。
+    pub fn inc_kv_v2_safe_ts_wait(&self, waited_millis: u64) {
+        self.inner
+            .kv_v2_safe_ts_wait_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .kv_v2_safe_ts_wait_millis_total
+            .fetch_add(waited_millis, Ordering::Relaxed);
+    }
+
     /// v2 KV `read_ts` 等待 safe_ts 超时计数 +1。
     pub fn inc_kv_v2_safe_ts_lag(&self) {
         self.inner
@@ -695,6 +735,30 @@ impl Metrics {
             ));
         }
 
+        out.push_str(
+            "\n# HELP coord_region_applied_revision Applied commit_ts watermark per region\n",
+        );
+        out.push_str("# TYPE coord_region_applied_revision gauge\n");
+        for m in metrics.iter() {
+            out.push_str(&format!(
+                "coord_region_applied_revision{{region_id=\"{}\"}} {}\n",
+                m.region_id,
+                m.applied_revision.load(Ordering::Relaxed)
+            ));
+        }
+
+        out.push_str(
+            "\n# HELP coord_region_apply_lag Applied revision lag behind the leading region\n",
+        );
+        out.push_str("# TYPE coord_region_apply_lag gauge\n");
+        for m in metrics.iter() {
+            out.push_str(&format!(
+                "coord_region_apply_lag{{region_id=\"{}\"}} {}\n",
+                m.region_id,
+                m.apply_lag.load(Ordering::Relaxed)
+            ));
+        }
+
         out
     }
 
@@ -766,6 +830,36 @@ impl Metrics {
         out.push_str(&format!(
             "coord_kv_v2_safe_ts_lag_total {}\n",
             inner.kv_v2_safe_ts_lag_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_safe_ts Global safe timestamp (min applied commit_ts across data regions)\n");
+        out.push_str("# TYPE coord_kv_t_safe_ts gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_safe_ts {}\n",
+            inner.kv_t_safe_ts.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_safe_ts_fence Published safe-point fence from region 0 (TSO allocation boundary)\n");
+        out.push_str("# TYPE coord_kv_t_safe_ts_fence gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_safe_ts_fence {}\n",
+            inner.kv_t_safe_ts_fence.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_v2_safe_ts_wait_total v2 KV reads that waited for safe_ts\n");
+        out.push_str("# TYPE coord_kv_v2_safe_ts_wait_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_v2_safe_ts_wait_total {}\n",
+            inner.kv_v2_safe_ts_wait_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_v2_safe_ts_wait_millis_total Cumulative v2 KV safe_ts wait time (ms)\n");
+        out.push_str("# TYPE coord_kv_v2_safe_ts_wait_millis_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_v2_safe_ts_wait_millis_total {}\n",
+            inner
+                .kv_v2_safe_ts_wait_millis_total
+                .load(Ordering::Relaxed)
         ));
 
         out.push_str("\n# HELP raft_leader_id Current Raft leader ID (0 = no leader)\n");

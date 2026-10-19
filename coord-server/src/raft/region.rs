@@ -468,6 +468,14 @@ impl RegionManager {
         self.runtimes.read().get(&region_id).cloned()
     }
 
+    /// 本节点已装配的全部 Region 运行时（按 region_id 升序）。
+    ///
+    /// safe_ts 聚合与指标需要一次快照，避免逐个 `runtime()` 锁开销；
+    /// 返回 `Arc` 克隆，调用方不需要持有 manager 锁。
+    pub fn list_runtimes(&self) -> Vec<Arc<RegionRuntime>> {
+        self.runtimes.read().values().cloned().collect()
+    }
+
     /// 通过 key 路由到 Region 运行时（服务端路由的基础）
     ///
     /// 先经 `route` 按 key range 二分定位 Region，再取其运行时；

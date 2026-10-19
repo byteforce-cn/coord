@@ -365,6 +365,63 @@ impl CoordNode {
         self.metrics.as_ref()
     }
 
+    /// 当前全局 `safe_ts`：所有 v2 数据 Region 已 apply 水位的**最小值**。
+    ///
+    /// - legacy（未装配 RegionManager）：region 0 就是数据面，取自身 current revision；
+    /// - Multi-Raft：取本地全部数据 Region 副本的 `current_revision` 最小值。v1
+    ///   静态复制保证每个节点持有全部 Region 副本；落后副本只会让 safe_ts 更保守。
+    /// - 空运行时列表（异常装配）返回 0，fail-closed。
+    ///
+    /// 每次调用同时刷新 `coord_kv_t_safe_ts` 与每 Region apply 指标；redb 读是
+    /// 本地水位读取，Region 数不大时足够便宜（批量缓存归性能工作项）。
+    pub fn safe_ts(&self) -> u64 {
+        let Some(manager) = &self.region_manager else {
+            let safe = self.storage.current_revision();
+            if let Some(metrics) = &self.metrics {
+                metrics.set_kv_t_safe_ts(safe);
+            }
+            return safe;
+        };
+
+        let runtimes = manager.list_runtimes();
+        if runtimes.is_empty() {
+            if let Some(metrics) = &self.metrics {
+                metrics.set_kv_t_safe_ts(0);
+            }
+            return 0;
+        }
+
+        let observed: Vec<(u64, u64)> = runtimes
+            .iter()
+            .map(|rt| (rt.region_id(), rt.mvcc.current_revision()))
+            .collect();
+        let safe = observed.iter().map(|(_, rev)| *rev).min().unwrap_or(0);
+        let max = observed.iter().map(|(_, rev)| *rev).max().unwrap_or(0);
+
+        if let Some(metrics) = &self.metrics {
+            metrics.set_kv_t_safe_ts(safe);
+            for (region_id, revision) in &observed {
+                let rm = metrics.get_or_create_region_metrics(*region_id);
+                rm.applied_revision
+                    .store(*revision, std::sync::atomic::Ordering::Relaxed);
+                rm.apply_lag.store(
+                    max.saturating_sub(*revision),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
+        safe
+    }
+
+    /// region 0 已发布的 safe-point fence（TSO 分配边界；legacy/未发布 = 0）。
+    pub fn safe_ts_fence(&self) -> u64 {
+        let fence = self.storage.safe_ts_fence().unwrap_or(0);
+        if let Some(metrics) = &self.metrics {
+            metrics.set_kv_t_safe_ts_fence(fence);
+        }
+        fence
+    }
+
     /// 注入 KV-T 运行时状态（`[kv_t]`）。
     ///
     /// 默认是 disabled：不注入时 v2 服务仍然注册，但每个 RPC 返回
