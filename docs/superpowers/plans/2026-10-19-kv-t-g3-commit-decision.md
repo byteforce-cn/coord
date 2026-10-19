@@ -265,8 +265,8 @@ Expected: 2 个测试 PASS。
 
 ### Task 7: 文档、门禁与 PR
 
-- [ ] **Step 1: 勾选计划与验证记录**（测试名/命令/边界）
-- [ ] **Step 2: 本机跑 CI 基础门禁**
+- [x] **Step 1: 勾选计划与验证记录**（测试名/命令/边界）
+- [x] **Step 2: 本机跑 CI 基础门禁**
 
 ```bash
 cargo fmt --all -- --check
@@ -306,4 +306,9 @@ bash scripts/check-doc-refs.sh
 - `cargo test -p coord --test kv_t_g3_commit_decision_test`：2 passed
   （两 Region 原子可见 + 重放；未应用决策把 safe_ts 钉在 `commit_ts-1`）。
 - `cargo test -p coord --test kv_t_g2_safe_ts_test`：7 passed（fence/等待回归不变）。
-- 门禁与全量测试结果见 PR 正文。
+- 门禁：`cargo fmt --all -- --check`、`cargo clippy --workspace --lib --bins -- -D warnings`、
+  `bash scripts/check-panics.sh`（0 violations）、`cargo audit`（1 条既有 allowed warning）、
+  `cargo deny check`（advisories/bans/licenses/sources ok）、
+  `bash scripts/check-doc-refs.sh`（仅在 Git 跟踪文件的 detached worktree 中 OK）。
+- `cargo test --workspace --no-fail-fast`：除既有偶发 `pd_operator_executor_test`
+  （add_learner 时 leader 视图短暂为空）外全绿；该用例单独重跑通过，与 #148 无关。
