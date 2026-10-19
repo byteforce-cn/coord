@@ -348,3 +348,80 @@ fn test_region_handle_contains_key() {
     assert!(!handle.contains_key(&[0x20]));
     assert!(!handle.contains_key(&[0x0F]));
 }
+
+// ============================================================================
+// 跨 Region Range 分段（v2 扇出路由）
+// ============================================================================
+
+use coord_core::error::Error;
+use coord_server::raft::region::RegionRangeSegment;
+
+fn seg(region_id: RegionId, start: &[u8], end: &[u8]) -> RegionRangeSegment {
+    RegionRangeSegment {
+        region_id,
+        start_key: start.to_vec(),
+        end_key: end.to_vec(),
+    }
+}
+
+fn tiled_manager() -> RegionManager {
+    let rm = RegionManager::new(1);
+    rm.register_region(make_test_meta(1, b"".to_vec(), b"d".to_vec()))
+        .unwrap();
+    rm.register_region(make_test_meta(2, b"d".to_vec(), b"n".to_vec()))
+        .unwrap();
+    rm.register_region(make_test_meta(3, b"n".to_vec(), b"".to_vec()))
+        .unwrap();
+    rm
+}
+
+#[test]
+fn test_resolve_range_splits_at_region_boundaries() {
+    let rm = tiled_manager();
+    assert_eq!(
+        rm.resolve_range(b"a", b"z").unwrap(),
+        vec![seg(1, b"a", b"d"), seg(2, b"d", b"n"), seg(3, b"n", b"z")]
+    );
+    assert_eq!(
+        rm.resolve_range(b"d", b"n").unwrap(),
+        vec![seg(2, b"d", b"n")]
+    );
+    assert_eq!(
+        rm.resolve_range(b"", b"c").unwrap(),
+        vec![seg(1, b"", b"c")]
+    );
+    // 无界末 Region：分段终点 = 请求终点。
+    assert_eq!(
+        rm.resolve_range(b"n", b"zzz").unwrap(),
+        vec![seg(3, b"n", b"zzz")]
+    );
+    // 空区间不路由。
+    assert!(rm.resolve_range(b"n", b"d").unwrap().is_empty());
+    // 调用方必须先把单键换算成非空上界。
+    assert!(matches!(
+        rm.resolve_range(b"d", b""),
+        Err(Error::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn test_resolve_range_rejects_gap_and_unroutable_start() {
+    let gap = RegionManager::new(1);
+    gap.register_region(make_test_meta(1, b"".to_vec(), b"d".to_vec()))
+        .unwrap();
+    gap.register_region(make_test_meta(3, b"n".to_vec(), b"".to_vec()))
+        .unwrap();
+    assert!(matches!(
+        gap.resolve_range(b"a", b"z"),
+        Err(Error::RouteNotReady)
+    ));
+
+    let starts_at_d = RegionManager::new(1);
+    starts_at_d
+        .register_region(make_test_meta(2, b"d".to_vec(), b"".to_vec()))
+        .unwrap();
+    assert!(matches!(
+        starts_at_d.resolve_range(b"a", b"z"),
+        Err(Error::RouteNotReady)
+    ));
+}

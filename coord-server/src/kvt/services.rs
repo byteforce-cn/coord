@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use futures::{StreamExt, TryStreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 use coord_proto::kv::v2 as kv_v2;
@@ -26,7 +27,7 @@ use coord_core::kv_range::RangeSemantics;
 use super::KvTCapability;
 use crate::raft::tso::{normalize_batch_size, TsoAllocator, TsoBatch};
 use crate::raft::type_config::{Command, Response as RaftResponse};
-use crate::server::{map_err, CoordNode};
+use crate::server::{map_err, CoordNode, KvRangeSegment};
 
 /// 门禁 + 未实现哨兵。
 fn shell(capability: KvTCapability, node: &CoordNode) -> Status {
@@ -241,6 +242,64 @@ async fn wait_for_safe_ts(node: &CoordNode, read_ts: u64, wait_ms: u64) -> Resul
     }
 }
 
+/// 单次 Range 同时在飞的 Region 分段数上限。
+///
+/// 分段读取是网络 + ReadIndex RPC；不设上界时一个大范围会把所有 Region 同时
+/// 打到饱和。`buffered` 保持分段顺序，因此合并结果仍按 key 有序。
+const RANGE_FANOUT_CONCURRENCY: usize = 8;
+
+/// 读取一个 Region 分段在 `read_ts` 上的精确快照。
+///
+/// 每段独立过 ReadIndex 屏障（确认本 Region 的 leader / apply 水位）；
+/// 屏障要求本节点是该 Region 的 leader，因此多节点 leader 分散时的跨节点读
+/// 转发缺口见 ADR-0015 D10 / #188。
+/// `read_ts == current` 时走实时读，但若读事务的 revision 已越过 `read_ts`
+/// 则退回精确历史视图，保证返回行 `mod_revision <= read_ts`。
+async fn read_kv_range_segment(
+    node: &CoordNode,
+    seg: KvRangeSegment,
+    read_ts: u64,
+    scan_limit: usize,
+) -> Result<Vec<kv_v2::KeyValue>, Status> {
+    let target = &seg.target;
+    node.ensure_linearizable_on(
+        target.raft.as_deref(),
+        target.raft_log_store.as_ref(),
+        target.region_id,
+    )
+    .await?;
+
+    let current_now = target.mvcc.current_revision();
+    let rows = if read_ts == 0 {
+        // 0 是“早于任何 commit”的合法快照（safe_ts 也可能为 0）；
+        // changelog 的 0 水位会被当成已压缩，不能走历史读。
+        Vec::new()
+    } else if read_ts == current_now {
+        let (rows, live_revision) = target
+            .mvcc
+            .range_in_with_metadata(&seg.start, &seg.end, scan_limit)
+            .map_err(map_err)?;
+        if live_revision > read_ts {
+            target
+                .mvcc
+                .range_at_revision_with_metadata(&seg.start, &seg.end, scan_limit, read_ts)
+                .map_err(v2_status)?
+        } else {
+            rows
+        }
+    } else {
+        target
+            .mvcc
+            .range_at_revision_with_metadata(&seg.start, &seg.end, scan_limit, read_ts)
+            .map_err(v2_status)?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|(key, value, meta)| to_kv_v2(&key, &value, Some(&meta)))
+        .collect())
+}
+
 #[tonic::async_trait]
 impl kv_v2::kv_server::Kv for CoordNode {
     async fn put(
@@ -398,20 +457,12 @@ impl kv_v2::kv_server::Kv for CoordNode {
             requested
         };
 
-        let target = self.kv_target_for_key(&req.key)?;
         let single_key = RangeSemantics::of(&req.key, &req.range_end).is_single_key();
-        if !single_key {
-            self.guard_range_in_target(&target, &req.key, &req.range_end)?;
-        }
-
-        // 读屏障确认 leader 且本地 apply 已覆盖已提交日志；否则 follower 可能
-        // 用落后的 current_revision 把 read_ts=0 解析成旧快照。
-        self.ensure_linearizable_on(
-            target.raft.as_deref(),
-            target.raft_log_store.as_ref(),
-            target.region_id,
-        )
-        .await?;
+        let end = if single_key {
+            single_key_end(&req.key)
+        } else {
+            req.range_end.clone()
+        };
 
         let safe_ts = self.safe_ts();
         let read_ts = if req.read_ts == 0 {
@@ -423,7 +474,15 @@ impl kv_v2::kv_server::Kv for CoordNode {
             wait_for_safe_ts(self, read_ts, self.kvt().config().read_ts_wait_ms).await?;
         }
 
-        let current_now = target.mvcc.current_revision();
+        // 空区间（非单键且 end <= key）：不路由、不读，但仍回显已解析的 read_ts。
+        if !single_key && end <= req.key {
+            return Ok(Response::new(kv_v2::RangeResponse {
+                kvs: Vec::new(),
+                count: 0,
+                read_ts: read_ts as i64,
+            }));
+        }
+
         let scan_limit = if req.count_only {
             if max_range == 0 {
                 0
@@ -433,61 +492,47 @@ impl kv_v2::kv_server::Kv for CoordNode {
         } else {
             limit
         };
-        let end = if single_key {
-            single_key_end(&req.key)
-        } else {
-            req.range_end.clone()
-        };
 
-        // safe_ts 是各 Region current 的最小值，因此 `read_ts <= safe_ts` 必然
-        // `<= target.current`；但并发的 fence 可能让 current 在两步之间又前进。
-        let (rows, header_read_ts) = if read_ts == 0 {
-            // 0 是“早于任何 commit”的合法快照（safe_ts 也可能为 0）；
-            // changelog 的 0 水位会被当成已压缩，不能走历史读。
-            (Vec::new(), 0)
-        } else if read_ts == current_now {
-            // 值、元数据、header revision 同一读事务；header 用该事务的 revision，
-            // 不能用读事务之前的 current——并发提交会让 header 落后于返回的行。
-            let (rows, live_revision) = target
-                .mvcc
-                .range_in_with_metadata(&req.key, &end, scan_limit)
-                .map_err(map_err)?;
-            if live_revision > read_ts {
-                // 显式/全局快照读越过了目标 revision：改用精确历史视图，
-                // 保证 `mod_revision <= read_ts`（read_ts=0 已在上一个分支处理）。
-                let rows = target
-                    .mvcc
-                    .range_at_revision_with_metadata(&req.key, &end, scan_limit, read_ts)
-                    .map_err(v2_status)?;
-                (rows, read_ts)
-            } else {
-                (rows, read_ts)
-            }
-        } else {
-            let rows = target
-                .mvcc
-                .range_at_revision_with_metadata(&req.key, &end, scan_limit, read_ts)
-                .map_err(v2_status)?;
-            (rows, read_ts)
-        };
-
-        let mut kvs: Vec<kv_v2::KeyValue> = rows
+        let segments = self.kv_range_targets(&req.key, &end)?;
+        let reads = segments
             .into_iter()
-            .map(|(key, value, meta)| to_kv_v2(&key, &value, Some(&meta)))
-            .collect();
-        if self.object_enabled() {
-            kvs.retain(|kv| !crate::storage::object_store::key_in_object_space(&kv.key));
-        }
-        if req.count_only && max_range > 0 && kvs.len() > max_range {
-            return Err(attach(
-                Status::invalid_argument(format!(
-                    "range scan exceeds max {max_range}; narrow the range"
-                )),
-                CoordErrorCode::ReadSetTooLarge,
-            ));
-        }
+            .map(|seg| read_kv_range_segment(self, seg, read_ts, scan_limit));
+        let mut parts = futures::stream::iter(reads).buffered(RANGE_FANOUT_CONCURRENCY);
 
-        let count = kvs.len() as i64;
+        let mut kvs: Vec<kv_v2::KeyValue> = Vec::new();
+        let mut total = 0usize;
+        while let Some(part) = parts.try_next().await? {
+            let mut part = part;
+            if self.object_enabled() {
+                part.retain(|kv| !crate::storage::object_store::key_in_object_space(&kv.key));
+            }
+            if req.count_only {
+                // count_only 只需要总数：逐段累加并及时失败，不把所有行留在内存。
+                total = total.saturating_add(part.len());
+                if max_range > 0 && total > max_range {
+                    return Err(attach(
+                        Status::invalid_argument(format!(
+                            "range scan exceeds max {max_range}; narrow the range"
+                        )),
+                        CoordErrorCode::ReadSetTooLarge,
+                    ));
+                }
+            } else {
+                kvs.extend(part);
+                if limit > 0 && kvs.len() >= limit {
+                    // 分段按 key 有序：已拿到全局前 limit 条，后续分段无需再读。
+                    kvs.truncate(limit);
+                    break;
+                }
+            }
+        }
+        drop(parts);
+
+        let count = if req.count_only {
+            total as i64
+        } else {
+            kvs.len() as i64
+        };
         if req.keys_only {
             for kv in &mut kvs {
                 kv.value.clear();
@@ -500,7 +545,7 @@ impl kv_v2::kv_server::Kv for CoordNode {
         Ok(Response::new(kv_v2::RangeResponse {
             kvs,
             count,
-            read_ts: header_read_ts as i64,
+            read_ts: read_ts as i64,
         }))
     }
 

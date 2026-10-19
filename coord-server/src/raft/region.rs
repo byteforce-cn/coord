@@ -69,6 +69,20 @@ impl RegionRole {
     }
 }
 
+/// `[start, end)` 在一个 Region 内的一个有序分段（v2 Range 扇出的执行单元）。
+///
+/// 分段由 [`RegionManager::resolve_range`] 生成：首段从请求起点开始，后续段首尾
+/// 相接，末段的 `end_key` 等于请求终点（末 Region 无上界时也一样）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionRangeSegment {
+    /// 该分段所属 Region
+    pub region_id: RegionId,
+    /// 分段起点（包含）
+    pub start_key: Vec<u8>,
+    /// 分段终点（不包含）
+    pub end_key: Vec<u8>,
+}
+
 /// 单个 Region 的运行时句柄
 ///
 /// 每个 RegionHandle 对应一个 Raft Group，维护该 Region 的元数据、
@@ -355,6 +369,59 @@ impl RegionManager {
     /// 列出所有 Region
     pub fn list_regions(&self) -> Vec<Arc<RegionHandle>> {
         self.regions.read().values().cloned().collect()
+    }
+
+    /// 把半开区间 `[start, end)` 切成按 key 有序、互不相交的 Region 分段。
+    ///
+    /// - `end` 必须非空（单键读由调用方换算为 `key + 0x00`）；空值 fail-closed，
+    ///   避免把「无上界」误当成一次全 keyspace 扫描。
+    /// - `end <= start` → 空分段（区间为空，不需要路由）。
+    /// - 相邻分段之间出现缺口/重叠（路由表未收敛或正在变更）→ `RouteNotReady`：
+    ///   调用方必须整请求失败，不能跳过缺口返回部分结果。
+    pub fn resolve_range(&self, start: &[u8], end: &[u8]) -> Result<Vec<RegionRangeSegment>> {
+        if end.is_empty() {
+            return Err(Error::InvalidArgument(
+                "range end must be non-empty (single-key reads use key + 0x00)".to_string(),
+            ));
+        }
+        if end <= start {
+            return Ok(Vec::new());
+        }
+
+        let mut segments = Vec::new();
+        let mut cursor = start.to_vec();
+        let mut region = self.route(&cursor)?;
+        loop {
+            let meta = region.meta.read().clone();
+            let seg_end = if meta.end_key.is_empty() || end <= meta.end_key.as_slice() {
+                end.to_vec()
+            } else {
+                meta.end_key.clone()
+            };
+            // 段必须前进；否则表已损坏（重叠/空 Region），不能静默跳 key。
+            if seg_end <= cursor {
+                return Err(Error::RouteNotReady);
+            }
+            segments.push(RegionRangeSegment {
+                region_id: meta.region_id,
+                start_key: cursor.clone(),
+                end_key: seg_end.clone(),
+            });
+            if seg_end.as_slice() >= end {
+                return Ok(segments);
+            }
+            cursor = seg_end;
+            // 下一段必须从本段终点开始；缺口 = 路由表不可用（可重试），
+            // 不得跳过缺口返回已读到的前缀。
+            let next_id = self.key_index.read().get(&cursor).copied();
+            let next_id = next_id.ok_or(Error::RouteNotReady)?;
+            region = self
+                .get_region(next_id)
+                .ok_or(Error::RegionNotFound { region_id: next_id })?;
+            if !region.contains_key(&cursor) {
+                return Err(Error::KeyNotInRegion { region_id: next_id });
+            }
+        }
     }
 
     /// 获取 Region 总数
