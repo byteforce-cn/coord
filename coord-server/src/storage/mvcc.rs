@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use coord_core::error::{Error, Result};
 use coord_core::kv_range::RangeSemantics;
-use coord_core::storage::{StorageBackend, WriteTx};
+use coord_core::storage::{ReadTx, StorageBackend, WriteTx};
 use coord_core::types::{LeaseID, Revision};
 
 use crate::security::barrier::Barrier;
@@ -684,7 +684,7 @@ impl<B: StorageBackend> MvccStorage<B> {
     }
 
     /// 写事务内读取当前 revision（缺失时按持久化 applied 回退；CommitTs 模式为 0）。
-    fn current_revision_in_tx(tx: &mut dyn WriteTx, mode: RevisionMode) -> Result<Revision> {
+    fn current_revision_in_tx(tx: &dyn ReadTx, mode: RevisionMode) -> Result<Revision> {
         if let Some(bytes) = tx.get(TABLE_META, META_CURRENT_REVISION)? {
             if let Some(revision) = decode_u64(&bytes) {
                 return Ok(revision);
@@ -1137,6 +1137,58 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    /// Range 实时读（含 revision 元数据）：值、元数据与 header revision 取自
+    /// **同一个读事务**。
+    ///
+    /// 分两次读（先 current_revision、再 range_in）会让并发提交落在两者之间：
+    /// header 说读到了 R，数据却缺 R 的写入（或读到了 header 之后才提交的数据）。
+    /// v2 Range 的 `read_ts=0` 承诺多 key 原子可见，因此三者必须同快照。
+    pub fn range_in_with_metadata(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        limit: usize,
+    ) -> Result<(Vec<(Vec<u8>, Vec<u8>, KvMetadata)>, Revision)> {
+        let internal_start = encode_kv_key(start);
+        let internal_end = encode_kv_key(range_end);
+        self.backend.read(|tx| {
+            let revision = Self::current_revision_in_tx(tx, self.revision_mode)?;
+            let all = tx.iter_range(TABLE_KV, &internal_start, &internal_end)?;
+            let mut results = Vec::new();
+            for (ik, v) in all {
+                if limit > 0 && results.len() >= limit {
+                    break;
+                }
+                let Some(user_key) = decode_kv_key(&ik) else {
+                    continue;
+                };
+                if !range_end.is_empty() && user_key >= range_end {
+                    break;
+                }
+                let meta_key = encode_kv_meta_key(user_key);
+                let meta = tx
+                    .get(TABLE_KV_META, &meta_key)?
+                    .and_then(|bytes| KvMetadata::from_bytes(&bytes))
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "key {} has no metadata; refusing to serve a v2 range read",
+                            String::from_utf8_lossy(user_key)
+                        ))
+                    })?;
+                if meta.deleted {
+                    continue;
+                }
+                let plaintext = if v.is_empty() {
+                    Vec::new()
+                } else {
+                    self.decrypt_value(&ik, &v)?
+                };
+                results.push((user_key.to_vec(), plaintext, meta));
+            }
+            Ok((results, revision))
+        })
+    }
+
     /// Range 历史读：返回 `[start, range_end)` 在目标 revision 时刻的视图（R-SVC-07-2）
     ///
     /// 通过回放 Changelog 重建历史视图（与 `get_at_revision` 同一模式）。
@@ -1205,26 +1257,25 @@ impl<B: StorageBackend> MvccStorage<B> {
                 }
                 current
             } else {
-                let version = current.version.checked_sub(writes_after as i64).ok_or_else(|| {
-                    Error::Internal(format!(
-                        "historical metadata for key {} at revision {target_revision} is not \
-                         reconstructable: {} write(s) after the target exceed current version {}",
-                        String::from_utf8_lossy(&key),
-                        writes_after,
-                        current.version
-                    ))
-                })?;
-                let mod_revision = historical
-                    .last_write
-                    .get(&key)
-                    .copied()
+                let version = current
+                    .version
+                    .checked_sub(writes_after as i64)
                     .ok_or_else(|| {
                         Error::Internal(format!(
-                            "historical metadata for key {} at revision {target_revision} is \
-                             not reconstructable: last write at or before the target is missing",
-                            String::from_utf8_lossy(&key)
+                            "historical metadata for key {} at revision {target_revision} is not \
+                         reconstructable: {} write(s) after the target exceed current version {}",
+                            String::from_utf8_lossy(&key),
+                            writes_after,
+                            current.version
                         ))
-                    })? as i64;
+                    })?;
+                let mod_revision = historical.last_write.get(&key).copied().ok_or_else(|| {
+                    Error::Internal(format!(
+                        "historical metadata for key {} at revision {target_revision} is \
+                             not reconstructable: last write at or before the target is missing",
+                        String::from_utf8_lossy(&key)
+                    ))
+                })? as i64;
                 if current.create_revision as u64 > target_revision {
                     return Err(Error::Internal(format!(
                         "historical metadata for key {} at revision {target_revision} is not \

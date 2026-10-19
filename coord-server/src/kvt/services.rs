@@ -8,6 +8,8 @@
 //! reflection 仍然可见，便于客户端在连接阶段就发现"这个集群没有 KV-T"，而不是
 //! 拿到 `UNAVAILABLE` 后误判为网络故障。
 
+use std::time::Duration;
+
 use tonic::{Request, Response, Status, Streaming};
 
 use coord_proto::kv::v2 as kv_v2;
@@ -194,6 +196,42 @@ fn record_commit_rejected(node: &CoordNode) {
     }
 }
 
+/// 单键半开区间上界：`key + 0x00` 恰好只包含 `key` 自身（长度前缀序）。
+fn single_key_end(key: &[u8]) -> Vec<u8> {
+    let mut end = Vec::with_capacity(key.len() + 1);
+    end.extend_from_slice(key);
+    end.push(0);
+    end
+}
+
+/// 等待 Region apply 追到 `read_ts`；超时返回可重试的 `SAFE_TS_LAG`。
+async fn wait_for_revision(
+    node: &CoordNode,
+    target: &crate::server::KvTarget,
+    read_ts: u64,
+    wait_ms: u64,
+) -> Result<(), Status> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        if target.mvcc.current_revision() >= read_ts {
+            return Ok(());
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            if let Some(metrics) = node.metrics() {
+                metrics.inc_kv_v2_safe_ts_lag();
+            }
+            return Err(attach(
+                Status::unavailable(format!(
+                    "read_ts {read_ts} exceeds safe_ts (region apply lag); retry later"
+                )),
+                CoordErrorCode::SafeTsLag,
+            ));
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_millis(10))).await;
+    }
+}
+
 #[tonic::async_trait]
 impl kv_v2::kv_server::Kv for CoordNode {
     async fn put(
@@ -311,9 +349,131 @@ impl kv_v2::kv_server::Kv for CoordNode {
 
     async fn range(
         &self,
-        _request: Request<kv_v2::RangeRequest>,
+        request: Request<kv_v2::RangeRequest>,
     ) -> Result<Response<kv_v2::RangeResponse>, Status> {
-        Err(shell(KvTCapability::Kv, self))
+        self.kvt().gate(KvTCapability::Kv)?;
+        let req = request.into_inner();
+        if req.read_ts < 0 {
+            return Err(attach(
+                Status::invalid_argument("read_ts must be >= 0"),
+                CoordErrorCode::InvalidArgument,
+            ));
+        }
+
+        let max_range = self.kvt().config().max_range as usize;
+        let limit = if req.limit < 0 {
+            return Err(attach(
+                Status::invalid_argument("limit must be >= 0"),
+                CoordErrorCode::InvalidArgument,
+            ));
+        } else if req.limit == 0 {
+            max_range
+        } else {
+            let requested = req.limit as usize;
+            if max_range > 0 && requested > max_range {
+                return Err(attach(
+                    Status::invalid_argument(format!(
+                        "range limit {requested} exceeds max {max_range}"
+                    )),
+                    CoordErrorCode::ReadSetTooLarge,
+                ));
+            }
+            requested
+        };
+
+        let target = self.kv_target_for_key(&req.key)?;
+        let single_key = RangeSemantics::of(&req.key, &req.range_end).is_single_key();
+        if !single_key {
+            self.guard_range_in_target(&target, &req.key, &req.range_end)?;
+        }
+
+        // 读屏障确认 leader 且本地 apply 已覆盖已提交日志；否则 follower 可能
+        // 用落后的 current_revision 把 read_ts=0 解析成旧快照。
+        self.ensure_linearizable_on(
+            target.raft.as_deref(),
+            target.raft_log_store.as_ref(),
+            target.region_id,
+        )
+        .await?;
+
+        let current = target.mvcc.current_revision();
+        let requested = if req.read_ts == 0 {
+            current
+        } else {
+            req.read_ts as u64
+        };
+        if requested > current {
+            wait_for_revision(
+                self,
+                &target,
+                requested,
+                self.kvt().config().read_ts_wait_ms,
+            )
+            .await?;
+        }
+
+        let read_ts = requested;
+        let current_now = target.mvcc.current_revision();
+        let scan_limit = if req.count_only {
+            if max_range == 0 {
+                0
+            } else {
+                max_range.saturating_add(1)
+            }
+        } else {
+            limit
+        };
+        let end = if single_key {
+            single_key_end(&req.key)
+        } else {
+            req.range_end.clone()
+        };
+
+        let rows = if read_ts == current_now {
+            // 值、元数据、header revision 同一读事务。
+            target
+                .mvcc
+                .range_in_with_metadata(&req.key, &end, scan_limit)
+                .map_err(map_err)?
+                .0
+        } else {
+            target
+                .mvcc
+                .range_at_revision_with_metadata(&req.key, &end, scan_limit, read_ts)
+                .map_err(v2_status)?
+        };
+
+        let mut kvs: Vec<kv_v2::KeyValue> = rows
+            .into_iter()
+            .map(|(key, value, meta)| to_kv_v2(&key, &value, Some(&meta)))
+            .collect();
+        if self.object_enabled() {
+            kvs.retain(|kv| !crate::storage::object_store::key_in_object_space(&kv.key));
+        }
+        if req.count_only && max_range > 0 && kvs.len() > max_range {
+            return Err(attach(
+                Status::invalid_argument(format!(
+                    "range scan exceeds max {max_range}; narrow the range"
+                )),
+                CoordErrorCode::ReadSetTooLarge,
+            ));
+        }
+
+        let count = kvs.len() as i64;
+        if req.keys_only {
+            for kv in &mut kvs {
+                kv.value.clear();
+            }
+        }
+        if req.count_only {
+            kvs.clear();
+        }
+
+        Ok(Response::new(kv_v2::RangeResponse {
+            kvs,
+            count,
+            read_ts: read_ts as i64,
+        }))
     }
 
     async fn delete(

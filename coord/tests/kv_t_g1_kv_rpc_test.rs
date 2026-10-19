@@ -25,7 +25,7 @@ mod tests {
     use coord_proto::kv::{PutRequest as PutRequestV1, RangeRequest as RangeRequestV1};
     use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
     use coord_server::server::CoordNode;
-    use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
+    use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
     use coord_server::storage::redb_backend::RedbBackend;
     use tokio::net::TcpListener;
     use tonic::transport::{Channel, Server};
@@ -34,12 +34,15 @@ mod tests {
     struct TestServer {
         addr: SocketAddr,
         handle: tokio::task::JoinHandle<()>,
+        shutdown_tx: tokio::sync::oneshot::Sender<()>,
         node: Arc<CoordNode>,
     }
 
     impl TestServer {
         async fn shutdown(self) {
-            self.handle.abort();
+            // 优雅停 accept loop：连接任务持有 node（= Redb 文件锁），直接 abort
+            // 会留下未释放的 Arc，同一目录无法立即重开。
+            let _ = self.shutdown_tx.send(());
             let _ = self.handle.await;
             drop(self.node);
         }
@@ -71,16 +74,27 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_node = Arc::clone(&node);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
             Server::builder()
                 .add_service(KvV1Server::from_arc(Arc::clone(&server_node)))
                 .add_service(KvV2Server::from_arc(server_node))
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async {
+                        let _ = shutdown_rx.await;
+                    },
+                )
                 .await
                 .unwrap();
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
-        TestServer { addr, handle, node }
+        TestServer {
+            addr,
+            handle,
+            shutdown_tx,
+            node,
+        }
     }
 
     async fn kv_v2(addr: SocketAddr) -> KvV2Client<Channel> {
@@ -201,6 +215,7 @@ mod tests {
         assert_eq!(resp.prev_kvs.len(), 2);
         assert_eq!(resp.commit_ts, 106);
 
+        drop(kv);
         server.shutdown().await;
     }
 
@@ -266,6 +281,7 @@ mod tests {
         assert_eq!(replay.deleted, 0);
         assert_eq!(replay.commit_ts, 201);
 
+        drop(kv);
         server.shutdown().await;
     }
 
@@ -311,8 +327,253 @@ mod tests {
         assert_eq!(range_resp.kvs.len(), 1);
         assert_eq!(range_resp.kvs[0].value, b"ok");
 
+        drop(v1);
         server.shutdown().await;
     }
 
-    // Task 3 会在这里补充 Range 的 safe_ts / 快照 / 上限用例。
+    fn range(key: &[u8], range_end: &[u8], read_ts: i64) -> RangeRequestV2 {
+        RangeRequestV2 {
+            key: key.to_vec(),
+            range_end: range_end.to_vec(),
+            read_ts,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_range_read_your_writes_and_snapshot() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let server = start_server(
+            tmpdir.path(),
+            RevisionMode::CommitTs,
+            true,
+            &[KvTCapability::Kv],
+            config(50),
+        )
+        .await;
+        let mut kv = kv_v2(server.addr).await;
+
+        kv.put(put(b"a", b"v1", 100)).await.unwrap();
+        kv.put(put(b"b", b"v1", 101)).await.unwrap();
+        kv.put(put(b"a", b"v2", 102)).await.unwrap();
+
+        // read_ts=0 → safe_ts=current_revision；读己之写。
+        let latest = kv
+            .range(range(b"a", b"z", 0))
+            .await
+            .expect("latest range")
+            .into_inner();
+        assert_eq!(latest.read_ts, 102);
+        assert_eq!(latest.count, 2);
+        let a = latest.kvs.iter().find(|kv| kv.key == b"a").unwrap();
+        assert_eq!(a.value, b"v2");
+        assert_eq!(a.mod_revision, 102);
+        assert_eq!(a.create_revision, 100);
+        assert_eq!(a.version, 2);
+
+        // read_ts=100：a 当时还不存在（create=100 恰好可见），b 尚未创建。
+        let at_100 = kv
+            .range(range(b"a", b"z", 100))
+            .await
+            .expect("snapshot at 100")
+            .into_inner();
+        assert_eq!(at_100.read_ts, 100);
+        assert_eq!(at_100.kvs.len(), 1);
+        assert_eq!(at_100.kvs[0].key, b"a");
+        assert_eq!(at_100.kvs[0].value, b"v1");
+        assert_eq!(at_100.kvs[0].mod_revision, 100);
+        assert_eq!(at_100.kvs[0].version, 1);
+
+        // 单键历史读与区间读同口径。
+        let single = kv
+            .range(range(b"a", b"", 101))
+            .await
+            .expect("single key snapshot")
+            .into_inner();
+        assert_eq!(single.kvs.len(), 1);
+        assert_eq!(single.kvs[0].value, b"v1");
+        assert_eq!(single.kvs[0].mod_revision, 100);
+
+        // count_only / keys_only。
+        let counted = kv
+            .range(RangeRequestV2 {
+                count_only: true,
+                ..range(b"a", b"z", 101)
+            })
+            .await
+            .expect("count only")
+            .into_inner();
+        assert_eq!(counted.count, 2);
+        assert!(counted.kvs.is_empty());
+
+        let keys_only = kv
+            .range(RangeRequestV2 {
+                keys_only: true,
+                ..range(b"a", b"z", 0)
+            })
+            .await
+            .expect("keys only")
+            .into_inner();
+        assert_eq!(keys_only.kvs.len(), 2);
+        assert!(keys_only.kvs.iter().all(|kv| kv.value.is_empty()));
+
+        drop(kv);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_range_waits_for_read_ts_then_safe_ts_lag() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let server = start_server(
+            tmpdir.path(),
+            RevisionMode::CommitTs,
+            true,
+            &[KvTCapability::Kv],
+            config(50),
+        )
+        .await;
+        let mut kv = kv_v2(server.addr).await;
+        kv.put(put(b"k", b"v", 100)).await.unwrap();
+
+        let started = tokio::time::Instant::now();
+        let err = kv
+            .range(range(b"k", b"", 200))
+            .await
+            .expect_err("read_ts beyond safe_ts must time out");
+        assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("SAFE_TS_LAG"),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "must wait for the configured window"
+        );
+
+        drop(kv);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_range_compacted_read_ts_is_out_of_range_and_limit_is_capped() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let server = start_server(
+            tmpdir.path(),
+            RevisionMode::CommitTs,
+            true,
+            &[KvTCapability::Kv],
+            KvTRuntimeConfig {
+                max_range: 5,
+                read_ts_wait_ms: 50,
+                ..KvTRuntimeConfig::default()
+            },
+        )
+        .await;
+        let mut kv = kv_v2(server.addr).await;
+        for (i, key) in [b"a", b"b", b"c", b"d", b"e", b"f"].iter().enumerate() {
+            kv.put(put(key.as_slice(), b"v", 100 + i as i64))
+                .await
+                .unwrap();
+        }
+        server
+            .node
+            .storage
+            .apply_compact(100, AppliedLogId::standalone(107))
+            .unwrap();
+
+        let err = kv
+            .range(range(b"a", b"z", 100))
+            .await
+            .expect_err("compacted read_ts must be rejected");
+        assert_eq!(err.code(), Code::OutOfRange, "{err:?}");
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("OUT_OF_RANGE"),
+            "{err:?}"
+        );
+
+        let err = kv
+            .range(RangeRequestV2 {
+                limit: 6,
+                ..range(b"a", b"z", 0)
+            })
+            .await
+            .expect_err("over-limit read must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("READ_SET_TOO_LARGE"),
+            "{err:?}"
+        );
+
+        let err = kv
+            .range(RangeRequestV2 {
+                count_only: true,
+                ..range(b"a", b"z", 0)
+            })
+            .await
+            .expect_err("count-only scan over max_range must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("READ_SET_TOO_LARGE"),
+            "{err:?}"
+        );
+
+        drop(kv);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_restart_preserves_revision_and_data() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let server = start_server(
+            tmpdir.path(),
+            RevisionMode::CommitTs,
+            true,
+            &[KvTCapability::Kv],
+            config(50),
+        )
+        .await;
+        let mut kv = kv_v2(server.addr).await;
+        kv.put(put(b"k", b"v1", 100)).await.unwrap();
+        drop(kv);
+        server.shutdown().await;
+
+        let server = start_server(
+            tmpdir.path(),
+            RevisionMode::CommitTs,
+            true,
+            &[KvTCapability::Kv],
+            config(50),
+        )
+        .await;
+        let mut kv = kv_v2(server.addr).await;
+        let err = kv
+            .put(put(b"k2", b"v", 99))
+            .await
+            .expect_err("revision must survive restart");
+        assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("COMMIT_REJECTED"),
+            "{err:?}"
+        );
+
+        kv.put(put(b"k", b"v2", 101)).await.unwrap();
+        let snapshot = kv
+            .range(range(b"k", b"", 100))
+            .await
+            .expect("historical range after restart")
+            .into_inner();
+        assert_eq!(snapshot.kvs.len(), 1);
+        assert_eq!(snapshot.kvs[0].value, b"v1");
+        assert_eq!(snapshot.kvs[0].mod_revision, 100);
+
+        drop(kv);
+        server.shutdown().await;
+    }
+
+    // Task 4 会在这里补充客户端用例。
 }
