@@ -1813,6 +1813,13 @@ pub fn apply_compact_local(node: &Arc<CoordNode>, revision: u64) -> Result<u64, 
 
 // ──── Compact 提案器（定时压缩经 raft 下发，节点一致）────
 
+impl crate::storage::compaction::SafeTsSource for CoordNode {
+    fn safe_ts(&self) -> u64 {
+        // 区分 trait 方法与本类型同名方法：这里明确调用 inherent impl。
+        CoordNode::safe_ts(self)
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::storage::compaction::CompactProposer for CoordNode {
     async fn can_propose(&self) -> bool {

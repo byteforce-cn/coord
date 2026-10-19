@@ -3363,11 +3363,13 @@ async fn run_server(
     let auto_compact = compaction_config.auto_compact;
     let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
         node.clone();
-    let _compaction_mgr = CompactionManager::start(
+    let safe_ts_source: Arc<dyn coord_server::storage::compaction::SafeTsSource> = node.clone();
+    let _compaction_mgr = CompactionManager::start_with_safe_ts(
         Arc::clone(&mvcc),
         compaction_config,
         Some(compaction_proposer),
         Some(Arc::clone(&metrics)),
+        Some(Arc::clone(&safe_ts_source)),
     );
     tracing::info!(
         "Compaction manager started: auto_compact={}, interval={:?}, retention={} revs",
@@ -3396,11 +3398,12 @@ async fn run_server(
                             &rt,
                         ),
                     );
-                let mgr = coord_server::storage::compaction::CompactionManager::start(
+                let mgr = coord_server::storage::compaction::CompactionManager::start_with_safe_ts(
                     Arc::clone(&rt.mvcc),
                     coord_server::storage::compaction::CompactionConfig::default(),
                     Some(proposer),
                     Some(Arc::clone(&metrics)),
+                    Some(Arc::clone(&safe_ts_source)),
                 );
                 tracing::info!("Region {rid} compaction manager started");
                 mgrs.push(mgr);
