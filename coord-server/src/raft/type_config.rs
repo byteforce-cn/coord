@@ -558,9 +558,7 @@ pub enum Command {
     /// 数据 Region 应用一批已决策事务（#148；仅数据 Region raft 提出）。
     ///
     /// **末尾追加**；`mutations` 只含本 Region 的 key，空切片用于推进游标。
-    ApplyCommitDecisions {
-        decisions: Vec<CommitDecisionApply>,
-    },
+    ApplyCommitDecisions { decisions: Vec<CommitDecisionApply> },
 }
 
 impl std::fmt::Display for Command {
