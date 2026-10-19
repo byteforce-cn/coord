@@ -22,7 +22,10 @@ use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::tso::{TsoAllocator, TsoClient};
-use coord_server::raft::type_config::{SequencerMutation, SequencerOutcome};
+use coord_server::raft::type_config::{
+    SequencerInvalid, SequencerMutation, SequencerOutcome, SequencerReadRange,
+    SequencerValidationLimits,
+};
 use coord_server::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode};
 use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
@@ -47,6 +50,17 @@ fn candidate(
     reads: &[&[u8]],
     writes: &[(&[u8], &[u8])],
 ) -> CommitCandidate {
+    candidate_with_ranges(txn_id, start_ts, request_id, reads, &[], writes)
+}
+
+fn candidate_with_ranges(
+    txn_id: &[u8],
+    start_ts: u64,
+    request_id: &[u8],
+    reads: &[&[u8]],
+    ranges: &[(&[u8], &[u8])],
+    writes: &[(&[u8], &[u8])],
+) -> CommitCandidate {
     CommitCandidate {
         txn_id: txn_id.to_vec(),
         start_ts,
@@ -55,6 +69,13 @@ fn candidate(
             .iter()
             .map(|key| key.to_vec())
             .collect::<BTreeSet<_>>(),
+        read_ranges: ranges
+            .iter()
+            .map(|(start, end)| SequencerReadRange {
+                start: start.to_vec(),
+                end: end.to_vec(),
+            })
+            .collect(),
         mutations: writes
             .iter()
             .map(|(key, value)| SequencerMutation::Put {
@@ -77,6 +98,14 @@ struct SingleNode {
 
 impl SingleNode {
     async fn start() -> Self {
+        Self::start_with_limits(SequencerValidationLimits {
+            max_read_set: 4_096,
+            max_range: 10_000,
+        })
+        .await
+    }
+
+    async fn start_with_limits(limits: SequencerValidationLimits) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().to_path_buf();
         let backend = RedbBackend::open(&base, &StorageConfig::default()).unwrap();
@@ -113,6 +142,7 @@ impl SingleNode {
             Arc::clone(&mvcc),
             256,
             1024 * 1024,
+            limits,
             coord_server::kvt::sequencer::SEQUENCER_PROPOSE_TIMEOUT,
         );
 
@@ -385,6 +415,256 @@ async fn start_two_node_region0() -> Vec<ClusterNode> {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_occ_write_skew_rejected() {
+    let node = SingleNode::start().await;
+    let start1 = node.tso.get_ts().await.unwrap();
+    let start2 = node.tso.get_ts().await.unwrap();
+
+    // 两个事务都读 x/y、各写一个：serializable 下后提交者必须冲突。
+    let first = node
+        .sequencer
+        .validate_and_commit(vec![candidate(
+            b"t1",
+            start1,
+            b"r1",
+            &[b"x", b"y"],
+            &[(b"x", b"1")],
+        )])
+        .await
+        .unwrap();
+    let commit1 = match first.as_slice() {
+        [SequencerOutcome::Committed { commit_ts }] => *commit_ts,
+        other => panic!("unexpected first outcome: {other:?}"),
+    };
+
+    let second = node
+        .sequencer
+        .validate_and_commit(vec![candidate(
+            b"t2",
+            start2,
+            b"r2",
+            &[b"x", b"y"],
+            &[(b"y", b"2")],
+        )])
+        .await
+        .unwrap();
+    let conflict_ts = match second.as_slice() {
+        [SequencerOutcome::Conflict {
+            commit_ts,
+            conflict_key,
+            conflict_ts,
+        }] => {
+            assert_eq!(conflict_key, b"x");
+            assert_eq!(*conflict_ts, commit1);
+            *commit_ts
+        }
+        other => panic!("expected write-skew conflict, got {other:?}"),
+    };
+    assert!(
+        node.mvcc
+            .get_sequencer_decision(conflict_ts)
+            .unwrap()
+            .is_none(),
+        "conflict must not write a decision"
+    );
+
+    // 换新 start_ts 重跑（新 txn_id）：成功。
+    let fresh_start = node.tso.get_ts().await.unwrap();
+    let retry = node
+        .sequencer
+        .validate_and_commit(vec![candidate(
+            b"t2-retry",
+            fresh_start,
+            b"r2-retry",
+            &[b"x", b"y"],
+            &[(b"y", b"2")],
+        )])
+        .await
+        .unwrap();
+    assert!(matches!(
+        retry.as_slice(),
+        [SequencerOutcome::Committed { .. }]
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_occ_range_phantom_rejected() {
+    let node = SingleNode::start().await;
+    let range_start = node.tso.get_ts().await.unwrap();
+
+    // 先提交插入 b，让晚于快照的 range 读出现幻影。
+    let inserted = node
+        .sequencer
+        .validate_and_commit(vec![candidate(
+            b"insert",
+            node.tso.get_ts().await.unwrap(),
+            b"r-insert",
+            &[],
+            &[(b"b", b"1")],
+        )])
+        .await
+        .unwrap();
+    let insert_ts = match inserted.as_slice() {
+        [SequencerOutcome::Committed { commit_ts }] => *commit_ts,
+        other => panic!("unexpected insert outcome: {other:?}"),
+    };
+
+    let phantom = node
+        .sequencer
+        .validate_and_commit(vec![candidate_with_ranges(
+            b"reader",
+            range_start,
+            b"r-reader",
+            &[],
+            &[(b"a", b"m")],
+            &[],
+        )])
+        .await
+        .unwrap();
+    let conflict_ts = match phantom.as_slice() {
+        [SequencerOutcome::Conflict {
+            commit_ts,
+            conflict_key,
+            conflict_ts,
+        }] => {
+            assert_eq!(conflict_key, b"b");
+            assert_eq!(*conflict_ts, insert_ts);
+            *commit_ts
+        }
+        other => panic!("expected phantom conflict, got {other:?}"),
+    };
+    assert!(
+        node.mvcc
+            .get_sequencer_decision(conflict_ts)
+            .unwrap()
+            .is_none(),
+        "phantom conflict must not write a decision"
+    );
+
+    // 新快照重跑：成功。
+    let retry = node
+        .sequencer
+        .validate_and_commit(vec![candidate_with_ranges(
+            b"reader-retry",
+            node.tso.get_ts().await.unwrap(),
+            b"r-reader-retry",
+            &[],
+            &[(b"a", b"m")],
+            &[],
+        )])
+        .await
+        .unwrap();
+    assert!(matches!(
+        retry.as_slice(),
+        [SequencerOutcome::Committed { .. }]
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_occ_range_scan_limit_fails_closed() {
+    let node = SingleNode::start_with_limits(SequencerValidationLimits {
+        max_read_set: 4_096,
+        max_range: 2,
+    })
+    .await;
+    let start = node.tso.get_ts().await.unwrap();
+    let writes = node
+        .sequencer
+        .validate_and_commit(vec![candidate(
+            b"writer",
+            start,
+            b"r-writer",
+            &[],
+            &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")],
+        )])
+        .await
+        .unwrap();
+    assert!(matches!(
+        writes.as_slice(),
+        [SequencerOutcome::Committed { .. }]
+    ));
+
+    let outcomes = node
+        .sequencer
+        .validate_and_commit(vec![candidate_with_ranges(
+            b"scanner",
+            start,
+            b"r-scanner",
+            &[],
+            &[(b"a", b"z")],
+            &[],
+        )])
+        .await
+        .unwrap();
+    let commit_ts = match outcomes.as_slice() {
+        [SequencerOutcome::Invalid {
+            commit_ts,
+            reason: SequencerInvalid::RangeScanExceeded,
+        }] => *commit_ts,
+        other => panic!("expected RangeScanExceeded, got {other:?}"),
+    };
+    assert!(
+        node.mvcc
+            .get_sequencer_decision(commit_ts)
+            .unwrap()
+            .is_none(),
+        "limit rejection must not write a decision"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_occ_read_set_limit_rejected() {
+    let node = SingleNode::start_with_limits(SequencerValidationLimits {
+        max_read_set: 2,
+        max_range: 10_000,
+    })
+    .await;
+    let start = node.tso.get_ts().await.unwrap();
+
+    let outcomes = node
+        .sequencer
+        .validate_and_commit(vec![candidate(
+            b"reader",
+            start,
+            b"r-reader",
+            &[b"a", b"b", b"c"],
+            &[],
+        )])
+        .await
+        .unwrap();
+    let commit_ts = match outcomes.as_slice() {
+        [SequencerOutcome::Invalid {
+            commit_ts,
+            reason: SequencerInvalid::ReadSetTooLarge,
+        }] => *commit_ts,
+        other => panic!("expected ReadSetTooLarge, got {other:?}"),
+    };
+    assert!(
+        node.mvcc
+            .get_sequencer_decision(commit_ts)
+            .unwrap()
+            .is_none(),
+        "read-set limit rejection must not write a decision"
+    );
+
+    let retry = node
+        .sequencer
+        .validate_and_commit(vec![candidate(
+            b"reader-retry",
+            start,
+            b"r-reader-retry",
+            &[b"a", b"b"],
+            &[],
+        )])
+        .await
+        .unwrap();
+    assert!(matches!(
+        retry.as_slice(),
+        [SequencerOutcome::Committed { .. }]
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_two_node_sequencer_leader_only_and_replication() {
     let nodes = start_two_node_region0().await;
@@ -411,6 +691,10 @@ async fn test_two_node_sequencer_leader_only_and_replication() {
         Arc::clone(&leader.mvcc),
         256,
         1024 * 1024,
+        SequencerValidationLimits {
+            max_read_set: 4_096,
+            max_range: 10_000,
+        },
         coord_server::kvt::sequencer::SEQUENCER_PROPOSE_TIMEOUT,
     );
     let outcomes = sequencer
@@ -444,6 +728,10 @@ async fn test_two_node_sequencer_leader_only_and_replication() {
         Arc::clone(&follower.mvcc),
         256,
         1024 * 1024,
+        SequencerValidationLimits {
+            max_read_set: 4_096,
+            max_range: 10_000,
+        },
         coord_server::kvt::sequencer::SEQUENCER_PROPOSE_TIMEOUT,
     );
     let err = follower_sequencer

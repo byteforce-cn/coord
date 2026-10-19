@@ -3222,6 +3222,9 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// [`crate::raft::type_config::SequencerOutcome`]：冲突/重复/乱序/非法
     /// 都是用户级结果，不返回 `Err`（D11.5）。决策、幂等索引、校验索引与
     /// `META_LAST_APPLIED` 在同一 redb 写事务里原子落盘。
+    ///
+    /// 旧 `ValidateAndCommit` 没有 range 谓词与上限，继续按 #146 语义执行；
+    /// range 校验只在追加的变体里生效（旧日志无需重写）。
     pub fn apply_sequencer_op(
         &self,
         op: &crate::raft::type_config::SequencerOp,
@@ -3230,13 +3233,25 @@ impl<B: StorageBackend> MvccStorage<B> {
     ) -> Result<Vec<crate::raft::type_config::SequencerOutcome>> {
         use crate::raft::type_config::SequencerOp;
 
-        let SequencerOp::ValidateAndCommit { txns } = op;
         self.backend.write(|tx| {
             self.note_log_index_revision(tx, revision)?;
-            let mut outcomes = Vec::with_capacity(txns.len());
-            for txn in txns {
-                outcomes.push(Self::sequencer_validate_in_tx(tx, txn)?);
-            }
+            let outcomes = match op {
+                SequencerOp::ValidateAndCommit { txns } => txns
+                    .iter()
+                    .map(|txn| Self::sequencer_validate_in_tx(tx, txn, &[], None))
+                    .collect::<Result<Vec<_>>>()?,
+                SequencerOp::ValidateAndCommitWithRanges { txns, limits } => txns
+                    .iter()
+                    .map(|entry| {
+                        Self::sequencer_validate_in_tx(
+                            tx,
+                            &entry.txn,
+                            &entry.read_ranges,
+                            Some(limits),
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            };
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
             Ok(outcomes)
         })
@@ -3245,10 +3260,16 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// 单条事务的 OCC 校验与决策落盘。
     ///
     /// 顺序不能调换：幂等命中先于「乱序」判断（重试可能带更大的新时间戳），
-    /// 乱序先于读集校验（旧时间戳的决策不能改写已确定的总序）。
+    /// 乱序先于读集校验（旧时间戳的决策不能改写已确定的总序）。读集上限先于
+    /// 冲突校验：输入非法时不必逐条扫一个超大的读集。
+    ///
+    /// range 谓词与 point 读集共用当前 `WriteTx`：同批前序事务的索引写入必须
+    /// 对后序校验可见，否则会漏掉本应冲突的事务（假阴性）。
     fn sequencer_validate_in_tx(
         tx: &mut dyn WriteTx,
         txn: &crate::raft::type_config::SequencerTxn,
+        read_ranges: &[crate::raft::type_config::SequencerReadRange],
+        limits: Option<&crate::raft::type_config::SequencerValidationLimits>,
     ) -> Result<crate::raft::type_config::SequencerOutcome> {
         use crate::raft::type_config::{SequencerInvalid, SequencerOutcome};
 
@@ -3305,6 +3326,16 @@ impl<B: StorageBackend> MvccStorage<B> {
             });
         }
 
+        if let Some(limits) = limits {
+            let entries = txn.read_set.len().saturating_add(read_ranges.len());
+            if limits.max_read_set > 0 && entries > limits.max_read_set as usize {
+                return Ok(SequencerOutcome::Invalid {
+                    commit_ts: txn.commit_ts,
+                    reason: SequencerInvalid::ReadSetTooLarge,
+                });
+            }
+        }
+
         for key in &txn.read_set {
             let index_key =
                 prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
@@ -3314,6 +3345,34 @@ impl<B: StorageBackend> MvccStorage<B> {
                         commit_ts: txn.commit_ts,
                         conflict_key: key.clone(),
                         conflict_ts: write_ts,
+                    });
+                }
+            }
+        }
+
+        // `max_range = 0` 沿用区间查询约定（不限制）；超预算不是冲突，
+        // 而是「无法证明无冲突」：调用方必须收窄谓词/拆分事务后重试。
+        let max_range = limits.map_or(0, |limits| limits.max_range as usize);
+        for range in read_ranges {
+            match Self::sequencer_range_query_in(
+                tx,
+                &range.start,
+                &range.end,
+                txn.start_ts,
+                max_range,
+            )? {
+                SequencerRangeQuery::Clear => {}
+                SequencerRangeQuery::Hit(hit) => {
+                    return Ok(SequencerOutcome::Conflict {
+                        commit_ts: txn.commit_ts,
+                        conflict_key: hit.key,
+                        conflict_ts: hit.commit_ts,
+                    });
+                }
+                SequencerRangeQuery::Exceeded { .. } => {
+                    return Ok(SequencerOutcome::Invalid {
+                        commit_ts: txn.commit_ts,
+                        reason: SequencerInvalid::RangeScanExceeded,
                     });
                 }
             }
@@ -3628,6 +3687,21 @@ impl<B: StorageBackend> MvccStorage<B> {
         start_ts: Revision,
         max_entries: usize,
     ) -> Result<SequencerRangeQuery> {
+        self.backend
+            .read(|tx| Self::sequencer_range_query_in(tx, start, end, start_ts, max_entries))
+    }
+
+    /// 在给定读事务/写事务里执行区间校验。
+    ///
+    /// sequencer apply 必须用当前写事务调用它：同批前序事务的索引写入尚未提交，
+    /// 用独立读事务会看不到，产生假阴性。
+    fn sequencer_range_query_in(
+        tx: &(impl ReadTx + ?Sized),
+        start: &[u8],
+        end: &[u8],
+        start_ts: Revision,
+        max_entries: usize,
+    ) -> Result<SequencerRangeQuery> {
         if !end.is_empty() && start >= end {
             return Ok(SequencerRangeQuery::Clear);
         }
@@ -3642,9 +3716,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         } else {
             max_entries.saturating_add(1)
         };
-        let rows = self
-            .backend
-            .read(|tx| tx.iter_range_limited(TABLE_KV, &scan_start, &scan_end, fetch_limit))?;
+        let rows = tx.iter_range_limited(TABLE_KV, &scan_start, &scan_end, fetch_limit)?;
         if max_entries > 0 && rows.len() > max_entries {
             return Ok(SequencerRangeQuery::Exceeded {
                 scanned: max_entries,
@@ -7194,6 +7266,413 @@ mod tests {
             b"t1".to_vec()
         );
         assert_eq!(restored.sequencer_last_commit_ts().unwrap(), 10);
+    }
+
+    // ──── OCC 谓词校验（#149）────
+
+    fn seq_txn_with_ranges(
+        txn_id: &[u8],
+        start_ts: u64,
+        commit_ts: u64,
+        request_id: &[u8],
+        reads: &[&[u8]],
+        ranges: &[(&[u8], &[u8])],
+        writes: &[(&[u8], &[u8])],
+    ) -> crate::raft::type_config::SequencerTxnWithRanges {
+        use crate::raft::type_config::{SequencerReadRange, SequencerTxnWithRanges};
+        SequencerTxnWithRanges {
+            txn: seq_txn(txn_id, start_ts, commit_ts, request_id, reads, writes),
+            read_ranges: ranges
+                .iter()
+                .map(|(start, end)| SequencerReadRange {
+                    start: start.to_vec(),
+                    end: end.to_vec(),
+                })
+                .collect(),
+        }
+    }
+
+    fn seq_op_with_ranges(
+        txns: Vec<crate::raft::type_config::SequencerTxnWithRanges>,
+        max_read_set: u32,
+        max_range: u32,
+    ) -> crate::raft::type_config::SequencerOp {
+        use crate::raft::type_config::{SequencerOp, SequencerValidationLimits};
+        SequencerOp::ValidateAndCommitWithRanges {
+            txns,
+            limits: SequencerValidationLimits {
+                max_read_set,
+                max_range,
+            },
+        }
+    }
+
+    #[test]
+    fn test_sequencer_occ_sees_prior_txn_in_same_batch() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+
+        // 同一批内 txn1 先写 b；txn2 的 range 谓词必须看见同批前序写入，
+        // 不能因为读快照看不到未提交的索引而假阴性。
+        let batch = seq_op_with_ranges(
+            vec![
+                seq_txn_with_ranges(b"t1", 1, 10, b"r1", &[], &[], &[(b"b", b"v1")]),
+                seq_txn_with_ranges(b"t2", 5, 20, b"r2", &[], &[(b"a", b"c")], &[]),
+            ],
+            4_096,
+            10_000,
+        );
+        let outcomes = storage
+            .apply_sequencer_op(&batch, 1, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                SequencerOutcome::Committed { commit_ts: 10 },
+                SequencerOutcome::Conflict {
+                    commit_ts: 20,
+                    conflict_key: b"b".to_vec(),
+                    conflict_ts: 10,
+                },
+            ]
+        );
+        assert!(storage.get_sequencer_decision(20).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sequencer_range_phantom_and_retry() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(b"t1", 1, 10, b"r1", &[], &[(b"b", b"v1")])]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        // 读谓词 [a,m) 在 start_ts=5 时为空；b 在 10 提交 => 幻读必须冲突。
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t2",
+                        5,
+                        20,
+                        b"r2",
+                        &[],
+                        &[(b"a", b"m")],
+                        &[],
+                    )],
+                    4_096,
+                    10_000,
+                ),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Conflict {
+                commit_ts: 20,
+                conflict_key: b"b".to_vec(),
+                conflict_ts: 10,
+            }]
+        );
+        assert!(storage.get_sequencer_decision(20).unwrap().is_none());
+
+        // 换新 start_ts（已包含 b）重试：成功。
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t3",
+                        10,
+                        21,
+                        b"r3",
+                        &[],
+                        &[(b"a", b"m")],
+                        &[],
+                    )],
+                    4_096,
+                    10_000,
+                ),
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Committed { commit_ts: 21 }]
+        );
+    }
+
+    #[test]
+    fn test_sequencer_range_empty_and_unbounded() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(b"t1", 1, 10, b"r1", &[], &[(b"z", b"v")])]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t2",
+                        5,
+                        20,
+                        b"r2",
+                        &[],
+                        &[(b"c", b"c"), (b"e", b"b")],
+                        &[],
+                    )],
+                    4_096,
+                    10_000,
+                ),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Committed { commit_ts: 20 }]
+        );
+
+        // end 为空 = 无上界；必须能命中 start 之后的写。
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t3",
+                        5,
+                        21,
+                        b"r3",
+                        &[],
+                        &[(b"m", b"")],
+                        &[],
+                    )],
+                    4_096,
+                    10_000,
+                ),
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Conflict {
+                commit_ts: 21,
+                conflict_key: b"z".to_vec(),
+                conflict_ts: 10,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_sequencer_range_scan_budget_is_fail_closed() {
+        use crate::raft::type_config::{SequencerInvalid, SequencerOutcome};
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(
+                    b"t1",
+                    1,
+                    10,
+                    b"r1",
+                    &[],
+                    &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")],
+                )]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t2",
+                        5,
+                        20,
+                        b"r2",
+                        &[],
+                        &[(b"a", b"z")],
+                        &[],
+                    )],
+                    4_096,
+                    2,
+                ),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Invalid {
+                commit_ts: 20,
+                reason: SequencerInvalid::RangeScanExceeded,
+            }]
+        );
+        assert!(
+            storage.get_sequencer_decision(20).unwrap().is_none(),
+            "scan budget exhaustion must not write a decision"
+        );
+
+        // 0 = 不限制（与 ValidationIndex 查询约定一致）；此时能看到真实写入，
+        // 结果应是冲突而不是「超预算」。
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t3",
+                        5,
+                        21,
+                        b"r3",
+                        &[],
+                        &[(b"a", b"z")],
+                        &[],
+                    )],
+                    4_096,
+                    0,
+                ),
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Conflict {
+                commit_ts: 21,
+                conflict_key: b"a".to_vec(),
+                conflict_ts: 10,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_sequencer_read_set_limit_rejected() {
+        use crate::raft::type_config::{SequencerInvalid, SequencerOutcome};
+        let (_dir, storage) = create_commit_ts_storage();
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t1",
+                        1,
+                        10,
+                        b"r1",
+                        &[b"a", b"b", b"c"],
+                        &[],
+                        &[],
+                    )],
+                    2,
+                    10_000,
+                ),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Invalid {
+                commit_ts: 10,
+                reason: SequencerInvalid::ReadSetTooLarge,
+            }]
+        );
+        assert!(storage.get_sequencer_decision(10).unwrap().is_none());
+
+        // 放开上限后同一读集正常提交。
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t2",
+                        1,
+                        11,
+                        b"r2",
+                        &[b"a", b"b", b"c"],
+                        &[],
+                        &[],
+                    )],
+                    3,
+                    10_000,
+                ),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Committed { commit_ts: 11 }]
+        );
+    }
+
+    #[test]
+    fn test_sequencer_legacy_op_unchanged() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+
+        // 新变体写入的决策，旧变体仍必须看得见（同一索引/决策日志）。
+        storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t1",
+                        1,
+                        10,
+                        b"r1",
+                        &[],
+                        &[],
+                        &[(b"k", b"v1")],
+                    )],
+                    4_096,
+                    10_000,
+                ),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(b"t2", 5, 11, b"r2", &[b"k"], &[])]),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Conflict {
+                commit_ts: 11,
+                conflict_key: b"k".to_vec(),
+                conflict_ts: 10,
+            }]
+        );
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(
+                    b"t3",
+                    10,
+                    12,
+                    b"r3",
+                    &[b"k"],
+                    &[(b"k2", b"v2")],
+                )]),
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Committed { commit_ts: 12 }]
+        );
     }
 
     // ──── ValidationIndex（#147）────
