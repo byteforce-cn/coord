@@ -191,9 +191,8 @@ Expected: 编译失败（`SequencerOp`/`apply_sequencer_op` 不存在）。
   260 条两批与指标、两节点 follower NotLeader + 决策复制）。
 - `cargo test --workspace --no-fail-fast`：全绿。
 - fmt / clippy（`--lib --bins -D warnings`）/ check-panics / audit / deny 通过。
-- `bash scripts/check-doc-refs.sh`：本计划无悬空引用；工作区存在 gitignored 的本地
-  `docs/pki-assessment/*` 历史文件导致该脚本在本地报 3 条既有悬空引用（不在 git 树内，
-  CI 干净检出不受影响）。
+- `bash scripts/check-doc-refs.sh`：本计划与代码引用可达（CI 通过）。本地工作区另有 3 条
+  来自 gitignored 历史文档的既有悬空引用，不在 git 树内。
 
 ## 验收矩阵
 
