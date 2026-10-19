@@ -13,8 +13,8 @@
 
 use std::collections::BTreeSet;
 
-mod services;
 pub mod safe_ts;
+mod services;
 
 use coord_core::error_code::{attach, CoordErrorCode};
 use tonic::{Code, Status};

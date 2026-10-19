@@ -722,7 +722,12 @@ impl StateMachineStore {
                 // #142：fence 是内部记录（不写 changelog、不上 Watch）；
                 // 只抬水位 + applied，重放由 applied-index 守卫幂等。
                 let effective = sm.set_safe_ts_fence(*fence_ts, applied).map_err(io_err)?;
-                Ok((Response::SafeTsPublished { fence_ts: effective }, None))
+                Ok((
+                    Response::SafeTsPublished {
+                        fence_ts: effective,
+                    },
+                    None,
+                ))
             }
             Command::AdvanceSafeTs { commit_ts } => {
                 // 数据 Region 的 safe-point fence：只抬 META_CURRENT_REVISION，

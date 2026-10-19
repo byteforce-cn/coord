@@ -15,27 +15,27 @@ use async_trait::async_trait;
 
 use coord_core::error::Result as CoordResult;
 use coord_core::error_code::error_code_of;
-use coord_proto::tso::v2::tso_server::Tso as TsoV2;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta, StorageConfig};
 use coord_proto::kv::v2::kv_server::Kv as KvV2;
 use coord_proto::kv::v2::RangeRequest as RangeRequestV2;
+use coord_proto::tso::v2::tso_server::Tso as TsoV2;
 use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
-use tonic::Code;
 use coord_server::metrics::Metrics;
 use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
 use coord_server::raft::region::RegionManager;
 use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
 use coord_server::raft::state_machine::StateMachineStore;
+use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
 use coord_server::raft::type_config::{Command, Response};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
 use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
-use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
+use tonic::Code;
 
 fn find_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -116,28 +116,18 @@ impl G2Node {
         let root_dir = base.join("region-0");
         std::fs::create_dir_all(&root_dir).unwrap();
         let backend = RedbBackend::open(&root_dir, &StorageConfig::default()).unwrap();
-        let mvcc = Arc::new(
-            MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap(),
-        );
+        let mvcc =
+            Arc::new(MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap());
         let root_factory = RaftNetworkFactoryImpl::new(1);
         root_factory.register_node(1, addr.clone());
         let root_tracker = Arc::new(SnapshotTracker::default());
         let root_log = LogStore::new(&root_dir).await.unwrap();
-        let root_sm = StateMachineStore::new(
-            Arc::clone(&mvcc),
-            root_dir.join("snapshots"),
-            root_tracker,
-        );
+        let root_sm =
+            StateMachineStore::new(Arc::clone(&mvcc), root_dir.join("snapshots"), root_tracker);
         let root_raft = Arc::new(
-            new_raft(
-                1,
-                Arc::new(raft_config()),
-                root_factory,
-                root_log,
-                root_sm,
-            )
-            .await
-            .expect("create region 0 raft"),
+            new_raft(1, Arc::new(raft_config()), root_factory, root_log, root_sm)
+                .await
+                .expect("create region 0 raft"),
         );
         root_raft
             .initialize(BTreeMap::from([(1u64, new_basic_node(&addr))]))
@@ -195,7 +185,7 @@ impl G2Node {
                     ..KvTRuntimeConfig::default()
                 },
             )
-                .with_implemented([KvTCapability::Kv, KvTCapability::Tso]),
+            .with_implemented([KvTCapability::Kv, KvTCapability::Tso]),
         );
         node.set_tso_client(TsoClient::new(FakeTso::new(), 8, None));
         let metrics = Arc::new(Metrics::new());
@@ -325,10 +315,7 @@ async fn test_safe_ts_is_min_region_revision_and_metrics() {
 async fn test_get_ts_stays_above_published_fence() {
     let g2 = G2Node::start().await;
     assert_eq!(
-        g2.node
-            .storage
-            .set_safe_ts_fence(1025, applied(1))
-            .unwrap(),
+        g2.node.storage.set_safe_ts_fence(1025, applied(1)).unwrap(),
         1025
     );
 
@@ -396,6 +383,14 @@ async fn test_idle_regions_do_not_pin_safe_ts() {
         0,
         "before the first fence both idle regions are at revision 0"
     );
+    let empty = g2
+        .node
+        .range(tonic::Request::new(range_req(b"apple", b"", 0)))
+        .await
+        .expect("read at revision 0")
+        .into_inner();
+    assert_eq!(empty.read_ts, 0);
+    assert!(empty.kvs.is_empty());
     coord_server::kvt::safe_ts::advance_once(&g2.node)
         .await
         .expect("advance safe ts");
@@ -546,12 +541,6 @@ async fn test_explicit_read_ts_waits_for_lagging_region_then_safe_ts_lag() {
     );
 
     let text = g2.metrics_text();
-    assert!(
-        text.contains("coord_kv_v2_safe_ts_wait_total 1"),
-        "{text}"
-    );
-    assert!(
-        text.contains("coord_kv_v2_safe_ts_lag_total 1"),
-        "{text}"
-    );
+    assert!(text.contains("coord_kv_v2_safe_ts_wait_total 1"), "{text}");
+    assert!(text.contains("coord_kv_v2_safe_ts_lag_total 1"), "{text}");
 }

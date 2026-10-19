@@ -198,9 +198,7 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
             if let Some(p) = proposer {
                 if p.can_propose().await {
                     let current = storage.current_revision();
-                    let base = safe_ts
-                        .map(|s| s.safe_ts().min(current))
-                        .unwrap_or(current);
+                    let base = safe_ts.map(|s| s.safe_ts().min(current)).unwrap_or(current);
                     let cutoff = base.saturating_sub(config.changelog_retention_revisions);
                     if cutoff > 0 {
                         match storage.compacted_revision() {

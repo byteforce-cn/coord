@@ -630,9 +630,7 @@ impl Metrics {
 
     /// 发布 region 0 的 safe-point fence（gauge）。
     pub fn set_kv_t_safe_ts_fence(&self, ts: u64) {
-        self.inner
-            .kv_t_safe_ts_fence
-            .store(ts, Ordering::Relaxed);
+        self.inner.kv_t_safe_ts_fence.store(ts, Ordering::Relaxed);
     }
 
     /// v2 KV 读等待 safe_ts：请求数 +1、累计等待毫秒。
@@ -846,7 +844,9 @@ impl Metrics {
             inner.kv_t_safe_ts_fence.load(Ordering::Relaxed)
         ));
 
-        out.push_str("\n# HELP coord_kv_v2_safe_ts_wait_total v2 KV reads that waited for safe_ts\n");
+        out.push_str(
+            "\n# HELP coord_kv_v2_safe_ts_wait_total v2 KV reads that waited for safe_ts\n",
+        );
         out.push_str("# TYPE coord_kv_v2_safe_ts_wait_total counter\n");
         out.push_str(&format!(
             "coord_kv_v2_safe_ts_wait_total {}\n",

@@ -2722,11 +2722,7 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// `fence_ts` 是 TSO 分配边界（下一未发放值），不是某个 key 的
     /// `commit_ts`：它只声明「fence 之后不再接受 `commit_ts <= fence_ts` 的写」。
     /// 只前进；同一 applied 重放返回当前值。
-    pub fn set_safe_ts_fence(
-        &self,
-        fence_ts: Revision,
-        applied: AppliedLogId,
-    ) -> Result<Revision> {
+    pub fn set_safe_ts_fence(&self, fence_ts: Revision, applied: AppliedLogId) -> Result<Revision> {
         self.backend.write(|tx| {
             let prev = tx
                 .get(TABLE_KV, SAFE_TS_FENCE)?
@@ -3270,10 +3266,7 @@ mod tests {
         let (dir, storage) = create_storage();
         assert_eq!(storage.safe_ts_fence().unwrap(), 0);
 
-        assert_eq!(
-            storage.set_safe_ts_fence(900, applied_for(1)).unwrap(),
-            900
-        );
+        assert_eq!(storage.set_safe_ts_fence(900, applied_for(1)).unwrap(), 900);
         assert_eq!(
             storage.set_safe_ts_fence(800, applied_for(2)).unwrap(),
             900,

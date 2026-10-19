@@ -533,9 +533,13 @@ pub enum Response {
         current_revision: u64,
     },
     /// 数据 Region 已 apply 水位抬升结果（#142）。
-    SafeTsAdvanced { revision: u64 },
+    SafeTsAdvanced {
+        revision: u64,
+    },
     /// region 0 安全点 fence 发布结果（#142；实际生效值）。
-    SafeTsPublished { fence_ts: u64 },
+    SafeTsPublished {
+        fence_ts: u64,
+    },
 }
 
 impl std::fmt::Display for Response {

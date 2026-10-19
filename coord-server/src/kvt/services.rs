@@ -214,11 +214,7 @@ fn single_key_end(key: &[u8]) -> Vec<u8> {
 /// 必须等全部 Region 的 apply 水位，而不是只看目标 Region：多 Region 下
 /// `commit_ts <= read_ts` 的事务可能已落到某个领先 Region，落后 Region 尚未
 /// apply；只看目标会让同一快照看到部分提交。
-async fn wait_for_safe_ts(
-    node: &CoordNode,
-    read_ts: u64,
-    wait_ms: u64,
-) -> Result<(), Status> {
+async fn wait_for_safe_ts(node: &CoordNode, read_ts: u64, wait_ms: u64) -> Result<(), Status> {
     let started = tokio::time::Instant::now();
     let deadline = started + Duration::from_millis(wait_ms);
     loop {
