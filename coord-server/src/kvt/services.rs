@@ -250,26 +250,30 @@ const RANGE_FANOUT_CONCURRENCY: usize = 8;
 
 /// 读取一个 Region 分段在 `read_ts` 上的精确快照。
 ///
-/// 每段独立过 ReadIndex 屏障（确认本 Region 的 leader / apply 水位）；
-/// 屏障要求本节点是该 Region 的 leader，因此多节点 leader 分散时的跨节点读
-/// 转发缺口见 ADR-0015 D10 / #188。
+/// 快照读不需要 ReadIndex 屏障：请求级等待已保证本节点**所有**数据 Region 的
+/// applied revision >= `read_ts`（`read_ts=0` 解析为本地 safe_ts，同样 <= 最小
+/// applied），本地副本足以重建该快照；压缩水位随 applied revision 前进，
+/// 历史在保留窗口内可回放。分段再复核一次 applied 水位：不足即
+/// `SAFE_TS_LAG`（可重试），不得把「当前态」当成未来 revision 的快照返回。
 /// `read_ts == current` 时走实时读，但若读事务的 revision 已越过 `read_ts`
 /// 则退回精确历史视图，保证返回行 `mod_revision <= read_ts`。
 async fn read_kv_range_segment(
-    node: &CoordNode,
     seg: KvRangeSegment,
     read_ts: u64,
     scan_limit: usize,
 ) -> Result<Vec<kv_v2::KeyValue>, Status> {
     let target = &seg.target;
-    node.ensure_linearizable_on(
-        target.raft.as_deref(),
-        target.raft_log_store.as_ref(),
-        target.region_id,
-    )
-    .await?;
-
     let current_now = target.mvcc.current_revision();
+    if read_ts > current_now {
+        return Err(attach(
+            Status::unavailable(format!(
+                "read_ts {read_ts} exceeds local applied revision {current_now} of region {}; \
+                 retry later",
+                target.region_id
+            )),
+            CoordErrorCode::SafeTsLag,
+        ));
+    }
     let rows = if read_ts == 0 {
         // 0 是“早于任何 commit”的合法快照（safe_ts 也可能为 0）；
         // changelog 的 0 水位会被当成已压缩，不能走历史读。
@@ -496,7 +500,7 @@ impl kv_v2::kv_server::Kv for CoordNode {
         let segments = self.kv_range_targets(&req.key, &end)?;
         let reads = segments
             .into_iter()
-            .map(|seg| read_kv_range_segment(self, seg, read_ts, scan_limit));
+            .map(|seg| read_kv_range_segment(seg, read_ts, scan_limit));
         let mut parts = futures::stream::iter(reads).buffered(RANGE_FANOUT_CONCURRENCY);
 
         let mut kvs: Vec<kv_v2::KeyValue> = Vec::new();
