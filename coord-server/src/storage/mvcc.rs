@@ -514,6 +514,15 @@ pub struct DeleteRangeOutcome {
     pub replayed: bool,
 }
 
+/// 历史 Range 回放的中间视图：值 + 元数据重建所需计数。
+struct HistoricalRangeView {
+    view: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+    /// key → 最后一次 <= target revision 的写入 revision（含 delete）
+    last_write: std::collections::BTreeMap<Vec<u8>, Revision>,
+    /// key → target revision 之后的写入次数（version 回推用）
+    writes_after: std::collections::HashMap<Vec<u8>, u64>,
+}
+
 // ──── Compact ────
 
 /// 单次 compaction 批删除上限（单写事务分片删除，避免巨型事务）
@@ -1144,10 +1153,110 @@ impl<B: StorageBackend> MvccStorage<B> {
         limit: usize,
         target_revision: Revision,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let historical = self.replay_historical_range(start, range_end, target_revision)?;
+        let mut results = Vec::new();
+        for (k, v) in historical.view {
+            if limit > 0 && results.len() >= limit {
+                break;
+            }
+            results.push((k, v));
+        }
+        Ok(results)
+    }
+
+    /// Range 历史读（含 revision 元数据）：返回 `[start, range_end)` 在目标
+    /// revision 时刻的 `(key, value, metadata)`。
+    ///
+    /// v2 的 `mod_revision` 必须是“最后一次 <= read_ts 的写入”，不能拿
+    /// `read_ts` 顶替；窗口内没有写入时当前元数据就是 T 时刻状态。
+    ///
+    /// `lease_id` 取当前元数据：G1 的 v2 写路径拒绝非零 lease（#145 才交付
+    /// v2 Lease），因此当前历史 lease 恒为 0；#145 必须让 changelog 携带
+    /// lease 或提供按 revision 查询 lease 的来源。
+    pub fn range_at_revision_with_metadata(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        limit: usize,
+        target_revision: Revision,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>, KvMetadata)>> {
+        let historical = self.replay_historical_range(start, range_end, target_revision)?;
+        let mut results = Vec::new();
+        for (key, value) in historical.view {
+            if limit > 0 && results.len() >= limit {
+                break;
+            }
+            let current = self.get_kv_metadata(&key)?.ok_or_else(|| {
+                Error::Internal(format!(
+                    "historical metadata for key {} at revision {target_revision} is not \
+                     reconstructable: key metadata is missing",
+                    String::from_utf8_lossy(&key)
+                ))
+            })?;
+            let writes_after = historical.writes_after.get(&key).copied().unwrap_or(0);
+            let metadata = if writes_after == 0 {
+                if current.deleted {
+                    return Err(Error::Internal(format!(
+                        "historical metadata for key {} at revision {target_revision} is not \
+                         reconstructable: key was deleted after that revision but no write was \
+                         found in the changelog",
+                        String::from_utf8_lossy(&key)
+                    )));
+                }
+                current
+            } else {
+                let version = current.version.checked_sub(writes_after as i64).ok_or_else(|| {
+                    Error::Internal(format!(
+                        "historical metadata for key {} at revision {target_revision} is not \
+                         reconstructable: {} write(s) after the target exceed current version {}",
+                        String::from_utf8_lossy(&key),
+                        writes_after,
+                        current.version
+                    ))
+                })?;
+                let mod_revision = historical
+                    .last_write
+                    .get(&key)
+                    .copied()
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "historical metadata for key {} at revision {target_revision} is \
+                             not reconstructable: last write at or before the target is missing",
+                            String::from_utf8_lossy(&key)
+                        ))
+                    })? as i64;
+                if current.create_revision as u64 > target_revision {
+                    return Err(Error::Internal(format!(
+                        "historical metadata for key {} at revision {target_revision} is not \
+                         reconstructable: current create_revision {} is after the target",
+                        String::from_utf8_lossy(&key),
+                        current.create_revision
+                    )));
+                }
+                KvMetadata {
+                    version,
+                    create_revision: current.create_revision,
+                    mod_revision,
+                    lease_id: current.lease_id,
+                    deleted: false,
+                }
+            };
+            results.push((key, value, metadata));
+        }
+        Ok(results)
+    }
+
+    /// 回放 changelog 得到 T 时刻的值视图，并保留元数据重建所需信息。
+    fn replay_historical_range(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        target_revision: Revision,
+    ) -> Result<HistoricalRangeView> {
         self.ensure_history_reconstructable(target_revision)?;
         let end_key = encode_changelog_key(target_revision.saturating_add(1));
 
-        let (mut view, changed_after) = self.backend.read(|tx| {
+        let (mut view, changed_after, last_write, writes_after) = self.backend.read(|tx| {
             let entries = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
             // BTreeMap 保持 Key 字典序
             let mut view: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
@@ -1155,6 +1264,12 @@ impl<B: StorageBackend> MvccStorage<B> {
             // T 之后有写入的 Key（用于判断"窗口内未变"是否成立）
             let mut changed_after: std::collections::HashSet<Vec<u8>> =
                 std::collections::HashSet::new();
+            // key → 最后一次 <= T 的写入 revision（含 delete）
+            let mut last_write: std::collections::BTreeMap<Vec<u8>, Revision> =
+                std::collections::BTreeMap::new();
+            // key → T 之后的写入次数（version 回推用）
+            let mut writes_after: std::collections::HashMap<Vec<u8>, u64> =
+                std::collections::HashMap::new();
             for (ch_key, ch_value) in entries {
                 let is_after = ch_key.as_slice() >= end_key.as_slice();
                 if let Ok(event) = ChangeEvent::from_bytes(&ch_value) {
@@ -1167,8 +1282,10 @@ impl<B: StorageBackend> MvccStorage<B> {
                         }
                         if is_after {
                             changed_after.insert(change.key.clone());
+                            *writes_after.entry(change.key.clone()).or_insert(0) += 1;
                             continue;
                         }
+                        last_write.insert(change.key.clone(), event.revision);
                         match &change.value {
                             Some(v) => {
                                 view.insert(change.key.clone(), v.clone());
@@ -1180,7 +1297,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     }
                 }
             }
-            Ok((view, changed_after))
+            Ok((view, changed_after, last_write, writes_after))
         })?;
 
         // 补齐：在保留窗口内没有任何写入的 Key，其 T 时刻状态 = 当前状态。
@@ -1236,14 +1353,11 @@ impl<B: StorageBackend> MvccStorage<B> {
             )));
         }
 
-        let mut results = Vec::new();
-        for (k, v) in view {
-            if results.len() >= limit && limit > 0 {
-                break;
-            }
-            results.push((k, v));
-        }
-        Ok(results)
+        Ok(HistoricalRangeView {
+            view,
+            last_write,
+            writes_after,
+        })
     }
 
     /// 范围删除（raft apply 路径，R-SVC-07-3）：单个写事务内原子标记
@@ -3086,6 +3200,73 @@ mod tests {
     }
 
     // ──── 压缩后的历史读不得静默返回错误值 ────
+
+    #[test]
+    fn test_range_at_revision_metadata_reflects_state_at_target() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v1", None, 10, applied_for(1))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"k", b"v2", None, 20, applied_for(2))
+            .unwrap();
+        storage
+            .delete_at_commit_ts(b"k", 30, applied_for(3))
+            .unwrap();
+
+        let at_15 = storage
+            .range_at_revision_with_metadata(b"a", b"z", 0, 15)
+            .unwrap();
+        assert_eq!(at_15.len(), 1);
+        let (key, value, meta) = &at_15[0];
+        assert_eq!(key, b"k");
+        assert_eq!(value, b"v1");
+        assert_eq!(meta.version, 1);
+        assert_eq!(meta.create_revision, 10);
+        assert_eq!(meta.mod_revision, 10);
+
+        let at_25 = storage
+            .range_at_revision_with_metadata(b"a", b"z", 0, 25)
+            .unwrap();
+        assert_eq!(at_25.len(), 1);
+        let (_, value, meta) = &at_25[0];
+        assert_eq!(value, b"v2");
+        assert_eq!(meta.version, 2);
+        assert_eq!(meta.create_revision, 10);
+        assert_eq!(meta.mod_revision, 20);
+
+        assert!(
+            storage
+                .range_at_revision_with_metadata(b"a", b"z", 0, 35)
+                .unwrap()
+                .is_empty(),
+            "delete@30 must remove the key from the revision-35 view"
+        );
+    }
+
+    #[test]
+    fn test_range_at_revision_metadata_after_compaction_uses_live_state() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v1", None, 10, applied_for(1))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"k", b"v2", None, 20, applied_for(2))
+            .unwrap();
+        storage
+            .apply_compact(15, AppliedLogId::standalone(3))
+            .unwrap();
+
+        let results = storage
+            .range_at_revision_with_metadata(b"a", b"z", 0, 25)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        let (_, value, meta) = &results[0];
+        assert_eq!(value, b"v2");
+        assert_eq!(meta.version, 2);
+        assert_eq!(meta.create_revision, 10);
+        assert_eq!(meta.mod_revision, 20);
+    }
 
     /// 压缩水位之前的修订不可复原 → 必须报 `RevisionCompacted`（与 Watch 同口径），
     /// 而不是"扫不到就返回 None"（历史读说"不存在"，实时读却能读到）。
