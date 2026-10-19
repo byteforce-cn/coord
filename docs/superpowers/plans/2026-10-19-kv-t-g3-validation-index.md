@@ -44,6 +44,13 @@ range 查询对有序索引做**有界**区间扫描，预算耗尽返回 `Excee
   （全量重建是显式维护操作）。
 - **索引保留窗口**：与决策日志/Commit Log 同寿；本项不做 GC，GC 归 #153/#157，容量归 #169/#174。
 - **被写入的 key 包含 Delete**：删除也是写，必须让并发读谓词冲突（否则幻读）。
+- **索引覆盖全局决策流，不按 Commit Log shard 拆分**：#146 的 sequencer 是 region 0 单组，
+  OCC 校验必须全局串行；D9 的「每 shard」在 G3 就是这一个全局索引。Commit Log 分片（#153+）
+  只影响日志存储/读取，不得把校验拆成互相看不见的分片。
+- **追赶/重建要求写入静默**：索引落后的窗口会把冲突看成无冲突（假阴性），所以启动路径在
+  对外服务前 fail-closed 追赶；`rebuild_*` 是离线维护 API，不能在服务中调用。
+- **索引 key 明文**：`/_sys/` 域不加密（与 `/_changelog/` 已存的完整 key 同口径）；本项不改变
+  Barrier 的加密边界，索引不引入新的敏感数据类别。
 
 ## Review Focus
 
@@ -71,7 +78,7 @@ range 查询对有序索引做**有界**区间扫描，预算耗尽返回 `Excee
   `catch_up_sequencer_index(&self, batch) -> Result<SequencerIndexRebuild>`、
   `rebuild_sequencer_validation_index(&self, batch) -> Result<SequencerIndexRebuild>`。
 
-- [ ] **Step 1: 写 4 个失败测试**
+- [x] **Step 1: 写 4 个失败测试**
 
 ```rust
 #[test] fn test_sequencer_index_point_query() {
@@ -91,7 +98,7 @@ range 查询对有序索引做**有界**区间扫描，预算耗尽返回 `Excee
 }
 ```
 
-- [ ] **Step 2: 跑 RED**
+- [x] **Step 2: 跑 RED**
 
 Run: `cargo test -p coord-server --lib sequencer_index -- --nocapture`
 Expected: 编译失败（`SequencerIndexHit`/`SequencerRangeQuery`/查询与追赶方法不存在）。
@@ -119,7 +126,7 @@ pub fn sequencer_range_query(&self, start: &[u8], end: &[u8], start_ts: Revision
     max_entries: usize) -> Result<SequencerRangeQuery>;
 ```
 
-- [ ] **Step 1: 常量与查询**
+- [x] **Step 1: 常量与查询**
   - `SEQUENCER_RANGE_INDEX_PREFIX = b"/_sys/seq/ridx/"`、`SEQUENCER_INDEX_LAST_TS =
     b"/_sys/seq/vidx_last_ts"`；`prefix_upper_bound(prefix) -> Vec<u8>`（末字节 +1，必有界，
     因为前缀以 `/` 结尾）。
@@ -128,11 +135,11 @@ pub fn sequencer_range_query(&self, start: &[u8], end: &[u8], start_ts: Revision
     TABLE_KV, ridx+start, end 为空 ? ridx 上界 : ridx+end, limit==0 ? 0 : limit+1)`；
     取 `ts > start_ts` 的最大 ts（同 ts 保留先扫到的、字典序更小的 key）；行数 > limit 返回
     `Exceeded { scanned: limit }`。
-- [ ] **Step 2: 提交路径同步推进两个索引**
+- [x] **Step 2: 提交路径同步推进两个索引**
   - 抽出 `sequencer_index_writes_in_tx(tx, decision) -> Result<u64>`：遍历 mutations，哈希索引
     与有序索引都只前进；commit 路径在写决策后调用，并把 `SEQUENCER_INDEX_LAST_TS` 设为
     `commit_ts`（同一事务）。
-- [ ] **Step 3: 跑 GREEN（Task 1 的 point/range/limit/brute-force）**
+- [x] **Step 3: 跑 GREEN（Task 1 的 point/range/limit/brute-force）**
 
 Run: `cargo test -p coord-server --lib sequencer_index -- --nocapture`
 Expected: 4 个测试 PASS。
@@ -147,10 +154,10 @@ Expected: 4 个测试 PASS。
 - Produces: `ReadTx::iter_range_limited(&self, table, start, end, limit) -> Result<Vec<(Vec<u8>, Vec<u8>)>>`；
   `limit=0` 不限，否则最多返回 `limit` 行，语义同 `iter_range`（`[start,end)`、有序）。
 
-- [ ] **Step 1: trait 默认实现 + redb 流式覆盖**
+- [x] **Step 1: trait 默认实现 + redb 流式覆盖**
   - 默认实现：调用 `iter_range` 后 `truncate(limit)`（其他后端语义正确）。
   - redb 两个 impl 在 `table.range(start..)` 迭代中达到 `limit` 立即 `break`，不物化整个区间。
-- [ ] **Step 2: 跑 GREEN**
+- [x] **Step 2: 跑 GREEN**
 
 Run: `cargo test -p coord-server --lib sequencer_range_query_scan_limit_is_fail_closed`
 Expected: PASS（行为不变；此任务把上界从「先全量物化再截断」变为真正的流式上界）。
@@ -178,7 +185,7 @@ pub fn rebuild_sequencer_validation_index(&self, batch: usize)
     -> Result<SequencerIndexRebuild>;
 ```
 
-- [ ] **Step 1: 写 2 个失败测试**
+- [x] **Step 1: 写 2 个失败测试**
 
 ```rust
 #[test] fn test_sequencer_index_catch_up_after_lag() {
@@ -193,26 +200,26 @@ pub fn rebuild_sequencer_validation_index(&self, batch: usize)
 Run: `cargo test -p coord-server --lib sequencer_index_catch_up -- --nocapture`
 Expected: 编译失败（追赶/重建方法不存在）。
 
-- [ ] **Step 2: 按批追赶**
+- [x] **Step 2: 按批追赶**
   - 读事务取 `marker` 与 `decision/{marker+1}` 起最多 `batch` 条决策；写事务逐条重放索引并推进
     marker（处理完最后一条才推进）；循环到无新决策或追上 `sequencer_last_commit_ts`。
   - `batch = 0` 按 1 处理；返回 `from_ts`（首次 marker）、`to_ts`（末条决策 ts）、`decisions`、
     `keys`（处理的 mutation 数）。
-- [ ] **Step 3: 显式重建**
+- [x] **Step 3: 显式重建**
   - 一个写事务内清空 `/_sys/seq/vidx/`、`/_sys/seq/ridx/` 与 marker，再调用追赶。
-- [ ] **Step 4: 启动接线（仅 kv_t 开启）**
+- [x] **Step 4: 启动接线（仅 kv_t 开启）**
   - `coord/src/main.rs` 在 `cfg.kv_t.enabled` 的 v2 初始化段调用
     `mvcc.catch_up_sequencer_index(cfg.kv_t.commit_sequencer_batch as usize)`；错误即启动失败
     （fail-closed），有追赶量时 `tracing::info!` 记录 `from/to/decisions/keys`；关闭态不调用。
-- [ ] **Step 5: 跑 GREEN**
+- [x] **Step 5: 跑 GREEN**
 
 Run: `cargo test -p coord-server --lib sequencer_index -- --nocapture`
 Expected: 6 个索引测试全 PASS。
 
 ### Task 5: 文档、门禁与 PR
 
-- [ ] **Step 1: 勾选计划与验证记录**（测试名、命令、缺口）
-- [ ] **Step 2: 本机跑 CI 基础门禁**
+- [x] **Step 1: 勾选计划与验证记录**（测试名、命令、缺口）
+- [x] **Step 2: 本机跑 CI 基础门禁**
 
 ```bash
 cargo fmt --all -- --check
@@ -247,4 +254,14 @@ bash scripts/check-doc-refs.sh
 
 ## 验证记录
 
-（实现后填写：命令、通过数、对拍规模、门禁结果、偏离计划的裁决。）
+- `cargo test -p coord-server --lib sequencer`：17 passed（含 6 个 #147 索引测试：
+  point、range 边界/Delete、预算 fail-closed、200 条决策 × 170 次查询暴力对拍、
+  落后追赶/重建、reopen + 快照）。
+- `cargo test -p coord-server --test kv_t_g3_sequencer_test`：3 passed（#146 回归）。
+- `cargo test --workspace --no-fail-fast -- --test-threads=4`：EXIT=0。
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --lib --bins -- -D warnings`、
+  `bash scripts/check-panics.sh`：通过。
+- `cargo audit`：1 条既有 allowed warning（unsafe-libyaml unmaintained）；
+  `cargo deny check`：advisories/bans/licenses/sources 全 ok。
+- `bash scripts/check-doc-refs.sh`：在仅含 Git 跟踪文件的 detached worktree 中 OK
+  （本地工作区的悬空引用全部来自 gitignored `docs/pki-assessment/`）。

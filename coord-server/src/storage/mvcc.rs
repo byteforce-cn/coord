@@ -3467,6 +3467,9 @@ impl<B: StorageBackend> MvccStorage<B> {
     ///
     /// 正常提交与索引在同一事务里推进，这里通常无事可做；索引丢失、旧快照或
     /// 人工清理后由它恢复。`batch` 是每批处理的决策数（内存上界），返回追赶量。
+    ///
+    /// 只能在开始服务前（或写入已静默）调用：索引落后的窗口里，OCC 校验会把
+    /// 已有冲突看成无冲突（假阴性），所以启动路径用它在对外服务前 fail-closed。
     pub fn catch_up_sequencer_index(&self, batch: usize) -> Result<SequencerIndexRebuild> {
         let batch = batch.max(1);
         let last_commit_ts = self.sequencer_last_commit_ts()?;
@@ -3537,6 +3540,7 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// 清空两个校验索引后从决策日志全量重建。
     ///
     /// 索引是派生数据，重建必须与原始索引等价；正常启动只做追赶，不调用本方法。
+    /// 与追赶相同，必须在写入静默时执行：清空后的空窗会让并发校验漏判冲突。
     pub fn rebuild_sequencer_validation_index(
         &self,
         batch: usize,
@@ -7336,6 +7340,19 @@ mod tests {
         );
         assert_index_matches();
         assert_eq!(storage.sequencer_index_last_ts().unwrap(), 15);
+
+        let rebuilt_again = storage.rebuild_sequencer_validation_index(2).unwrap();
+        assert_eq!(
+            rebuilt_again,
+            SequencerIndexRebuild {
+                from_ts: 0,
+                to_ts: 15,
+                decisions: 3,
+                keys: 6,
+            },
+            "rebuild is deterministic and does not depend on the previous index state"
+        );
+        assert_index_matches();
     }
 
     #[test]
