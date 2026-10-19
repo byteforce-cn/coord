@@ -12,6 +12,7 @@
 use parking_lot::RwLock;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use coord_core::error::{Error, Result};
 use coord_core::kv_range::RangeSemantics;
@@ -117,6 +118,63 @@ const TSO_HIGH_WATER: &[u8] = b"/_sys/tso/high_water";
 
 /// 最近一次分配的批次（信封 V2；重放同一 revision 时原样返回）。
 const TSO_LAST_BATCH: &[u8] = b"/_sys/tso/last_batch";
+
+// ──── Commit Sequencer（region 0 system raft，#146）────
+//
+// 全部选 `/_sys/seq/`：快照按 `/_sys/*` 整域导出，决策日志/校验索引/幂等键
+// 随 region 0 快照恢复。非 `/kv/` 前缀 → 不加密、不进 compaction 清理。
+
+/// 决策日志：`/_sys/seq/decision/{commit_ts:u64be}` → 信封 V2 `SequencerDecision`
+const SEQUENCER_DECISION_PREFIX: &[u8] = b"/_sys/seq/decision/";
+
+/// 已决策的最大 `commit_ts`（u64 BE；缺失 = 0）。D11.1 的单调水位。
+const SEQUENCER_LAST_COMMIT_TS: &[u8] = b"/_sys/seq/last_commit_ts";
+
+/// 单次提交索引：`sha256("txn", txn_id)` → commit_ts BE
+const SEQUENCER_TXN_PREFIX: &[u8] = b"/_sys/seq/txn/";
+
+/// 请求幂等索引：`sha256("req", txn_id, request_id)` → commit_ts BE
+const SEQUENCER_REQUEST_PREFIX: &[u8] = b"/_sys/seq/req/";
+
+/// point-key 校验索引：`sha256("key", key)` → 最大 commit_ts BE
+const SEQUENCER_KEY_INDEX_PREFIX: &[u8] = b"/_sys/seq/vidx/";
+
+/// 完整决策记录（#148 应用、#153 CommitRecord 的上游输入）。
+///
+/// 只增不改：同一 `commit_ts` 不重写；`txn_id`/`request_id` 用于幂等排查。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencerDecision {
+    pub txn_id: Vec<u8>,
+    pub request_id: Vec<u8>,
+    pub start_ts: u64,
+    pub commit_ts: u64,
+    pub mutations: Vec<crate::raft::type_config::SequencerMutation>,
+}
+
+/// 带域分隔与长度前缀的 SHA-256（避免 `("ab","c")` 与 `("a","bc")` 撞键）。
+fn sequencer_hash(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
+fn prefixed_hash_key(prefix: &[u8], hash: &[u8; 32]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(prefix.len() + hash.len());
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(hash);
+    key
+}
+
+fn encode_sequencer_decision_key(commit_ts: Revision) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SEQUENCER_DECISION_PREFIX.len() + 8);
+    key.extend_from_slice(SEQUENCER_DECISION_PREFIX);
+    key.extend_from_slice(&commit_ts.to_be_bytes());
+    key
+}
 
 // ──── SafeTs fence（region 0 system raft，#142）────
 
@@ -3059,6 +3117,174 @@ impl<B: StorageBackend> MvccStorage<B> {
                 end_ts,
                 replayed: false,
             })
+        })
+    }
+
+    // ──── Commit Sequencer（#146）────
+
+    /// apply 一批 `ValidateAndCommit`（region 0 system raft）。
+    ///
+    /// 批内顺序 = leader 分配的 `commit_ts` 顺序。每位事务独立给出
+    /// [`crate::raft::type_config::SequencerOutcome`]：冲突/重复/乱序/非法
+    /// 都是用户级结果，不返回 `Err`（D11.5）。决策、幂等索引、校验索引与
+    /// `META_LAST_APPLIED` 在同一 redb 写事务里原子落盘。
+    pub fn apply_sequencer_op(
+        &self,
+        op: &crate::raft::type_config::SequencerOp,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<Vec<crate::raft::type_config::SequencerOutcome>> {
+        use crate::raft::type_config::SequencerOp;
+
+        let SequencerOp::ValidateAndCommit { txns } = op;
+        self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
+            let mut outcomes = Vec::with_capacity(txns.len());
+            for txn in txns {
+                outcomes.push(Self::sequencer_validate_in_tx(tx, txn)?);
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(outcomes)
+        })
+    }
+
+    /// 单条事务的 OCC 校验与决策落盘。
+    ///
+    /// 顺序不能调换：幂等命中先于「乱序」判断（重试可能带更大的新时间戳），
+    /// 乱序先于读集校验（旧时间戳的决策不能改写已确定的总序）。
+    fn sequencer_validate_in_tx(
+        tx: &mut dyn WriteTx,
+        txn: &crate::raft::type_config::SequencerTxn,
+    ) -> Result<crate::raft::type_config::SequencerOutcome> {
+        use crate::raft::type_config::{SequencerInvalid, SequencerOutcome};
+
+        if txn.txn_id.is_empty() {
+            return Ok(SequencerOutcome::Invalid {
+                commit_ts: txn.commit_ts,
+                reason: SequencerInvalid::MissingTxnId,
+            });
+        }
+
+        // 幂等优先于时间戳合法性：重试可能带一个新的、甚至非法的提案时间戳，
+        // 但已决策的事务必须原样返回首次结果。
+        let txn_index = prefixed_hash_key(
+            SEQUENCER_TXN_PREFIX,
+            &sequencer_hash(b"txn", &[&txn.txn_id]),
+        );
+        if let Some(existing) = tx.get(TABLE_KV, &txn_index)?.and_then(|b| decode_u64(&b)) {
+            return Ok(SequencerOutcome::Duplicate {
+                commit_ts: existing,
+            });
+        }
+        // request_id 的作用域是 txn（服务端会话）：重跑事务会换 txn_id，
+        // 不能被上一轮同名字符串误判为重复提交。
+        if !txn.request_id.is_empty() {
+            let request_index = prefixed_hash_key(
+                SEQUENCER_REQUEST_PREFIX,
+                &sequencer_hash(b"req", &[&txn.txn_id, &txn.request_id]),
+            );
+            if let Some(existing) = tx
+                .get(TABLE_KV, &request_index)?
+                .and_then(|b| decode_u64(&b))
+            {
+                return Ok(SequencerOutcome::Duplicate {
+                    commit_ts: existing,
+                });
+            }
+        }
+
+        if txn.commit_ts <= txn.start_ts {
+            return Ok(SequencerOutcome::Invalid {
+                commit_ts: txn.commit_ts,
+                reason: SequencerInvalid::CommitTsNotAboveStart,
+            });
+        }
+
+        let last_commit_ts = tx
+            .get(TABLE_KV, SEQUENCER_LAST_COMMIT_TS)?
+            .and_then(|b| decode_u64(&b))
+            .unwrap_or(0);
+        if txn.commit_ts <= last_commit_ts {
+            return Ok(SequencerOutcome::OutOfOrder {
+                commit_ts: txn.commit_ts,
+                last_commit_ts,
+            });
+        }
+
+        for key in &txn.read_set {
+            let index_key =
+                prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
+            if let Some(write_ts) = tx.get(TABLE_KV, &index_key)?.and_then(|b| decode_u64(&b)) {
+                if write_ts > txn.start_ts {
+                    return Ok(SequencerOutcome::Conflict {
+                        commit_ts: txn.commit_ts,
+                        conflict_key: key.clone(),
+                        conflict_ts: write_ts,
+                    });
+                }
+            }
+        }
+
+        let decision = SequencerDecision {
+            txn_id: txn.txn_id.clone(),
+            request_id: txn.request_id.clone(),
+            start_ts: txn.start_ts,
+            commit_ts: txn.commit_ts,
+            mutations: txn.mutations.clone(),
+        };
+        let bytes = crate::storage::envelope::encode(&decision)
+            .map_err(|e| Error::Internal(format!("encode sequencer decision: {e}")))?;
+        tx.insert(
+            TABLE_KV,
+            &encode_sequencer_decision_key(txn.commit_ts),
+            &bytes,
+        )?;
+        tx.insert(TABLE_KV, &txn_index, &txn.commit_ts.to_be_bytes())?;
+        if !txn.request_id.is_empty() {
+            let request_index = prefixed_hash_key(
+                SEQUENCER_REQUEST_PREFIX,
+                &sequencer_hash(b"req", &[&txn.txn_id, &txn.request_id]),
+            );
+            tx.insert(TABLE_KV, &request_index, &txn.commit_ts.to_be_bytes())?;
+        }
+        for mutation in &txn.mutations {
+            let index_key = prefixed_hash_key(
+                SEQUENCER_KEY_INDEX_PREFIX,
+                &sequencer_hash(b"key", &[mutation.key()]),
+            );
+            // 只前进：同一 key 的多个写取最大 commit_ts（重放/同批多写都不回退）。
+            let prev = tx
+                .get(TABLE_KV, &index_key)?
+                .and_then(|b| decode_u64(&b))
+                .unwrap_or(0);
+            if txn.commit_ts > prev {
+                tx.insert(TABLE_KV, &index_key, &txn.commit_ts.to_be_bytes())?;
+            }
+        }
+        tx.insert(
+            TABLE_KV,
+            SEQUENCER_LAST_COMMIT_TS,
+            &txn.commit_ts.to_be_bytes(),
+        )?;
+        Ok(SequencerOutcome::Committed {
+            commit_ts: txn.commit_ts,
+        })
+    }
+
+    /// 读取决策日志中的一条记录（#148 应用、运维排查）。
+    pub fn get_sequencer_decision(&self, commit_ts: Revision) -> Result<Option<SequencerDecision>> {
+        self.backend
+            .read(|tx| tx.get(TABLE_KV, &encode_sequencer_decision_key(commit_ts)))
+            .map(|opt| opt.and_then(|bytes| crate::storage::envelope::decode(&bytes).ok()))
+    }
+
+    /// 已决策的最大 `commit_ts`（缺失 = 0）。
+    pub fn sequencer_last_commit_ts(&self) -> Result<u64> {
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, SEQUENCER_LAST_COMMIT_TS)?
+                .and_then(|b| decode_u64(&b))
+                .unwrap_or(0))
         })
     }
 
@@ -6135,5 +6361,344 @@ mod tests {
                 current_revision: 103,
             }
         ));
+    }
+
+    // ──── Commit Sequencer（#146）────
+
+    fn seq_txn(
+        txn_id: &[u8],
+        start_ts: u64,
+        commit_ts: u64,
+        request_id: &[u8],
+        reads: &[&[u8]],
+        writes: &[(&[u8], &[u8])],
+    ) -> crate::raft::type_config::SequencerTxn {
+        use crate::raft::type_config::{SequencerMutation, SequencerTxn};
+        SequencerTxn {
+            txn_id: txn_id.to_vec(),
+            start_ts,
+            commit_ts,
+            request_id: request_id.to_vec(),
+            read_set: reads.iter().map(|key| key.to_vec()).collect(),
+            mutations: writes
+                .iter()
+                .map(|(key, value)| SequencerMutation::Put {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn seq_op(
+        txns: Vec<crate::raft::type_config::SequencerTxn>,
+    ) -> crate::raft::type_config::SequencerOp {
+        crate::raft::type_config::SequencerOp::ValidateAndCommit { txns }
+    }
+
+    #[test]
+    fn test_sequencer_orders_conflicting_txns() {
+        use crate::raft::type_config::{SequencerInvalid, SequencerOutcome};
+        let (_dir, storage) = create_commit_ts_storage();
+
+        // txn2 的 start_ts (2) 早于 txn1 的 commit_ts (10)，且两者都读写 k：
+        // 日志顺序下 txn1 先决策，txn2 必须看到它并冲突。
+        let batch = seq_op(vec![
+            seq_txn(b"t1", 1, 10, b"r1", &[b"k"], &[(b"k", b"v1")]),
+            seq_txn(b"t2", 2, 11, b"r2", &[b"k"], &[(b"k", b"v2")]),
+        ]);
+        let outcomes = storage
+            .apply_sequencer_op(&batch, 1, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                SequencerOutcome::Committed { commit_ts: 10 },
+                SequencerOutcome::Conflict {
+                    commit_ts: 11,
+                    conflict_key: b"k".to_vec(),
+                    conflict_ts: 10,
+                },
+            ]
+        );
+        assert!(storage.get_sequencer_decision(10).unwrap().is_some());
+        assert!(
+            storage.get_sequencer_decision(11).unwrap().is_none(),
+            "conflict must not write a decision"
+        );
+        assert_eq!(storage.sequencer_last_commit_ts().unwrap(), 10);
+
+        // 同一批里后一条的读集若在 start_ts 之后被写，也一样冲突。
+        let batch = seq_op(vec![
+            seq_txn(b"t3", 12, 20, b"r3", &[b"k"], &[(b"k", b"v3")]),
+            seq_txn(b"t4", 11, 21, b"r4", &[b"k"], &[(b"k", b"v4")]),
+        ]);
+        let outcomes = storage
+            .apply_sequencer_op(&batch, 2, applied_for(2))
+            .unwrap();
+        assert_eq!(outcomes[0], SequencerOutcome::Committed { commit_ts: 20 });
+        assert_eq!(
+            outcomes[1],
+            SequencerOutcome::Conflict {
+                commit_ts: 21,
+                conflict_key: b"k".to_vec(),
+                conflict_ts: 20,
+            }
+        );
+
+        // 非法时间戳不是用户级冲突的替代品：单独断言变体存在且不写决策。
+        let invalid = seq_op(vec![seq_txn(b"t5", 30, 30, b"r5", &[], &[(b"z", b"v")])]);
+        let outcomes = storage
+            .apply_sequencer_op(&invalid, 3, applied_for(3))
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Invalid {
+                commit_ts: 30,
+                reason: SequencerInvalid::CommitTsNotAboveStart,
+            }]
+        );
+        assert!(storage.get_sequencer_decision(30).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sequencer_conflict_writes_no_decision() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(
+                    b"t1",
+                    1,
+                    10,
+                    b"r1",
+                    &[b"k"],
+                    &[(b"k", b"v1")],
+                )]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(
+                    b"t2",
+                    2,
+                    11,
+                    b"r2",
+                    &[b"k"],
+                    &[(b"other", b"v2")],
+                )]),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Conflict {
+                commit_ts: 11,
+                conflict_key: b"k".to_vec(),
+                conflict_ts: 10,
+            }]
+        );
+        assert!(storage.get_sequencer_decision(11).unwrap().is_none());
+        assert_eq!(storage.sequencer_last_commit_ts().unwrap(), 10);
+    }
+
+    #[test]
+    fn test_sequencer_retry_is_idempotent() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(
+                    b"t1",
+                    1,
+                    10,
+                    b"r1",
+                    &[b"k"],
+                    &[(b"k", b"v1")],
+                )]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        // 同 txn_id + request_id 的重试即使带了更大的 commit_ts，也返回首次决策。
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(
+                    b"t1",
+                    2,
+                    20,
+                    b"r1",
+                    &[b"k"],
+                    &[(b"k", b"v2")],
+                )]),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Duplicate { commit_ts: 10 }]
+        );
+        assert!(storage.get_sequencer_decision(20).unwrap().is_none());
+        assert_eq!(storage.sequencer_last_commit_ts().unwrap(), 10);
+
+        // 同一 txn_id 换 request_id 也不能产生第二个决策。
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(b"t1", 3, 21, b"r2", &[], &[(b"k", b"v3")])]),
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Duplicate { commit_ts: 10 }]
+        );
+
+        // request_id 只在同一 txn_id 内去重：另一个事务复用同一个字符串是
+        // 新请求（D12.2 的幂等范围是会话），正常提交。
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(b"t3", 4, 22, b"r1", &[], &[(b"k", b"v4")])]),
+                4,
+                applied_for(4),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Committed { commit_ts: 22 }]
+        );
+        assert!(storage.get_sequencer_decision(22).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_sequencer_rejects_out_of_order_commit_ts() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(b"t1", 1, 20, b"r1", &[], &[(b"a", b"v1")])]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(b"t2", 2, 19, b"r2", &[], &[(b"b", b"v2")])]),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::OutOfOrder {
+                commit_ts: 19,
+                last_commit_ts: 20,
+            }]
+        );
+        assert!(storage.get_sequencer_decision(19).unwrap().is_none());
+        assert_eq!(storage.sequencer_last_commit_ts().unwrap(), 20);
+    }
+
+    #[test]
+    fn test_sequencer_decision_and_index_survive_reopen() {
+        use crate::raft::type_config::SequencerOutcome;
+        let dir = TempDir::new().unwrap();
+        let storage = MvccStorage::new_with_revision_mode(
+            RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap(),
+            RevisionMode::CommitTs,
+        )
+        .unwrap();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(
+                    b"t1",
+                    1,
+                    10,
+                    b"r1",
+                    &[b"k"],
+                    &[(b"k", b"v1")],
+                )]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+        drop(storage);
+
+        let reopened = MvccStorage::new_with_revision_mode(
+            RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap(),
+            RevisionMode::CommitTs,
+        )
+        .unwrap();
+        let decision = reopened.get_sequencer_decision(10).unwrap().unwrap();
+        assert_eq!(decision.txn_id, b"t1".to_vec());
+        assert_eq!(decision.commit_ts, 10);
+        assert_eq!(reopened.sequencer_last_commit_ts().unwrap(), 10);
+
+        // 索引也恢复：新事务读到旧写时冲突；重复请求仍是 Duplicate。
+        let outcomes = reopened
+            .apply_sequencer_op(
+                &seq_op(vec![
+                    seq_txn(b"t2", 2, 11, b"r2", &[b"k"], &[]),
+                    seq_txn(b"t1", 2, 12, b"r1", &[], &[]),
+                ]),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                SequencerOutcome::Conflict {
+                    commit_ts: 11,
+                    conflict_key: b"k".to_vec(),
+                    conflict_ts: 10,
+                },
+                SequencerOutcome::Duplicate { commit_ts: 10 },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_sequencer_decisions_survive_snapshot() {
+        use crate::storage::snapshot::{export_snapshot_data, import_snapshot_data};
+        let (_dir, source) = create_commit_ts_storage();
+        source
+            .apply_sequencer_op(
+                &seq_op(vec![seq_txn(
+                    b"t1",
+                    1,
+                    10,
+                    b"r1",
+                    &[b"k"],
+                    &[(b"k", b"v1")],
+                )]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        let data = export_snapshot_data(&source, 1, 1).unwrap();
+        assert!(
+            data.sys_entries
+                .iter()
+                .any(|entry| entry.internal_key.starts_with(b"/_sys/seq/")),
+            "sequencer records must travel in the /_sys/ snapshot domain"
+        );
+
+        let (_dir, restored) = create_commit_ts_storage();
+        import_snapshot_data(&restored, &data).unwrap();
+        assert_eq!(
+            restored.get_sequencer_decision(10).unwrap().unwrap().txn_id,
+            b"t1".to_vec()
+        );
+        assert_eq!(restored.sequencer_last_commit_ts().unwrap(), 10);
     }
 }

@@ -674,6 +674,32 @@ impl StateMachineStore {
                 }
                 Err(e) => Err(io_err(e)),
             },
+            Command::Sequencer(op) => {
+                // 用户级冲突/重复/乱序只体现在 outcomes 里，不得变成 raft apply
+                // 的 Err（D11.5）；决策与 applied 在同一 redb 事务。无 Watch 事件：
+                // Commit Log/严格 watch 归 G4（#153+）。
+                let validation_start = std::time::Instant::now();
+                let outcomes = sm
+                    .apply_sequencer_op(op, revision, applied)
+                    .map_err(io_err)?;
+                if let Some(metrics) = &self.metrics {
+                    let conflicts = outcomes
+                        .iter()
+                        .filter(|outcome| {
+                            matches!(
+                                outcome,
+                                crate::raft::type_config::SequencerOutcome::Conflict { .. }
+                            )
+                        })
+                        .count() as u64;
+                    metrics.record_sequencer_batch(
+                        outcomes.len() as u64,
+                        conflicts,
+                        validation_start.elapsed().as_micros() as u64,
+                    );
+                }
+                Ok((Response::Sequencer { outcomes }, None))
+            }
             Command::Lease(op) => {
                 let (outcome, changes) =
                     sm.apply_lease_op(op, revision, applied).map_err(io_err)?;

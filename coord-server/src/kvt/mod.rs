@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 pub(crate) mod lease;
 pub mod safe_ts;
+pub mod sequencer;
 mod services;
 pub(crate) mod txn;
 

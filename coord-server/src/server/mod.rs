@@ -288,6 +288,11 @@ pub struct CoordNode {
     ///
     /// 保持 `Option` 而非延迟构造：关闭时不得有任何 v2 装配痕迹（ADR-0001）。
     tso_client: Option<Arc<TsoClient>>,
+    /// KV-T Commit Sequencer（仅 enabled + region 0 raft 装配；`None` = 未启用）。
+    ///
+    /// `coord.txn.v2.Commit` 的 RPC 接线归 #151；这里先暴露可测试的内部
+    /// 接口，关闭态不创建任何提案路径。
+    commit_sequencer: Option<Arc<crate::kvt::sequencer::CommitSequencer>>,
     /// 进程级指标（`[kv_t]` v2 拒绝计数用；main 在 Arc::new 前注入）。
     metrics: Option<Arc<crate::metrics::Metrics>>,
     /// `coord.txn.v2` 服务端会话（ADR-0015 D12.2）：只在协调节点内存，不复制。
@@ -374,6 +379,7 @@ impl CoordNode {
             chunk_store: None,
             kvt: crate::kvt::KvTState::disabled(),
             tso_client: None,
+            commit_sequencer: None,
             metrics: None,
             txn_sessions: crate::kvt::txn::TxnSessions::new(),
         }
@@ -468,6 +474,17 @@ impl CoordNode {
     /// 本地 TSO 批次缓存（未装配时为 `None`，`GetTs` 据此 fail-closed）。
     pub fn tso_client(&self) -> Option<&Arc<TsoClient>> {
         self.tso_client.as_ref()
+    }
+
+    /// 注入 Commit Sequencer（`[kv_t].enabled=true` 且 region 0 raft 已装配）。
+    /// 必须在 `Arc::new(node)` 之前调用。
+    pub fn set_commit_sequencer(&mut self, sequencer: Arc<crate::kvt::sequencer::CommitSequencer>) {
+        self.commit_sequencer = Some(sequencer);
+    }
+
+    /// Commit Sequencer（未装配时为 `None`；#151 的 Commit handler 据此门禁）。
+    pub fn commit_sequencer(&self) -> Option<&Arc<crate::kvt::sequencer::CommitSequencer>> {
+        self.commit_sequencer.as_ref()
     }
 
     /// `coord.txn.v2` 会话表（只在协调节点内存，不随节点复制）。

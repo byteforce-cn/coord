@@ -378,6 +378,84 @@ pub enum TsoOp {
     Allocate { batch_size: u32 },
 }
 
+/// Commit Sequencer 事务写操作（point）。
+///
+/// 区间写/range 谓词由 #147/#149 扩展；这里刻意不提供 range 字段，
+/// 避免 sequencer 收下后静默忽略（D4 的谓词校验不能被“看不见”）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SequencerMutation {
+    Put {
+        key: Vec<u8>,
+        value: Vec<u8>,
+        lease_id: Option<i64>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
+}
+
+impl SequencerMutation {
+    pub fn key(&self) -> &[u8] {
+        match self {
+            Self::Put { key, .. } | Self::Delete { key } => key,
+        }
+    }
+}
+
+/// 一条待 Commit Sequencer 校验的事务。
+///
+/// `commit_ts` 由 region 0 leader 从 TSO 取号后写入日志；apply 只校验/落盘它，
+/// 不再分配（确定性）。`read_set` 是去重后的 point key；range 谓词归 #147/#149。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencerTxn {
+    pub txn_id: Vec<u8>,
+    pub start_ts: u64,
+    pub commit_ts: u64,
+    pub request_id: Vec<u8>,
+    pub read_set: Vec<Vec<u8>>,
+    pub mutations: Vec<SequencerMutation>,
+}
+
+/// 非法候选事务（用户级输入问题，不是 raft 错误）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SequencerInvalid {
+    /// `commit_ts <= start_ts`：不可能作为一次“读到 start_ts 快照后提交”的决策。
+    CommitTsNotAboveStart,
+    /// 空 `txn_id` 无法建立单次提交索引。
+    MissingTxnId,
+}
+
+/// apply 对单条事务的结果（用户级结果一律走响应，不让 apply 返回 `Err`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SequencerOutcome {
+    /// 校验通过并写入决策。
+    Committed { commit_ts: u64 },
+    /// 读集在 `(start_ts, commit_ts]` 内被写命中；不写决策。
+    Conflict {
+        commit_ts: u64,
+        conflict_key: Vec<u8>,
+        conflict_ts: u64,
+    },
+    /// 同一事务/请求已决策：返回首次 `commit_ts`，不重复分配。
+    Duplicate { commit_ts: u64 },
+    /// `commit_ts` 不高于已决策水位：不写决策（D11.1 的最后防线）。
+    OutOfOrder { commit_ts: u64, last_commit_ts: u64 },
+    /// 输入非法；不写决策。
+    Invalid {
+        commit_ts: u64,
+        reason: SequencerInvalid,
+    },
+}
+
+/// Commit Sequencer 命令（仅 region 0 system raft 提出）。
+///
+/// **末尾追加变体**（旧日志/快照兼容）。批内顺序已由 leader 按 `commit_ts`
+/// 递增排列；apply 按数组顺序校验。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SequencerOp {
+    ValidateAndCommit { txns: Vec<SequencerTxn> },
+}
+
 /// Raft 日志负载：客户端提交的状态机命令
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
@@ -462,6 +540,10 @@ pub enum Command {
     ///
     /// **末尾追加**；只由 v2 Lease revoke/到期触发。
     DeleteKeysByLeaseV2 { lease_id: i64, commit_ts: u64 },
+    /// Commit Sequencer 校验/决策（仅 region 0 system raft 提出）。
+    ///
+    /// **末尾追加**；决策写 `/_sys/seq/`（随 `/_sys/*` 快照域恢复）。
+    Sequencer(SequencerOp),
 }
 
 impl std::fmt::Display for Command {
@@ -522,6 +604,9 @@ impl std::fmt::Display for Command {
                     f,
                     "DeleteKeysByLeaseV2(lease_id={lease_id}, commit_ts={commit_ts})"
                 )
+            }
+            Command::Sequencer(SequencerOp::ValidateAndCommit { txns }) => {
+                write!(f, "Sequencer(txns={})", txns.len())
             }
         }
     }
@@ -607,6 +692,10 @@ pub enum Response {
     LeaseV2Revoke {
         commit_ts: u64,
     },
+    /// Commit Sequencer 批结果：与命令中的事务一一对应、顺序一致。
+    Sequencer {
+        outcomes: Vec<SequencerOutcome>,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -659,6 +748,9 @@ impl std::fmt::Display for Response {
             Response::LeaseV2Revoke { commit_ts } => {
                 write!(f, "LeaseV2Revoke(commit_ts={commit_ts})")
             }
+            Response::Sequencer { outcomes } => {
+                write!(f, "Sequencer(outcomes={})", outcomes.len())
+            }
         }
     }
 }
@@ -703,6 +795,41 @@ mod tests {
                 assert_eq!(lease_id, Some(42));
             }
             _ => panic!("expected Put"),
+        }
+    }
+
+    #[test]
+    fn test_command_sequencer_serde_roundtrip() {
+        let cmd = Command::Sequencer(SequencerOp::ValidateAndCommit {
+            txns: vec![SequencerTxn {
+                txn_id: b"txn-1".to_vec(),
+                start_ts: 7,
+                commit_ts: 9,
+                request_id: b"req-1".to_vec(),
+                read_set: vec![b"reads".to_vec()],
+                mutations: vec![
+                    SequencerMutation::Put {
+                        key: b"k".to_vec(),
+                        value: b"v".to_vec(),
+                        lease_id: Some(3),
+                    },
+                    SequencerMutation::Delete {
+                        key: b"gone".to_vec(),
+                    },
+                ],
+            }],
+        });
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
+        match decoded {
+            Command::Sequencer(SequencerOp::ValidateAndCommit { txns }) => {
+                assert_eq!(txns.len(), 1);
+                assert_eq!(txns[0].txn_id, b"txn-1");
+                assert_eq!(txns[0].commit_ts, 9);
+                assert_eq!(txns[0].read_set, [b"reads".to_vec()]);
+                assert_eq!(txns[0].mutations.len(), 2);
+            }
+            other => panic!("expected Sequencer, got {other:?}"),
         }
     }
 

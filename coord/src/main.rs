@@ -2865,26 +2865,39 @@ async fn run_server(
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
     node.set_metrics(Arc::clone(&metrics));
-    // 本地 TSO 批次缓存：只有开启且 region 0 raft 已装配才构造（
-    // 关闭时不起后台任务、不改启动路径，ADR-0001）。
+    // 本地 TSO 批次缓存 + Commit Sequencer：只有开启且 region 0 raft 已装配才
+    // 构造（关闭时不起后台任务、不改启动路径，ADR-0001）。
     if cfg.kv_t.enabled {
-        if let Some(raft) = node.raft.as_ref() {
-            node.set_tso_client(coord_server::raft::tso::TsoClient::new(
+        if let Some(raft) = node.raft.clone() {
+            let storage = Arc::clone(&node.storage);
+            let tso = coord_server::raft::tso::TsoClient::new(
                 Arc::new(coord_server::raft::tso::TsoAllocator::new(
                     raft.as_ref().clone(),
                     node.node_id,
                 )),
                 cfg.kv_t.tso_batch_size,
                 Some(Arc::clone(&metrics)),
+            );
+            node.set_tso_client(Arc::clone(&tso));
+            node.set_commit_sequencer(Arc::new(
+                coord_server::kvt::sequencer::CommitSequencer::new(
+                    raft.as_ref().clone(),
+                    node.node_id,
+                    tso,
+                    storage,
+                    cfg.kv_t.commit_sequencer_batch as usize,
+                    cfg.kv_t.max_txn_bytes as usize,
+                    std::time::Duration::from_millis(cfg.limits.write_timeout_ms),
+                ),
             ));
         }
     }
     if cfg.kv_t.enabled {
         tracing::warn!(
-            "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2), KV (coord.kv.v2) and \
-             the txn read phase (coord.txn.v2 Begin/Read/Abort) are available; txn Commit \
-             and the remaining v2 RPCs stay FAILED_PRECONDITION/UNIMPLEMENTED until their \
-             gate lands"
+            "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2), KV (coord.kv.v2), \
+             the txn read phase (coord.txn.v2 Begin/Read/Abort) and the internal Commit \
+             Sequencer are available; txn Commit and the remaining v2 RPCs stay \
+             FAILED_PRECONDITION/UNIMPLEMENTED until their gate lands"
         );
     } else {
         tracing::info!(
