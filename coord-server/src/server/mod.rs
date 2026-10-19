@@ -313,6 +313,27 @@ pub(crate) struct KvTarget {
     pub(crate) handle: Option<Arc<RegionHandle>>,
 }
 
+/// region 模式下的一个 Range 执行分段：目标 Region 与半开 `[start, end)`。
+///
+/// 分段由 `CoordNode::kv_range_targets` 生成，互不相交且按 key 有序；
+/// v2 Range 按分段并行读取后顺序拼接。
+pub(crate) struct KvRangeSegment {
+    pub(crate) target: KvTarget,
+    pub(crate) start: Vec<u8>,
+    pub(crate) end: Vec<u8>,
+}
+
+/// 从已装配的 Region 运行时构造 KV 执行目标（读写共用字段口径）。
+fn kv_target_from_runtime(rt: &crate::raft::region_runtime::RegionRuntime) -> KvTarget {
+    KvTarget {
+        region_id: rt.region_id(),
+        mvcc: Arc::clone(&rt.mvcc),
+        raft: Some(Arc::new(rt.raft.clone())),
+        raft_log_store: Some(rt.raft_log_store.clone()),
+        handle: Some(rt.handle()),
+    }
+}
+
 /// 对象存储执行目标（一个 Region，或 legacy 单 Raft）——对象 manifest 读写的
 /// raft/mvcc + 该目标数据目录下的 chunk 文件存储。
 struct ObjectTarget {
@@ -605,13 +626,7 @@ impl CoordNode {
     pub(crate) fn kv_target_for_key(&self, key: &[u8]) -> Result<KvTarget, tonic::Status> {
         if let Some(manager) = &self.region_manager {
             let rt = manager.route_runtime(key).map_err(map_err)?;
-            Ok(KvTarget {
-                region_id: rt.region_id(),
-                mvcc: Arc::clone(&rt.mvcc),
-                raft: Some(Arc::new(rt.raft.clone())),
-                raft_log_store: Some(rt.raft_log_store.clone()),
-                handle: Some(rt.handle()),
-            })
+            Ok(kv_target_from_runtime(&rt))
         } else {
             Ok(KvTarget {
                 region_id: 0,
@@ -621,6 +636,43 @@ impl CoordNode {
                 handle: None,
             })
         }
+    }
+
+    /// 将半开区间 `[start, end)` 解析为按 key 有序的 per-Region 执行分段。
+    ///
+    /// legacy（未装配 RegionManager）只有一个 region 0 分段。region 模式的
+    /// 缺口/重叠由 [`RegionManager::resolve_range`] fail-closed；运行时缺失按
+    /// 路由错误返回（整请求失败，不返回已解析分段的部分结果）。
+    pub(crate) fn kv_range_targets(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<KvRangeSegment>, tonic::Status> {
+        let Some(manager) = &self.region_manager else {
+            return Ok(vec![KvRangeSegment {
+                target: self.kv_target_for_key(start)?,
+                start: start.to_vec(),
+                end: end.to_vec(),
+            }]);
+        };
+
+        manager
+            .resolve_range(start, end)
+            .map_err(map_err)?
+            .into_iter()
+            .map(|seg| {
+                let rt = manager.runtime(seg.region_id).ok_or_else(|| {
+                    map_err(coord_core::error::Error::RegionNotFound {
+                        region_id: seg.region_id,
+                    })
+                })?;
+                Ok(KvRangeSegment {
+                    target: kv_target_from_runtime(&rt),
+                    start: seg.start_key,
+                    end: seg.end_key,
+                })
+            })
+            .collect()
     }
 
     /// 校验 key 属于 target Region（Txn 的多 key 同区约束）。
