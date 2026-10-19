@@ -14,10 +14,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use coord_core::error::Result as CoordResult;
+use coord_core::error_code::error_code_of;
 use coord_proto::tso::v2::tso_server::Tso as TsoV2;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta, StorageConfig};
+use coord_proto::kv::v2::kv_server::Kv as KvV2;
+use coord_proto::kv::v2::RangeRequest as RangeRequestV2;
 use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
+use tonic::Code;
 use coord_server::metrics::Metrics;
 use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
@@ -184,7 +188,13 @@ impl G2Node {
         node.raft = Some(root_raft);
         node.region_manager = Some(Arc::clone(&manager));
         node.set_kvt_state(
-            KvTState::new(true, KvTRuntimeConfig::default())
+            KvTState::new(
+                true,
+                KvTRuntimeConfig {
+                    read_ts_wait_ms: 50,
+                    ..KvTRuntimeConfig::default()
+                },
+            )
                 .with_implemented([KvTCapability::Kv, KvTCapability::Tso]),
         );
         node.set_tso_client(TsoClient::new(FakeTso::new(), 8, None));
@@ -254,6 +264,17 @@ async fn wait_for_leaders(node: &CoordNode, manager: &RegionManager) {
             "raft leaders not elected in time"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn range_req(key: &[u8], range_end: &[u8], read_ts: i64) -> RangeRequestV2 {
+    RangeRequestV2 {
+        key: key.to_vec(),
+        range_end: range_end.to_vec(),
+        limit: 0,
+        read_ts,
+        keys_only: false,
+        count_only: false,
     }
 }
 
@@ -425,4 +446,112 @@ async fn test_fence_rejects_stale_commit_ts_without_raft_error() {
         g2.put_v2(b"apple", b"v", fence + 1).await,
         Response::Put { revision } if revision == fence + 1
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_range_read_ts_zero_uses_global_safe_ts() {
+    let g2 = G2Node::start().await;
+    assert!(matches!(
+        g2.put_v2(b"apple", b"a", 2_000).await,
+        Response::Put { revision: 2_000 }
+    ));
+    assert!(matches!(
+        g2.put_v2(b"melon", b"b", 1_500).await,
+        Response::Put { revision: 1_500 }
+    ));
+
+    // fence 到 1800：region1 仍领先（2000），region2 被抬到 1800；
+    // safe_ts=1800，因此 read_ts=0 不得看到 2000 的写入。
+    g2.node
+        .storage
+        .apply_tso_allocate(1_799, 1, AppliedLogId::standalone(0))
+        .unwrap();
+    coord_server::kvt::safe_ts::advance_once(&g2.node)
+        .await
+        .expect("first fence");
+    assert_eq!(g2.node.safe_ts(), 1_800);
+
+    let early = g2
+        .node
+        .range(tonic::Request::new(range_req(b"apple", b"", 0)))
+        .await
+        .expect("range at safe_ts")
+        .into_inner();
+    assert_eq!(early.read_ts, 1_800, "header must echo the global safe_ts");
+    assert!(
+        early.kvs.is_empty(),
+        "commit_ts 2000 is beyond the global safe_ts: {:?}",
+        early.kvs
+    );
+
+    // 再 fence 到 2200：所有 Region 都越过 2000，read_ts=0 才可见。
+    g2.node
+        .storage
+        .apply_tso_allocate(400, 2, AppliedLogId::standalone(1))
+        .unwrap();
+    coord_server::kvt::safe_ts::advance_once(&g2.node)
+        .await
+        .expect("second fence");
+    assert_eq!(g2.node.safe_ts(), 2_200);
+
+    let late = g2
+        .node
+        .range(tonic::Request::new(range_req(b"apple", b"", 0)))
+        .await
+        .expect("range after catch-up")
+        .into_inner();
+    assert_eq!(late.read_ts, 2_200);
+    assert_eq!(late.kvs.len(), 1);
+    assert_eq!(late.kvs[0].value, b"a");
+    assert_eq!(late.kvs[0].mod_revision, 2_000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_explicit_read_ts_waits_for_lagging_region_then_safe_ts_lag() {
+    let g2 = G2Node::start().await;
+    assert!(matches!(
+        g2.put_v2(b"apple", b"a", 2_000).await,
+        Response::Put { revision: 2_000 }
+    ));
+    assert!(matches!(
+        g2.put_v2(b"melon", b"b", 1_500).await,
+        Response::Put { revision: 1_500 }
+    ));
+    g2.node
+        .storage
+        .apply_tso_allocate(1_799, 1, AppliedLogId::standalone(0))
+        .unwrap();
+    coord_server::kvt::safe_ts::advance_once(&g2.node)
+        .await
+        .expect("fence");
+    assert_eq!(g2.node.safe_ts(), 1_800);
+
+    // region1 已 apply 2000，但 region2 只到 1800：read_ts=2000 必须等待
+    // 全局水位，而不是只看目标 Region。
+    let started = tokio::time::Instant::now();
+    let err = g2
+        .node
+        .range(tonic::Request::new(range_req(b"apple", b"", 2_000)))
+        .await
+        .expect_err("read_ts above the lagging region's watermark must time out");
+    assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+    assert_eq!(
+        error_code_of(&err).as_deref(),
+        Some("SAFE_TS_LAG"),
+        "{err:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(40),
+        "must respect read_ts_wait_ms"
+    );
+
+    let text = g2.metrics_text();
+    assert!(
+        text.contains("coord_kv_v2_safe_ts_wait_total 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("coord_kv_v2_safe_ts_lag_total 1"),
+        "{text}"
+    );
 }

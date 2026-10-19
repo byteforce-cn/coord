@@ -209,26 +209,34 @@ fn single_key_end(key: &[u8]) -> Vec<u8> {
     end
 }
 
-/// 等待 Region apply 追到 `read_ts`；超时返回可重试的 `SAFE_TS_LAG`。
-async fn wait_for_revision(
+/// 等待**全局** safe_ts 追到 `read_ts`；超时返回可重试的 `SAFE_TS_LAG`。
+///
+/// 必须等全部 Region 的 apply 水位，而不是只看目标 Region：多 Region 下
+/// `commit_ts <= read_ts` 的事务可能已落到某个领先 Region，落后 Region 尚未
+/// apply；只看目标会让同一快照看到部分提交。
+async fn wait_for_safe_ts(
     node: &CoordNode,
-    target: &crate::server::KvTarget,
     read_ts: u64,
     wait_ms: u64,
 ) -> Result<(), Status> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_millis(wait_ms);
     loop {
-        if target.mvcc.current_revision() >= read_ts {
+        if node.safe_ts() >= read_ts {
+            if let Some(metrics) = node.metrics() {
+                metrics.inc_kv_v2_safe_ts_wait(started.elapsed().as_millis() as u64);
+            }
             return Ok(());
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
             if let Some(metrics) = node.metrics() {
+                metrics.inc_kv_v2_safe_ts_wait(started.elapsed().as_millis() as u64);
                 metrics.inc_kv_v2_safe_ts_lag();
             }
             return Err(attach(
                 Status::unavailable(format!(
-                    "read_ts {read_ts} exceeds safe_ts (region apply lag); retry later"
+                    "read_ts {read_ts} exceeds safe_ts (global apply lag); retry later"
                 )),
                 CoordErrorCode::SafeTsLag,
             ));
@@ -409,23 +417,16 @@ impl kv_v2::kv_server::Kv for CoordNode {
         )
         .await?;
 
-        let current = target.mvcc.current_revision();
-        let requested = if req.read_ts == 0 {
-            current
+        let safe_ts = self.safe_ts();
+        let read_ts = if req.read_ts == 0 {
+            safe_ts
         } else {
             req.read_ts as u64
         };
-        if requested > current {
-            wait_for_revision(
-                self,
-                &target,
-                requested,
-                self.kvt().config().read_ts_wait_ms,
-            )
-            .await?;
+        if read_ts > safe_ts {
+            wait_for_safe_ts(self, read_ts, self.kvt().config().read_ts_wait_ms).await?;
         }
 
-        let read_ts = requested;
         let current_now = target.mvcc.current_revision();
         let scan_limit = if req.count_only {
             if max_range == 0 {
@@ -442,28 +443,29 @@ impl kv_v2::kv_server::Kv for CoordNode {
             req.range_end.clone()
         };
 
-        let (rows, header_read_ts) = if read_ts == current_now {
+        // safe_ts 是各 Region current 的最小值，因此 `read_ts <= safe_ts` 必然
+        // `<= target.current`；但并发的 fence 可能让 current 在两步之间又前进。
+        let (rows, header_read_ts) = if read_ts == 0 {
+            // 0 是“早于任何 commit”的合法快照（safe_ts 也可能为 0）；
+            // changelog 的 0 水位会被当成已压缩，不能走历史读。
+            (Vec::new(), 0)
+        } else if read_ts == current_now {
             // 值、元数据、header revision 同一读事务；header 用该事务的 revision，
             // 不能用读事务之前的 current——并发提交会让 header 落后于返回的行。
             let (rows, live_revision) = target
                 .mvcc
                 .range_in_with_metadata(&req.key, &end, scan_limit)
                 .map_err(map_err)?;
-            if req.read_ts > 0 && live_revision > read_ts {
-                // 显式快照读越过了目标 revision：改用精确历史视图，保证
-                // `mod_revision <= read_ts`。
+            if live_revision > read_ts {
+                // 显式/全局快照读越过了目标 revision：改用精确历史视图，
+                // 保证 `mod_revision <= read_ts`（read_ts=0 已在上一个分支处理）。
                 let rows = target
                     .mvcc
                     .range_at_revision_with_metadata(&req.key, &end, scan_limit, read_ts)
                     .map_err(v2_status)?;
                 (rows, read_ts)
             } else {
-                let header = if req.read_ts == 0 {
-                    live_revision
-                } else {
-                    read_ts
-                };
-                (rows, header)
+                (rows, read_ts)
             }
         } else {
             let rows = target
