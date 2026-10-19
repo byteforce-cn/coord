@@ -490,12 +490,102 @@ impl LeaseRecord {
     }
 }
 
+/// v2 租约表前缀（与 v1 `/_lease/` 分离：v1 记录携带 log-index revision，
+/// v2 记录不参与 revision，清理使用 TSO `commit_ts`）。
+const LEASE_V2_PREFIX: &[u8] = b"/_leasev2/";
+
+/// v2 Grant 的 request_id 幂等索引前缀（独立前缀，避免混入租约记录枚举）。
+const LEASE_V2_REQ_PREFIX: &[u8] = b"/_leasev2req/";
+
 /// 将 Lease ID 编码为内部存储 Key：/_lease/{id_be}
 pub(crate) fn encode_lease_key(lease_id: i64) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(LEASE_PREFIX.len() + 8);
     encoded.extend_from_slice(LEASE_PREFIX);
     encoded.extend_from_slice(&lease_id.to_be_bytes());
     encoded
+}
+
+// ──── LeaseV2Record（region 0 的 v2 租约表） ────
+
+/// `/_leasev2/{id}` 的持久化记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseV2Record {
+    /// 租约 TTL（秒）
+    pub ttl: i64,
+    /// 发放时的 TSO（只读参考，不参与 revision 语义）
+    pub granted_ts: u64,
+    /// 过期墙钟时刻（epoch 毫秒；leader 计算后入日志，apply 确定性）
+    pub deadline_wall_ms: i64,
+    /// 是否已吊销/已过期清理
+    pub revoked: bool,
+    /// 吊销决策的 `commit_ts`（0 = 未吊销；清理重试可推进）
+    pub revoked_commit_ts: u64,
+    /// 首次 Grant 的 request_id（幂等回放；空 = 客户端未提供）
+    pub grant_request_id: Vec<u8>,
+}
+
+impl LeaseV2Record {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(35 + self.grant_request_id.len());
+        buf.extend_from_slice(&self.ttl.to_be_bytes());
+        buf.extend_from_slice(&self.granted_ts.to_be_bytes());
+        buf.extend_from_slice(&self.deadline_wall_ms.to_be_bytes());
+        buf.push(u8::from(self.revoked));
+        buf.extend_from_slice(&self.revoked_commit_ts.to_be_bytes());
+        let len = self.grant_request_id.len().min(u16::MAX as usize);
+        buf.extend_from_slice(&(len as u16).to_be_bytes());
+        buf.extend_from_slice(&self.grant_request_id[..len]);
+        buf
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 35 {
+            return None;
+        }
+        let req_len = u16::from_be_bytes(bytes[33..35].try_into().ok()?) as usize;
+        if bytes.len() < 35 + req_len {
+            return None;
+        }
+        Some(Self {
+            ttl: i64::from_be_bytes(bytes[0..8].try_into().ok()?),
+            granted_ts: u64::from_be_bytes(bytes[8..16].try_into().ok()?),
+            deadline_wall_ms: i64::from_be_bytes(bytes[16..24].try_into().ok()?),
+            revoked: bytes[24] != 0,
+            revoked_commit_ts: u64::from_be_bytes(bytes[25..33].try_into().ok()?),
+            grant_request_id: bytes[35..35 + req_len].to_vec(),
+        })
+    }
+}
+
+fn encode_lease_v2_key(lease_id: i64) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(LEASE_V2_PREFIX.len() + 8);
+    encoded.extend_from_slice(LEASE_V2_PREFIX);
+    encoded.extend_from_slice(&lease_id.to_be_bytes());
+    encoded
+}
+
+fn encode_lease_v2_req_key(request_id: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(LEASE_V2_REQ_PREFIX.len() + request_id.len());
+    encoded.extend_from_slice(LEASE_V2_REQ_PREFIX);
+    encoded.extend_from_slice(request_id);
+    encoded
+}
+
+/// v2 租约 apply 结果（状态机据此构造 response）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseV2Apply {
+    Grant {
+        lease_id: i64,
+        granted_ts: u64,
+        ttl: i64,
+        created: bool,
+    },
+    KeepAlive {
+        ok: bool,
+    },
+    Revoke {
+        commit_ts: u64,
+    },
 }
 
 // ──── ApplyOutcome ────
@@ -2189,6 +2279,273 @@ impl<B: StorageBackend> MvccStorage<B> {
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
 
             Ok((ApplyOutcome::applied(), changes))
+        })
+    }
+
+    // ──── v2 Lease 状态表（region 0 system raft） ────
+
+    /// 读取 `/_leasev2/{id}` 记录
+    pub fn get_lease_v2_record(&self, lease_id: i64) -> Result<Option<LeaseV2Record>> {
+        self.backend
+            .read(|tx| tx.get(TABLE_KV, &encode_lease_v2_key(lease_id)))
+            .map(|opt| opt.and_then(|bytes| LeaseV2Record::from_bytes(&bytes)))
+    }
+
+    /// 列出全部 v2 租约记录（revoker/expiry 启动扫描用）。
+    pub fn list_lease_v2_records(&self) -> Result<Vec<(i64, LeaseV2Record)>> {
+        let rows = self
+            .backend
+            .read(|tx| tx.iter_prefix(TABLE_KV, LEASE_V2_PREFIX))?;
+        let mut records = Vec::with_capacity(rows.len());
+        for (key, value) in rows {
+            let Some(id_bytes) = key.strip_prefix(LEASE_V2_PREFIX) else {
+                continue;
+            };
+            let Some(id_bytes): Option<[u8; 8]> = id_bytes.try_into().ok() else {
+                continue;
+            };
+            let id = i64::from_be_bytes(id_bytes);
+            if let Some(record) = LeaseV2Record::from_bytes(&value) {
+                records.push((id, record));
+            } else {
+                tracing::warn!(lease_id = id, "corrupt lease.v2 record skipped");
+            }
+        }
+        Ok(records)
+    }
+
+    /// 应用 v2 租约操作（region 0 raft apply 路径）。
+    ///
+    /// 租约表不是业务 keyspace：不写 changelog、不推进 `META_CURRENT_REVISION`
+    /// （v2 下 `note_log_index_revision` 为 no-op），只推进 applied 水位。
+    /// 显式 id 冲突/重复 revoke 是用户级结果，不返回 `Err`（D11.5）。
+    pub fn apply_lease_v2_op(
+        &self,
+        op: &crate::raft::type_config::LeaseV2Op,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<(LeaseV2Apply, ApplyOutcome)> {
+        use crate::raft::type_config::LeaseV2Op;
+
+        let outcome = self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
+            let result = match op {
+                LeaseV2Op::Grant {
+                    lease_id,
+                    ttl_seconds,
+                    granted_ts,
+                    deadline_wall_ms,
+                    request_id,
+                } => {
+                    if !request_id.is_empty() {
+                        if let Some(existing) = tx
+                            .get(TABLE_KV, &encode_lease_v2_req_key(request_id))?
+                            .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+                        {
+                            let existing_id = i64::from_be_bytes(existing);
+                            if let Some(record) = tx
+                                .get(TABLE_KV, &encode_lease_v2_key(existing_id))?
+                                .and_then(|bytes| LeaseV2Record::from_bytes(&bytes))
+                            {
+                                // request_id 命中 = 同一逻辑请求的回放：返回
+                                // 首次结果且不覆盖记录（created=true 让 handler
+                                // 与「显式 id 冲突」区分开）。
+                                tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+                                tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+                                return Ok(LeaseV2Apply::Grant {
+                                    lease_id: existing_id,
+                                    granted_ts: record.granted_ts,
+                                    ttl: record.ttl,
+                                    created: true,
+                                });
+                            }
+                        }
+                    }
+
+                    if let Some(record) = tx
+                        .get(TABLE_KV, &encode_lease_v2_key(*lease_id))?
+                        .and_then(|bytes| LeaseV2Record::from_bytes(&bytes))
+                    {
+                        // 状态机是 id 归属的最终权威：绝不静默覆盖已有租约。
+                        let same_request =
+                            !request_id.is_empty() && record.grant_request_id == *request_id;
+                        tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+                        return Ok(LeaseV2Apply::Grant {
+                            lease_id: *lease_id,
+                            granted_ts: record.granted_ts,
+                            ttl: record.ttl,
+                            created: same_request,
+                        });
+                    }
+
+                    let record = LeaseV2Record {
+                        ttl: *ttl_seconds,
+                        granted_ts: *granted_ts,
+                        deadline_wall_ms: *deadline_wall_ms,
+                        revoked: false,
+                        revoked_commit_ts: 0,
+                        grant_request_id: request_id.clone(),
+                    };
+                    tx.insert(
+                        TABLE_KV,
+                        &encode_lease_v2_key(*lease_id),
+                        &record.to_bytes(),
+                    )?;
+                    if !request_id.is_empty() {
+                        tx.insert(
+                            TABLE_KV,
+                            &encode_lease_v2_req_key(request_id),
+                            &lease_id.to_be_bytes(),
+                        )?;
+                    }
+                    LeaseV2Apply::Grant {
+                        lease_id: *lease_id,
+                        granted_ts: *granted_ts,
+                        ttl: *ttl_seconds,
+                        created: true,
+                    }
+                }
+                LeaseV2Op::KeepAlive {
+                    lease_id,
+                    deadline_wall_ms,
+                } => {
+                    let key = encode_lease_v2_key(*lease_id);
+                    let mut ok = false;
+                    if let Some(mut record) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|bytes| LeaseV2Record::from_bytes(&bytes))
+                    {
+                        if !record.revoked {
+                            record.deadline_wall_ms = *deadline_wall_ms;
+                            tx.insert(TABLE_KV, &key, &record.to_bytes())?;
+                            ok = true;
+                        }
+                    }
+                    LeaseV2Apply::KeepAlive { ok }
+                }
+                LeaseV2Op::Revoke {
+                    lease_id,
+                    commit_ts,
+                    expected_deadline_wall_ms,
+                    request_id: _,
+                } => {
+                    let key = encode_lease_v2_key(*lease_id);
+                    let Some(mut record) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|bytes| LeaseV2Record::from_bytes(&bytes))
+                    else {
+                        tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+                        return Ok(LeaseV2Apply::Revoke { commit_ts: 0 });
+                    };
+                    if !record.revoked {
+                        // 到期清理与 KeepAlive 的竞争由 apply 确定性裁决：
+                        // KeepAlive 先 apply（deadline 更晚）⇒ 本次到期不成立。
+                        if *expected_deadline_wall_ms != 0
+                            && record.deadline_wall_ms > *expected_deadline_wall_ms
+                        {
+                            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+                            return Ok(LeaseV2Apply::Revoke { commit_ts: 0 });
+                        }
+                        record.revoked = true;
+                        record.revoked_commit_ts = *commit_ts;
+                        tx.insert(TABLE_KV, &key, &record.to_bytes())?;
+                        LeaseV2Apply::Revoke {
+                            commit_ts: *commit_ts,
+                        }
+                    } else if *commit_ts > record.revoked_commit_ts {
+                        // 清理重试：`COMMIT_REJECTED` 后重新取 TSO，旧时间戳在
+                        // 某些 Region 仍可能未 apply。
+                        record.revoked_commit_ts = *commit_ts;
+                        tx.insert(TABLE_KV, &key, &record.to_bytes())?;
+                        LeaseV2Apply::Revoke {
+                            commit_ts: *commit_ts,
+                        }
+                    } else {
+                        LeaseV2Apply::Revoke { commit_ts: 0 }
+                    }
+                }
+            };
+
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(result)
+        })?;
+        Ok((outcome, ApplyOutcome::applied()))
+    }
+
+    /// 按 `KvMetadata.lease_id` 收集未删除的 key（TimeToLive(keys=true)）。
+    pub fn keys_by_lease(&self, lease_id: i64, limit: usize) -> Result<Vec<Vec<u8>>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .backend
+            .read(|tx| tx.iter_prefix(TABLE_KV_META, KV_META_PREFIX))?;
+        let mut keys = Vec::new();
+        for (meta_key_bytes, meta_value) in rows {
+            let Some(meta) = KvMetadata::from_bytes(&meta_value) else {
+                continue;
+            };
+            if meta.lease_id == lease_id
+                && !meta.deleted
+                && meta_key_bytes.starts_with(KV_META_PREFIX)
+            {
+                keys.push(meta_key_bytes[KV_META_PREFIX.len()..].to_vec());
+                if keys.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(keys)
+    }
+
+    /// per-Region 删除绑定到某 Lease 的全部 Key（v2：显式 `commit_ts`）。
+    ///
+    /// 与 v1 的 log-index 版本分开：`commit_ts <= current_revision` 且未命中
+    /// 已有 changelog ⇒ `CommitRejected`，由 revoker 重新取 TSO 后重试。
+    pub fn delete_keys_by_lease_at_commit_ts(
+        &self,
+        lease_id: i64,
+        commit_ts: Revision,
+        applied: AppliedLogId,
+    ) -> Result<(ApplyOutcome, Vec<Vec<u8>>)> {
+        if commit_ts == 0 {
+            return Err(Error::InvalidArgument("commit_ts must be > 0".into()));
+        }
+        if let Some(event) = self.changelog_event_at(commit_ts)? {
+            // 同一 commit_ts 只有同一租约清理命令算重放；其他类型的既有写入
+            // 是时间戳碰撞（D11.4），必须显式拒绝而不是静默跳过删除。
+            if event.event_type == EventType::Lease {
+                return Ok((ApplyOutcome::replayed(), Vec::new()));
+            }
+            return Err(Error::CommitRejected {
+                commit_ts,
+                current_revision: self.current_revision(),
+            });
+        }
+
+        self.backend.write(|tx| {
+            self.accept_commit_ts(tx, commit_ts)?;
+            let deleted = Self::delete_keys_by_lease_in_tx(tx, lease_id, commit_ts)?;
+            let changes: Vec<KeyValueChange> = deleted
+                .iter()
+                .map(|key| KeyValueChange {
+                    key: key.clone(),
+                    value: None,
+                    prev_value: None,
+                })
+                .collect();
+            let event = ChangeEvent {
+                revision: commit_ts,
+                changes,
+                event_type: EventType::Lease,
+            };
+            tx.insert(
+                TABLE_CHANGELOG,
+                &encode_changelog_key(commit_ts),
+                &event.to_bytes(),
+            )?;
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok((ApplyOutcome::applied(), deleted))
         })
     }
 
@@ -5507,5 +5864,276 @@ mod tests {
         assert!(entries[0].is_running());
         assert_eq!(entries[0].claimed_by, 2);
         assert_eq!(entries[0].claimed_at_unix, 1_700_000_800);
+    }
+
+    // ──── v2 Lease 表（#145）────
+
+    use crate::raft::type_config::LeaseV2Op;
+
+    fn lease_v2_grant(id: i64, ttl: i64, granted_ts: u64, req: &[u8]) -> LeaseV2Op {
+        LeaseV2Op::Grant {
+            lease_id: id,
+            ttl_seconds: ttl,
+            granted_ts,
+            deadline_wall_ms: 1_000_000,
+            request_id: req.to_vec(),
+        }
+    }
+
+    #[test]
+    fn test_lease_v2_grant_request_id_idempotent_and_id_conflict() {
+        let (_dir, storage) = create_commit_ts_storage();
+
+        let (result, _) = storage
+            .apply_lease_v2_op(&lease_v2_grant(100, 30, 10, b"req-1"), 1, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            result,
+            LeaseV2Apply::Grant {
+                lease_id: 100,
+                granted_ts: 10,
+                ttl: 30,
+                created: true,
+            }
+        );
+
+        // 同 request_id（即使客户端换了显式 id）回放首次结果。
+        let (result, _) = storage
+            .apply_lease_v2_op(&lease_v2_grant(200, 30, 11, b"req-1"), 2, applied_for(2))
+            .unwrap();
+        assert_eq!(
+            result,
+            LeaseV2Apply::Grant {
+                lease_id: 100,
+                granted_ts: 10,
+                ttl: 30,
+                created: true,
+            }
+        );
+        assert!(storage.get_lease_v2_record(200).unwrap().is_none());
+
+        // 显式 id 被不同 request_id 占用：不覆盖，created=false 供 handler 报冲突。
+        let (result, _) = storage
+            .apply_lease_v2_op(&lease_v2_grant(100, 30, 12, b"req-2"), 3, applied_for(3))
+            .unwrap();
+        assert_eq!(
+            result,
+            LeaseV2Apply::Grant {
+                lease_id: 100,
+                granted_ts: 10,
+                ttl: 30,
+                created: false,
+            }
+        );
+        assert_eq!(
+            storage
+                .get_lease_v2_record(100)
+                .unwrap()
+                .unwrap()
+                .grant_request_id,
+            b"req-1".to_vec()
+        );
+
+        // 幂等回放也必须推进 processed applied 水位（否则重启后会从旧
+        // checkpoint 重放后续命令）。
+        storage
+            .apply_lease_v2_op(&lease_v2_grant(100, 30, 10, b"req-1"), 4, applied_for(4))
+            .unwrap();
+        assert_eq!(storage.get_applied_log_id().unwrap(), Some(applied_for(4)));
+
+        // v1 的 `/_lease/` 枚举不受 v2 表影响。
+        assert!(storage.list_lease_records().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_lease_v2_keepalive_and_revoke_are_idempotent() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_lease_v2_op(&lease_v2_grant(7, 30, 10, b""), 1, applied_for(1))
+            .unwrap();
+
+        let (result, _) = storage
+            .apply_lease_v2_op(
+                &LeaseV2Op::KeepAlive {
+                    lease_id: 7,
+                    deadline_wall_ms: 2_000_000,
+                },
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(result, LeaseV2Apply::KeepAlive { ok: true });
+        assert_eq!(
+            storage
+                .get_lease_v2_record(7)
+                .unwrap()
+                .unwrap()
+                .deadline_wall_ms,
+            2_000_000
+        );
+
+        let (result, _) = storage
+            .apply_lease_v2_op(
+                &LeaseV2Op::Revoke {
+                    lease_id: 7,
+                    commit_ts: 50,
+                    expected_deadline_wall_ms: 0,
+                    request_id: Vec::new(),
+                },
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(result, LeaseV2Apply::Revoke { commit_ts: 50 });
+
+        // 重复/更旧时间戳的 revoke = 无新决策。
+        for (revision, commit_ts) in [(4, 50), (5, 40)] {
+            let (result, _) = storage
+                .apply_lease_v2_op(
+                    &LeaseV2Op::Revoke {
+                        lease_id: 7,
+                        commit_ts,
+                        expected_deadline_wall_ms: 0,
+                        request_id: Vec::new(),
+                    },
+                    revision,
+                    applied_for(revision),
+                )
+                .unwrap();
+            assert_eq!(result, LeaseV2Apply::Revoke { commit_ts: 0 });
+        }
+
+        // 清理重试可以推进决策时间戳。
+        let (result, _) = storage
+            .apply_lease_v2_op(
+                &LeaseV2Op::Revoke {
+                    lease_id: 7,
+                    commit_ts: 60,
+                    expected_deadline_wall_ms: 0,
+                    request_id: Vec::new(),
+                },
+                6,
+                applied_for(6),
+            )
+            .unwrap();
+        assert_eq!(result, LeaseV2Apply::Revoke { commit_ts: 60 });
+        assert_eq!(
+            storage
+                .get_lease_v2_record(7)
+                .unwrap()
+                .unwrap()
+                .revoked_commit_ts,
+            60
+        );
+
+        // 到期清理的 deadline 守卫：记录已被续期（deadline 更晚）时，
+        // 旧到期观测不得吊销。
+        let (_dir2, storage2) = create_commit_ts_storage();
+        storage2
+            .apply_lease_v2_op(&lease_v2_grant(9, 30, 20, b""), 1, applied_for(1))
+            .unwrap();
+        let (result, _) = storage2
+            .apply_lease_v2_op(
+                &LeaseV2Op::Revoke {
+                    lease_id: 9,
+                    commit_ts: 80,
+                    expected_deadline_wall_ms: 999_999,
+                    request_id: Vec::new(),
+                },
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(result, LeaseV2Apply::Revoke { commit_ts: 0 });
+        assert!(!storage2.get_lease_v2_record(9).unwrap().unwrap().revoked);
+        let (result, _) = storage2
+            .apply_lease_v2_op(
+                &LeaseV2Op::Revoke {
+                    lease_id: 9,
+                    commit_ts: 81,
+                    expected_deadline_wall_ms: 1_000_000,
+                    request_id: Vec::new(),
+                },
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(result, LeaseV2Apply::Revoke { commit_ts: 81 });
+
+        // 已吊销记录上的 KeepAlive 不生效（handler 报 NOT_FOUND）。
+        let (result, _) = storage
+            .apply_lease_v2_op(
+                &LeaseV2Op::KeepAlive {
+                    lease_id: 7,
+                    deadline_wall_ms: 9_000_000,
+                },
+                7,
+                applied_for(7),
+            )
+            .unwrap();
+        assert_eq!(result, LeaseV2Apply::KeepAlive { ok: false });
+
+        // 未知 lease 的 revoke 幂等成功。
+        let (result, _) = storage
+            .apply_lease_v2_op(
+                &LeaseV2Op::Revoke {
+                    lease_id: 999,
+                    commit_ts: 70,
+                    expected_deadline_wall_ms: 0,
+                    request_id: Vec::new(),
+                },
+                8,
+                applied_for(8),
+            )
+            .unwrap();
+        assert_eq!(result, LeaseV2Apply::Revoke { commit_ts: 0 });
+    }
+
+    #[test]
+    fn test_lease_v2_delete_keys_at_commit_ts_replay_and_reject() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"a", b"1", Some(7), 100, applied_for(1))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"b", b"2", Some(7), 101, applied_for(2))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"c", b"3", None, 102, applied_for(3))
+            .unwrap();
+
+        let mut keys = storage.keys_by_lease(7, 10).unwrap();
+        keys.sort();
+        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec()]);
+
+        let (outcome, mut deleted) = storage
+            .delete_keys_by_lease_at_commit_ts(7, 103, applied_for(4))
+            .unwrap();
+        assert!(!outcome.replayed);
+        deleted.sort();
+        assert_eq!(deleted, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert!(storage.get(b"a").unwrap().is_none());
+        assert!(storage.get(b"b").unwrap().is_none());
+        assert_eq!(storage.get(b"c").unwrap(), Some(b"3".to_vec()));
+
+        // 同一 commit_ts 重放：不重复写 changelog、不报错。
+        let (outcome, deleted) = storage
+            .delete_keys_by_lease_at_commit_ts(7, 103, applied_for(4))
+            .unwrap();
+        assert!(outcome.replayed);
+        assert!(deleted.is_empty());
+
+        // 更旧的时间戳（已 apply 更高 revision）→ CommitRejected，由 revoker
+        // 重新取 TSO；不得静默删除。
+        let err = storage
+            .delete_keys_by_lease_at_commit_ts(7, 102, applied_for(5))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::CommitRejected {
+                commit_ts: 102,
+                current_revision: 103,
+            }
+        ));
     }
 }

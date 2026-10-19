@@ -13,6 +13,7 @@
 
 use std::collections::BTreeSet;
 
+pub(crate) mod lease;
 pub mod safe_ts;
 mod services;
 pub(crate) mod txn;

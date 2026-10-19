@@ -918,6 +918,11 @@ impl CoordNode {
 
     /// Lease 准入检查：仅 leader 接受 grant/keepalive/revoke；
     /// 非 leader 返回 `UNAVAILABLE` 并携带 leader 提示。
+    /// lease 写路径的 raft 提交超时（无 quorum 时必须返回而不是无限挂起）。
+    pub(crate) fn lease_write_timeout(&self) -> std::time::Duration {
+        self.limits.read().lease_timeout
+    }
+
     pub async fn ensure_lease_leader(&self) -> Result<(), tonic::Status> {
         if let Some(ref raft) = self.raft {
             let leader = raft.current_leader().await;

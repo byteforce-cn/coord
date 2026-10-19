@@ -2129,6 +2129,15 @@ async fn run_server(
         sm_store.set_lease_revoke_tx(lease_revoke_tx);
     }
 
+    // v2 Lease Revoke 广播通道（#145）：独立于 multi_raft——legacy 单 Raft 下
+    // region 0 就是业务数据面，revoker 直接在该 raft 上清理。关闭时通道不挂载，
+    // 也不启动任何 v2 worker（ADR-0001）。
+    let (lease_v2_revoke_tx, lease_v2_revoke_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(i64, u64)>();
+    if cfg.kv_t.enabled {
+        sm_store.set_lease_v2_revoke_tx(lease_v2_revoke_tx);
+    }
+
     // 5b.5 启动检查：日志已被 purge 但无覆盖快照。
     // 必须放在 StateMachineStore::new 之后：启动时把已落盘快照（META_SNAPSHOT）
     // 登记进 snapshot_tracker 的正是 StateMachineStore::new；若在它之前检查，
@@ -2846,11 +2855,12 @@ async fn run_server(
             },
         )
         // #136/#137：TSO；#141：coord.kv.v2 单 Region 读写；
-        // #144：coord.txn.v2 读阶段（Begin/Read/Abort）。
+        // #144：coord.txn.v2 读阶段（Begin/Read/Abort）；#145：coord.lease.v2。
         .with_implemented([
             coord_server::kvt::KvTCapability::Tso,
             coord_server::kvt::KvTCapability::Kv,
             coord_server::kvt::KvTCapability::Txn,
+            coord_server::kvt::KvTCapability::Lease,
         ]),
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
@@ -2895,6 +2905,11 @@ async fn run_server(
         node.start_region_lease_revoker(lease_revoke_rx);
     } else {
         drop(lease_revoke_rx);
+    }
+    // v2 Lease：到期清理 + 跨 Region revoke（仅 [kv_t].enabled；关闭时通道已丢弃）。
+    if cfg.kv_t.enabled && node.raft.is_some() {
+        node.start_kvt_lease_expiry_worker();
+        node.start_kvt_lease_revoker(lease_v2_revoke_rx);
     }
 
     // 6.6 Auth 根密钥：HKDF 派生 CCT 签名密钥。
