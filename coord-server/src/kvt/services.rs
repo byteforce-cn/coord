@@ -24,6 +24,7 @@ use coord_core::error::Error;
 use coord_core::error_code::{attach, CoordErrorCode};
 use coord_core::kv_range::RangeSemantics;
 
+use super::txn::{ReadIntent, ReadSetLimit, SessionError};
 use super::KvTCapability;
 use crate::raft::tso::{normalize_batch_size, TsoAllocator, TsoBatch};
 use crate::raft::type_config::{Command, Response as RaftResponse};
@@ -727,22 +728,179 @@ impl kv_v2::kv_server::Kv for CoordNode {
 
 // ──── coord.txn.v2 ────
 
+/// 会话错误的线上映射：调用方只按 trailer 码分支（D12.5）。
+fn txn_session_status(err: SessionError) -> Status {
+    match err {
+        SessionError::NotFound => attach(
+            Status::aborted("transaction session not found or expired; restart the transaction"),
+            CoordErrorCode::TxnNotFound,
+        ),
+        SessionError::ReadSetLimit(ReadSetLimit::Entries) => attach(
+            Status::invalid_argument(
+                "transaction read set exceeds max_read_set; narrow the reads or split the transaction",
+            ),
+            CoordErrorCode::ReadSetTooLarge,
+        ),
+        SessionError::ReadSetLimit(ReadSetLimit::RangeKeys) => attach(
+            Status::invalid_argument(
+                "transaction range scan exceeds max_range keys; narrow the range or split the transaction",
+            ),
+            CoordErrorCode::ReadSetTooLarge,
+        ),
+    }
+}
+
 #[tonic::async_trait]
 impl txn_v2::txn_server::Txn for CoordNode {
     async fn begin(
         &self,
-        _request: Request<txn_v2::BeginRequest>,
+        request: Request<txn_v2::BeginRequest>,
     ) -> Result<Response<txn_v2::BeginResponse>, Status> {
-        Err(shell(KvTCapability::Txn, self))
+        self.kvt().gate(KvTCapability::Txn)?;
+        let req = request.into_inner();
+        if req.start_ts < 0 {
+            return Err(attach(
+                Status::invalid_argument("start_ts must be >= 0"),
+                CoordErrorCode::InvalidArgument,
+            ));
+        }
+
+        let start_ts = if req.start_ts == 0 {
+            let client = self.tso_client().ok_or_else(|| {
+                attach(
+                    Status::failed_precondition(
+                        "coord.txn.v2 Begin with start_ts=0 requires the local TSO client \
+                         (region 0 raft / tso client assembly missing)",
+                    ),
+                    CoordErrorCode::FailedPrecondition,
+                )
+            })?;
+            client
+                .get_ts_above(self.safe_ts_fence())
+                .await
+                .map_err(tso_status)?
+        } else {
+            req.start_ts as u64
+        };
+
+        // 事务在 start_ts 上的快照必须已经可服务：本节点所有数据 Region 都
+        // apply 到 start_ts 后，读才不会漏掉 commit_ts < start_ts 的已决策事务。
+        if start_ts > self.safe_ts() {
+            wait_for_safe_ts(self, start_ts, self.kvt().config().read_ts_wait_ms).await?;
+        }
+
+        let default_ms = self.kvt().config().txn_ttl_secs.saturating_mul(1000);
+        let ttl_ms = if req.ttl_ms == 0 {
+            default_ms
+        } else {
+            u64::from(req.ttl_ms).min(default_ms)
+        };
+        let txn_id = self
+            .txn_sessions()
+            .begin(start_ts, Duration::from_millis(ttl_ms));
+        Ok(Response::new(txn_v2::BeginResponse {
+            txn_id,
+            start_ts: ts_to_i64(start_ts)?,
+        }))
     }
 
     async fn read(
         &self,
-        _request: Request<txn_v2::ReadRequest>,
+        request: Request<txn_v2::ReadRequest>,
     ) -> Result<Response<txn_v2::ReadResponse>, Status> {
-        Err(shell(KvTCapability::Txn, self))
+        self.kvt().gate(KvTCapability::Txn)?;
+        let req = request.into_inner();
+        if req.limit < 0 {
+            return Err(attach(
+                Status::invalid_argument("limit must be >= 0"),
+                CoordErrorCode::InvalidArgument,
+            ));
+        }
+
+        let config = self.kvt().config();
+        let max_range = config.max_range as usize;
+        let max_read_set = config.max_read_set as usize;
+
+        // 与 coord.kv.v2.Range / 鉴权层共用同一处区间语义：
+        // range_end 为空或等于 key → 点读；否则半开 [key, range_end)。
+        let single_key = RangeSemantics::of(&req.key, &req.range_end).is_single_key();
+        let end = if single_key {
+            single_key_end(&req.key)
+        } else {
+            req.range_end.clone()
+        };
+        let requested_limit = if single_key || req.limit == 0 {
+            None
+        } else {
+            let requested = req.limit as usize;
+            if max_range > 0 && requested > max_range {
+                return Err(txn_session_status(SessionError::ReadSetLimit(
+                    ReadSetLimit::RangeKeys,
+                )));
+            }
+            Some(requested)
+        };
+
+        let intent = if single_key {
+            ReadIntent::Point(&req.key)
+        } else {
+            ReadIntent::Range {
+                start: &req.key,
+                end: &req.range_end,
+            }
+        };
+        // 先记录读集再读数据：并发读无法穿过上限；数据读失败时谓词保留是
+        // 安全的方向（读集超集只会产生保守冲突，不会漏冲突）。
+        let start_ts = self
+            .txn_sessions()
+            .record_read(&req.txn_id, intent, max_read_set)
+            .map_err(txn_session_status)?;
+
+        if !single_key && end <= req.key {
+            return Ok(Response::new(txn_v2::ReadResponse {
+                kvs: Vec::new(),
+                read_ts: start_ts as i64,
+            }));
+        }
+
+        let scan_limit = requested_limit.unwrap_or_else(|| max_range.saturating_add(1));
+        let segments = self.kv_range_targets(&req.key, &end)?;
+        let reads = segments
+            .into_iter()
+            .map(|seg| read_kv_range_segment(seg, start_ts, scan_limit));
+        let mut parts = futures::stream::iter(reads).buffered(RANGE_FANOUT_CONCURRENCY);
+
+        let mut kvs = Vec::new();
+        while let Some(mut part) = parts.try_next().await? {
+            if self.object_enabled() {
+                part.retain(|kv| !crate::storage::object_store::key_in_object_space(&kv.key));
+            }
+            kvs.extend(part);
+            if let Some(limit) = requested_limit {
+                if kvs.len() >= limit {
+                    kvs.truncate(limit);
+                    break;
+                }
+            } else if kvs.len() > max_range {
+                return Err(txn_session_status(SessionError::ReadSetLimit(
+                    ReadSetLimit::RangeKeys,
+                )));
+            }
+        }
+        drop(parts);
+
+        if req.keys_only {
+            for kv in &mut kvs {
+                kv.value.clear();
+            }
+        }
+        Ok(Response::new(txn_v2::ReadResponse {
+            kvs,
+            read_ts: start_ts as i64,
+        }))
     }
 
+    /// 决策/校验归 #149/#151；未交付前门禁通过后返回 `UNIMPLEMENTED`。
     async fn commit(
         &self,
         _request: Request<txn_v2::CommitRequest>,
@@ -750,11 +908,14 @@ impl txn_v2::txn_server::Txn for CoordNode {
         Err(shell(KvTCapability::Txn, self))
     }
 
+    /// 幂等删除会话：未知/已过期/已 abort 的 id 不报错。
     async fn abort(
         &self,
-        _request: Request<txn_v2::AbortRequest>,
+        request: Request<txn_v2::AbortRequest>,
     ) -> Result<Response<txn_v2::AbortResponse>, Status> {
-        Err(shell(KvTCapability::Txn, self))
+        self.kvt().gate(KvTCapability::Txn)?;
+        self.txn_sessions().abort(&request.into_inner().txn_id);
+        Ok(Response::new(txn_v2::AbortResponse {}))
     }
 }
 

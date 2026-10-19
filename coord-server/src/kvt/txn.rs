@@ -47,10 +47,7 @@ impl ReadRange {
 
     /// 重叠或相邻（`[a,c)` 与 `[c,d)` 可合并为一个谓词）。
     fn overlaps_or_adjacent(&self, other: &Self) -> bool {
-        !self.is_empty()
-            && !other.is_empty()
-            && self.start <= other.end
-            && other.start <= self.end
+        !self.is_empty() && !other.is_empty() && self.start <= other.end && other.start <= self.end
     }
 }
 
@@ -130,7 +127,8 @@ impl ReadSet {
         }
         self.ranges = merged;
         let ranges = &self.ranges;
-        self.points.retain(|point| !ranges.iter().any(|r| r.contains(point)));
+        self.points
+            .retain(|point| !ranges.iter().any(|r| r.contains(point)));
     }
 }
 

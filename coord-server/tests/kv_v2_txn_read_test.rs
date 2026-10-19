@@ -261,10 +261,7 @@ async fn test_txn_reads_one_snapshot_across_regions() {
     assert_eq!(begin.start_ts, 400);
     assert!(!begin.txn_id.is_empty());
 
-    let a = fx
-        .read(&begin.txn_id, b"a", b"", 0, false)
-        .await
-        .unwrap();
+    let a = fx.read(&begin.txn_id, b"a", b"", 0, false).await.unwrap();
     assert_eq!(a.read_ts, 400);
     assert_eq!(a.kvs.len(), 1);
     assert_eq!(a.kvs[0].value, b"a100");
@@ -272,10 +269,7 @@ async fn test_txn_reads_one_snapshot_across_regions() {
 
     // 快照固定：Begin 之后的写入（commit_ts=500）对本会话不可见。
     fx.put(b"a", b"a500", 500).await;
-    let a = fx
-        .read(&begin.txn_id, b"a", b"", 0, false)
-        .await
-        .unwrap();
+    let a = fx.read(&begin.txn_id, b"a", b"", 0, false).await.unwrap();
     assert_eq!(a.read_ts, 400);
     assert_eq!(a.kvs[0].value, b"a100");
     assert_eq!(a.kvs[0].mod_revision, 100);
@@ -288,18 +282,12 @@ async fn test_txn_reads_one_snapshot_across_regions() {
     assert_eq!(keys(&all), expected_keys());
     assert!(all.kvs.iter().all(|kv| kv.mod_revision <= 400));
 
-    let keys_only = fx
-        .read(&begin.txn_id, b"d", b"n", 0, true)
-        .await
-        .unwrap();
+    let keys_only = fx.read(&begin.txn_id, b"d", b"n", 0, true).await.unwrap();
     assert_eq!(keys(&keys_only), vec![b"d".to_vec(), b"e".to_vec()]);
     assert!(keys_only.kvs.iter().all(|kv| kv.value.is_empty()));
 
     // 空谓词（end < key）返回空，不路由、不回退成全扫描。
-    let empty = fx
-        .read(&begin.txn_id, b"n", b"a", 0, false)
-        .await
-        .unwrap();
+    let empty = fx.read(&begin.txn_id, b"n", b"a", 0, false).await.unwrap();
     assert!(empty.kvs.is_empty());
     assert_eq!(empty.read_ts, 400);
 
@@ -318,10 +306,7 @@ async fn test_txn_begin_allocates_start_ts_from_local_tso() {
     let begin = fx.begin(0, 0).await.unwrap();
     assert_eq!(begin.start_ts, 1, "fake TSO batch starts at 1");
 
-    let read = fx
-        .read(&begin.txn_id, b"a", b"", 0, false)
-        .await
-        .unwrap();
+    let read = fx.read(&begin.txn_id, b"a", b"", 0, false).await.unwrap();
     assert_eq!(read.read_ts, 1);
     assert!(read.kvs.is_empty(), "a@100 is after start_ts=1");
 
@@ -335,12 +320,8 @@ async fn test_txn_begin_allocates_start_ts_from_local_tso() {
 async fn test_txn_read_set_limit_fails_closed() {
     let fx = TxnNode::standard(100, 2, false).await;
     let begin = fx.begin(400, 0).await.unwrap();
-    fx.read(&begin.txn_id, b"a", b"", 0, false)
-        .await
-        .unwrap();
-    fx.read(&begin.txn_id, b"d", b"", 0, false)
-        .await
-        .unwrap();
+    fx.read(&begin.txn_id, b"a", b"", 0, false).await.unwrap();
+    fx.read(&begin.txn_id, b"d", b"", 0, false).await.unwrap();
 
     let err = fx
         .read(&begin.txn_id, b"n", b"", 0, false)
@@ -350,9 +331,7 @@ async fn test_txn_read_set_limit_fails_closed() {
     assert_eq!(error_code_of(&err).as_deref(), Some("READ_SET_TOO_LARGE"));
 
     // 已覆盖的 point 不增长读集：满额会话里重复读仍成功。
-    fx.read(&begin.txn_id, b"a", b"", 0, false)
-        .await
-        .unwrap();
+    fx.read(&begin.txn_id, b"a", b"", 0, false).await.unwrap();
 
     // 新会话：一个 range 谓词只占一个条目。
     let fresh = fx.begin(400, 0).await.unwrap();
@@ -382,17 +361,11 @@ async fn test_txn_range_scan_over_max_range_fails_closed() {
     assert_eq!(keys(&limited), vec![b"a".to_vec(), b"a2".to_vec()]);
 
     // point read 不受 max_range 约束。
-    let point = fx
-        .read(&begin.txn_id, b"a3", b"", 0, false)
-        .await
-        .unwrap();
+    let point = fx.read(&begin.txn_id, b"a3", b"", 0, false).await.unwrap();
     assert_eq!(point.kvs.len(), 1);
 
     // 小 range 正常返回；显式 limit 超过 max_range 仍拒绝。
-    let small = fx
-        .read(&begin.txn_id, b"n", b"o", 0, false)
-        .await
-        .unwrap();
+    let small = fx.read(&begin.txn_id, b"n", b"o", 0, false).await.unwrap();
     assert_eq!(keys(&small), vec![b"n".to_vec()]);
     let err = fx
         .read(&begin.txn_id, b"n", b"o", 4, false)
@@ -414,10 +387,7 @@ async fn test_txn_session_ttl_and_unknown_id() {
     assert_eq!(err.code(), Code::Aborted);
     assert_eq!(error_code_of(&err).as_deref(), Some("TXN_NOT_FOUND"));
 
-    let err = fx
-        .read(b"missing", b"a", b"", 0, false)
-        .await
-        .unwrap_err();
+    let err = fx.read(b"missing", b"a", b"", 0, false).await.unwrap_err();
     assert_eq!(error_code_of(&err).as_deref(), Some("TXN_NOT_FOUND"));
 
     // Abort 幂等：重复调用不改变结果。
