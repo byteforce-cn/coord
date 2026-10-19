@@ -21,9 +21,11 @@ package coord.kv.v2;
 //   - `commit_ts` 落后于已 compact 水位 ⇒ `OUT_OF_RANGE`。
 //
 // 读路径：
-//   - `read_ts = 0` ⇒ 服务端取当前 `safe_ts`（已 apply 的全局水位），保证
-//     多 key 原子可见；`read_ts > safe_ts` 时等待至多 `[kv_t].read_ts_wait_ms`，
-//     超时返回 `UNAVAILABLE` + `SAFE_TS_LAG`（可重试）；
+//   - `read_ts = 0` ⇒ 服务端取**本节点**当前 `safe_ts`（本地已 apply 水位），
+//     保证多 key 原子可见；`read_ts > safe_ts` 时等待至多
+//     `[kv_t].read_ts_wait_ms`，超时返回 `UNAVAILABLE` + `SAFE_TS_LAG`（可重试）；
+//   - 读取由任意持有本地副本的节点服务，不要求 leader；快照在 `read_ts` 上一致，
+//     `read_ts=0` 不保证线性一致（需要最新/跨节点同一快照请用显式 `read_ts`）；
 //   - `read_ts` 早于 compact 水位 ⇒ `OUT_OF_RANGE`。
 //
 // 路由：请求可选携带 gRPC metadata `coord-routing-epoch`（十进制 u64）。与

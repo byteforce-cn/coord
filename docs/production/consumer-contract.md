@@ -103,9 +103,11 @@
 
 - **一致性**：serializable（非 strict）；`Range.read_ts=0` 取 `safe_ts`，
   `read_ts > safe_ts` 等待至多 `read_ts_wait_ms` 后 `SAFE_TS_LAG`（可重试）。
-- **跨 Region Range（当前限制）**：扇出在请求节点本地执行，要求该节点是所有命中
-  Region 的 leader；多节点 leader 分散时返回 `UNAVAILABLE`（跟踪 #188，见
-  ADR-0015 D10）。
+- **跨 Region Range**：由请求节点的本地副本服务（v1 静态复制下每节点持有全部
+  Region），不要求 leader；`read_ts <= 本地 applied` 由 safe_ts 等待 + 分段复核
+  保证，不足 `UNAVAILABLE + SAFE_TS_LAG`（可重试）；整请求失败、不返回部分结果。
+  `read_ts=0` 取**本节点** `safe_ts`，可能落后于集群最新提交、跨节点不保证同一
+  数值/单调；跨节点同一快照或 read-your-writes 请用显式 `read_ts`。
 - **事务**：`Begin` 建服务端读集会话；冲突 `ABORTED` + `TXN_CONFLICT`（换
   `start_ts` 重跑）；会话丢失 `TXN_NOT_FOUND`（重跑）；写集 4MiB / 读集 4096 /
   单 range 10000 key 上限（超限 `INVALID_ARGUMENT`）。
