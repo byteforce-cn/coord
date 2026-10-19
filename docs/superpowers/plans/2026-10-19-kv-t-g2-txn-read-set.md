@@ -545,7 +545,7 @@ git commit -m "chore(kv-t): satisfy txn read-phase gates (#144)"
 
 先跑 `gh pr checks --watch` 前的本地门禁（本任务 Step 2）；PR 正文写清：
 - `Closes #144`；
-- RED 证据（`FAILED_PRECONDITION`）与 GREEN 证据（7 passed）；
+- RED 证据（`FAILED_PRECONDITION`）与 GREEN 证据（6 passed）；
 - 读集/上限/会话边界的取舍（Rulings）；
 - 已知限制：`Begin(start_ts=0)` 目前依赖 region 0 leader 的 TSO（`TsoClient` 只在 leader 发放），
   显式 `start_ts` 不受限；`Commit` 归 #151。

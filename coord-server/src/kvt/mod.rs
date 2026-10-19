@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 pub mod safe_ts;
 mod services;
+pub(crate) mod txn;
 
 use coord_core::error_code::{attach, CoordErrorCode};
 use tonic::{Code, Status};
