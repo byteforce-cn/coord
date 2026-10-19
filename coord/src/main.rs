@@ -3363,13 +3363,20 @@ async fn run_server(
     let auto_compact = compaction_config.auto_compact;
     let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
         node.clone();
-    let safe_ts_source: Arc<dyn coord_server::storage::compaction::SafeTsSource> = node.clone();
+    // safe_ts 只在 kv_t 开启时约束 compaction；关闭时传 None，v1 的
+    //「current_revision - retention」逐字节不变（ADR-0001）。
+    let safe_ts_source: Option<Arc<dyn coord_server::storage::compaction::SafeTsSource>> =
+        if cfg.kv_t.enabled {
+            Some(node.clone())
+        } else {
+            None
+        };
     let _compaction_mgr = CompactionManager::start_with_safe_ts(
         Arc::clone(&mvcc),
         compaction_config,
         Some(compaction_proposer),
         Some(Arc::clone(&metrics)),
-        Some(Arc::clone(&safe_ts_source)),
+        safe_ts_source.clone(),
     );
     tracing::info!(
         "Compaction manager started: auto_compact={}, interval={:?}, retention={} revs",
@@ -3403,7 +3410,7 @@ async fn run_server(
                     coord_server::storage::compaction::CompactionConfig::default(),
                     Some(proposer),
                     Some(Arc::clone(&metrics)),
-                    Some(Arc::clone(&safe_ts_source)),
+                    safe_ts_source.clone(),
                 );
                 tracing::info!("Region {rid} compaction manager started");
                 mgrs.push(mgr);
