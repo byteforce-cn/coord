@@ -110,7 +110,10 @@ impl tso_v2::tso_server::Tso for CoordNode {
                 CoordErrorCode::FailedPrecondition,
             )
         })?;
-        let ts = client.get_ts().await.map_err(tso_status)?;
+        let ts = client
+            .get_ts_above(self.safe_ts_fence())
+            .await
+            .map_err(tso_status)?;
         Ok(Response::new(tso_v2::GetTsResponse { ts: ts_to_i64(ts)? }))
     }
 }

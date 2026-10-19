@@ -7,9 +7,14 @@
 //! - 指标暴露 safe_ts 与每 Region apply lag。
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+
+use coord_core::error::Result as CoordResult;
+use coord_proto::tso::v2::tso_server::Tso as TsoV2;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta, StorageConfig};
 use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
@@ -24,6 +29,7 @@ use coord_server::raft::{new_basic_node, new_raft, RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
 use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
+use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
 
@@ -50,6 +56,36 @@ fn applied(index: u64) -> AppliedLogId {
         term: 1,
         node_id: 1,
         index,
+    }
+}
+
+/// 进程内 TSO 源：只验证 GetTs 的 fence 跳值，不启动真实 region 0 allocator。
+struct FakeTso {
+    high_water: AtomicU64,
+}
+
+impl FakeTso {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            high_water: AtomicU64::new(1),
+        })
+    }
+}
+
+#[async_trait]
+impl TsoSource for FakeTso {
+    async fn is_leader(&self) -> bool {
+        true
+    }
+
+    async fn allocate(&self, batch_size: u32) -> CoordResult<TsoBatch> {
+        let start = self
+            .high_water
+            .fetch_add(u64::from(batch_size), Ordering::SeqCst);
+        Ok(TsoBatch {
+            start_ts: start,
+            end_ts: start + u64::from(batch_size),
+        })
     }
 }
 
@@ -151,6 +187,7 @@ impl G2Node {
             KvTState::new(true, KvTRuntimeConfig::default())
                 .with_implemented([KvTCapability::Kv, KvTCapability::Tso]),
         );
+        node.set_tso_client(TsoClient::new(FakeTso::new(), 8, None));
         let metrics = Arc::new(Metrics::new());
         node.set_metrics(Arc::clone(&metrics));
         let node = Arc::new(node);
@@ -261,4 +298,28 @@ async fn test_safe_ts_is_min_region_revision_and_metrics() {
 
     // 直接通过 trait 读 Range 的测试在 Task 5 加入；这里只验证观测面。
     let _ = Arc::clone(&g2.manager);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_get_ts_stays_above_published_fence() {
+    let g2 = G2Node::start().await;
+    assert_eq!(
+        g2.node
+            .storage
+            .set_safe_ts_fence(1025, applied(1))
+            .unwrap(),
+        1025
+    );
+
+    let ts = g2
+        .node
+        .get_ts(tonic::Request::new(coord_proto::tso::v2::GetTsRequest {}))
+        .await
+        .expect("GetTs")
+        .into_inner()
+        .ts;
+    assert!(
+        ts > 1025,
+        "GetTs must not issue a value the published fence already rejects (got {ts})"
+    );
 }
