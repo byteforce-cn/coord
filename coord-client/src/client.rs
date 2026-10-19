@@ -10,6 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
 use coord_core::error::{Error, Result};
+use coord_proto::kv::v2 as kv_v2;
 use coord_proto::kv::{kv_client::KvClient as KvStub, DeleteRequest, PutRequest, RangeRequest};
 use coord_proto::lease::{
     lease_client::LeaseClient as LeaseStub, LeaseGrantRequest, LeaseKeepAliveRequest,
@@ -25,6 +26,7 @@ use coord_proto::storage::{
     GetRequest as StorageGetRequest, GetResponse as StorageGetResponse, ObjectStat, PutMeta,
     PutRequest as StoragePutRequest, StatRequest as StorageStatRequest,
 };
+use coord_proto::tso::v2 as tso_v2;
 use coord_proto::txn::{
     txn_client::TxnClient as TxnStub, Compare, RequestOp, TxnRequest, TxnResponse,
 };
@@ -69,6 +71,7 @@ pub(crate) fn from_status(status: tonic::Status) -> Error {
         tonic::Code::Unavailable => Error::ClusterUnavailable(msg),
         tonic::Code::DeadlineExceeded => Error::RequestTimeout,
         tonic::Code::InvalidArgument => Error::InvalidArgument(msg),
+        tonic::Code::FailedPrecondition => Error::FailedPrecondition(msg),
         tonic::Code::AlreadyExists => Error::AlreadyExists {
             resource: "resource",
             key: msg,
@@ -95,7 +98,9 @@ fn classify_tonic(status: &tonic::Status) -> RetryDecision {
         | tonic::Code::PermissionDenied
         | tonic::Code::Unauthenticated
         | tonic::Code::InvalidArgument
-        | tonic::Code::AlreadyExists => RetryDecision::Abort,
+        | tonic::Code::AlreadyExists
+        | tonic::Code::FailedPrecondition
+        | tonic::Code::OutOfRange => RetryDecision::Abort,
         // 未知错误：谨慎退避重试一次
         _ => RetryDecision::RetryAfter(std::time::Duration::from_millis(100)),
     }
@@ -200,6 +205,11 @@ impl Client {
     /// 返回 KV 客户端（键值操作）
     pub fn kv(&self) -> KvClient {
         KvClient::new(self.clone())
+    }
+
+    /// 返回 KV v2 客户端（KV-T G1 最小面：显式 commit_ts / read_ts）。
+    pub fn kv_v2(&self) -> KvV2Client {
+        KvV2Client::new(self.clone())
     }
 
     /// 返回 Lease 客户端（租约管理）
@@ -690,6 +700,143 @@ impl KvClient {
     /// Key 在 Lease 过期后自动删除。
     pub async fn put_lease(&self, key: &[u8], value: &[u8], lease_id: i64) -> Result<u64> {
         self.put_full(key, value, lease_id, &[]).await
+    }
+}
+
+// ──── KV v2 Client（KV-T G1 最小面）────
+
+/// `coord.kv.v2` 的最小客户端：G1 只覆盖单 Region 读写与 TSO 取时间戳。
+///
+/// 每次写调用 `GetTs` 一次（不缓存批次）；批量发放/本地缓存是 #137 的服务端
+/// 能力与 #172 SDK GA 的范围。`commit_ts`/`read_ts` 按调用方显式传入。
+#[derive(Clone)]
+pub struct KvV2Client {
+    client: Client,
+}
+
+impl KvV2Client {
+    fn new(client: Client) -> Self {
+        Self { client }
+    }
+
+    fn ts_to_i64(name: &str, ts: u64) -> Result<i64> {
+        i64::try_from(ts)
+            .map_err(|_| Error::InvalidArgument(format!("{name} {ts} exceeds i64 wire range")))
+    }
+
+    /// 从 `coord.tso.v2.GetTs` 取一个全局单调时间戳。
+    pub async fn get_commit_ts(&self) -> Result<u64> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = tso_v2::tso_client::TsoClient::new(channel.clone());
+        match stub.get_ts(tso_v2::GetTsRequest {}).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                let ts = resp.into_inner().ts;
+                u64::try_from(ts)
+                    .map_err(|_| Error::Internal(format!("TSO returned invalid ts {ts}")))
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// v2 Put（`commit_ts` 必填；`request_id` 空 = 不去重）。
+    pub async fn put(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        commit_ts: u64,
+        prev_kv: bool,
+        request_id: &[u8],
+    ) -> Result<(Option<kv_v2::KeyValue>, u64)> {
+        let commit_ts = Self::ts_to_i64("commit_ts", commit_ts)?;
+        let key = key.to_vec();
+        let value = value.to_vec();
+        let request_id = request_id.to_vec();
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = kv_v2::kv_client::KvClient::new(channel);
+                let request = tonic::Request::new(kv_v2::PutRequest {
+                    key: key.clone(),
+                    value: value.clone(),
+                    lease_id: 0,
+                    prev_kv,
+                    request_id: request_id.clone(),
+                    commit_ts,
+                });
+                async move {
+                    let resp = stub.put(request).await?.into_inner();
+                    let ts = u64::try_from(resp.commit_ts)
+                        .map_err(|_| tonic::Status::internal("negative commit_ts in response"))?;
+                    Ok((resp.prev_kv, ts))
+                }
+            })
+            .await
+    }
+
+    /// v2 Range（`read_ts=0` = 服务端 safe_ts）。
+    pub async fn range(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        limit: i64,
+        read_ts: u64,
+        keys_only: bool,
+        count_only: bool,
+    ) -> Result<(Vec<kv_v2::KeyValue>, i64, u64)> {
+        let read_ts = Self::ts_to_i64("read_ts", read_ts)?;
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = kv_v2::kv_client::KvClient::new(channel.clone());
+        let request = tonic::Request::new(kv_v2::RangeRequest {
+            key: key.to_vec(),
+            range_end: range_end.to_vec(),
+            limit,
+            read_ts,
+            keys_only,
+            count_only,
+        });
+        match stub.range(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                let inner = resp.into_inner();
+                let read_ts = u64::try_from(inner.read_ts)
+                    .map_err(|_| Error::Internal("negative read_ts in response".into()))?;
+                Ok((inner.kvs, inner.count, read_ts))
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// v2 Delete（`range_end` 空/等于 key = 单键）。
+    pub async fn delete(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        commit_ts: u64,
+        prev_kv: bool,
+        request_id: &[u8],
+    ) -> Result<(i64, Vec<kv_v2::KeyValue>, u64)> {
+        let commit_ts = Self::ts_to_i64("commit_ts", commit_ts)?;
+        let key = key.to_vec();
+        let range_end = range_end.to_vec();
+        let request_id = request_id.to_vec();
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = kv_v2::kv_client::KvClient::new(channel);
+                let request = tonic::Request::new(kv_v2::DeleteRequest {
+                    key: key.clone(),
+                    range_end: range_end.clone(),
+                    prev_kv,
+                    request_id: request_id.clone(),
+                    commit_ts,
+                });
+                async move {
+                    let resp = stub.delete(request).await?.into_inner();
+                    let ts = u64::try_from(resp.commit_ts)
+                        .map_err(|_| tonic::Status::internal("negative commit_ts in response"))?;
+                    Ok((resp.deleted, resp.prev_kvs, ts))
+                }
+            })
+            .await
     }
 }
 

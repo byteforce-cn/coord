@@ -2826,8 +2826,8 @@ async fn run_server(
     //
     // 默认关闭：不创建后台任务、不改变 v1 服务与磁盘布局（ADR-0001）。开启时
     // 前置（multi_raft + PD、与迁移开关互斥）已由配置校验 fail-closed 拒绝非法组合；
-    // 这里只装配门禁状态：G0 尚未交付任何 v2 能力，因此 v2 RPC 一律
-    // FAILED_PRECONDITION，直到对应 gate 把能力加入 implemented 集合并实现 handler。
+    // 这里装配门禁状态与已交付能力：G1 已交付 TSO 与单 Region KV 读写，其余 v2
+    // 能力继续保持 FAILED_PRECONDITION，直到对应 gate 把能力加入 implemented。
     node.set_kvt_state(
         coord_server::kvt::KvTState::new(
             cfg.kv_t.enabled,
@@ -2845,10 +2845,14 @@ async fn run_server(
                 txn_ttl_secs: cfg.kv_t.txn_ttl_secs,
             },
         )
-        // #136：TSO 批次分配已交付；其余 v2 能力按各自 gate 逐步加入。
-        .with_implemented([coord_server::kvt::KvTCapability::Tso]),
+        // #136/#137：TSO；#141：coord.kv.v2 单 Region 读写。
+        .with_implemented([
+            coord_server::kvt::KvTCapability::Tso,
+            coord_server::kvt::KvTCapability::Kv,
+        ]),
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
+    node.set_metrics(Arc::clone(&metrics));
     // 本地 TSO 批次缓存：只有开启且 region 0 raft 已装配才构造（
     // 关闭时不起后台任务、不改启动路径，ADR-0001）。
     if cfg.kv_t.enabled {
@@ -2865,8 +2869,9 @@ async fn run_server(
     }
     if cfg.kv_t.enabled {
         tracing::warn!(
-            "KV-T enabled ([kv_t].enabled=true): TSO allocation (coord.tso.v2) is \
-             available; other v2 RPCs remain FAILED_PRECONDITION until their gate lands"
+            "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2) and single-Region \
+             KV (coord.kv.v2) are available; other v2 RPCs remain FAILED_PRECONDITION \
+             until their gate lands"
         );
     } else {
         tracing::info!(

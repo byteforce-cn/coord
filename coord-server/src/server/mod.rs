@@ -99,25 +99,25 @@ impl Default for RuntimeLimits {
 
 /// 幂等请求去重缓存条目
 #[derive(Debug, Clone)]
-struct IdempotentEntry {
+pub(crate) struct IdempotentEntry {
     /// 写入缓存的时间（TTL 依据）
-    inserted_at: std::time::Instant,
+    pub(crate) inserted_at: std::time::Instant,
     /// 上次响应返回的 revision
-    revision: i64,
+    pub(crate) revision: i64,
     /// 上次响应是否 succeeded（仅 Txn 使用）
-    succeeded: bool,
+    pub(crate) succeeded: bool,
     /// Txn 缓存的完整响应（命中时必须回放，不得返回空 responses）
-    responses: Vec<ResponseOp>,
+    pub(crate) responses: Vec<ResponseOp>,
     /// Put 缓存的完整响应 —— `prev_kv` 必须与首次执行一致：命中路径若硬编码
     /// `prev_kv: None`，依赖 prev_kv 做 CAS 后置校验 / 审计的上层会把 None
     /// 读成「该 key 不存在」（静默的错误结论）。
-    prev_kv: Option<KeyValue>,
+    pub(crate) prev_kv: Option<KeyValue>,
     /// Delete 缓存的完整响应。
     /// `deleted` 为首次执行实际删除的 Key 数；`prev_kvs` 为首次执行返回的被删
     /// 旧值。范围删重放时必须回放这两项，否则「返回首次执行的结果」不成立，
     /// 且重放会删掉首次执行之后新写入的数据（重试放大破坏面）。
-    deleted: i64,
-    prev_kvs: Vec<KeyValue>,
+    pub(crate) deleted: i64,
+    pub(crate) prev_kvs: Vec<KeyValue>,
 }
 
 impl IdempotentEntry {
@@ -213,6 +213,24 @@ fn idempotency_key(metadata: &tonic::metadata::MetadataMap, request_id: &[u8]) -
     key
 }
 
+/// v2 幂等缓存键：在 v1 的身份+request_id 前加操作命名空间。
+///
+/// v1/v2 是两套 wire，同一客户端用同一个 request_id 分别打 v1 Put 与 v2 Put
+/// 时不能互相命中（响应字段不同，回放会串味）。
+pub(crate) fn v2_idempotency_key(
+    op: &[u8],
+    metadata: &tonic::metadata::MetadataMap,
+    request_id: &[u8],
+) -> Vec<u8> {
+    let base = idempotency_key(metadata, request_id);
+    let mut key = Vec::with_capacity(6 + op.len() + base.len());
+    key.extend_from_slice(b"kv.v2/");
+    key.extend_from_slice(op);
+    key.extend_from_slice(b"\0");
+    key.extend_from_slice(&base);
+    key
+}
+
 /// follower 重定向 hint 的 gRPC metadata key
 pub const LEADER_HINT_METADATA_KEY: &str = "coord-leader-hint";
 
@@ -270,6 +288,8 @@ pub struct CoordNode {
     ///
     /// 保持 `Option` 而非延迟构造：关闭时不得有任何 v2 装配痕迹（ADR-0001）。
     tso_client: Option<Arc<TsoClient>>,
+    /// 进程级指标（`[kv_t]` v2 拒绝计数用；main 在 Arc::new 前注入）。
+    metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 /// KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
@@ -280,17 +300,17 @@ pub struct CoordNode {
 ///   的 `node_raft_log` 同理）。
 /// - legacy 模式（manager 为 None）：region 0 目标，使用 CoordNode 自有
 ///   storage/raft/raft_log_store（单 Raft / 兼容路径，行为字节级不变）。
-struct KvTarget {
+pub(crate) struct KvTarget {
     /// 目标 Region（legacy 模式为 0）
-    region_id: RegionId,
+    pub(crate) region_id: RegionId,
     /// 该 Region 的 MVCC（读写目标）
-    mvcc: Arc<MvccStorage<RedbBackend>>,
+    pub(crate) mvcc: Arc<MvccStorage<RedbBackend>>,
     /// 该 Region 的 Raft 实例（None = 单节点直写模式，仅 legacy 出现）
-    raft: Option<Arc<CoordRaft>>,
+    pub(crate) raft: Option<Arc<CoordRaft>>,
     /// 该 Region 的 LogStore（读屏障幻影态终检用）
-    raft_log_store: Option<LogStore>,
+    pub(crate) raft_log_store: Option<LogStore>,
     /// region 模式下的 Region 句柄（key range containment 校验）；legacy 为 None
-    handle: Option<Arc<RegionHandle>>,
+    pub(crate) handle: Option<Arc<RegionHandle>>,
 }
 
 /// 对象存储执行目标（一个 Region，或 legacy 单 Raft）——对象 manifest 读写的
@@ -331,7 +351,18 @@ impl CoordNode {
             chunk_store: None,
             kvt: crate::kvt::KvTState::disabled(),
             tso_client: None,
+            metrics: None,
         }
+    }
+
+    /// 注入进程级指标（必须在 `Arc::new(node)` 之前调用）。
+    pub fn set_metrics(&mut self, metrics: Arc<crate::metrics::Metrics>) {
+        self.metrics = Some(metrics);
+    }
+
+    /// 进程级指标（未注入时 v2 handler 不记自定义计数）。
+    pub(crate) fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
+        self.metrics.as_ref()
     }
 
     /// 注入 KV-T 运行时状态（`[kv_t]`）。
@@ -514,7 +545,7 @@ impl CoordNode {
     /// Status（RouteNotReady→unavailable / RegionNotFound→not_found /
     /// KeyNotInRegion→invalid_argument）；legacy 模式返回 region 0 目标
     /// （CoordNode 自有 storage/raft/raft_log_store，行为与现状一致）。
-    fn kv_target_for_key(&self, key: &[u8]) -> Result<KvTarget, tonic::Status> {
+    pub(crate) fn kv_target_for_key(&self, key: &[u8]) -> Result<KvTarget, tonic::Status> {
         if let Some(manager) = &self.region_manager {
             let rt = manager.route_runtime(key).map_err(map_err)?;
             Ok(KvTarget {
@@ -537,7 +568,11 @@ impl CoordNode {
 
     /// 校验 key 属于 target Region（Txn 的多 key 同区约束）。
     /// legacy 模式（handle=None）直接放行——与现状一致。
-    fn guard_key_in_target(&self, target: &KvTarget, key: &[u8]) -> Result<(), tonic::Status> {
+    pub(crate) fn guard_key_in_target(
+        &self,
+        target: &KvTarget,
+        key: &[u8],
+    ) -> Result<(), tonic::Status> {
         if let Some(handle) = &target.handle {
             if !handle.contains_key(key) {
                 return Err(tonic::Status::invalid_argument(format!(
@@ -558,7 +593,7 @@ impl CoordNode {
     /// 单点（end 空或 end==start）无需校验——路由已保证 start 属于本 Region。
     /// region 模式非末段（end_key 非空）且 end 越界 → INVALID_ARGUMENT
     /// （v1 明确不支持跨 Region 范围，宁可拒绝不可静默错答）；legacy 放行。
-    fn guard_range_in_target(
+    pub(crate) fn guard_range_in_target(
         &self,
         target: &KvTarget,
         start: &[u8],
@@ -707,7 +742,7 @@ impl CoordNode {
     /// 超时从 `RuntimeLimits.write_timeout` 读取（配置可调，默认 5s）。
     /// `region_id` 用于非 0 Region 的错误映射（RegionNotLeader + hint）；
     /// region 0 / legacy 走 [`Self::map_client_write_error`]，行为与现状一致。
-    async fn client_write_with_timeout(
+    pub(crate) async fn client_write_with_timeout(
         &self,
         raft: &CoordRaft,
         cmd: Command,
@@ -1139,13 +1174,18 @@ impl CoordNode {
 
     /// 命中时取出**完整条目**（而不只是 revision），让 Put 能回放
     /// `prev_kv`、Delete 能回放 `deleted`/`prev_kvs`。
-    fn check_idempotent_entry(&self, key: &[u8]) -> Option<IdempotentEntry> {
+    pub(crate) fn check_idempotent_entry(&self, key: &[u8]) -> Option<IdempotentEntry> {
         let ttl = self.limits.read().idempotency_ttl;
         self.idempotent_cache.write().check(key, ttl)
     }
 
     /// 缓存 Put 的完整响应（含 `prev_kv`），命中时整体回放。
-    fn cache_idempotent_put(&self, key: Vec<u8>, revision: i64, prev_kv: Option<KeyValue>) {
+    pub(crate) fn cache_idempotent_put(
+        &self,
+        key: Vec<u8>,
+        revision: i64,
+        prev_kv: Option<KeyValue>,
+    ) {
         self.idempotent_cache.write().insert(
             key,
             IdempotentEntry {
@@ -1160,7 +1200,7 @@ impl CoordNode {
     ///
     /// 范围删必须缓存 `prev_kvs` 与 `deleted`：否则「返回首次执行的结果」无法
     /// 满足，而且重放会在区间内新写入补齐之后再次删一遍（重试放大破坏面）。
-    fn cache_idempotent_delete(
+    pub(crate) fn cache_idempotent_delete(
         &self,
         key: Vec<u8>,
         deleted: i64,
@@ -1235,7 +1275,7 @@ impl CoordNode {
     ///
     /// `region_id` 仅用于日志标注（非 0 时 raft_wm 日志带 ` region=`）；region 0
     /// 的日志格式与历史完全一致（soak 取证日志不变量）。
-    async fn ensure_linearizable_on(
+    pub(crate) async fn ensure_linearizable_on(
         &self,
         raft: Option<&CoordRaft>,
         raft_log_store: Option<&LogStore>,
@@ -1467,6 +1507,10 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
     use coord_core::error::Error;
     match e {
         Error::InvalidArgument(m) => tonic::Status::invalid_argument(m.clone()),
+        Error::FailedPrecondition(m) => coord_core::error_code::attach(
+            tonic::Status::failed_precondition(m.clone()),
+            coord_core::error_code::CoordErrorCode::FailedPrecondition,
+        ),
         Error::NotFound { resource, key } => {
             tonic::Status::not_found(format!("{resource} not found: {key}"))
         }
@@ -1490,6 +1534,12 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
         Error::RevisionCompacted { revision, oldest } => tonic::Status::out_of_range(format!(
             "revision {revision} compacted; oldest available: {oldest}"
         )),
+        Error::HistoryUnavailable { revision, detail } => coord_core::error_code::attach(
+            tonic::Status::out_of_range(format!(
+                "history at revision {revision} is unavailable: {detail}"
+            )),
+            coord_core::error_code::CoordErrorCode::OutOfRange,
+        ),
         Error::CommitRejected {
             commit_ts,
             current_revision,

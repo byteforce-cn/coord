@@ -79,6 +79,10 @@ struct MetricsInner {
     pub tso_refill_failures_total: AtomicU64,
     /// 客户端观测到的 leadership 丢失次数（旧批随后被丢弃）
     pub tso_leader_changes_total: AtomicU64,
+    /// v2 KV 写被 `CommitRejected` 拒绝次数（D11.4；不静默写）
+    pub kv_v2_commit_rejected_total: AtomicU64,
+    /// v2 KV `read_ts` 等待 safe_ts 超时次数（`SAFE_TS_LAG`，可重试）
+    pub kv_v2_safe_ts_lag_total: AtomicU64,
 
     // ── Multi-Raft 指标（v6.0） ──
     /// Region 总数（全局）
@@ -224,6 +228,8 @@ impl Default for MetricsInner {
             tso_batch_remaining: AtomicU64::new(0),
             tso_refill_failures_total: AtomicU64::new(0),
             tso_leader_changes_total: AtomicU64::new(0),
+            kv_v2_commit_rejected_total: AtomicU64::new(0),
+            kv_v2_safe_ts_lag_total: AtomicU64::new(0),
             regions_total: AtomicU64::new(0),
             nodes_online: AtomicU64::new(0),
             region_split_total: AtomicU64::new(0),
@@ -592,6 +598,20 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// v2 KV 写被 `CommitRejected` 拒绝计数 +1。
+    pub fn inc_kv_v2_commit_rejected(&self) {
+        self.inner
+            .kv_v2_commit_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// v2 KV `read_ts` 等待 safe_ts 超时计数 +1。
+    pub fn inc_kv_v2_safe_ts_lag(&self) {
+        self.inner
+            .kv_v2_safe_ts_lag_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 设置本节点 Leader 数量
     pub fn set_local_leader_count(&self, count: u64) {
         self.inner
@@ -728,6 +748,24 @@ impl Metrics {
         out.push_str(&format!(
             "coord_tso_leader_changes_total {}\n",
             inner.tso_leader_changes_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_kv_v2_commit_rejected_total v2 KV writes rejected with COMMIT_REJECTED\n",
+        );
+        out.push_str("# TYPE coord_kv_v2_commit_rejected_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_v2_commit_rejected_total {}\n",
+            inner.kv_v2_commit_rejected_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_kv_v2_safe_ts_lag_total v2 KV reads that timed out waiting for safe_ts\n",
+        );
+        out.push_str("# TYPE coord_kv_v2_safe_ts_lag_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_v2_safe_ts_lag_total {}\n",
+            inner.kv_v2_safe_ts_lag_total.load(Ordering::Relaxed)
         ));
 
         out.push_str("\n# HELP raft_leader_id Current Raft leader ID (0 = no leader)\n");
@@ -1374,11 +1412,15 @@ mod tests {
         m.set_tso_batch_remaining(17);
         m.inc_tso_refill_failure();
         m.inc_tso_leader_change();
+        m.inc_kv_v2_commit_rejected();
+        m.inc_kv_v2_safe_ts_lag();
         let output = m.render_prometheus_text();
         assert!(output.contains("coord_tso_current 4242"));
         assert!(output.contains("coord_tso_batch_remaining 17"));
         assert!(output.contains("coord_tso_refill_failures_total 1"));
         assert!(output.contains("coord_tso_leader_changes_total 1"));
+        assert!(output.contains("coord_kv_v2_commit_rejected_total 1"));
+        assert!(output.contains("coord_kv_v2_safe_ts_lag_total 1"));
     }
 
     #[test]
