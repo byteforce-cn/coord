@@ -256,16 +256,18 @@ fn event_matches_mutations(
     mutations: &[crate::raft::type_config::SequencerMutation],
 ) -> bool {
     event.changes.len() == mutations.len()
-        && event.changes.iter().zip(mutations).all(|(change, mutation)| {
-            match mutation {
+        && event
+            .changes
+            .iter()
+            .zip(mutations)
+            .all(|(change, mutation)| match mutation {
                 crate::raft::type_config::SequencerMutation::Put { key, value, .. } => {
                     change.key == *key && change.value.as_deref() == Some(value.as_slice())
                 }
                 crate::raft::type_config::SequencerMutation::Delete { key } => {
                     change.key == *key && change.value.is_none()
                 }
-            }
-        })
+            })
 }
 
 // ──── SafeTs fence（region 0 system raft，#142）────
@@ -3489,6 +3491,13 @@ impl<B: StorageBackend> MvccStorage<B> {
                     break;
                 }
                 if decision.commit_ts <= current {
+                    if decision.mutations.is_empty() {
+                        // 空决策没有 changelog 可作重放证据；游标丢失后只要水位
+                        // 已越过它就说明当时已应用（或本来就没有本 Region 的写）。
+                        through = decision.commit_ts;
+                        count += 1;
+                        continue;
+                    }
                     break;
                 }
 
@@ -3561,11 +3570,7 @@ impl<B: StorageBackend> MvccStorage<B> {
             }
             let effective = current.max(through);
             if effective > Self::current_revision_in_tx(tx, self.revision_mode)? {
-                tx.insert(
-                    TABLE_META,
-                    META_CURRENT_REVISION,
-                    &effective.to_be_bytes(),
-                )?;
+                tx.insert(TABLE_META, META_CURRENT_REVISION, &effective.to_be_bytes())?;
             }
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
             self.note_log_index_revision(tx, revision)?;
@@ -7698,7 +7703,10 @@ mod tests {
         // 崩溃后从旧游标重跑时，旧决策与新决策可能同批出现：旧的跳过、新的生效。
         let result = storage
             .apply_commit_decisions(
-                &[decision(20, vec![put(b"b", b"2")]), decision(30, vec![put(b"c", b"3")])],
+                &[
+                    decision(20, vec![put(b"b", b"2")]),
+                    decision(30, vec![put(b"c", b"3")]),
+                ],
                 3,
                 applied_for(3),
             )
@@ -7720,6 +7728,19 @@ mod tests {
         assert_eq!(storage.current_revision(), 10);
         assert_eq!(storage.last_applied_decision_ts().unwrap(), 10);
         assert!(!storage.changelog_contains_revision(10).unwrap());
+
+        // 游标丢失后重放空决策：没有 changelog 可对账，但 current_revision
+        // 已越过它，视为已应用，不得把 safe_ts 永久钉住。
+        storage
+            .backend
+            .write(|tx| tx.remove(TABLE_KV, DECISION_APPLIED_TS))
+            .unwrap();
+        assert_eq!(storage.last_applied_decision_ts().unwrap(), 0);
+        let replay = storage
+            .apply_commit_decisions(&[decision(10, Vec::new())], 2, applied_for(2))
+            .unwrap();
+        assert_eq!(replay.through_ts, 10);
+        assert_eq!(replay.decisions, 1);
     }
 
     #[test]
@@ -7764,7 +7785,10 @@ mod tests {
         let result = storage
             .apply_commit_decisions(&[decision(50, vec![put(b"a", b"1")])], 2, applied_for(2))
             .unwrap();
-        assert_eq!(result.through_ts, 0, "must not skip past an unapplied decision");
+        assert_eq!(
+            result.through_ts, 0,
+            "must not skip past an unapplied decision"
+        );
         assert_eq!(result.decisions, 0);
         assert_eq!(storage.get(b"a").unwrap(), None);
         assert_eq!(storage.last_applied_decision_ts().unwrap(), 0);
@@ -7786,7 +7810,10 @@ mod tests {
         let second = storage.sequencer_decisions_after(10, 10).unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].commit_ts, 20);
-        assert!(storage.sequencer_decisions_after(20, 10).unwrap().is_empty());
+        assert!(storage
+            .sequencer_decisions_after(20, 10)
+            .unwrap()
+            .is_empty());
         assert_eq!(storage.next_sequencer_decision_ts(0).unwrap(), Some(10));
         assert_eq!(storage.next_sequencer_decision_ts(20).unwrap(), None);
     }

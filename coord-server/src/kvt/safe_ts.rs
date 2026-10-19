@@ -125,9 +125,7 @@ pub async fn advance_once(node: &CoordNode) -> Result<usize, String> {
             Ok(Some(next)) => fence.min(next.saturating_sub(1)),
             Ok(None) => fence,
             Err(e) => {
-                first_error.get_or_insert_with(|| {
-                    format!("region 0 scan pending decisions: {e}")
-                });
+                first_error.get_or_insert_with(|| format!("region 0 scan pending decisions: {e}"));
                 continue;
             }
         };

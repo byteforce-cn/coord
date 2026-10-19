@@ -17,8 +17,8 @@ use tokio::time::MissedTickBehavior;
 
 use coord_core::types::RegionMeta;
 
-use crate::raft::type_config::{Command, CommitDecisionApply, Response, SequencerMutation};
 use crate::raft::region_runtime::RegionRuntime;
+use crate::raft::type_config::{Command, CommitDecisionApply, Response, SequencerMutation};
 use crate::raft::WatchReceiver;
 use crate::server::CoordNode;
 
@@ -33,8 +33,7 @@ fn is_leader(rt: &RegionRuntime, node_id: u64) -> bool {
 
 /// `end_key` 为空 = 无上界；Region 区间语义与 `range_in` 一致（`[start,end)`）。
 fn key_in_region(meta: &RegionMeta, key: &[u8]) -> bool {
-    meta.start_key.as_slice() <= key
-        && (meta.end_key.is_empty() || key < meta.end_key.as_slice())
+    meta.start_key.as_slice() <= key && (meta.end_key.is_empty() || key < meta.end_key.as_slice())
 }
 
 /// 扫描 region 0 决策日志，把新决策应用到本节点领导的数据 Region。
