@@ -2865,6 +2865,22 @@ async fn run_server(
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
     node.set_metrics(Arc::clone(&metrics));
+    // 校验索引与决策日志同事务推进；这里只补旧快照/索引缺失留下的缺口。
+    // 失败即拒绝启动：残缺索引会让后续 OCC 冲突判断失效。
+    if cfg.kv_t.enabled {
+        let catch_up = mvcc
+            .catch_up_sequencer_index(cfg.kv_t.commit_sequencer_batch as usize)
+            .map_err(|e| format!("KV-T validation index catch-up failed: {e}"))?;
+        if catch_up.decisions > 0 {
+            tracing::info!(
+                from_ts = catch_up.from_ts,
+                to_ts = catch_up.to_ts,
+                decisions = catch_up.decisions,
+                keys = catch_up.keys,
+                "KV-T validation index caught up before serving"
+            );
+        }
+    }
     // 本地 TSO 批次缓存 + Commit Sequencer：只有开启且 region 0 raft 已装配才
     // 构造（关闭时不起后台任务、不改启动路径，ADR-0001）。
     if cfg.kv_t.enabled {

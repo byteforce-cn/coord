@@ -62,6 +62,24 @@ pub trait ReadTx {
     /// R-SVC-07：支撑 `[key, range_end)` 半开区间语义。返回的 Key 满足
     /// `start <= key` 且（end 非空时）`key < end`，按 Key 字典序排列。
     fn iter_range(&self, table: &str, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+
+    /// 区间扫描 `[start, end)`，最多返回 `limit` 行（`limit = 0` 表示不限）。
+    ///
+    /// 语义与 [`ReadTx::iter_range`] 相同；有界扫描让校验索引的区间查询不会
+    /// 因为一个大区间先物化整段再截断。默认实现保留正确性（其他后端可按需覆盖）。
+    fn iter_range_limited(
+        &self,
+        table: &str,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut rows = self.iter_range(table, start, end)?;
+        if limit > 0 {
+            rows.truncate(limit);
+        }
+        Ok(rows)
+    }
 }
 
 /// 读写事务句柄
