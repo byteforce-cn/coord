@@ -3,7 +3,8 @@
 //! 校验与决策由 region 0 system raft 的 `Command::Sequencer` apply 完成；本模块
 //! 只负责：按条数/字节切批、从 TSO 取 `commit_ts`、串行化提案，保证提案顺序 =
 //! `commit_ts` 顺序。`coord.txn.v2.Commit` 的 RPC 接线归 #151，本模块先提供可独立
-//! 测试的内部接口。
+//! 测试的内部接口。`propose` 锁也被 safe_ts 的 fence 发布复用：两者串行化后，
+//! 已发布的 fence 之后不会再有 `commit_ts <= fence` 的新决策。
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -121,6 +122,15 @@ impl CommitSequencer {
             propose_timeout,
             propose: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// 持有期间不取 TSO、不提案（safe_ts 发布 fence 时使用）。
+    ///
+    /// fence 发布与「取 TSO → 提案」共用同一把锁：发布瞬间没有 in-flight
+    /// 决策，且之后 `get_ts_above(fence)` 只会分配更大的 `commit_ts`，因此
+    /// 不会出现 fence 越过未落盘决策的窗口。
+    pub async fn lock_fence_publication(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.propose.lock().await
     }
 
     /// 校验并提交一批事务；返回与输入一一对应、顺序一致的结果。

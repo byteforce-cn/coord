@@ -13,6 +13,7 @@
 
 use std::collections::BTreeSet;
 
+pub mod decision_apply;
 pub(crate) mod lease;
 pub mod safe_ts;
 pub mod sequencer;

@@ -10,9 +10,10 @@
 //!
 //! fence 一旦被所有 Region apply，任何 `commit_ts <= fence` 的新写入都会被
 //! Region 存储层拒绝，因此 `safe_ts` 达到 fence 后该时间点的历史不再变化。
-//! 本模块不处理 in-flight CommitDecision：G2 的直写只有 apply 后才算成功；
-//! #148 必须在候选值上叠 `min(in_flight commit_ts)`（唯一计算点是
-//! [`advance_once`] 的 phase 1）。
+//! CommitDecision 的可见性（#148）：fence 发布与 sequencer 提案共用一把锁，
+//! 发布瞬间没有 in-flight 决策；phase 2 再把每个 Region 的目标水位封顶到
+//! 「下一条未应用决策 - 1」，避免把 current_revision 抬过尚未 apply 的决策
+//! （那会让该决策随后被 `CommitTs` 策略拒绝）。
 //!
 //! 只在 Region leader 上提案：follower 的 current revision 由 raft apply 收敛；
 //! 无 leader 的 Region 会短暂钉住 safe_ts（保守，不静默跳过）。
@@ -48,6 +49,12 @@ pub async fn advance_once(node: &CoordNode) -> Result<usize, String> {
     // 高水位是「下一未发放值」：fence 之后 GetTs 只会发放更大的值。
     if let Some(raft) = node.raft.as_ref() {
         if raft.current_leader().await == Some(node.node_id) {
+            // 锁必须覆盖「读高水位 → 提案」：sequencer 在锁内取 TSO，因此
+            // fence 发布时不可能有已分配但未落盘的 commit_ts。
+            let _fence_gate = match node.commit_sequencer() {
+                Some(sequencer) => Some(sequencer.lock_fence_publication().await),
+                None => None,
+            };
             let high_water = node
                 .storage
                 .tso_high_water()
@@ -92,23 +99,53 @@ pub async fn advance_once(node: &CoordNode) -> Result<usize, String> {
             let metrics = metrics.borrow_watched();
             metrics.current_leader == Some(node.node_id)
         };
-        if !is_leader || rt.mvcc.current_revision() >= fence {
+        if !is_leader {
+            continue;
+        }
+        let current = rt.mvcc.current_revision();
+        let cursor = match rt.mvcc.last_applied_decision_ts() {
+            Ok(cursor) => cursor,
+            Err(e) => {
+                first_error.get_or_insert_with(|| {
+                    format!("region {} read decision cursor: {e}", rt.region_id())
+                });
+                continue;
+            }
+        };
+        let target = match node.storage.next_sequencer_decision_ts(cursor) {
+            Ok(Some(next)) if next <= current => {
+                first_error.get_or_insert_with(|| {
+                    format!(
+                        "region {} current_revision {current} passed unapplied decision {next}",
+                        rt.region_id()
+                    )
+                });
+                continue;
+            }
+            Ok(Some(next)) => fence.min(next.saturating_sub(1)),
+            Ok(None) => fence,
+            Err(e) => {
+                first_error.get_or_insert_with(|| format!("region 0 scan pending decisions: {e}"));
+                continue;
+            }
+        };
+        if current >= target {
             continue;
         }
 
         match rt
             .raft
-            .client_write(Command::AdvanceSafeTs { commit_ts: fence })
+            .client_write(Command::AdvanceSafeTs { commit_ts: target })
             .await
         {
             Ok(resp) => match resp.response() {
-                Response::SafeTsAdvanced { revision } if *revision >= fence => {
+                Response::SafeTsAdvanced { revision } if *revision >= target => {
                     advanced += 1;
                 }
                 other => {
                     first_error.get_or_insert_with(|| {
                         format!(
-                            "region {} unexpected AdvanceSafeTs response for {fence}: {other:?}",
+                            "region {} unexpected AdvanceSafeTs response for {target}: {other:?}",
                             rt.region_id()
                         )
                     });
@@ -116,7 +153,7 @@ pub async fn advance_once(node: &CoordNode) -> Result<usize, String> {
             },
             Err(e) => {
                 first_error.get_or_insert_with(|| {
-                    format!("region {} advance safe-ts to {fence}: {e}", rt.region_id())
+                    format!("region {} advance safe-ts to {target}: {e}", rt.region_id())
                 });
             }
         }

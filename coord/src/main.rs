@@ -3383,6 +3383,23 @@ async fn run_server(
         tracing::info!("SIGHUP config reload is not supported on this platform");
     }
 
+    // 7.5a KV-T CommitDecision 应用器（#148）：region 0 决策日志 → 本地领导的
+    //      数据 Region raft；Commit 只等决策落盘，apply 异步追赶。关闭 kv_t /
+    //      无 Multi-Raft 时不启动（v1 行为不变）。
+    let _decision_applier =
+        if cfg.kv_t.enabled && node.region_manager.is_some() && node.raft.is_some() {
+            tracing::info!(
+                "KV-T commit decision applier started (interval={:?})",
+                coord_server::kvt::decision_apply::DECISION_APPLY_INTERVAL
+            );
+            Some(coord_server::kvt::decision_apply::start_applier(
+                Arc::clone(&node),
+                coord_server::kvt::decision_apply::DECISION_APPLY_INTERVAL,
+            ))
+        } else {
+            None
+        };
+
     // 7.5 KV-T safe_ts 推进器（#142）：region 0 leader 发布 TSO 分配高水位
     //     fence，各节点把本地领导的 Region 水位抬到 fence。关闭 kv_t / 无
     //     Multi-Raft 时不启动（v1 行为不变）。

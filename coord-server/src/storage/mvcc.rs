@@ -150,6 +150,12 @@ const SEQUENCER_RANGE_INDEX_PREFIX: &[u8] = b"/_sys/seq/ridx/";
 /// 正常提交在同一事务里推进它；落后时按它追赶，重建时先清它。
 const SEQUENCER_INDEX_LAST_TS: &[u8] = b"/_sys/seq/vidx_last_ts";
 
+/// 数据 Region 已应用的决策游标（u64 BE；缺失 = 0）。
+///
+/// 选 `/_sys/`：随 Region 快照整域导出/恢复；只由 `ApplyCommitDecisions` 的
+/// 同一条 redb 事务推进，崩溃后从游标续跑。
+const DECISION_APPLIED_TS: &[u8] = b"/_sys/kv_t/decision_applied";
+
 /// 完整决策记录（#148 应用、#153 CommitRecord 的上游输入）。
 ///
 /// 只增不改：同一 `commit_ts` 不重写；`txn_id`/`request_id` 用于幂等排查。
@@ -160,6 +166,13 @@ pub struct SequencerDecision {
     pub start_ts: u64,
     pub commit_ts: u64,
     pub mutations: Vec<crate::raft::type_config::SequencerMutation>,
+}
+
+/// `apply_commit_decisions` 的进度：游标推进到哪、本次推进了几条决策。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitDecisionApplyResult {
+    pub through_ts: Revision,
+    pub decisions: u64,
 }
 
 /// 一次命中校验索引的写（该 key 的最大 `commit_ts`）。
@@ -235,6 +248,26 @@ fn encode_sequencer_decision_key(commit_ts: Revision) -> Vec<u8> {
     key.extend_from_slice(SEQUENCER_DECISION_PREFIX);
     key.extend_from_slice(&commit_ts.to_be_bytes());
     key
+}
+
+/// 决策重放判定：同 `commit_ts` 的 changelog 必须与决策内容逐项一致。
+fn event_matches_mutations(
+    event: &ChangeEvent,
+    mutations: &[crate::raft::type_config::SequencerMutation],
+) -> bool {
+    event.changes.len() == mutations.len()
+        && event
+            .changes
+            .iter()
+            .zip(mutations)
+            .all(|(change, mutation)| match mutation {
+                crate::raft::type_config::SequencerMutation::Put { key, value, .. } => {
+                    change.key == *key && change.value.as_deref() == Some(value.as_slice())
+                }
+                crate::raft::type_config::SequencerMutation::Delete { key } => {
+                    change.key == *key && change.value.is_none()
+                }
+            })
 }
 
 // ──── SafeTs fence（region 0 system raft，#142）────
@@ -3355,6 +3388,198 @@ impl<B: StorageBackend> MvccStorage<B> {
         self.backend
             .read(|tx| tx.get(TABLE_KV, &encode_sequencer_decision_key(commit_ts)))
             .map(|opt| opt.and_then(|bytes| crate::storage::envelope::decode(&bytes).ok()))
+    }
+
+    /// 数据 Region 已应用的决策游标（缺失 = 0）。
+    pub fn last_applied_decision_ts(&self) -> Result<Revision> {
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, DECISION_APPLIED_TS)?
+                .and_then(|b| decode_u64(&b))
+                .unwrap_or(0))
+        })
+    }
+
+    /// 按 `commit_ts` 升序读取 `after_ts` 之后的决策（有界）。
+    ///
+    /// 决策日志是 applier 的唯一事实源；`limit` 是内存上界，`0` 按 1。
+    pub fn sequencer_decisions_after(
+        &self,
+        after_ts: Revision,
+        limit: usize,
+    ) -> Result<Vec<SequencerDecision>> {
+        let limit = limit.max(1);
+        let rows = self.backend.read(|tx| {
+            let start = encode_sequencer_decision_key(after_ts.saturating_add(1));
+            let end = prefix_upper_bound(SEQUENCER_DECISION_PREFIX);
+            tx.iter_range_limited(TABLE_KV, &start, &end, limit)
+        })?;
+        rows.into_iter()
+            .map(|(key, value)| {
+                let commit_ts = key
+                    .strip_prefix(SEQUENCER_DECISION_PREFIX)
+                    .filter(|suffix| suffix.len() == 8)
+                    .and_then(|suffix| <[u8; 8]>::try_from(suffix).ok())
+                    .map(u64::from_be_bytes)
+                    .ok_or_else(|| {
+                        Error::Internal("decode sequencer decision key: bad suffix".to_string())
+                    })?;
+                let decision: SequencerDecision = crate::storage::envelope::decode(&value)
+                    .map_err(|e| Error::Internal(format!("decode sequencer decision: {e}")))?;
+                if decision.commit_ts != commit_ts {
+                    return Err(Error::Internal(format!(
+                        "sequencer decision key/record mismatch: key={commit_ts} record={}",
+                        decision.commit_ts
+                    )));
+                }
+                Ok(decision)
+            })
+            .collect()
+    }
+
+    /// 该 Region 游标之后的下一条决策（无 = None）。safe_ts 用它逐 Region 封顶。
+    pub fn next_sequencer_decision_ts(&self, after_ts: Revision) -> Result<Option<Revision>> {
+        Ok(self
+            .sequencer_decisions_after(after_ts, 1)?
+            .first()
+            .map(|decision| decision.commit_ts))
+    }
+
+    /// 把一批已决策事务应用到本 Region 的 MVCC（#148）。
+    ///
+    /// 一个命令内的所有 mutation 在同一个 redb 写事务里完成，因此同一 Region
+    /// 的多 key 不会部分可见；跨 Region 的可见性由 safe_ts 收敛。
+    ///
+    /// 幂等/漂移处理：
+    /// - `commit_ts <= 游标` 或 changelog 已存在且内容一致 → 跳过（重放）；
+    /// - changelog 已存在但内容不一致、或 `commit_ts <= current_revision` 且无
+    ///   changelog → 停在该决策之前并保留游标（fence 漂移时 fail-closed，
+    ///   由 safe_ts 封顶保证正常路径不会发生）；
+    /// - 无本 Region mutation 的决策也推进游标与 `META_CURRENT_REVISION`。
+    pub fn apply_commit_decisions(
+        &self,
+        decisions: &[crate::raft::type_config::CommitDecisionApply],
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<CommitDecisionApplyResult> {
+        let cursor = self.last_applied_decision_ts()?;
+        let result = self.backend.write(|tx| {
+            let mut current = Self::current_revision_in_tx(tx, self.revision_mode)?;
+            let mut through = cursor;
+            let mut count = 0u64;
+            let mut previous = None;
+
+            for decision in decisions {
+                if decision.commit_ts <= through {
+                    continue; // 已应用/游标之前的重放
+                }
+                if previous.is_some_and(|ts| decision.commit_ts <= ts) {
+                    break; // 载荷必须按 commit_ts 严格递增
+                }
+                previous = Some(decision.commit_ts);
+
+                let existing = tx
+                    .get(TABLE_CHANGELOG, &encode_changelog_key(decision.commit_ts))?
+                    .map(|bytes| ChangeEvent::from_bytes(&bytes))
+                    .transpose()?;
+                if let Some(event) = existing {
+                    if event_matches_mutations(&event, &decision.mutations) {
+                        through = decision.commit_ts;
+                        count += 1;
+                        continue;
+                    }
+                    break;
+                }
+                if decision.commit_ts <= current {
+                    if decision.mutations.is_empty() {
+                        // 空决策没有 changelog 可作重放证据；游标丢失后只要水位
+                        // 已越过它就说明当时已应用（或本来就没有本 Region 的写）。
+                        through = decision.commit_ts;
+                        count += 1;
+                        continue;
+                    }
+                    break;
+                }
+
+                let mut changes = Vec::with_capacity(decision.mutations.len());
+                for mutation in &decision.mutations {
+                    match mutation {
+                        crate::raft::type_config::SequencerMutation::Put {
+                            key,
+                            value,
+                            lease_id,
+                        } => {
+                            let internal_key = encode_kv_key(key);
+                            let meta_key = encode_kv_meta_key(key);
+                            let lease_id = lease_id.unwrap_or(0);
+                            let existing_meta = tx
+                                .get(TABLE_KV_META, &meta_key)?
+                                .and_then(|bytes| KvMetadata::from_bytes(&bytes));
+                            let meta = match existing_meta {
+                                Some(meta) => meta.update(decision.commit_ts, lease_id),
+                                None => KvMetadata::new_key(decision.commit_ts, lease_id),
+                            };
+                            let encrypted = self.encrypt_value(&internal_key, value)?;
+                            tx.insert(TABLE_KV, &internal_key, &encrypted)?;
+                            tx.insert(TABLE_KV_META, &meta_key, &meta.to_bytes())?;
+                            changes.push(KeyValueChange {
+                                key: key.clone(),
+                                value: Some(value.clone()),
+                                prev_value: None,
+                            });
+                        }
+                        crate::raft::type_config::SequencerMutation::Delete { key } => {
+                            let meta_key = encode_kv_meta_key(key);
+                            let existing_meta = tx
+                                .get(TABLE_KV_META, &meta_key)?
+                                .and_then(|bytes| KvMetadata::from_bytes(&bytes));
+                            if let Some(meta) = existing_meta.filter(|meta| !meta.deleted) {
+                                tx.insert(
+                                    TABLE_KV_META,
+                                    &meta_key,
+                                    &meta.mark_deleted(decision.commit_ts).to_bytes(),
+                                )?;
+                            }
+                            changes.push(KeyValueChange {
+                                key: key.clone(),
+                                value: None,
+                                prev_value: None,
+                            });
+                        }
+                    }
+                }
+                if !changes.is_empty() {
+                    let event = ChangeEvent {
+                        revision: decision.commit_ts,
+                        changes,
+                        event_type: EventType::Txn,
+                    };
+                    tx.insert(
+                        TABLE_CHANGELOG,
+                        &encode_changelog_key(decision.commit_ts),
+                        &event.to_bytes(),
+                    )?;
+                }
+                current = decision.commit_ts;
+                through = decision.commit_ts;
+                count += 1;
+            }
+
+            if through > cursor {
+                tx.insert(TABLE_KV, DECISION_APPLIED_TS, &through.to_be_bytes())?;
+            }
+            let effective = current.max(through);
+            if effective > Self::current_revision_in_tx(tx, self.revision_mode)? {
+                tx.insert(TABLE_META, META_CURRENT_REVISION, &effective.to_be_bytes())?;
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            self.note_log_index_revision(tx, revision)?;
+            Ok(CommitDecisionApplyResult {
+                through_ts: through,
+                decisions: count,
+            })
+        })?;
+        Ok(result)
     }
 
     /// 已决策的最大 `commit_ts`（缺失 = 0）。
@@ -7392,5 +7617,204 @@ mod tests {
             })
         );
         assert_eq!(restored.sequencer_index_last_ts().unwrap(), 15);
+    }
+
+    // ──── CommitDecision 应用（#148）────
+
+    fn decision(
+        commit_ts: Revision,
+        mutations: Vec<crate::raft::type_config::SequencerMutation>,
+    ) -> crate::raft::type_config::CommitDecisionApply {
+        crate::raft::type_config::CommitDecisionApply {
+            commit_ts,
+            mutations,
+        }
+    }
+
+    fn put(key: &[u8], value: &[u8]) -> crate::raft::type_config::SequencerMutation {
+        crate::raft::type_config::SequencerMutation::Put {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            lease_id: None,
+        }
+    }
+
+    fn delete(key: &[u8]) -> crate::raft::type_config::SequencerMutation {
+        crate::raft::type_config::SequencerMutation::Delete { key: key.to_vec() }
+    }
+
+    #[test]
+    fn test_apply_commit_decisions_multi_key_is_atomic() {
+        use crate::storage::mvcc::EventType;
+
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"c", b"old", None, 5, applied_for(1))
+            .unwrap();
+
+        let result = storage
+            .apply_commit_decisions(
+                &[decision(
+                    10,
+                    vec![put(b"a", b"1"), put(b"b", b"2"), delete(b"c")],
+                )],
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(result.through_ts, 10);
+        assert_eq!(result.decisions, 1);
+        assert_eq!(storage.get(b"a").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(storage.get(b"b").unwrap(), Some(b"2".to_vec()));
+        assert_eq!(storage.get(b"c").unwrap(), None);
+        assert_eq!(storage.current_revision(), 10);
+        assert_eq!(storage.last_applied_decision_ts().unwrap(), 10);
+
+        let events = storage.read_changelog_entries(10).unwrap();
+        let event = events.iter().find(|e| e.revision == 10).unwrap();
+        assert_eq!(event.event_type, EventType::Txn);
+        assert_eq!(event.changes.len(), 3, "one event carries the whole txn");
+        assert_eq!(storage.get_kv_metadata(b"b").unwrap().unwrap().version, 1);
+    }
+
+    #[test]
+    fn test_apply_commit_decisions_replay_is_idempotent() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let first = [
+            decision(10, vec![put(b"a", b"1")]),
+            decision(20, vec![put(b"b", b"2")]),
+        ];
+        assert_eq!(
+            storage
+                .apply_commit_decisions(&first, 1, applied_for(1))
+                .unwrap()
+                .decisions,
+            2
+        );
+
+        let replay = storage
+            .apply_commit_decisions(&first, 2, applied_for(2))
+            .unwrap();
+        assert_eq!(replay.through_ts, 20);
+        assert_eq!(replay.decisions, 0);
+        assert_eq!(storage.get_kv_metadata(b"a").unwrap().unwrap().version, 1);
+        assert_eq!(storage.read_changelog_entries(10).unwrap().len(), 2);
+
+        // 崩溃后从旧游标重跑时，旧决策与新决策可能同批出现：旧的跳过、新的生效。
+        let result = storage
+            .apply_commit_decisions(
+                &[
+                    decision(20, vec![put(b"b", b"2")]),
+                    decision(30, vec![put(b"c", b"3")]),
+                ],
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(result.through_ts, 30);
+        assert_eq!(result.decisions, 1);
+        assert_eq!(storage.get_kv_metadata(b"b").unwrap().unwrap().version, 1);
+        assert_eq!(storage.get(b"c").unwrap(), Some(b"3".to_vec()));
+    }
+
+    #[test]
+    fn test_apply_commit_decisions_empty_advances_watermark() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let result = storage
+            .apply_commit_decisions(&[decision(10, Vec::new())], 1, applied_for(1))
+            .unwrap();
+        assert_eq!(result.through_ts, 10);
+        assert_eq!(result.decisions, 1);
+        assert_eq!(storage.current_revision(), 10);
+        assert_eq!(storage.last_applied_decision_ts().unwrap(), 10);
+        assert!(!storage.changelog_contains_revision(10).unwrap());
+
+        // 游标丢失后重放空决策：没有 changelog 可对账，但 current_revision
+        // 已越过它，视为已应用，不得把 safe_ts 永久钉住。
+        storage
+            .backend
+            .write(|tx| tx.remove(TABLE_KV, DECISION_APPLIED_TS))
+            .unwrap();
+        assert_eq!(storage.last_applied_decision_ts().unwrap(), 0);
+        let replay = storage
+            .apply_commit_decisions(&[decision(10, Vec::new())], 2, applied_for(2))
+            .unwrap();
+        assert_eq!(replay.through_ts, 10);
+        assert_eq!(replay.decisions, 1);
+    }
+
+    #[test]
+    fn test_apply_commit_decisions_cursor_survives_reopen_and_snapshot() {
+        use crate::storage::snapshot::{export_snapshot_data, import_snapshot_data};
+
+        let (dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_commit_decisions(
+                &[
+                    decision(10, vec![put(b"a", b"1")]),
+                    decision(20, vec![put(b"b", b"2")]),
+                ],
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+        drop(storage);
+
+        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
+        let reopened =
+            MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap();
+        assert_eq!(reopened.last_applied_decision_ts().unwrap(), 20);
+
+        let data = export_snapshot_data(&reopened, 1, 1).unwrap();
+        let (_restored_dir, restored) = create_commit_ts_storage();
+        import_snapshot_data(&restored, &data).unwrap();
+        assert_eq!(restored.last_applied_decision_ts().unwrap(), 20);
+        let replay = restored
+            .apply_commit_decisions(&[decision(10, vec![put(b"a", b"1")])], 2, applied_for(2))
+            .unwrap();
+        assert_eq!(replay.decisions, 0);
+    }
+
+    #[test]
+    fn test_apply_commit_decisions_stops_before_fence_overtake() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .advance_commit_ts_watermark(100, applied_for(1))
+            .unwrap();
+
+        let result = storage
+            .apply_commit_decisions(&[decision(50, vec![put(b"a", b"1")])], 2, applied_for(2))
+            .unwrap();
+        assert_eq!(
+            result.through_ts, 0,
+            "must not skip past an unapplied decision"
+        );
+        assert_eq!(result.decisions, 0);
+        assert_eq!(storage.get(b"a").unwrap(), None);
+        assert_eq!(storage.last_applied_decision_ts().unwrap(), 0);
+        assert!(storage.read_changelog_entries(50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_sequencer_decisions_after_scans_ordered() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let op = seq_op(vec![
+            seq_txn(b"t1", 1, 10, b"r1", &[], &[(b"a", b"1")]),
+            seq_txn(b"t2", 2, 20, b"r2", &[], &[(b"b", b"2")]),
+        ]);
+        storage.apply_sequencer_op(&op, 1, applied_for(1)).unwrap();
+
+        let first = storage.sequencer_decisions_after(0, 1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].commit_ts, 10);
+        let second = storage.sequencer_decisions_after(10, 10).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].commit_ts, 20);
+        assert!(storage
+            .sequencer_decisions_after(20, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(storage.next_sequencer_decision_ts(0).unwrap(), Some(10));
+        assert_eq!(storage.next_sequencer_decision_ts(20).unwrap(), None);
     }
 }
