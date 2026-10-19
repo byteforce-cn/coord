@@ -3336,6 +3336,25 @@ async fn run_server(
         tracing::info!("SIGHUP config reload is not supported on this platform");
     }
 
+    // 7.5 KV-T safe_ts 推进器（#142）：region 0 leader 发布 TSO 分配高水位
+    //     fence，各节点把本地领导的 Region 水位抬到 fence。关闭 kv_t / 无
+    //     Multi-Raft 时不启动（v1 行为不变）。
+    let _safe_ts_advancer = if cfg.kv_t.enabled
+        && node.region_manager.is_some()
+        && node.raft.is_some()
+    {
+        tracing::info!(
+            "KV-T safe-ts advancer started (interval={:?})",
+            coord_server::kvt::safe_ts::SAFE_TS_ADVANCE_INTERVAL
+        );
+        Some(coord_server::kvt::safe_ts::start_advancer(
+            Arc::clone(&node),
+            coord_server::kvt::safe_ts::SAFE_TS_ADVANCE_INTERVAL,
+        ))
+    } else {
+        None
+    };
+
     // 8. 启动 Changelog Compaction 后台任务（leader 经 raft 提案
     //    compact revision（节点一致）+ 定时 redb 文件级 compact 空间回收）
     let compaction_config = CompactionConfig::default();

@@ -323,3 +323,106 @@ async fn test_get_ts_stays_above_published_fence() {
         "GetTs must not issue a value the published fence already rejects (got {ts})"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_advance_once_publishes_fence_and_fences_all_regions() {
+    let g2 = G2Node::start().await;
+    g2.node
+        .storage
+        .apply_tso_allocate(1024, 1, AppliedLogId::standalone(0))
+        .expect("raise TSO high water");
+    assert_eq!(g2.node.storage.tso_high_water().unwrap(), 1025);
+
+    let advanced = coord_server::kvt::safe_ts::advance_once(&g2.node)
+        .await
+        .expect("advance safe ts");
+    assert_eq!(advanced, 2, "both local region leaders must be fenced");
+    assert_eq!(g2.node.safe_ts_fence(), 1025);
+    for region_id in [1u64, 2] {
+        assert_eq!(
+            g2.runtime(region_id).mvcc.current_revision(),
+            1025,
+            "region {region_id} applied watermark"
+        );
+        assert!(
+            !g2.runtime(region_id)
+                .mvcc
+                .changelog_contains_revision(1025)
+                .unwrap(),
+            "fence must not write a changelog entry"
+        );
+    }
+    assert_eq!(g2.node.safe_ts(), 1025);
+
+    // 高水位未变：第二轮不发布/不重复 fence。
+    let advanced = coord_server::kvt::safe_ts::advance_once(&g2.node)
+        .await
+        .expect("second advance");
+    assert_eq!(advanced, 0);
+    assert_eq!(g2.node.safe_ts(), 1025);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_idle_regions_do_not_pin_safe_ts() {
+    let g2 = G2Node::start().await;
+    g2.node
+        .storage
+        .apply_tso_allocate(512, 1, AppliedLogId::standalone(0))
+        .unwrap();
+
+    assert_eq!(
+        g2.node.safe_ts(),
+        0,
+        "before the first fence both idle regions are at revision 0"
+    );
+    coord_server::kvt::safe_ts::advance_once(&g2.node)
+        .await
+        .expect("advance safe ts");
+    assert_eq!(
+        g2.node.safe_ts(),
+        513,
+        "an idle region must not pin safe_ts forever"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_fence_rejects_stale_commit_ts_without_raft_error() {
+    let g2 = G2Node::start().await;
+    g2.node
+        .storage
+        .apply_tso_allocate(256, 1, AppliedLogId::standalone(0))
+        .unwrap();
+    coord_server::kvt::safe_ts::advance_once(&g2.node)
+        .await
+        .expect("advance safe ts");
+    let fence = g2.node.safe_ts_fence();
+    assert!(fence > 0);
+
+    let rt = g2.manager.route_runtime(b"apple").unwrap();
+    let stale = rt
+        .raft
+        .client_write(Command::PutV2 {
+            key: b"apple".to_vec(),
+            value: b"v".to_vec(),
+            lease_id: None,
+            commit_ts: fence,
+        })
+        .await
+        .expect("user-level rejection must not fail raft");
+    assert!(
+        matches!(
+            stale.response(),
+            Response::CommitRejected {
+                commit_ts,
+                current_revision
+            } if *commit_ts == fence && *current_revision == fence
+        ),
+        "unexpected response: {:?}",
+        stale.response()
+    );
+
+    assert!(matches!(
+        g2.put_v2(b"apple", b"v", fence + 1).await,
+        Response::Put { revision } if revision == fence + 1
+    ));
+}
