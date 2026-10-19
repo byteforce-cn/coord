@@ -351,3 +351,30 @@ async fn test_range_count_only_caps_across_segments() {
     assert_eq!(r.kvs.len(), 4);
     assert_eq!(r.count, 4);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_range_fails_closed_when_a_region_is_missing() {
+    let fx = standard_data().await;
+    fx.manager.remove_region_runtime(2).unwrap();
+    let err = fx
+        .range(b"a", b"zzz", 400, 0, false, false)
+        .await
+        .expect_err("gap must fail the whole request, not return a partial prefix");
+    assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_v1_cross_region_range_is_still_rejected() {
+    let fx = standard_data().await;
+    let err = coord_proto::kv::kv_server::Kv::range(
+        &*fx.node,
+        tonic::Request::new(coord_proto::kv::RangeRequest {
+            key: b"a".to_vec(),
+            range_end: b"zzz".to_vec(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect_err("v1 cross-region range stays unsupported");
+    assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+}
