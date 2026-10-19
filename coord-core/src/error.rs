@@ -71,6 +71,10 @@ pub enum Error {
         current_revision: u64,
     },
 
+    /// 历史视图不可重建（changelog 已压缩，且目标 revision 之后又被写过）
+    #[error("history at revision {revision} is not reconstructable: {detail}")]
+    HistoryUnavailable { revision: u64, detail: String },
+
     /// 数据损坏
     #[error("data corruption: {0}")]
     DataCorruption(String),

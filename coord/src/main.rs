@@ -2869,8 +2869,9 @@ async fn run_server(
     }
     if cfg.kv_t.enabled {
         tracing::warn!(
-            "KV-T enabled ([kv_t].enabled=true): TSO allocation (coord.tso.v2) is \
-             available; other v2 RPCs remain FAILED_PRECONDITION until their gate lands"
+            "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2) and single-Region \
+             KV (coord.kv.v2) are available; other v2 RPCs remain FAILED_PRECONDITION \
+             until their gate lands"
         );
     } else {
         tracing::info!(

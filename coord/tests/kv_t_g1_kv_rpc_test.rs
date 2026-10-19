@@ -8,7 +8,7 @@
 mod tests {
     use std::net::SocketAddr;
     use std::path::Path;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -255,6 +255,48 @@ mod tests {
         assert_eq!(resp.prev_kvs.len(), 2);
         assert_eq!(resp.commit_ts, 106);
 
+        // 同一个 commit_ts 承载第二条写命令不是重放：必须显式拒绝，不能返回成功
+        // 却把数据静默丢掉。
+        kv.put(put(b"p0-a", b"1", 107)).await.unwrap();
+        let err = kv
+            .put(put(b"p0-b", b"2", 107))
+            .await
+            .expect_err("different key at the same commit_ts must be rejected");
+        assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("COMMIT_REJECTED"),
+            "{err:?}"
+        );
+        let empty = kv
+            .range(range(b"p0-b", b"", 0))
+            .await
+            .expect("range must succeed")
+            .into_inner();
+        assert!(
+            empty.kvs.is_empty(),
+            "the second write must not be silently dropped"
+        );
+
+        // put 与 delete 也不能共享 commit_ts。
+        kv.put(put(b"p0-c", b"3", 108)).await.unwrap();
+        let err = kv
+            .delete(delete(b"p0-c", b"", 108, true))
+            .await
+            .expect_err("delete at a commit_ts used by put must be rejected");
+        assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("COMMIT_REJECTED"),
+            "{err:?}"
+        );
+        let kept = kv
+            .range(range(b"p0-c", b"", 0))
+            .await
+            .expect("range must succeed")
+            .into_inner();
+        assert_eq!(kept.kvs[0].value, b"3");
+
         drop(kv);
         server.shutdown().await;
     }
@@ -434,6 +476,28 @@ mod tests {
         assert_eq!(single.kvs[0].value, b"v1");
         assert_eq!(single.kvs[0].mod_revision, 100);
 
+        let hist_count = kv
+            .range(RangeRequestV2 {
+                count_only: true,
+                ..range(b"a", b"z", 100)
+            })
+            .await
+            .expect("historical count only")
+            .into_inner();
+        assert_eq!(hist_count.count, 1);
+        assert!(hist_count.kvs.is_empty());
+
+        let hist_keys = kv
+            .range(RangeRequestV2 {
+                keys_only: true,
+                ..range(b"a", b"z", 101)
+            })
+            .await
+            .expect("historical keys only")
+            .into_inner();
+        assert_eq!(hist_keys.kvs.len(), 2);
+        assert!(hist_keys.kvs.iter().all(|kv| kv.value.is_empty()));
+
         // count_only / keys_only。
         let counted = kv
             .range(RangeRequestV2 {
@@ -561,6 +625,131 @@ mod tests {
             "{err:?}"
         );
 
+        // limit=0 ⇒ max_range（静默截断到服务端上限），limit<count 同理。
+        let truncated = kv
+            .range(range(b"a", b"z", 0))
+            .await
+            .expect("limit=0 capped range")
+            .into_inner();
+        assert_eq!(truncated.kvs.len(), 5);
+        assert_eq!(truncated.count, 5);
+        let one = kv
+            .range(RangeRequestV2 {
+                limit: 1,
+                ..range(b"a", b"z", 0)
+            })
+            .await
+            .expect("limit=1 range")
+            .into_inner();
+        assert_eq!(one.kvs.len(), 1);
+        assert_eq!(one.count, 1);
+
+        // 目标 revision > compact 水位、但 T 之前的写入已被压缩：不能回报
+        // INTERNAL（像服务端故障），必须让调用方按 OUT_OF_RANGE 改读新位点。
+        kv.put(put(b"g", b"v", 200)).await.unwrap();
+        kv.delete(delete(b"g", b"", 210, false)).await.unwrap();
+        server
+            .node
+            .storage
+            .apply_compact(205, AppliedLogId::standalone(211))
+            .unwrap();
+        let err = kv
+            .range(range(b"g", b"", 206))
+            .await
+            .expect_err("compacted earlier history is out of range");
+        assert_eq!(err.code(), Code::OutOfRange, "{err:?}");
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("OUT_OF_RANGE"),
+            "{err:?}"
+        );
+
+        drop(kv);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_range_wait_succeeds_when_commit_lands_within_window() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let server = start_server(
+            tmpdir.path(),
+            RevisionMode::CommitTs,
+            true,
+            &[KvTCapability::Kv],
+            config(1_000),
+        )
+        .await;
+        let mut kv = kv_v2(server.addr).await;
+        kv.put(put(b"k", b"v1", 100)).await.unwrap();
+
+        let writer_addr = server.addr;
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let mut writer_kv = kv_v2(writer_addr).await;
+            writer_kv.put(put(b"k", b"v2", 200)).await.unwrap();
+        });
+
+        let resp = kv
+            .range(range(b"k", b"", 200))
+            .await
+            .expect("waiting read_ts must succeed once the commit applies")
+            .into_inner();
+        assert_eq!(resp.read_ts, 200);
+        assert_eq!(resp.kvs.len(), 1);
+        assert_eq!(resp.kvs[0].value, b"v2");
+        assert_eq!(resp.kvs[0].mod_revision, 200);
+
+        writer.await.unwrap();
+        drop(kv);
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_range_header_is_snapshot_of_returned_rows() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let server = start_server(
+            tmpdir.path(),
+            RevisionMode::CommitTs,
+            true,
+            &[KvTCapability::Kv],
+            config(50),
+        )
+        .await;
+        let mut kv = kv_v2(server.addr).await;
+        kv.put(put(b"k0", b"v", 100)).await.unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = Arc::clone(&stop);
+        let writer_addr = server.addr;
+        let writer = tokio::spawn(async move {
+            let mut writer_kv = kv_v2(writer_addr).await;
+            let mut ts = 101i64;
+            while !writer_stop.load(Ordering::Relaxed) {
+                writer_kv.put(put(b"k0", b"v", ts)).await.unwrap();
+                ts += 1;
+                tokio::task::yield_now().await;
+            }
+        });
+
+        for _ in 0..100 {
+            let resp = kv
+                .range(range(b"k0", b"", 0))
+                .await
+                .expect("range under concurrent writes")
+                .into_inner();
+            for row in &resp.kvs {
+                assert!(
+                    row.mod_revision <= resp.read_ts,
+                    "header read_ts {} must cover row mod_revision {}",
+                    resp.read_ts,
+                    row.mod_revision
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        writer.await.unwrap();
         drop(kv);
         server.shutdown().await;
     }

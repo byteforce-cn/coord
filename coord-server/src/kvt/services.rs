@@ -121,7 +121,9 @@ impl tso_v2::tso_server::Tso for CoordNode {
 fn v2_status(err: Error) -> Status {
     let code = match &err {
         Error::InvalidArgument(_) => Some(CoordErrorCode::InvalidArgument),
-        Error::RevisionCompacted { .. } => Some(CoordErrorCode::OutOfRange),
+        Error::RevisionCompacted { .. } | Error::HistoryUnavailable { .. } => {
+            Some(CoordErrorCode::OutOfRange)
+        }
         Error::CommitRejected { .. } => Some(CoordErrorCode::CommitRejected),
         _ => None,
     };
@@ -272,6 +274,14 @@ impl kv_v2::kv_server::Kv for CoordNode {
         self.guard_key_in_target(&target, &req.key)?;
 
         let prev_kv = if req.prev_kv {
+            // prev_kv 必须来自已 apply 到 commit index 的视图；否则 leader 本地
+            // 落后时会把旧值当“当前值”返回。
+            self.ensure_linearizable_on(
+                target.raft.as_deref(),
+                target.raft_log_store.as_ref(),
+                target.region_id,
+            )
+            .await?;
             target
                 .mvcc
                 .get(&req.key)
@@ -429,18 +439,35 @@ impl kv_v2::kv_server::Kv for CoordNode {
             req.range_end.clone()
         };
 
-        let rows = if read_ts == current_now {
-            // 值、元数据、header revision 同一读事务。
-            target
+        let (rows, header_read_ts) = if read_ts == current_now {
+            // 值、元数据、header revision 同一读事务；header 用该事务的 revision，
+            // 不能用读事务之前的 current——并发提交会让 header 落后于返回的行。
+            let (rows, live_revision) = target
                 .mvcc
                 .range_in_with_metadata(&req.key, &end, scan_limit)
-                .map_err(map_err)?
-                .0
+                .map_err(map_err)?;
+            if req.read_ts > 0 && live_revision > read_ts {
+                // 显式快照读越过了目标 revision：改用精确历史视图，保证
+                // `mod_revision <= read_ts`。
+                let rows = target
+                    .mvcc
+                    .range_at_revision_with_metadata(&req.key, &end, scan_limit, read_ts)
+                    .map_err(v2_status)?;
+                (rows, read_ts)
+            } else {
+                let header = if req.read_ts == 0 {
+                    live_revision
+                } else {
+                    read_ts
+                };
+                (rows, header)
+            }
         } else {
-            target
+            let rows = target
                 .mvcc
                 .range_at_revision_with_metadata(&req.key, &end, scan_limit, read_ts)
-                .map_err(v2_status)?
+                .map_err(v2_status)?;
+            (rows, read_ts)
         };
 
         let mut kvs: Vec<kv_v2::KeyValue> = rows
@@ -472,7 +499,7 @@ impl kv_v2::kv_server::Kv for CoordNode {
         Ok(Response::new(kv_v2::RangeResponse {
             kvs,
             count,
-            read_ts: read_ts as i64,
+            read_ts: header_read_ts as i64,
         }))
     }
 
@@ -512,6 +539,13 @@ impl kv_v2::kv_server::Kv for CoordNode {
             self.guard_key_in_target(&target, &req.key)?;
         }
 
+        // deleted/prev_kvs 由本地视图计算，必须先确认本地 apply 已覆盖已提交日志。
+        self.ensure_linearizable_on(
+            target.raft.as_deref(),
+            target.raft_log_store.as_ref(),
+            target.region_id,
+        )
+        .await?;
         let max_range = self.kvt().config().max_range as usize;
         let live = if is_range {
             None

@@ -1534,6 +1534,12 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
         Error::RevisionCompacted { revision, oldest } => tonic::Status::out_of_range(format!(
             "revision {revision} compacted; oldest available: {oldest}"
         )),
+        Error::HistoryUnavailable { revision, detail } => coord_core::error_code::attach(
+            tonic::Status::out_of_range(format!(
+                "history at revision {revision} is unavailable: {detail}"
+            )),
+            coord_core::error_code::CoordErrorCode::OutOfRange,
+        ),
         Error::CommitRejected {
             commit_ts,
             current_revision,
