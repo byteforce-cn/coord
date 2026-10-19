@@ -290,6 +290,8 @@ pub struct CoordNode {
     tso_client: Option<Arc<TsoClient>>,
     /// 进程级指标（`[kv_t]` v2 拒绝计数用；main 在 Arc::new 前注入）。
     metrics: Option<Arc<crate::metrics::Metrics>>,
+    /// `coord.txn.v2` 服务端会话（ADR-0015 D12.2）：只在协调节点内存，不复制。
+    txn_sessions: crate::kvt::txn::TxnSessions,
 }
 
 /// KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
@@ -373,6 +375,7 @@ impl CoordNode {
             kvt: crate::kvt::KvTState::disabled(),
             tso_client: None,
             metrics: None,
+            txn_sessions: crate::kvt::txn::TxnSessions::new(),
         }
     }
 
@@ -465,6 +468,11 @@ impl CoordNode {
     /// 本地 TSO 批次缓存（未装配时为 `None`，`GetTs` 据此 fail-closed）。
     pub fn tso_client(&self) -> Option<&Arc<TsoClient>> {
         self.tso_client.as_ref()
+    }
+
+    /// `coord.txn.v2` 会话表（只在协调节点内存，不随节点复制）。
+    pub(crate) fn txn_sessions(&self) -> &crate::kvt::txn::TxnSessions {
+        &self.txn_sessions
     }
 
     /// 注入运行时资源限制（由配置层在启动时调用；默认值可直接使用）。

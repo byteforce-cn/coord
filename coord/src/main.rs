@@ -2845,10 +2845,12 @@ async fn run_server(
                 txn_ttl_secs: cfg.kv_t.txn_ttl_secs,
             },
         )
-        // #136/#137：TSO；#141：coord.kv.v2 单 Region 读写。
+        // #136/#137：TSO；#141：coord.kv.v2 单 Region 读写；
+        // #144：coord.txn.v2 读阶段（Begin/Read/Abort）。
         .with_implemented([
             coord_server::kvt::KvTCapability::Tso,
             coord_server::kvt::KvTCapability::Kv,
+            coord_server::kvt::KvTCapability::Txn,
         ]),
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
@@ -2869,9 +2871,10 @@ async fn run_server(
     }
     if cfg.kv_t.enabled {
         tracing::warn!(
-            "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2) and single-Region \
-             KV (coord.kv.v2) are available; other v2 RPCs remain FAILED_PRECONDITION \
-             until their gate lands"
+            "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2), KV (coord.kv.v2) and \
+             the txn read phase (coord.txn.v2 Begin/Read/Abort) are available; txn Commit \
+             and the remaining v2 RPCs stay FAILED_PRECONDITION/UNIMPLEMENTED until their \
+             gate lands"
         );
     } else {
         tracing::info!(
