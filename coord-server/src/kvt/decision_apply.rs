@@ -36,6 +36,45 @@ fn key_in_region(meta: &RegionMeta, key: &[u8]) -> bool {
     meta.start_key.as_slice() <= key && (meta.end_key.is_empty() || key < meta.end_key.as_slice())
 }
 
+fn mutation_bytes(mutation: &SequencerMutation) -> usize {
+    match mutation {
+        SequencerMutation::Put { key, value, .. } => key.len() + value.len() + 24,
+        SequencerMutation::Delete { key } => key.len() + 16,
+    }
+}
+
+/// 按条数与字节双上限构造一个 Region 的 apply 载荷。
+///
+/// 决策的最大单条是 `max_txn_bytes`（4MiB）；只按条数切批会让 256 条大事务
+/// 变成 1GiB 的 raft 负载。首条无论多大都保留（绝不丢决策）。
+fn build_apply_batch(
+    decisions: &[crate::storage::mvcc::SequencerDecision],
+    meta: &RegionMeta,
+    batch: usize,
+    max_bytes: usize,
+) -> Vec<CommitDecisionApply> {
+    let mut payload = Vec::new();
+    let mut bytes = 0usize;
+    for decision in decisions.iter().take(batch) {
+        let mutations: Vec<SequencerMutation> = decision
+            .mutations
+            .iter()
+            .filter(|mutation| key_in_region(meta, mutation.key()))
+            .cloned()
+            .collect();
+        let size = 24 + mutations.iter().map(mutation_bytes).sum::<usize>();
+        if !payload.is_empty() && bytes.saturating_add(size) > max_bytes.max(1) {
+            break;
+        }
+        bytes = bytes.saturating_add(size);
+        payload.push(CommitDecisionApply {
+            commit_ts: decision.commit_ts,
+            mutations,
+        });
+    }
+    payload
+}
+
 /// 扫描 region 0 决策日志，把新决策应用到本节点领导的数据 Region。
 ///
 /// 返回本轮推进的决策条数（跨 Region 合计）。单个 Region 失败不阻止其他
@@ -75,23 +114,16 @@ pub async fn apply_pending_decisions(node: &CoordNode, batch: usize) -> Result<u
             if batch_decisions.is_empty() {
                 break;
             }
-            let Some(last_ts) = batch_decisions.last().map(|decision| decision.commit_ts) else {
+            let payload = build_apply_batch(
+                &batch_decisions,
+                &meta,
+                batch,
+                node.kvt().config().max_txn_bytes as usize,
+            );
+            let Some(last_ts) = payload.last().map(|decision| decision.commit_ts) else {
                 break;
             };
-
-            let payload: Vec<CommitDecisionApply> = batch_decisions
-                .iter()
-                .map(|decision| CommitDecisionApply {
-                    commit_ts: decision.commit_ts,
-                    mutations: decision
-                        .mutations
-                        .iter()
-                        .filter(|mutation| key_in_region(&meta, mutation.key()))
-                        .cloned()
-                        .collect::<Vec<SequencerMutation>>(),
-                })
-                .collect();
-            let more = batch_decisions.len() >= batch;
+            let more = payload.len() >= batch || payload.len() < batch_decisions.len();
 
             match rt
                 .raft
@@ -186,6 +218,64 @@ mod tests {
             approximate_size: 0,
             approximate_keys: 0,
         }
+    }
+
+    fn decision(
+        commit_ts: u64,
+        mutations: Vec<SequencerMutation>,
+    ) -> crate::storage::mvcc::SequencerDecision {
+        crate::storage::mvcc::SequencerDecision {
+            txn_id: format!("t{commit_ts}").into_bytes(),
+            request_id: Vec::new(),
+            start_ts: commit_ts.saturating_sub(1),
+            commit_ts,
+            mutations,
+        }
+    }
+
+    fn put(key: &[u8], value: &[u8]) -> SequencerMutation {
+        SequencerMutation::Put {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            lease_id: None,
+        }
+    }
+
+    #[test]
+    fn build_apply_batch_caps_bytes_and_keeps_order() {
+        let all = meta(b"", b"");
+        let decisions = vec![
+            decision(10, vec![put(b"a", &[0u8; 100])]),
+            decision(20, vec![put(b"b", &[0u8; 100])]),
+            decision(30, Vec::new()),
+        ];
+        let payload = build_apply_batch(&decisions, &all, 10, 150);
+        assert_eq!(
+            payload.len(),
+            1,
+            "second 100B txn must wait for the next batch"
+        );
+        assert_eq!(payload[0].commit_ts, 10);
+
+        // 空决策几乎不占字节：不因前面的数据决策被挤掉顺序。
+        let payload = build_apply_batch(&decisions, &all, 10, usize::MAX);
+        assert_eq!(payload.len(), 3);
+        assert_eq!(payload[2].commit_ts, 30);
+
+        // 首条超预算也保留，绝不丢决策。
+        let payload = build_apply_batch(&decisions, &all, 10, 1);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0].commit_ts, 10);
+    }
+
+    #[test]
+    fn build_apply_batch_filters_by_region() {
+        let region = meta(b"m", b"t");
+        let decisions = vec![decision(10, vec![put(b"a", b"1"), put(b"n", b"2")])];
+        let payload = build_apply_batch(&decisions, &region, 10, usize::MAX);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0].mutations.len(), 1);
+        assert_eq!(payload[0].mutations[0].key(), b"n");
     }
 
     #[test]
