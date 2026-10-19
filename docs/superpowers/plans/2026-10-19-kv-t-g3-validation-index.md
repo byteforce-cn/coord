@@ -264,4 +264,4 @@ bash scripts/check-doc-refs.sh
 - `cargo audit`：1 条既有 allowed warning（unsafe-libyaml unmaintained）；
   `cargo deny check`：advisories/bans/licenses/sources 全 ok。
 - `bash scripts/check-doc-refs.sh`：在仅含 Git 跟踪文件的 detached worktree 中 OK
-  （本地工作区的悬空引用全部来自 gitignored `docs/pki-assessment/`）。
+  （本地工作区的悬空引用全部来自 gitignored 的 pki 历史文档）。
