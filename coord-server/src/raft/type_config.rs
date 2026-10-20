@@ -5,9 +5,10 @@
 use serde::{Deserialize, Serialize};
 
 use coord_core::error::{Error, Result};
-use coord_core::types::NodeID;
+use coord_core::types::{NodeID, RegionMeta};
 
 use crate::pd::operator::{Operator, OperatorStatus};
+use crate::storage::region_table::RegionChange;
 use crate::txn::{TxnCompare, TxnOp, TxnOpResponse};
 
 // ──── 应用层数据类型 ────
@@ -554,6 +555,29 @@ pub enum CommitLogShardOp {
     Gc { through_ts: u64 },
 }
 
+/// Region 元数据操作（仅 region 0 system raft 提出，#159）。
+///
+/// 表是单键整表（见 `storage::region_table`）：`Init` 只在空表时种入静态
+/// `initial_regions`，`Apply` 在一个 raft 条目里原子应用一批 add/update/remove
+/// （split = Update + Add，merge = Update + Remove）。表级非法变更降级为
+/// `Rejected`，不失败 apply（D11.5）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegionMetaOp {
+    /// 空表种子；已有表（`version > 0`）时幂等 no-op。
+    Init { regions: Vec<RegionMeta> },
+    /// 原子应用一批区间变更；任一非法则整批拒绝。
+    Apply { changes: Vec<RegionChange> },
+}
+
+/// Region 表操作结果（随 raft 响应返回，节点间确定）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegionMetaOutcome {
+    /// 已应用（或幂等 no-op）；`version` 是应用后的表版本。
+    Applied { version: u64 },
+    /// 表级拒绝；表内容与版本不变。
+    Rejected { reason: String },
+}
+
 /// Raft 日志负载：客户端提交的状态机命令
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
@@ -675,6 +699,11 @@ pub enum Command {
     /// **末尾追加**；`watermark` 是「<= 它的 `commit_ts` 不会再有新 CommitRecord」
     /// 的单调承诺，apply 不推进 revision、不写 changelog。
     PublishCommitWatermark { watermark: u64 },
+    /// Region 元数据表操作（仅 region 0 system raft 提出，#159）。
+    ///
+    /// **末尾追加**；表写 `/_sys/pd/regions`，不产生 Watch 事件、不推进业务
+    /// revision。
+    RegionMeta(RegionMetaOp),
 }
 
 impl std::fmt::Display for Command {
@@ -726,6 +755,7 @@ impl std::fmt::Display for Command {
             Command::PublishSafeTs { fence_ts } => {
                 write!(f, "PublishSafeTs(fence_ts={fence_ts})")
             }
+            Command::RegionMeta(op) => write!(f, "RegionMeta({op:?})"),
             Command::LeaseV2(op) => write!(f, "LeaseV2({op:?})"),
             Command::DeleteKeysByLeaseV2 {
                 lease_id,
@@ -870,6 +900,10 @@ pub enum Response {
     CommitWatermarkPublished {
         watermark: u64,
     },
+    /// Region 表操作结果（#159）：拒绝只体现在 outcome 里，不是 apply 错误。
+    RegionMeta {
+        outcome: RegionMetaOutcome,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -947,6 +981,7 @@ impl std::fmt::Display for Response {
             Response::CommitWatermarkPublished { watermark } => {
                 write!(f, "CommitWatermarkPublished(watermark={watermark})")
             }
+            Response::RegionMeta { outcome } => write!(f, "RegionMeta({outcome:?})"),
         }
     }
 }
