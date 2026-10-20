@@ -119,7 +119,10 @@
   `DELETE_RANGE` 删除 `[key, range_end)`（`range_end` 必须非空且大于 `key`），
   与同一事务的其它 mutation 共享 `commit_ts`，跨 Region 由 `safe_ts` 收敛后
   原子可见；point/range 读集与区间写按相交判冲突（冲突返回 `TXN_CONFLICT`；
-  校验索引扫描超 `max_range` 返回 `READ_SET_TOO_LARGE`）。TTL 从 `Begin`
+  校验索引扫描超 `max_range` 返回 `READ_SET_TOO_LARGE`）。`max_range` 按区间
+  索引条目总量计（生命周期累计，超过后所有带读集的事务都会被拒），不是单次
+  谓词的 key 数；区间删除的 apply 成本与区间内存活 key 数成正比（不按
+  `max_txn_bytes` 计）。容量、GC 与分块 apply 见 #174。TTL 从 `Begin`
   起算、`Read` 不续期；split drain 期间命中被 drain 区间的 `Read` 返回
   `UNAVAILABLE`（退避后重试同一会话，或重跑）。
 - **Lease v2**：Grant/Revoke/KeepAlive/TimeToLive 由 region 0 leader 服务；租约

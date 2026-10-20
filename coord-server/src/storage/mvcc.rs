@@ -220,6 +220,12 @@ pub struct SequencerIndexRebuild {
     pub keys: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 区间索引扫描次数：钉住「每事务最多扫一次」的复杂度契约。
+    static INTERVAL_INDEX_SCANS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
 /// 带域分隔与长度前缀的 SHA-256（避免 `("ab","c")` 与 `("a","bc")` 撞键）。
 fn sequencer_hash(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -3367,7 +3373,24 @@ impl<B: StorageBackend> MvccStorage<B> {
 
         // `max_range = 0` 沿用区间查询约定（不限制）；超预算不是冲突，
         // 而是「无法证明无冲突」：调用方必须收窄谓词/拆分事务后重试。
+        //
+        // 区间索引每个事务只扫一次：按 read_set 逐 key 重复全量扫描会让最热的
+        // region0 apply 变成 O(read_set × 索引项)。读集为空时不扫，避免无读
+        // 事务因索引总量被拒。
         let max_range = limits.map_or(0, |limits| limits.max_range as usize);
+        let interval_entries = if txn.read_set.is_empty() {
+            Vec::new()
+        } else {
+            match Self::sequencer_interval_rows_in(tx, max_range)? {
+                Some(entries) => entries,
+                None => {
+                    return Ok(SequencerOutcome::Invalid {
+                        commit_ts: txn.commit_ts,
+                        reason: SequencerInvalid::RangeScanExceeded,
+                    })
+                }
+            }
+        };
         for key in &txn.read_set {
             let index_key =
                 prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
@@ -3380,21 +3403,14 @@ impl<B: StorageBackend> MvccStorage<B> {
                     });
                 }
             }
-            match Self::sequencer_interval_point_in(tx, key, txn.start_ts, max_range)? {
-                SequencerRangeQuery::Clear => {}
-                SequencerRangeQuery::Hit(hit) => {
-                    return Ok(SequencerOutcome::Conflict {
-                        commit_ts: txn.commit_ts,
-                        conflict_key: key.clone(),
-                        conflict_ts: hit.commit_ts,
-                    });
-                }
-                SequencerRangeQuery::Exceeded { .. } => {
-                    return Ok(SequencerOutcome::Invalid {
-                        commit_ts: txn.commit_ts,
-                        reason: SequencerInvalid::RangeScanExceeded,
-                    });
-                }
+            if let Some(hit) =
+                Self::sequencer_interval_point_hit(&interval_entries, key, txn.start_ts)
+            {
+                return Ok(SequencerOutcome::Conflict {
+                    commit_ts: txn.commit_ts,
+                    conflict_key: key.clone(),
+                    conflict_ts: hit.commit_ts,
+                });
             }
         }
 
@@ -3824,6 +3840,8 @@ impl<B: StorageBackend> MvccStorage<B> {
         tx: &(impl ReadTx + ?Sized),
         max_entries: usize,
     ) -> Result<Option<Vec<SequencerIntervalWrite>>> {
+        #[cfg(test)]
+        INTERVAL_INDEX_SCANS.with(|scans| scans.set(scans.get() + 1));
         let fetch_limit = if max_entries == 0 {
             0
         } else {
@@ -3859,6 +3877,20 @@ impl<B: StorageBackend> MvccStorage<B> {
                 scanned: max_entries,
             });
         };
+        Ok(
+            match Self::sequencer_interval_point_hit(&entries, key, start_ts) {
+                Some(hit) => SequencerRangeQuery::Hit(hit),
+                None => SequencerRangeQuery::Clear,
+            },
+        )
+    }
+
+    /// 在已读到的区间索引项里查 point 命中（不再重复扫描索引）。
+    fn sequencer_interval_point_hit(
+        entries: &[SequencerIntervalWrite],
+        key: &[u8],
+        start_ts: Revision,
+    ) -> Option<SequencerIndexHit> {
         let mut best: Option<SequencerIndexHit> = None;
         for entry in entries {
             if entry.commit_ts <= start_ts {
@@ -3866,16 +3898,13 @@ impl<B: StorageBackend> MvccStorage<B> {
             }
             if entry.start.as_slice() <= key && key < entry.end.as_slice() {
                 let hit = SequencerIndexHit {
-                    key: entry.start,
+                    key: entry.start.clone(),
                     commit_ts: entry.commit_ts,
                 };
                 best = Self::best_index_hit(best, Some(hit));
             }
         }
-        Ok(match best {
-            Some(hit) => SequencerRangeQuery::Hit(hit),
-            None => SequencerRangeQuery::Clear,
-        })
+        best
     }
 
     /// 读区间是否与某条区间写相交。
@@ -8874,6 +8903,53 @@ mod tests {
             }]
         );
         assert!(storage.get_sequencer_decision(20).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sequencer_interval_scan_is_not_per_read_key() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![range_delete_txn(b"t1", 1, 10, b"a", b"z")]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+
+        INTERVAL_INDEX_SCANS.with(|scans| scans.set(0));
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(
+                        b"t2",
+                        5,
+                        20,
+                        b"r2",
+                        &[b"0", b"1", b"a1"],
+                        &[],
+                        &[],
+                    )],
+                    4_096,
+                    10_000,
+                ),
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert!(matches!(
+            outcomes.as_slice(),
+            [SequencerOutcome::Conflict {
+                conflict_key,
+                conflict_ts: 10,
+                ..
+            }] if conflict_key == b"a1"
+        ));
+        assert_eq!(
+            INTERVAL_INDEX_SCANS.with(std::cell::Cell::get),
+            1,
+            "the interval index must be scanned once per txn, not once per read key"
+        );
     }
 
     #[test]

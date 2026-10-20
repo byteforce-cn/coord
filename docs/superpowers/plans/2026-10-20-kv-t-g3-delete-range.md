@@ -572,3 +572,16 @@ git switch main && git pull
 | point/range 读集与区间写冲突；不重叠不冲突 | `test_sequencer_range_delete_conflicts_with_point_and_range_read`、`test_txn_delete_range_conflicts_with_point_and_range_read_sets` | ☑ |
 | `[kv_t].enabled=false` 时 v1 行为不变 | 既有 `kv_t_g0_test` / v1 套件 | ☑ |
 | 门禁与文档 | Task 5 命令输出 + `check-doc-refs.sh` | ☑ |
+
+## 复查修复（post-merge review）
+
+- **I1**：point 读集校验改为每事务扫一次区间索引（原实现逐 key 全量扫，
+  `read_set × 索引项`）；新增 `test_sequencer_interval_scan_is_not_per_read_key`
+  钉住扫描次数。
+- **I2/I3**：`consumer-contract.md` 披露 `max_range` 是区间条目总量（生命周期
+  累计）与区间删除 apply 成本按存活 key 计；容量、GC、分块 apply 归 #174
+  （已在 issue 留档）。
+- **Minor（M1–M7）**：记录在 SDD ledger，未在本轮修复（doc 注释位置、range
+  命中未与区间命中取最大 ts、point 区间查询对空 end 的防御分支、测试清理
+  辅助缺少区间前缀、proto 头缺 `key < range_end`、损坏索引行的错误策略、
+  stall warning 频率）。
