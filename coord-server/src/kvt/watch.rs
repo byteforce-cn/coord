@@ -497,12 +497,12 @@ fn resolve_position(
     }
     if meta.end_ts != 0 && cursor.commit_ts >= meta.end_ts {
         // 续订 cursor 已越过该 shard 的末尾：定位到覆盖该 ts 的 shard。
-        if let Some(cover) = table.covering(cursor.commit_ts) {
-            let cover_index = table
-                .shards
-                .iter()
-                .position(|candidate| candidate.shard_id == cover.shard_id)
-                .expect("covering shard must be in the table");
+        if let Some((cover_index, _)) = table
+            .shards
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.covers(cursor.commit_ts))
+        {
             return Ok((cover_index, cursor.commit_ts));
         }
     }
