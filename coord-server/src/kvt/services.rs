@@ -25,10 +25,14 @@ use coord_core::error_code::{attach, CoordErrorCode};
 use coord_core::kv_range::RangeSemantics;
 
 use super::lease as lease_rpc;
+use super::sequencer::CommitCandidate;
 use super::txn::{ReadIntent, ReadSetLimit, SessionError};
 use super::KvTCapability;
 use crate::raft::tso::{normalize_batch_size, TsoAllocator, TsoBatch};
-use crate::raft::type_config::{Command, Response as RaftResponse};
+use crate::raft::type_config::{
+    Command, Response as RaftResponse, SequencerInvalid, SequencerMutation, SequencerOutcome,
+    SequencerReadRange,
+};
 use crate::server::{map_err, CoordNode, KvRangeSegment};
 
 /// 门禁 + 未实现哨兵。
@@ -730,11 +734,73 @@ impl kv_v2::kv_server::Kv for CoordNode {
 // ──── coord.txn.v2 ────
 
 /// 会话错误的线上映射：调用方只按 trailer 码分支（D12.5）。
+/// 把 wire 上的写集转成 sequencer 事务，并在进入会话前拒绝非法形状。
+///
+/// 用户级输入错误用 `INVALID_ARGUMENT`（不可重试）：形状校验先于会话提交占用，
+/// 非法请求不会把会话卡在 `Committing`。区间写尚未交付（`SequencerMutation`
+/// 只有 point 写，OCC 写索引按 key 枚举），因此 `DELETE_RANGE` fail-closed，
+/// 不静默退化成单 key。
+fn validate_commit_mutations(
+    mutations: &[txn_v2::Mutation],
+) -> Result<Vec<SequencerMutation>, Status> {
+    use txn_v2::mutation::Op;
+
+    let mut out = Vec::with_capacity(mutations.len());
+    for mutation in mutations {
+        if mutation.lease_id < 0 {
+            return Err(attach(
+                Status::invalid_argument("lease_id must be >= 0"),
+                CoordErrorCode::InvalidArgument,
+            ));
+        }
+        out.push(match mutation.op() {
+            Op::Put if mutation.range_end.is_empty() => SequencerMutation::Put {
+                key: mutation.key.clone(),
+                value: mutation.value.clone(),
+                lease_id: (mutation.lease_id != 0).then_some(mutation.lease_id),
+            },
+            Op::Delete if mutation.range_end.is_empty() => SequencerMutation::Delete {
+                key: mutation.key.clone(),
+            },
+            Op::DeleteRange => {
+                return Err(Status::unimplemented(
+                    "txn DELETE_RANGE is not implemented; delete keys individually",
+                ))
+            }
+            Op::Put | Op::Delete | Op::Unspecified => {
+                return Err(attach(
+                    Status::invalid_argument(
+                        "invalid mutation: PUT/DELETE must be a single key (empty range_end)",
+                    ),
+                    CoordErrorCode::InvalidArgument,
+                ))
+            }
+        });
+    }
+    Ok(out)
+}
+
 fn txn_session_status(err: SessionError) -> Status {
     match err {
         SessionError::NotFound => attach(
             Status::aborted("transaction session not found or expired; restart the transaction"),
             CoordErrorCode::TxnNotFound,
+        ),
+        SessionError::Closed => attach(
+            Status::aborted("transaction is committing or committed; start a new transaction"),
+            CoordErrorCode::TxnNotFound,
+        ),
+        SessionError::Committed => attach(
+            Status::failed_precondition(
+                "transaction already committed with a different request_id; start a new transaction",
+            ),
+            CoordErrorCode::FailedPrecondition,
+        ),
+        SessionError::CommitInProgress => attach(
+            Status::failed_precondition(
+                "transaction commit already in progress with another request_id",
+            ),
+            CoordErrorCode::FailedPrecondition,
         ),
         SessionError::ReadSetLimit(ReadSetLimit::Entries) => attach(
             Status::invalid_argument(
@@ -905,12 +971,130 @@ impl txn_v2::txn_server::Txn for CoordNode {
         }))
     }
 
-    /// 决策/校验归 #149/#151；未交付前门禁通过后返回 `UNIMPLEMENTED`。
+    /// 读集快照 + 写集交给 region 0 Commit Sequencer；`commit_ts` 由 sequencer
+    /// 分配。冲突/非法不写决策，会话回到可 `Abort` 的状态；幂等重放直接返回
+    /// 首次 `commit_ts`。不等待各 Region apply（D12.3）。
     async fn commit(
         &self,
-        _request: Request<txn_v2::CommitRequest>,
+        request: Request<txn_v2::CommitRequest>,
     ) -> Result<Response<txn_v2::CommitResponse>, Status> {
-        Err(shell(KvTCapability::Txn, self))
+        self.kvt().gate(KvTCapability::Txn)?;
+        let req = request.into_inner();
+        if req.txn_id.is_empty() {
+            return Err(attach(
+                Status::invalid_argument("txn_id must not be empty"),
+                CoordErrorCode::InvalidArgument,
+            ));
+        }
+        let mutations = validate_commit_mutations(&req.mutations)?;
+
+        let input = self
+            .txn_sessions()
+            .begin_commit(&req.txn_id, &req.request_id)
+            .map_err(txn_session_status)?;
+        if let Some(commit_ts) = input.replay {
+            return Ok(Response::new(txn_v2::CommitResponse {
+                commit_ts: ts_to_i64(commit_ts)?,
+            }));
+        }
+
+        let release = |status: Status| {
+            self.txn_sessions()
+                .cancel_commit(&req.txn_id, &req.request_id);
+            status
+        };
+
+        // 与 coord.kv.v2.Put 同规则：提案前拒绝死租约，避免决策落盘后无法
+        // 再绑定/清理。验证失败释放提交占用，会话仍可 Abort 或改写集重试。
+        for mutation in &mutations {
+            if let SequencerMutation::Put {
+                lease_id: Some(lease_id),
+                ..
+            } = mutation
+            {
+                if let Err(status) = lease_rpc::require_live_lease(self, *lease_id) {
+                    return Err(release(status));
+                }
+            }
+        }
+
+        let Some(sequencer) = self.commit_sequencer() else {
+            return Err(release(attach(
+                Status::failed_precondition(
+                    "txn Commit requires the region0 Commit Sequencer (local assembly missing)",
+                ),
+                CoordErrorCode::FailedPrecondition,
+            )));
+        };
+
+        let (read_set, read_ranges) = input.read_set.into_parts();
+        let candidate = CommitCandidate {
+            txn_id: req.txn_id.clone(),
+            start_ts: input.start_ts,
+            request_id: req.request_id.clone(),
+            read_set,
+            read_ranges: read_ranges
+                .into_iter()
+                .map(|range| SequencerReadRange {
+                    start: range.start,
+                    end: range.end,
+                })
+                .collect(),
+            mutations,
+        };
+        let limit = self.kvt().config().max_txn_bytes;
+        if candidate.wire_bytes() as u64 > limit {
+            return Err(release(attach(
+                Status::invalid_argument(format!(
+                    "transaction write set exceeds max_txn_bytes ({limit}); split the transaction"
+                )),
+                CoordErrorCode::TxnTooLarge,
+            )));
+        }
+
+        let outcome = match sequencer.validate_and_commit(vec![candidate]).await {
+            Ok(outcomes) => outcomes.into_iter().next(),
+            // 传输失败可能已经落盘（幂等索引会回放）；释放占用让重试可继续。
+            Err(err) => return Err(release(v2_status(err))),
+        };
+        match outcome {
+            Some(SequencerOutcome::Committed { commit_ts })
+            | Some(SequencerOutcome::Duplicate { commit_ts }) => {
+                self.txn_sessions()
+                    .finish_commit(&req.txn_id, &req.request_id, commit_ts);
+                Ok(Response::new(txn_v2::CommitResponse {
+                    commit_ts: ts_to_i64(commit_ts)?,
+                }))
+            }
+            Some(SequencerOutcome::Conflict { commit_ts, .. }) => Err(release(attach(
+                Status::aborted(format!(
+                    "transaction conflict at commit_ts {commit_ts}; restart with a newer start_ts"
+                )),
+                CoordErrorCode::TxnConflict,
+            ))),
+            Some(SequencerOutcome::Invalid { reason, .. }) => Err(release(match reason {
+                SequencerInvalid::ReadSetTooLarge | SequencerInvalid::RangeScanExceeded => attach(
+                    Status::invalid_argument("transaction read set exceeds the server limit"),
+                    CoordErrorCode::ReadSetTooLarge,
+                ),
+                SequencerInvalid::CommitTsNotAboveStart => Status::internal(
+                    "sequencer allocated commit_ts not above start_ts (TSO invariant breach)",
+                ),
+                SequencerInvalid::MissingTxnId => attach(
+                    Status::invalid_argument("txn_id must not be empty"),
+                    CoordErrorCode::InvalidArgument,
+                ),
+            })),
+            Some(SequencerOutcome::OutOfOrder {
+                commit_ts,
+                last_commit_ts,
+            }) => Err(release(Status::internal(format!(
+                "commit_ts {commit_ts} is not above the sequencer watermark {last_commit_ts}"
+            )))),
+            None => Err(release(Status::internal(
+                "sequencer returned no outcome for the transaction",
+            ))),
+        }
     }
 
     /// 幂等删除会话：未知/已过期/已 abort 的 id 不报错。
@@ -1018,10 +1202,82 @@ mod tests {
     use super::*;
     use coord_core::error_code::error_code_of;
 
+    fn mutation(op: txn_v2::mutation::Op, key: &[u8], range_end: &[u8]) -> txn_v2::Mutation {
+        txn_v2::Mutation {
+            op: op as i32,
+            key: key.to_vec(),
+            range_end: range_end.to_vec(),
+            value: b"v".to_vec(),
+            lease_id: 0,
+        }
+    }
+
     #[test]
     fn draining_session_error_is_retryable_unavailable() {
         let status = txn_session_status(SessionError::Draining);
         assert_eq!(status.code(), tonic::Code::Unavailable);
         assert_eq!(error_code_of(&status).as_deref(), Some("UNAVAILABLE"));
+    }
+
+    #[test]
+    fn commit_mutations_validate_ops_and_ranges() {
+        use txn_v2::mutation::Op;
+
+        assert!(validate_commit_mutations(&[mutation(Op::Put, b"k", b"")]).is_ok());
+        assert!(validate_commit_mutations(&[mutation(Op::Delete, b"k", b"")]).is_ok());
+
+        for bad in [
+            mutation(Op::Unspecified, b"k", b""),
+            mutation(Op::Put, b"k", b"z"),
+            mutation(Op::Delete, b"k", b"z"),
+        ] {
+            let err = validate_commit_mutations(&[bad]).expect_err("invalid mutation");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+            assert_eq!(error_code_of(&err).as_deref(), Some("INVALID_ARGUMENT"));
+        }
+
+        // 区间写尚未交付：fail-closed 而不是静默退化成单 key。
+        assert_eq!(
+            validate_commit_mutations(&[mutation(Op::DeleteRange, b"a", b"b")])
+                .expect_err("delete range")
+                .code(),
+            tonic::Code::Unimplemented
+        );
+
+        let mut negative_lease = mutation(Op::Put, b"k", b"");
+        negative_lease.lease_id = -1;
+        assert_eq!(
+            validate_commit_mutations(&[negative_lease])
+                .expect_err("negative lease")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn session_errors_map_to_protocol_codes() {
+        let not_found = txn_session_status(SessionError::NotFound);
+        assert_eq!(not_found.code(), tonic::Code::Aborted);
+        assert_eq!(error_code_of(&not_found).as_deref(), Some("TXN_NOT_FOUND"));
+
+        let closed = txn_session_status(SessionError::Closed);
+        assert_eq!(closed.code(), tonic::Code::Aborted);
+        assert_eq!(error_code_of(&closed).as_deref(), Some("TXN_NOT_FOUND"));
+
+        for err in [SessionError::Committed, SessionError::CommitInProgress] {
+            let status = txn_session_status(err);
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+            assert_eq!(
+                error_code_of(&status).as_deref(),
+                Some("FAILED_PRECONDITION")
+            );
+        }
+
+        let too_large = txn_session_status(SessionError::ReadSetLimit(ReadSetLimit::RangeKeys));
+        assert_eq!(too_large.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            error_code_of(&too_large).as_deref(),
+            Some("READ_SET_TOO_LARGE")
+        );
     }
 }

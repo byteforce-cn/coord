@@ -2915,9 +2915,10 @@ async fn run_server(
     if cfg.kv_t.enabled {
         tracing::warn!(
             "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2), KV (coord.kv.v2), \
-             the txn read phase (coord.txn.v2 Begin/Read/Abort) and the internal Commit \
-             Sequencer are available; txn Commit and the remaining v2 RPCs stay \
-             FAILED_PRECONDITION/UNIMPLEMENTED until their gate lands"
+             Txn (coord.txn.v2 Begin/Read/Commit/Abort, OCC + Commit Sequencer) and Lease \
+             (coord.lease.v2) are available; Watch/Storage v2 stay \
+             FAILED_PRECONDITION/UNIMPLEMENTED and txn DELETE_RANGE stays UNIMPLEMENTED \
+             until their gate lands"
         );
     } else {
         tracing::info!(

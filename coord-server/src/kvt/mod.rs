@@ -6,10 +6,11 @@
 //! 2. 某个 v2 能力是否已经交付（G0–G6 分批；未交付 = `FAILED_PRECONDITION`）。
 //!
 //! v2 服务**始终注册**（reflection 可见）；`implemented` 只包含已交付 gate 的
-//! 能力（当前为 G1 的 `Tso`、`Kv` 读与单 Region 写，G2 的 `Txn` 读阶段）。
-//! 其余 RPC 返回 `FAILED_PRECONDITION`。后续 gate
-//! 在自己的 issue 里把对应能力加入 `implemented` 并实现 handler；不得用"未实现
-//! 就返回 UNIMPLEMENTED"绕过门禁（那会让调用方无法区分"关闭"与"写错地址"）。
+//! 能力（当前为 G1 的 `Tso`、`Kv` 读与单 Region 写，G2 的 `Txn` 读阶段，G3 的
+//! `Txn` Commit）。未交付的 handler 返回 `UNIMPLEMENTED`，未开启/未交付的能力
+//! 返回 `FAILED_PRECONDITION`。后续 gate 在自己的 issue 里把对应能力加入
+//! `implemented` 并实现 handler；不得用"未实现就返回 UNIMPLEMENTED"绕过门禁
+//! （那会让调用方无法区分"关闭"与"写错地址"）。
 
 use std::collections::BTreeSet;
 

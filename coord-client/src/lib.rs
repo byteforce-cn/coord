@@ -9,6 +9,7 @@
 // - retry:       重试策略（指数退避、错误分类）
 // - client:      主客户端 + KV/Lease/Watch/Txn/Maintenance/Storage 子客户端
 //                + 高级 Lock API
+// - txn_v2:      coord.txn.v2 事务会话（Begin/Read/Commit/Abort，绑定协调节点）
 // - tls:         TLS/mTLS Channel 构建（Config.tls，供连接池与 Leader 发现共用）
 // （R-AGT-20：route_cache 死代码已移除——单连接直连模式无需 Leader 路由缓存）
 
@@ -21,6 +22,7 @@ pub mod pool;
 pub mod refresh;
 pub mod retry;
 mod tls;
+pub mod txn_v2;
 
 // 重新导出主要类型
 pub use auth::AuthClient;
@@ -38,3 +40,4 @@ pub use credential::{
 pub use leader::LeaderDiscovery;
 pub use refresh::{spawn_session_refresher, SessionGateway, SessionTokens, REFRESH_LEAD_SECS};
 pub use retry::{classify_error, RetryDecision, RetryState};
+pub use txn_v2::{delete_mutation, put_mutation, TxnCommit, TxnV2Client, TxnV2Session};

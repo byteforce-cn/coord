@@ -207,6 +207,11 @@ impl Client {
         KvClient::new(self.clone())
     }
 
+    /// 返回 v2 事务客户端（`coord.txn.v2` Begin/Read/Commit/Abort）。
+    pub fn txn_v2(&self) -> crate::txn_v2::TxnV2Client {
+        crate::txn_v2::TxnV2Client::new(self.clone())
+    }
+
     /// 返回 KV v2 客户端（KV-T G1 最小面：显式 commit_ts / read_ts）。
     pub fn kv_v2(&self) -> KvV2Client {
         KvV2Client::new(self.clone())
