@@ -20,6 +20,7 @@ use coord_core::storage::{ReadTx, StorageBackend, WriteTx};
 use coord_core::types::{LeaseID, Revision};
 
 use crate::security::barrier::Barrier;
+use crate::storage::commit_log::{CommitLogAppend, CommitRecord};
 
 // ──── Key 空间常量 ────
 
@@ -79,6 +80,8 @@ pub(crate) const TABLE_KV: &str = "kv";
 pub(crate) const TABLE_META: &str = "meta";
 pub(crate) const TABLE_CHANGELOG: &str = "changelog";
 pub(crate) const TABLE_KV_META: &str = "kv_meta";
+/// Commit Log（#153）：`(shard_id, commit_ts, region_id)` → zstd(postcard(CommitRecord))。
+pub(crate) const TABLE_COMMIT_LOG: &str = "commit_log";
 
 // ──── KV 元数据 Key 前缀 ────
 
@@ -3771,6 +3774,51 @@ impl<B: StorageBackend> MvccStorage<B> {
             })
         })?;
         Ok(result)
+    }
+
+    /// 追加一条 CommitRecord（维护/测试入口；apply 走同事务的 `append_in_tx`）。
+    pub fn append_commit_record(
+        &self,
+        record: &CommitRecord,
+        max_txn_bytes: u64,
+    ) -> Result<CommitLogAppend> {
+        self.backend.write(|tx| {
+            crate::storage::commit_log::append_commit_record_in_tx(tx, record, max_txn_bytes)
+        })
+    }
+
+    /// 同一 `commit_ts` 的全部 Region 分片，按 `(commit_ts, region_id)` 升序。
+    pub fn commit_records_at(&self, shard_id: u64, commit_ts: u64) -> Result<Vec<CommitRecord>> {
+        self.backend.read(|tx| {
+            let prefix = crate::storage::commit_log::encode_commit_log_key(shard_id, commit_ts, 0);
+            let prefix = &prefix[..prefix.len() - 8];
+            tx.iter_prefix(TABLE_COMMIT_LOG, prefix)?
+                .into_iter()
+                .map(|(key, value)| crate::storage::commit_log::decode_commit_log_row(&key, &value))
+                .collect()
+        })
+    }
+
+    /// `commit_ts > after_ts` 的分片，最多 `limit` 行（`0` = 不限）。
+    pub fn commit_records_after(
+        &self,
+        shard_id: u64,
+        after_ts: u64,
+        limit: usize,
+    ) -> Result<Vec<CommitRecord>> {
+        self.backend.read(|tx| {
+            let start = crate::storage::commit_log::encode_commit_log_key(
+                shard_id,
+                after_ts.saturating_add(1),
+                0,
+            );
+            let shard_prefix = crate::storage::commit_log::commit_log_shard_prefix(shard_id);
+            let end = prefix_upper_bound(&shard_prefix);
+            tx.iter_range_limited(TABLE_COMMIT_LOG, &start, &end, limit)?
+                .into_iter()
+                .map(|(key, value)| crate::storage::commit_log::decode_commit_log_row(&key, &value))
+                .collect()
+        })
     }
 
     /// 已决策的最大 `commit_ts`（缺失 = 0）。
@@ -9019,5 +9067,129 @@ mod tests {
         );
         assert_eq!(result.decisions, 0);
         assert_eq!(storage.get(b"x").unwrap(), Some(b"1".to_vec()));
+    }
+    // ──── Commit Log（#153）────
+
+    fn commit_record(
+        commit_ts: Revision,
+        region_id: u64,
+        value: &[u8],
+    ) -> crate::storage::commit_log::CommitRecord {
+        use crate::storage::commit_log::{CommitChange, CommitRecord, COMMIT_LOG_STAGING_SHARD_ID};
+        CommitRecord {
+            shard_id: COMMIT_LOG_STAGING_SHARD_ID,
+            commit_ts,
+            txn_id: format!("txn-{commit_ts}-{region_id}").into_bytes(),
+            start_ts: commit_ts.saturating_sub(1),
+            region_id,
+            txn_bytes: 32,
+            changes: vec![CommitChange {
+                key: b"k".to_vec(),
+                value: Some(value.to_vec()),
+                prev: None,
+            }],
+        }
+    }
+
+    fn commit_log_rows(storage: &MvccStorage<RedbBackend>) -> Vec<(Vec<u8>, Vec<u8>)> {
+        storage
+            .backend()
+            .read(|tx| {
+                tx.iter_prefix(
+                    TABLE_COMMIT_LOG,
+                    crate::storage::commit_log::COMMIT_LOG_PREFIX,
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn test_commit_log_append_is_idempotent_and_rejects_conflicts() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let record = commit_record(10, 1, b"v1");
+
+        assert_eq!(
+            storage
+                .append_commit_record(&record, 4 * 1024 * 1024)
+                .unwrap(),
+            crate::storage::commit_log::CommitLogAppend::Inserted
+        );
+        assert_eq!(
+            storage
+                .append_commit_record(&record, 4 * 1024 * 1024)
+                .unwrap(),
+            crate::storage::commit_log::CommitLogAppend::Duplicate
+        );
+        assert_eq!(commit_log_rows(&storage).len(), 1, "exactly one row");
+
+        let conflicting = commit_record(10, 1, b"v2");
+        assert!(
+            storage
+                .append_commit_record(&conflicting, 4 * 1024 * 1024)
+                .is_err(),
+            "a different record for the same (shard, ts, region) must fail closed"
+        );
+        let rows = commit_log_rows(&storage);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            crate::storage::commit_log::CommitRecord::decode(&rows[0].1).unwrap(),
+            record,
+            "the stored row must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn test_commit_log_reads_fragments_in_commit_ts_order() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let shard = crate::storage::commit_log::COMMIT_LOG_STAGING_SHARD_ID;
+        for (ts, region, value) in [(10u64, 3u64, b"c".as_slice()), (20, 2, b"b"), (10, 1, b"a")] {
+            storage
+                .append_commit_record(&commit_record(ts, region, value), 4 * 1024 * 1024)
+                .unwrap();
+        }
+
+        let all = storage.commit_records_after(shard, 0, 0).unwrap();
+        let order: Vec<(u64, u64)> = all
+            .iter()
+            .map(|record| (record.commit_ts, record.region_id))
+            .collect();
+        assert_eq!(order, vec![(10, 1), (10, 3), (20, 2)]);
+
+        let later = storage.commit_records_after(shard, 10, 0).unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!((later[0].commit_ts, later[0].region_id), (20, 2));
+
+        let at = storage.commit_records_at(shard, 10).unwrap();
+        assert_eq!(at.len(), 2, "both region fragments for commit_ts=10");
+        assert_eq!(at[0].changes[0].value.as_deref(), Some(b"a".as_slice()));
+
+        assert_eq!(storage.commit_records_after(shard, 0, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_commit_log_survives_reopen() {
+        let dir = TempDir::new().unwrap();
+        let record = commit_record(15, 4, b"kept");
+        {
+            let storage = MvccStorage::new_with_revision_mode(
+                RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap(),
+                RevisionMode::CommitTs,
+            )
+            .unwrap();
+            storage
+                .append_commit_record(&record, 4 * 1024 * 1024)
+                .unwrap();
+        }
+
+        let reopened = MvccStorage::new_with_revision_mode(
+            RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap(),
+            RevisionMode::CommitTs,
+        )
+        .unwrap();
+        let shard = crate::storage::commit_log::COMMIT_LOG_STAGING_SHARD_ID;
+        assert_eq!(
+            reopened.commit_records_after(shard, 0, 0).unwrap(),
+            vec![record]
+        );
     }
 }

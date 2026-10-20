@@ -8,8 +8,10 @@
 use serde::{Deserialize, Serialize};
 
 use coord_core::error::{Error, Result};
+use coord_core::storage::{ReadTx, WriteTx};
 
 use crate::raft::type_config::SequencerMutation;
+use crate::storage::mvcc::TABLE_COMMIT_LOG;
 
 /// 帧魔数：控制字节 `0x01` + `CLR`（便于 hexdump 辨识，且不会与 postcard 首字节混淆）。
 pub const COMMIT_LOG_MAGIC: [u8; 4] = [0x01, b'C', b'L', b'R'];
@@ -25,6 +27,19 @@ pub const COMMIT_LOG_STAGING_SHARD_ID: u64 = 1;
 
 /// 单帧解压上界：4MiB 写集 + prev 值/信封开销的硬上界（防 zip bomb）。
 pub const COMMIT_LOG_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+/// Commit Log 键空间：`/_sys/commit_log/{shard:u64be}/{commit_ts:u64be}/{region:u64be}`。
+///
+/// 选择 `/_sys/`：与决策日志/校验索引同域；shard 在最外层，便于 #154 按 shard
+/// 整段迁移到独立 raft group。
+pub const COMMIT_LOG_PREFIX: &[u8] = b"/_sys/commit_log/";
+
+/// `append` 的结果：新写入 vs 同内容重放。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitLogAppend {
+    Inserted,
+    Duplicate,
+}
 
 /// 帧头：MAGIC(4) | VERSION(1) | CODEC(1) | uncompressed_len(4 BE) | compressed_len(4 BE)。
 const COMMIT_LOG_HEADER_LEN: usize = 14;
@@ -195,6 +210,68 @@ impl CommitRecord {
         }
         Ok(record)
     }
+}
+
+/// 一个 shard 的键前缀（`commit_records_after` 的扫描边界）。
+pub(crate) fn commit_log_shard_prefix(shard_id: u64) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(COMMIT_LOG_PREFIX.len() + 8);
+    prefix.extend_from_slice(COMMIT_LOG_PREFIX);
+    prefix.extend_from_slice(&shard_id.to_be_bytes());
+    prefix
+}
+
+pub(crate) fn encode_commit_log_key(shard_id: u64, commit_ts: u64, region_id: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(COMMIT_LOG_PREFIX.len() + 24);
+    key.extend_from_slice(COMMIT_LOG_PREFIX);
+    key.extend_from_slice(&shard_id.to_be_bytes());
+    key.extend_from_slice(&commit_ts.to_be_bytes());
+    key.extend_from_slice(&region_id.to_be_bytes());
+    key
+}
+
+/// 幂等写入：同键同内容 = `Duplicate`，同键不同内容 = fail-closed。
+///
+/// 与数据 apply 同一条 redb 事务调用，因此「数据可见 ⇒ 记录已落盘」；重放走
+/// changelog 守卫，不会重复写。
+pub(crate) fn append_commit_record_in_tx(
+    tx: &mut dyn WriteTx,
+    record: &CommitRecord,
+    max_txn_bytes: u64,
+) -> Result<CommitLogAppend> {
+    let key = encode_commit_log_key(record.shard_id, record.commit_ts, record.region_id);
+    let encoded = record.encode(max_txn_bytes)?;
+    match tx.get(TABLE_COMMIT_LOG, &key)? {
+        Some(existing) => {
+            let existing = CommitRecord::decode(&existing).map_err(|err| {
+                Error::Storage(format!(
+                    "existing commit record {}:{}:{} is unreadable: {err}",
+                    record.shard_id, record.commit_ts, record.region_id
+                ))
+            })?;
+            if existing == *record {
+                Ok(CommitLogAppend::Duplicate)
+            } else {
+                Err(Error::Storage(format!(
+                    "conflicting commit record for shard {} commit_ts {} region {}",
+                    record.shard_id, record.commit_ts, record.region_id
+                )))
+            }
+        }
+        None => {
+            tx.insert(TABLE_COMMIT_LOG, &key, &encoded)?;
+            Ok(CommitLogAppend::Inserted)
+        }
+    }
+}
+
+/// 解码一行；坏行带键上下文显式失败。
+pub(crate) fn decode_commit_log_row(key: &[u8], bytes: &[u8]) -> Result<CommitRecord> {
+    CommitRecord::decode(bytes)
+        .map_err(|err| Error::Storage(format!("commit log row {}: {err}", hex_key(key))))
+}
+
+fn hex_key(key: &[u8]) -> String {
+    key.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
