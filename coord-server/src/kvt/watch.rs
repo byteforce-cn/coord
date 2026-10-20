@@ -13,7 +13,7 @@ use std::sync::Arc;
 use coord_core::error::Error;
 
 use crate::kvt::commit_log_shards::CommitLogShardManager;
-use crate::storage::commit_log::{CommitChange, CommitPrevValue, CommitRecord};
+use crate::storage::commit_log::{CommitChange, CommitRecord};
 use crate::storage::commit_log_shard::{CommitLogShardMeta, CommitLogShardTable};
 
 /// 单批 change 条数上限（D9；协议同口径）。
@@ -197,16 +197,13 @@ impl BatchBuilder {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn events(&self) -> &[WatchEvent] {
         &self.events
     }
 
     pub(crate) fn into_events(self) -> Vec<WatchEvent> {
         self.events
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.events.is_empty()
     }
 }
 
@@ -515,6 +512,7 @@ fn resolve_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::commit_log::CommitPrevValue;
 
     fn change(key: &[u8], value: Option<&[u8]>) -> CommitChange {
         CommitChange {
