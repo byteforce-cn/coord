@@ -133,7 +133,11 @@
   `LeaseTimeToLive(keys=true)` 从请求节点的数据 Region 副本收集绑定 key（有上限）。
 - **Watch**：按 `commit_ts` 全局有序、同一事务原子批；断线用
   `WatchCursor(shard_id, commit_ts)` 续订；窗口不足 `OUT_OF_RANGE` +
-  `HISTORY_UNAVAILABLE`（须全量重同步）。
+  `HISTORY_UNAVAILABLE`（须全量重同步）。Commit Log 记录按 Region 分片、按
+  `commit_ts` 合并为一个原子事件；记录含完整 key/value 与 `prev_kv`（不依赖
+  Region 历史），zstd 压缩，写集 4MiB 上限在 Commit 阶段强制；记录值与 MVCC
+  同信封（保留 `key_id`），DEK 轮换窗口须 ≥ `watch_retention`（默认 24h，最大
+  7d），否则超出窗口的旧事件不可解密。Commit Log 随快照/备份恢复归 #169。
 - **路由**：可带 metadata `coord-routing-epoch`；epoch 过期返回 `ABORTED` +
   `EPOCH_STALE`，刷新路由后重试。
 - **对象存储**：manifest 用 `commit_ts`；`/obj/` 固定 Region 区间，不参与任意
