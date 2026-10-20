@@ -166,7 +166,23 @@
   **数据 Region 的 staging outbox 尚未裁剪**，因此磁盘上界暂不严格等于
   窗口 × 写入速率（裁剪归 #174 的容量工作）；回收进度看
   `coord_kv_t_commit_log_gc_before` 与 `coord_kv_t_commit_log_shards_gc_total`。
-  **尚未提供**：v2 Watch RPC/授权/订阅指标（后续 gate）。
+  **RPC 面**（`coord.watch.v2.Watch`，G4）：双向流，首帧必须是 `create`；同一流可
+  建多个订阅，`cancel` 按 `watch_id` 生效（未知 id 幂等）。服务端建立订阅后先回一条
+  空 `events` 批（ack），回显解析后的 `cursor` 与当前 `watermark`/`sealed`；
+  `start_revision` 与 `start_cursor` 互斥（同时给出 `INVALID_ARGUMENT`），
+  `start_revision=0` 表示从当前 watermark 之后开始。`range_end` 空 = 单 key，
+  key/range 都空 = 全 keyspace；`filter`/`prev_kv` 只裁剪事件内容，cursor 照常推进。
+  历史窗口不足时 RPC 以 `OUT_OF_RANGE` + `HISTORY_UNAVAILABLE` 终止（消息带最老可用
+  位置），**不是**可重试错误。单条流的响应通道有界（32 批）：慢消费者承受背压，
+  服务端不丢事件。`coord-client` 的 `watch_v2()` 包装隐藏 `watch_id`，断线后用最后
+  一批 `cursor` 自动重开流；投递语义是**至少一次**（重放按 `commit_ts` 幂等）。
+  订阅指标：`coord_kv_t_watch_streams`、`coord_kv_t_watch_batches_total`、
+  `coord_kv_t_watch_events_total`、`coord_kv_t_watch_lag_commit_ts`、
+  `coord_kv_t_watch_history_unavailable_total`、`coord_kv_t_watch_backpressure_total`。
+  **授权边界**：能力 `data:watch:subscribe`；鉴权层对非空 scope 的该能力授权目前
+  整体 fail-closed（prefix 级 watch 授权待后续 auth 项），handler 在收到
+  `DeferredScopeGrants` 时会按首帧区间判定，且保留命名空间（`/_pki/` 等）与
+  `/obj/` 的订阅一律拒绝。
 - **路由**：可带 metadata `coord-routing-epoch`；epoch 过期返回 `ABORTED` +
   `EPOCH_STALE`，刷新路由后重试。
 - **对象存储**：manifest 用 `commit_ts`；`/obj/` 固定 Region 区间，不参与任意
