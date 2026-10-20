@@ -103,6 +103,10 @@ struct MetricsInner {
     pub kv_t_commit_log_seal_lag_seconds: AtomicU64,
     /// watermark 停滞超时后 seal 的 shard 数
     pub kv_t_commit_watermark_stalls_total: AtomicU64,
+    /// 已回收的 Commit Log 水位：`commit_ts < 它的记录已不可读`（0 = 尚未回收）
+    pub kv_t_commit_log_gc_before: AtomicU64,
+    /// 本节点实际回收的 Commit Log shard 组数
+    pub kv_t_commit_log_shards_gc_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的请求次数
     pub kv_v2_safe_ts_wait_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的累计毫秒
@@ -278,6 +282,8 @@ impl Default for MetricsInner {
             kv_t_commit_in_flight: AtomicU64::new(0),
             kv_t_commit_log_seal_lag_seconds: AtomicU64::new(0),
             kv_t_commit_watermark_stalls_total: AtomicU64::new(0),
+            kv_t_commit_log_gc_before: AtomicU64::new(0),
+            kv_t_commit_log_shards_gc_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_millis_total: AtomicU64::new(0),
             kvt_sequencer_batches_total: AtomicU64::new(0),
@@ -729,6 +735,20 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 发布 Commit Log 回收水位（gauge）。
+    pub fn set_kv_t_commit_log_gc_before(&self, ts: u64) {
+        self.inner
+            .kv_t_commit_log_gc_before
+            .store(ts, Ordering::Relaxed);
+    }
+
+    /// 本节点回收的 shard 组数（counter）。
+    pub fn add_kv_t_commit_log_shards_gc(&self, shards: u64) {
+        self.inner
+            .kv_t_commit_log_shards_gc_total
+            .fetch_add(shards, Ordering::Relaxed);
+    }
+
     /// v2 KV 读等待 safe_ts：请求数 +1、累计等待毫秒。
     pub fn inc_kv_v2_safe_ts_wait(&self, waited_millis: u64) {
         self.inner
@@ -1031,6 +1051,22 @@ impl Metrics {
             "coord_kv_t_commit_watermark_stalls_total {}\n",
             inner
                 .kv_t_commit_watermark_stalls_total
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_log_gc_before Commit Log history before this commit_ts is reclaimed (0 = nothing reclaimed)\n");
+        out.push_str("# TYPE coord_kv_t_commit_log_gc_before gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_log_gc_before {}\n",
+            inner.kv_t_commit_log_gc_before.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_log_shards_gc_total Commit Log shard groups reclaimed on this node\n");
+        out.push_str("# TYPE coord_kv_t_commit_log_shards_gc_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_log_shards_gc_total {}\n",
+            inner
+                .kv_t_commit_log_shards_gc_total
                 .load(Ordering::Relaxed)
         ));
 
@@ -1733,6 +1769,17 @@ mod tests {
         assert!(output.contains("grpc_method_requests_total{method=\"/coord.kv.KV/Range\"} 1"));
         assert!(output.contains("grpc_method_errors_total{method=\"/coord.kv.KV/Range\"} 0"));
     }
+    #[test]
+    fn test_metrics_commit_log_gc() {
+        let m = Metrics::new();
+        m.set_kv_t_commit_log_gc_before(101);
+        m.add_kv_t_commit_log_shards_gc(2);
+
+        let output = m.render_prometheus_text();
+        assert!(output.contains("coord_kv_t_commit_log_gc_before 101"));
+        assert!(output.contains("coord_kv_t_commit_log_shards_gc_total 2"));
+    }
+
     #[test]
     fn test_metrics_commit_watermark() {
         let m = Metrics::new();
