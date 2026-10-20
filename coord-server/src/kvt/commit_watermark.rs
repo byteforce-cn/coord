@@ -76,11 +76,7 @@ mod tests {
     #[test]
     fn pending_decision_starts_after_the_applied_cursor() {
         assert_eq!(pending_decision(5, Some(7)), Some(7));
-        assert_eq!(
-            pending_decision(7, Some(7)),
-            None,
-            "等于游标的决策已 apply"
-        );
+        assert_eq!(pending_decision(7, Some(7)), None, "等于游标的决策已 apply");
         assert_eq!(pending_decision(7, None), None);
         assert_eq!(pending_decision(0, Some(2)), Some(2));
     }

@@ -23,14 +23,14 @@ use std::time::Duration;
 use coord_core::error::{Error, Result};
 use coord_core::types::{NodeID, RegionEpoch, RegionMeta};
 
+use crate::kvt::commit_watermark::{
+    commit_watermark, pending_decision, unshipped_record, CommitWatermarkState,
+};
 use crate::kvt::KvTRuntimeConfig;
 use crate::raft::network::RaftNetworkFactoryImpl;
 use crate::raft::region::RegionHandle;
 use crate::raft::region_runtime::{
     region_data_dir, spawn_region_runtime, RegionRuntime, RegionRuntimeSpec,
-};
-use crate::kvt::commit_watermark::{
-    commit_watermark, pending_decision, unshipped_record, CommitWatermarkState,
 };
 use crate::raft::type_config::{Command, CommitLogShardOp, Response};
 use crate::raft::{CoordRaft, RaftConfig};
@@ -153,9 +153,10 @@ impl CommitLogShardManager {
         let mut in_flight = Vec::new();
 
         for rt in &regions {
-            let applied = rt.mvcc.last_applied_decision_ts().map_err(|err| {
-                format!("region {} read decision cursor: {err}", rt.region_id())
-            })?;
+            let applied = rt
+                .mvcc
+                .last_applied_decision_ts()
+                .map_err(|err| format!("region {} read decision cursor: {err}", rt.region_id()))?;
             let next = self
                 .mvcc
                 .next_sequencer_decision_ts(applied)
@@ -405,9 +406,10 @@ impl CommitLogShardManager {
             if state.watermark > self.published_watermark()? {
                 self.publish_watermark(state.watermark).await?;
             }
-            let (opened, sealed) = self.advance_metadata().await?;
+            let (opened, sealed, stalls) = self.advance_metadata(state.watermark).await?;
             tick.opened = opened;
             tick.sealed = sealed;
+            tick.stalls = stalls;
         }
 
         Ok(tick)
@@ -417,9 +419,12 @@ impl CommitLogShardManager {
     ///
     /// `end_ts` 取 `max(本 shard 已 ship 的 ts, sequencer 最后决策 ts) + 1`：
     /// 之后的新决策一定落进新 shard，之前的落进旧 shard。sealed shard 仍接受
-    /// 区间内的迟到记录（outbox 晚到），因此不会丢事件——#155 的 watermark 会
-    /// 把「不再有迟到记录」变成可判定的条件。
-    async fn advance_metadata(&self) -> std::result::Result<(u64, u64), String> {
+    /// 区间内的迟到记录（outbox 晚到），因此不会丢事件；`watermark >= end_ts`
+    /// 才说明「不再有迟到记录」。
+    async fn advance_metadata(
+        &self,
+        watermark: u64,
+    ) -> std::result::Result<(u64, u64, u64), String> {
         let now = self.now_ms();
         let cfg = &self.config;
         let table = self
@@ -427,6 +432,7 @@ impl CommitLogShardManager {
             .map_err(|err| format!("read commit log shard table: {err}"))?;
         let mut opened = 0;
         let mut sealed = 0;
+        let mut stalls = 0;
 
         let Some(latest) = table.shards.last().cloned() else {
             self.propose(CommitLogShardOp::Open {
@@ -435,7 +441,7 @@ impl CommitLogShardManager {
             })
             .await
             .map_err(|err| format!("open the first commit log shard: {err}"))?;
-            return Ok((1, 0));
+            return Ok((1, 0, 0));
         };
 
         let rt = self.ensure_runtime(latest.shard_id).await?;
@@ -483,27 +489,21 @@ impl CommitLogShardManager {
                 .await
                 .map_err(|err| format!("pre-create the next commit log shard: {err}"))?;
                 opened += 1;
-                if full {
-                    self.propose(CommitLogShardOp::Seal {
-                        shard_id: latest.shard_id,
-                        now_ms: now,
-                    })
-                    .await
-                    .map_err(|err| format!("seal shard {}: {err}", latest.shard_id))?;
-                    sealed += 1;
-                }
             }
         }
 
         let table = self
             .table()
             .map_err(|err| format!("read commit log shard table: {err}"))?;
+        // seal 主条件是 D9 的 `watermark >= end_ts`：它证明区间内的记录已全部
+        // 落进 shard，且此后不会再有更小的 commit_ts。超时只是停滞兜底——钉住
+        // watermark 的 Region/shipper 可能长时间不可用，不能让 shard 永久 open。
         for meta in table
             .shards
             .iter()
             .filter(|meta| meta.end_ts != 0 && meta.sealed_at_ms == 0)
         {
-            if seal_timeout_due(meta.ended_at_ms, now, cfg.shard_seal_timeout_secs) {
+            if watermark >= meta.end_ts {
                 self.propose(CommitLogShardOp::Seal {
                     shard_id: meta.shard_id,
                     now_ms: now,
@@ -511,9 +511,24 @@ impl CommitLogShardManager {
                 .await
                 .map_err(|err| format!("seal shard {}: {err}", meta.shard_id))?;
                 sealed += 1;
+            } else if seal_timeout_due(meta.ended_at_ms, now, cfg.shard_seal_timeout_secs) {
+                tracing::warn!(
+                    shard_id = meta.shard_id,
+                    end_ts = meta.end_ts,
+                    watermark,
+                    "commit log shard seal stalled; sealing on timeout"
+                );
+                self.propose(CommitLogShardOp::Seal {
+                    shard_id: meta.shard_id,
+                    now_ms: now,
+                })
+                .await
+                .map_err(|err| format!("seal shard {}: {err}", meta.shard_id))?;
+                sealed += 1;
+                stalls += 1;
             }
         }
-        Ok((opened, sealed))
+        Ok((opened, sealed, stalls))
     }
 
     /// 把一个 shard 的 outbox 记录搬进 shard raft 组（仅本地 shard leader）。
@@ -599,6 +614,8 @@ pub struct CommitLogShardTick {
     pub watermark: u64,
     /// 钉住 watermark 的未完成项数量（未 apply 决策 + 未搬运记录）。
     pub in_flight: u64,
+    /// 因 watermark 停滞超时而 seal 的 shard 数。
+    pub stalls: u64,
 }
 
 /// 单批记录条数上限（与 sequencer 批同量级；raft 负载由字节预算再切）。
@@ -1047,12 +1064,13 @@ mod tests {
         fx.set_now(2_000 + 300_000);
         let tick = fx.manager.tick().await.unwrap();
         assert_eq!(tick.sealed, 1, "seal timeout closes the bounded shard");
+        assert_eq!(tick.stalls, 1, "stalled watermark is observable");
         let table = fx.manager.table().unwrap();
         assert_eq!(table.shards[0].sealed_at_ms, 2_000 + 300_000);
     }
 
     #[tokio::test]
-    async fn tick_seals_immediately_when_the_record_capacity_is_reached() {
+    async fn tick_bounds_a_full_shard_and_the_timeout_seals_it() {
         let fx = ShardFixture::start_with(
             KvTRuntimeConfig {
                 commit_log_shard_records: 2,
@@ -1064,10 +1082,17 @@ mod tests {
         fx.manager.tick().await.unwrap();
         fx.ship_one(1, b"a", b"1").await;
         fx.ship_one(2, b"b", b"2").await;
+        // 达阈值只定界 + 预创建；没有新决策时 watermark 不大于 end_ts。
         let table = fx.manager.table().unwrap();
         assert_eq!(table.shards.len(), 2);
-        assert!(table.shards[0].sealed_at_ms > 0);
+        assert_eq!(table.shards[0].sealed_at_ms, 0);
         assert!(table.shards[0].end_ts > table.shards[0].start_ts);
+
+        fx.set_now(1_000 + 300_000);
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.stalls, 1);
+        assert_eq!(tick.sealed, 1);
+        assert!(fx.manager.table().unwrap().shards[0].sealed_at_ms > 0);
     }
 
     #[tokio::test]
@@ -1133,5 +1158,99 @@ mod tests {
         let tick = fx.manager.tick().await.unwrap();
         assert_eq!(tick.shipped, 2);
         assert_eq!(tick.watermark, 3);
+    }
+
+    #[tokio::test]
+    async fn watermark_seals_a_completed_shard_without_waiting_for_the_timeout() {
+        let fx = ShardFixture::start().await;
+        fx.manager.tick().await.unwrap(); // open shard 1
+        fx.write_decisions(&[2, 3, 4]);
+        fx.apply_decisions(&[2, 3, 4]);
+        fx.manager.tick().await.unwrap(); // ship 2/3/4, watermark = 4
+        fx.manager
+            .propose(CommitLogShardOp::SetEnd {
+                shard_id: 1,
+                end_ts: 4,
+                now_ms: 1_000,
+            })
+            .await
+            .unwrap();
+
+        // 时钟不动：seal 只能来自 watermark，不是超时。
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.stalls, 0);
+        assert_eq!(tick.sealed, 1);
+        let table = fx.manager.table().unwrap();
+        assert_eq!(table.shards[0].sealed_at_ms, 1_000, "tick 使用注入时钟");
+        assert_eq!(table.shards[0].end_ts, 4, "seal 不改边界");
+    }
+
+    #[tokio::test]
+    async fn stalled_watermark_is_observable_and_still_lands_late_records() {
+        let fx = ShardFixture::start().await;
+        fx.manager.tick().await.unwrap(); // open shard 1
+        fx.write_decisions(&[2, 3]);
+        fx.manager
+            .propose(CommitLogShardOp::SetEnd {
+                shard_id: 1,
+                end_ts: 3,
+                now_ms: 2_000,
+            })
+            .await
+            .unwrap();
+
+        // 决策 2 未 apply：watermark 停在 1，< end_ts。
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.sealed, 0);
+        assert_eq!(tick.stalls, 0);
+
+        fx.set_now(2_000 + 300_000);
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.stalls, 1, "超时后走兜底并计入停滞");
+        assert_eq!(tick.sealed, 1);
+
+        // seal 之后迟到的区间内记录仍必须落进 shard（不丢事件）。
+        fx.apply_decisions(&[2]);
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.shipped, 1);
+        assert_eq!(fx.manager.records_at(1, 2).await.unwrap().len(), 1);
+
+        // seal 后不再接受越界记录：边界 [1,3) 之外的 ts=3 被 shard 拒收。
+        let response = fx
+            .manager
+            .runtime(1)
+            .unwrap()
+            .raft
+            .client_write(Command::CommitLogAppend {
+                shard_id: 1,
+                start_ts: 1,
+                end_ts: 3,
+                max_txn_bytes: fx.manager.config().max_txn_bytes,
+                records: vec![crate::storage::commit_log::CommitRecord {
+                    shard_id: 1,
+                    commit_ts: 3,
+                    txn_id: b"txn-3".to_vec(),
+                    start_ts: 2,
+                    region_id: fx.data.region_id(),
+                    txn_bytes: 16,
+                    changes: vec![crate::storage::commit_log::CommitChange {
+                        key: b"k3".to_vec(),
+                        value: Some(b"v".to_vec()),
+                        prev: None,
+                    }],
+                }],
+            })
+            .await
+            .unwrap();
+        match response.response() {
+            Response::CommitLogAppend {
+                inserted, rejected, ..
+            } => {
+                assert_eq!(*inserted, 0, "sealed shard 不写越界记录");
+                assert_eq!(*rejected, 1);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(fx.manager.records_at(1, 3).await.unwrap().is_empty());
     }
 }
