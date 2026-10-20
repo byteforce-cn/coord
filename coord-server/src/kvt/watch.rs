@@ -336,9 +336,7 @@ impl WatchCoordinator {
                 // GC 可能在可用性检查与 shard 读取之间推进：此时正确的语义是
                 // HISTORY_UNAVAILABLE，而不是把内部错误泄露给调用方。
                 if let Ok(fresh) = self.shards.table() {
-                    if let Err(history) = ensure_available(&fresh, cursor) {
-                        return Err(history);
-                    }
+                    ensure_available(&fresh, cursor)?;
                 }
                 Err(err)
             }
