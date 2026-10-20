@@ -2439,6 +2439,8 @@ async fn run_server(
     // 单 Raft（region 0）；装配发生在 bootstrap/join 之后、CoordNode 之前。
     let region_shared_factory = network_factory.clone();
     let region_raft_config = Arc::clone(&raft_config);
+    // Commit Log shard 组的 raft 调优与数据 Region 一致（#154）。
+    let shard_raft_config = Arc::clone(&raft_config);
     let raft =
         coord_server::raft::new_raft(node_id, raft_config, network_factory, log_store, sm_store)
             .await
@@ -2865,6 +2867,27 @@ async fn run_server(
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
     node.set_metrics(Arc::clone(&metrics));
+
+    // 6.6a Commit Log shard 协调器（#154）：region 0 是 shard 元数据权威，
+    //      每个 shard 一个独立 Raft 组。只在 kv_t + Multi-Raft 装配时构造；
+    //      关闭态不产生任何目录/任务（ADR-0001）。
+    if cfg.kv_t.enabled {
+        if let (Some(manager), Some(raft)) = (node.region_manager.as_ref(), node.raft.as_ref()) {
+            node.set_commit_log_shards(Arc::new(
+                coord_server::kvt::commit_log_shards::CommitLogShardManager::new(
+                    node_id,
+                    raft.as_ref().clone(),
+                    Arc::clone(&node.storage),
+                    Arc::clone(manager),
+                    region_shared_factory.clone(),
+                    raft_rpc_service.clone(),
+                    data_dir.clone(),
+                    Arc::clone(&shard_raft_config),
+                    node.kvt().config().clone(),
+                ),
+            ));
+        }
+    }
     // 校验索引与决策日志同事务推进；这里只补旧快照/索引缺失留下的缺口。
     // 失败即拒绝启动：残缺索引会让后续 OCC 冲突判断失效。
     if cfg.kv_t.enabled {
@@ -3411,6 +3434,18 @@ async fn run_server(
     // 7.5 KV-T safe_ts 推进器（#142）：region 0 leader 发布 TSO 分配高水位
     //     fence，各节点把本地领导的 Region 水位抬到 fence。关闭 kv_t / 无
     //     Multi-Raft 时不启动（v1 行为不变）。
+    // 7.5b Commit Log shard 协调任务（#154）：装配 shard raft 组、推进
+    //      open/预创建/seal 元数据、把数据 Region outbox 搬进 shard 组。
+    let _commit_log_shards = if cfg.kv_t.enabled && node.commit_log_shards().is_some() {
+        tracing::info!("KV-T commit log shard manager started");
+        Some(coord_server::kvt::commit_log_shards::start_shard_manager(
+            Arc::clone(&node),
+            coord_server::kvt::commit_log_shards::SHARD_TICK_INTERVAL,
+        ))
+    } else {
+        None
+    };
+
     let _safe_ts_advancer =
         if cfg.kv_t.enabled && node.region_manager.is_some() && node.raft.is_some() {
             tracing::info!(
