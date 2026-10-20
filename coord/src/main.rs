@@ -22,7 +22,7 @@ use clap::{Parser, Subcommand};
 use coord_server::raft::WatchReceiver;
 
 use coord_core::storage::StorageBackend;
-use coord_core::types::{Peer, PeerRole};
+use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta};
 use coord_proto::auth::auth_server::AuthServer;
 use coord_proto::capability::capability_registry_server::CapabilityRegistryServer;
 use coord_proto::kv::kv_server::KvServer;
@@ -1958,6 +1958,50 @@ async fn snapshot_restore(
     Ok(())
 }
 
+/// 经 region 0 raft 种入权威 Region 表（幂等：已有表时 `Init` no-op）。
+///
+/// v2 集群没有 Region 表就无法执行 split/merge，种子失败使启动失败
+/// （fail-closed）。leader 未就绪时在 30s 内重试；每个节点都提交同一条
+/// `Init`，避免 bootstrap 节点重启/后来加入时丢失种子。
+async fn seed_region_table(
+    raft: &coord_server::raft::CoordRaft,
+    regions: Vec<RegionMeta>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use coord_server::raft::type_config::{Command, RegionMetaOp, RegionMetaOutcome, Response};
+
+    let cmd = Command::RegionMeta(RegionMetaOp::Init { regions });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match raft.client_write(cmd.clone()).await {
+            Ok(resp) => match resp.response() {
+                Response::RegionMeta {
+                    outcome: RegionMetaOutcome::Applied { version },
+                } => {
+                    tracing::info!(version, "region table seeded via region 0 raft");
+                    return Ok(());
+                }
+                Response::RegionMeta {
+                    outcome: RegionMetaOutcome::Rejected { reason },
+                } => {
+                    return Err(format!("region table seed rejected: {reason}").into());
+                }
+                other => {
+                    return Err(format!("unexpected region table seed response: {other}").into())
+                }
+            },
+            Err(err) => {
+                if tokio::time::Instant::now() > deadline {
+                    return Err(format!(
+                        "seed region table via raft failed (cluster may need a leader): {err}"
+                    )
+                    .into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
 // ──── Server 启动逻辑 ────
 
 async fn run_server(
@@ -2868,6 +2912,29 @@ async fn run_server(
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
     node.set_metrics(Arc::clone(&metrics));
+
+    // 6.6a 权威 Region 表（#159）：region 0 是元数据权威，各节点本地 apply 后
+    //      通过 `refresh_region_table` 收敛路由。`[kv_t]` 关闭时不写表。
+    if cfg.kv_t.enabled {
+        let regions: Vec<RegionMeta> = region_seeds
+            .iter()
+            .map(|seed| RegionMeta {
+                region_id: seed.region_id,
+                start_key: seed.start_key.clone(),
+                end_key: seed.end_key.clone(),
+                epoch: RegionEpoch::initial(),
+                peers: region_peers.clone(),
+                approximate_size: 0,
+                approximate_keys: 0,
+            })
+            .collect();
+        if let Some(raft) = node.raft.as_ref() {
+            seed_region_table(raft.as_ref(), regions).await?;
+        }
+        if let Err(err) = node.refresh_region_table() {
+            tracing::warn!(error = %err, "initial region table refresh failed");
+        }
+    }
 
     // 6.6a Commit Log shard 协调器（#154）：region 0 是 shard 元数据权威，
     //      每个 shard 一个独立 Raft 组。只在 kv_t + Multi-Raft 装配时构造；

@@ -470,6 +470,37 @@ impl CoordNode {
         &self.kvt
     }
 
+    /// 把本节点 region 0 已 apply 的权威 Region 表收敛到路由表（#159）。
+    ///
+    /// 每个节点都复制 region 0 raft，因此本地 `MvccStorage` 就是表的收敛点；
+    /// 这里只做一次单键读 + 版本比较。`[kv_t]` 关闭 / 无 RegionManager / 表
+    /// 未初始化（version 0）→ `Ok(false)`，v1 静态装配行为不变。
+    ///
+    /// 读失败不改变路由：旧表在 split/merge 数据迁移落地前仍是有效路由，
+    /// 不把一次存储抖动升级成所有 KV 请求失败。
+    pub fn refresh_region_table(&self) -> coord_core::error::Result<bool> {
+        if !self.kvt.is_enabled() {
+            return Ok(false);
+        }
+        let Some(manager) = self.region_manager.as_ref() else {
+            return Ok(false);
+        };
+        let table = match self.storage.region_table() {
+            Ok(table) => table,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "read region table failed; keeping current routing table"
+                );
+                return Ok(false);
+            }
+        };
+        if table.version == 0 {
+            return Ok(false);
+        }
+        manager.apply_region_table(&table)
+    }
+
     /// 注入本地 TSO 批次缓存（`[kv_t].enabled=true` 且 region 0 raft 已装配）。
     /// 必须在 `Arc::new(node)` 之前调用。
     pub fn set_tso_client(&mut self, client: Arc<TsoClient>) {
@@ -675,6 +706,9 @@ impl CoordNode {
     /// KeyNotInRegion→invalid_argument）；legacy 模式返回 region 0 目标
     /// （CoordNode 自有 storage/raft/raft_log_store，行为与现状一致）。
     pub(crate) fn kv_target_for_key(&self, key: &[u8]) -> Result<KvTarget, tonic::Status> {
+        if let Err(err) = self.refresh_region_table() {
+            tracing::warn!(error = %err, "region table refresh failed; using current routing");
+        }
         if let Some(manager) = &self.region_manager {
             let rt = manager.route_runtime(key).map_err(map_err)?;
             Ok(kv_target_from_runtime(&rt))
@@ -699,6 +733,9 @@ impl CoordNode {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<KvRangeSegment>, tonic::Status> {
+        if let Err(err) = self.refresh_region_table() {
+            tracing::warn!(error = %err, "region table refresh failed; using current routing");
+        }
         let Some(manager) = &self.region_manager else {
             return Ok(vec![KvRangeSegment {
                 target: self.kv_target_for_key(start)?,
