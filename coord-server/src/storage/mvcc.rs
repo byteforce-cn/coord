@@ -145,6 +145,12 @@ const SEQUENCER_KEY_INDEX_PREFIX: &[u8] = b"/_sys/seq/vidx/";
 /// 只需一次（有界）区间扫描。
 const SEQUENCER_RANGE_INDEX_PREFIX: &[u8] = b"/_sys/seq/ridx/";
 
+/// 区间写校验索引：`sha256("interval", start, end)` → `SequencerIntervalWrite`。
+///
+/// 区间写没有可枚举的 key，不能进点索引；OCC 的 point/range 校验都在这里
+/// 扫（有界），命中条件见 `sequencer_interval_*_in`。
+const SEQUENCER_INTERVAL_INDEX_PREFIX: &[u8] = b"/_sys/seq/iidx/";
+
 /// 两个校验索引共同覆盖到的最大 commit_ts（u64 BE；缺失 = 0）。
 ///
 /// 正常提交在同一事务里推进它；落后时按它追赶，重建时先清它。
@@ -180,6 +186,17 @@ pub struct CommitDecisionApplyResult {
 pub struct SequencerIndexHit {
     pub key: Vec<u8>,
     pub commit_ts: Revision,
+}
+
+/// 区间写索引项：`[start, end)` 在 `commit_ts` 被整段写（删除）。
+///
+/// 存完整边界而不只是哈希，冲突诊断能回报区间起点；同一 `(start, end)` 只保留
+/// 最大 `commit_ts`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SequencerIntervalWrite {
+    start: Vec<u8>,
+    end: Vec<u8>,
+    commit_ts: Revision,
 }
 
 /// range 谓词校验查询的结果。
@@ -251,22 +268,36 @@ fn encode_sequencer_decision_key(commit_ts: Revision) -> Vec<u8> {
 }
 
 /// 决策重放判定：同 `commit_ts` 的 changelog 必须与决策内容逐项一致。
+///
+/// 含 `DeleteRange` 的决策一律返回 false：区间删除产生的 change 条数取决于
+/// apply 时存活的 key，无法从 mutation 反推。游标与 changelog 同事务写入，
+/// 正常重放会在 `commit_ts <= 游标` 处跳过；能走到这里的只可能是同 ts 已被
+/// 非决策写占用，停在该决策前（fail-closed）比误判「已应用」安全。
 fn event_matches_mutations(
     event: &ChangeEvent,
     mutations: &[crate::raft::type_config::SequencerMutation],
 ) -> bool {
+    use crate::raft::type_config::SequencerMutation;
+
+    if mutations
+        .iter()
+        .any(|mutation| matches!(mutation, SequencerMutation::DeleteRange { .. }))
+    {
+        return false;
+    }
     event.changes.len() == mutations.len()
         && event
             .changes
             .iter()
             .zip(mutations)
             .all(|(change, mutation)| match mutation {
-                crate::raft::type_config::SequencerMutation::Put { key, value, .. } => {
+                SequencerMutation::Put { key, value, .. } => {
                     change.key == *key && change.value.as_deref() == Some(value.as_slice())
                 }
-                crate::raft::type_config::SequencerMutation::Delete { key } => {
+                SequencerMutation::Delete { key } => {
                     change.key == *key && change.value.is_none()
                 }
+                SequencerMutation::DeleteRange { .. } => false,
             })
 }
 
@@ -3336,6 +3367,9 @@ impl<B: StorageBackend> MvccStorage<B> {
             }
         }
 
+        // `max_range = 0` 沿用区间查询约定（不限制）；超预算不是冲突，
+        // 而是「无法证明无冲突」：调用方必须收窄谓词/拆分事务后重试。
+        let max_range = limits.map_or(0, |limits| limits.max_range as usize);
         for key in &txn.read_set {
             let index_key =
                 prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
@@ -3348,11 +3382,24 @@ impl<B: StorageBackend> MvccStorage<B> {
                     });
                 }
             }
+            match Self::sequencer_interval_point_in(tx, key, txn.start_ts, max_range)? {
+                SequencerRangeQuery::Clear => {}
+                SequencerRangeQuery::Hit(hit) => {
+                    return Ok(SequencerOutcome::Conflict {
+                        commit_ts: txn.commit_ts,
+                        conflict_key: key.clone(),
+                        conflict_ts: hit.commit_ts,
+                    });
+                }
+                SequencerRangeQuery::Exceeded { .. } => {
+                    return Ok(SequencerOutcome::Invalid {
+                        commit_ts: txn.commit_ts,
+                        reason: SequencerInvalid::RangeScanExceeded,
+                    });
+                }
+            }
         }
 
-        // `max_range = 0` 沿用区间查询约定（不限制）；超预算不是冲突，
-        // 而是「无法证明无冲突」：调用方必须收窄谓词/拆分事务后重试。
-        let max_range = limits.map_or(0, |limits| limits.max_range as usize);
         for range in read_ranges {
             match Self::sequencer_range_query_in(
                 tx,
@@ -3416,26 +3463,62 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
-    /// 推进 point 哈希索引与有序 range 索引；返回本次处理的 mutation 数。
+    /// 推进 point 哈希索引、有序 range 索引与区间写索引；返回本次处理的
+    /// mutation 数。
     ///
-    /// 两个索引都是派生数据：同一 key 只保留最大 `commit_ts`，重放/同批重复写
-    /// 只前进不回退。删除也是写，必须让并发谓词读冲突。
+    /// 三个索引都是派生数据：同一 key/区间只保留最大 `commit_ts`，重放/同批
+    /// 重复写只前进不回退。删除也是写，必须让并发谓词读冲突。
     fn sequencer_index_writes_in_tx(
         tx: &mut dyn WriteTx,
         decision: &SequencerDecision,
     ) -> Result<u64> {
+        use crate::raft::type_config::SequencerMutation;
+
         for mutation in &decision.mutations {
-            let key = mutation.key();
-            let hash_key =
-                prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
-            let range_key = prefixed_key(SEQUENCER_RANGE_INDEX_PREFIX, key);
-            for index_key in [hash_key, range_key] {
-                let prev = tx
-                    .get(TABLE_KV, &index_key)?
-                    .and_then(|b| decode_u64(&b))
-                    .unwrap_or(0);
-                if decision.commit_ts > prev {
-                    tx.insert(TABLE_KV, &index_key, &decision.commit_ts.to_be_bytes())?;
+            match mutation {
+                SequencerMutation::Put { .. } | SequencerMutation::Delete { .. } => {
+                    let Some(key) = mutation.point_key() else {
+                        continue;
+                    };
+                    let hash_key = prefixed_hash_key(
+                        SEQUENCER_KEY_INDEX_PREFIX,
+                        &sequencer_hash(b"key", &[key]),
+                    );
+                    let range_key = prefixed_key(SEQUENCER_RANGE_INDEX_PREFIX, key);
+                    for index_key in [hash_key, range_key] {
+                        let prev = tx
+                            .get(TABLE_KV, &index_key)?
+                            .and_then(|b| decode_u64(&b))
+                            .unwrap_or(0);
+                        if decision.commit_ts > prev {
+                            tx.insert(TABLE_KV, &index_key, &decision.commit_ts.to_be_bytes())?;
+                        }
+                    }
+                }
+                SequencerMutation::DeleteRange { start, end } => {
+                    let index_key = prefixed_key(
+                        SEQUENCER_INTERVAL_INDEX_PREFIX,
+                        &sequencer_hash(b"interval", &[start, end]),
+                    );
+                    let prev = tx
+                        .get(TABLE_KV, &index_key)?
+                        .and_then(|b| crate::storage::envelope::decode::<SequencerIntervalWrite>(&b).ok())
+                        .unwrap_or(SequencerIntervalWrite {
+                            start: Vec::new(),
+                            end: Vec::new(),
+                            commit_ts: 0,
+                        });
+                    if decision.commit_ts > prev.commit_ts {
+                        let entry = SequencerIntervalWrite {
+                            start: start.clone(),
+                            end: end.clone(),
+                            commit_ts: decision.commit_ts,
+                        };
+                        let bytes = crate::storage::envelope::encode(&entry).map_err(|e| {
+                            Error::Internal(format!("encode sequencer interval index: {e}"))
+                        })?;
+                        tx.insert(TABLE_KV, &index_key, &bytes)?;
+                    }
                 }
             }
         }
@@ -3605,6 +3688,42 @@ impl<B: StorageBackend> MvccStorage<B> {
                                 prev_value: None,
                             });
                         }
+                        crate::raft::type_config::SequencerMutation::DeleteRange {
+                            start,
+                            end,
+                        } => {
+                            let internal_start = encode_kv_key(start);
+                            let internal_end = if end.is_empty() {
+                                prefix_upper_bound(KV_PREFIX)
+                            } else {
+                                encode_kv_key(end)
+                            };
+                            let rows = tx.iter_range(TABLE_KV, &internal_start, &internal_end)?;
+                            for (internal_key, _value) in rows {
+                                let Some(user_key) = decode_kv_key(&internal_key) else {
+                                    continue;
+                                };
+                                if !end.is_empty() && user_key >= end.as_slice() {
+                                    break;
+                                }
+                                let meta_key = encode_kv_meta_key(user_key);
+                                let existing_meta = tx
+                                    .get(TABLE_KV_META, &meta_key)?
+                                    .and_then(|bytes| KvMetadata::from_bytes(&bytes));
+                                if let Some(meta) = existing_meta.filter(|meta| !meta.deleted) {
+                                    tx.insert(
+                                        TABLE_KV_META,
+                                        &meta_key,
+                                        &meta.mark_deleted(decision.commit_ts).to_bytes(),
+                                    )?;
+                                    changes.push(KeyValueChange {
+                                        key: user_key.to_vec(),
+                                        value: None,
+                                        prev_value: None,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 if !changes.is_empty() {
@@ -3660,17 +3779,144 @@ impl<B: StorageBackend> MvccStorage<B> {
         key: &[u8],
         start_ts: Revision,
     ) -> Result<Option<SequencerIndexHit>> {
-        let index_key =
-            prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
-        let write_ts = self
-            .backend
-            .read(|tx| Ok(tx.get(TABLE_KV, &index_key)?.and_then(|b| decode_u64(&b))))?;
-        Ok(write_ts
-            .filter(|ts| *ts > start_ts)
-            .map(|commit_ts| SequencerIndexHit {
-                key: key.to_vec(),
-                commit_ts,
-            }))
+        self.backend.read(|tx| {
+            let index_key =
+                prefixed_hash_key(SEQUENCER_KEY_INDEX_PREFIX, &sequencer_hash(b"key", &[key]));
+            let point = tx
+                .get(TABLE_KV, &index_key)?
+                .and_then(|b| decode_u64(&b))
+                .filter(|ts| *ts > start_ts)
+                .map(|commit_ts| SequencerIndexHit {
+                    key: key.to_vec(),
+                    commit_ts,
+                });
+            let interval = match Self::sequencer_interval_point_in(tx, key, start_ts, 0)? {
+                SequencerRangeQuery::Hit(hit) => Some(hit),
+                SequencerRangeQuery::Clear => None,
+                SequencerRangeQuery::Exceeded { .. } => {
+                    return Err(Error::Internal(
+                        "unbounded interval index scan reported a budget overflow".to_string(),
+                    ))
+                }
+            };
+            Ok(Self::best_index_hit(point, interval))
+        })
+    }
+
+    /// 取 `commit_ts` 更大的命中；同 ts 取字典序更小的 key（结果确定）。
+    fn best_index_hit(
+        left: Option<SequencerIndexHit>,
+        right: Option<SequencerIndexHit>,
+    ) -> Option<SequencerIndexHit> {
+        match (left, right) {
+            (None, hit) | (hit, None) => hit,
+            (Some(left), Some(right)) => {
+                if right.commit_ts > left.commit_ts
+                    || (right.commit_ts == left.commit_ts && right.key < left.key)
+                {
+                    Some(right)
+                } else {
+                    Some(left)
+                }
+            }
+        }
+    }
+
+    /// 扫描区间写索引；返回 `None` 表示超过 `max_entries` 预算（0 = 不限）。
+    fn sequencer_interval_rows_in(
+        tx: &(impl ReadTx + ?Sized),
+        max_entries: usize,
+    ) -> Result<Option<Vec<SequencerIntervalWrite>>> {
+        let fetch_limit = if max_entries == 0 {
+            0
+        } else {
+            max_entries.saturating_add(1)
+        };
+        let rows = tx.iter_range_limited(
+            TABLE_KV,
+            SEQUENCER_INTERVAL_INDEX_PREFIX,
+            &prefix_upper_bound(SEQUENCER_INTERVAL_INDEX_PREFIX),
+            fetch_limit,
+        )?;
+        if max_entries > 0 && rows.len() > max_entries {
+            return Ok(None);
+        }
+        let mut entries = Vec::with_capacity(rows.len());
+        for (_key, value) in rows {
+            let entry: SequencerIntervalWrite = crate::storage::envelope::decode(&value)
+                .map_err(|e| Error::Internal(format!("decode sequencer interval index: {e}")))?;
+            entries.push(entry);
+        }
+        Ok(Some(entries))
+    }
+
+    /// point 读是否落在某条区间写内：`start <= key < end && ts > start_ts`。
+    fn sequencer_interval_point_in(
+        tx: &(impl ReadTx + ?Sized),
+        key: &[u8],
+        start_ts: Revision,
+        max_entries: usize,
+    ) -> Result<SequencerRangeQuery> {
+        let Some(entries) = Self::sequencer_interval_rows_in(tx, max_entries)? else {
+            return Ok(SequencerRangeQuery::Exceeded {
+                scanned: max_entries,
+            });
+        };
+        let mut best: Option<SequencerIndexHit> = None;
+        for entry in entries {
+            if entry.commit_ts <= start_ts {
+                continue;
+            }
+            if entry.start.as_slice() <= key && key < entry.end.as_slice() {
+                let hit = SequencerIndexHit {
+                    key: entry.start,
+                    commit_ts: entry.commit_ts,
+                };
+                best = Self::best_index_hit(best, Some(hit));
+            }
+        }
+        Ok(match best {
+            Some(hit) => SequencerRangeQuery::Hit(hit),
+            None => SequencerRangeQuery::Clear,
+        })
+    }
+
+    /// 读区间是否与某条区间写相交。
+    ///
+    /// 相交条件：`write.start < read.end && read.start < write.end`（空 end = +∞）；
+    /// 相邻区间（`[a,c)` 与 `[c,e)`）不算相交。
+    fn sequencer_interval_range_in(
+        tx: &(impl ReadTx + ?Sized),
+        start: &[u8],
+        end: &[u8],
+        start_ts: Revision,
+        max_entries: usize,
+    ) -> Result<SequencerRangeQuery> {
+        let Some(entries) = Self::sequencer_interval_rows_in(tx, max_entries)? else {
+            return Ok(SequencerRangeQuery::Exceeded {
+                scanned: max_entries,
+            });
+        };
+        let mut best: Option<SequencerIndexHit> = None;
+        for entry in entries {
+            if entry.commit_ts <= start_ts {
+                continue;
+            }
+            let write_starts_before_end = end.is_empty() || entry.start.as_slice() < end;
+            let read_starts_before_write_end =
+                entry.end.is_empty() || start < entry.end.as_slice();
+            if write_starts_before_end && read_starts_before_write_end {
+                let hit = SequencerIndexHit {
+                    key: entry.start,
+                    commit_ts: entry.commit_ts,
+                };
+                best = Self::best_index_hit(best, Some(hit));
+            }
+        }
+        Ok(match best {
+            Some(hit) => SequencerRangeQuery::Hit(hit),
+            None => SequencerRangeQuery::Clear,
+        })
     }
 
     /// range 谓词校验：`[start, end)` 在 `(start_ts, ·]` 内是否有写。
@@ -3744,10 +3990,10 @@ impl<B: StorageBackend> MvccStorage<B> {
                 });
             }
         }
-        Ok(match best {
-            Some(hit) => SequencerRangeQuery::Hit(hit),
-            None => SequencerRangeQuery::Clear,
-        })
+        match best {
+            Some(hit) => Ok(SequencerRangeQuery::Hit(hit)),
+            None => Self::sequencer_interval_range_in(tx, start, end, start_ts, max_entries),
+        }
     }
 
     /// 校验索引已覆盖的最大 `commit_ts`（缺失 = 0）。
@@ -3834,7 +4080,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         Ok(stats)
     }
 
-    /// 清空两个校验索引后从决策日志全量重建。
+    /// 清空三个校验索引后从决策日志全量重建。
     ///
     /// 索引是派生数据，重建必须与原始索引等价；正常启动只做追赶，不调用本方法。
     /// 与追赶相同，必须在写入静默时执行：清空后的空窗会让并发校验漏判冲突。
@@ -3843,7 +4089,11 @@ impl<B: StorageBackend> MvccStorage<B> {
         batch: usize,
     ) -> Result<SequencerIndexRebuild> {
         self.backend.write(|tx| {
-            for prefix in [SEQUENCER_KEY_INDEX_PREFIX, SEQUENCER_RANGE_INDEX_PREFIX] {
+            for prefix in [
+                SEQUENCER_KEY_INDEX_PREFIX,
+                SEQUENCER_RANGE_INDEX_PREFIX,
+                SEQUENCER_INTERVAL_INDEX_PREFIX,
+            ] {
                 for (key, _) in tx.iter_prefix(TABLE_KV, prefix)? {
                     tx.remove(TABLE_KV, &key)?;
                 }
@@ -8369,5 +8619,319 @@ mod tests {
             .is_empty());
         assert_eq!(storage.next_sequencer_decision_ts(0).unwrap(), Some(10));
         assert_eq!(storage.next_sequencer_decision_ts(20).unwrap(), None);
+    }
+
+    // ──── OCC 区间写（#198）────
+
+    fn range_delete(
+        start: &[u8],
+        end: &[u8],
+    ) -> crate::raft::type_config::SequencerMutation {
+        crate::raft::type_config::SequencerMutation::DeleteRange {
+            start: start.to_vec(),
+            end: end.to_vec(),
+        }
+    }
+
+    fn range_delete_txn(
+        txn_id: &[u8],
+        start_ts: u64,
+        commit_ts: u64,
+        start: &[u8],
+        end: &[u8],
+    ) -> crate::raft::type_config::SequencerTxn {
+        crate::raft::type_config::SequencerTxn {
+            txn_id: txn_id.to_vec(),
+            start_ts,
+            commit_ts,
+            request_id: Vec::new(),
+            read_set: Vec::new(),
+            mutations: vec![range_delete(start, end)],
+        }
+    }
+
+    #[test]
+    fn test_sequencer_range_delete_conflicts_with_point_and_range_read() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op(vec![range_delete_txn(b"t1", 1, 10, b"b", b"f")]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+        assert_eq!(outcomes, vec![SequencerOutcome::Committed { commit_ts: 10 }]);
+
+        let hit = |key: &[u8], commit_ts: u64| {
+            Some(SequencerIndexHit {
+                key: key.to_vec(),
+                commit_ts,
+            })
+        };
+        assert_eq!(storage.sequencer_point_query(b"c", 5).unwrap(), hit(b"b", 10));
+        assert_eq!(
+            storage.sequencer_point_query(b"c", 10).unwrap(),
+            None,
+            "ts == start_ts is outside the conflict window"
+        );
+        assert_eq!(storage.sequencer_point_query(b"a", 5).unwrap(), None);
+        assert_eq!(
+            storage.sequencer_point_query(b"f", 5).unwrap(),
+            None,
+            "the deleted range is half-open"
+        );
+
+        let range_hit = |key: &[u8], commit_ts: u64| {
+            SequencerRangeQuery::Hit(SequencerIndexHit {
+                key: key.to_vec(),
+                commit_ts,
+            })
+        };
+        assert_eq!(
+            storage.sequencer_range_query(b"a", b"c", 5, 0).unwrap(),
+            range_hit(b"b", 10)
+        );
+        assert_eq!(
+            storage.sequencer_range_query(b"a", b"b", 5, 0).unwrap(),
+            SequencerRangeQuery::Clear,
+            "adjacent ranges do not overlap"
+        );
+        assert_eq!(
+            storage.sequencer_range_query(b"f", b"z", 5, 0).unwrap(),
+            SequencerRangeQuery::Clear
+        );
+        assert_eq!(
+            storage.sequencer_range_query(b"a", b"", 5, 0).unwrap(),
+            range_hit(b"b", 10),
+            "an empty range end is unbounded"
+        );
+    }
+
+    #[test]
+    fn test_sequencer_range_delete_same_batch_conflicts() {
+        use crate::raft::type_config::{SequencerOutcome, SequencerTxnWithRanges};
+        let (_dir, storage) = create_commit_ts_storage();
+
+        let batch = seq_op_with_ranges(
+            vec![
+                SequencerTxnWithRanges {
+                    txn: range_delete_txn(b"t1", 1, 10, b"b", b"f"),
+                    read_ranges: Vec::new(),
+                },
+                seq_txn_with_ranges(b"t2", 5, 20, b"r2", &[], &[(b"a", b"z")], &[]),
+            ],
+            4_096,
+            10_000,
+        );
+        let outcomes = storage
+            .apply_sequencer_op(&batch, 1, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                SequencerOutcome::Committed { commit_ts: 10 },
+                SequencerOutcome::Conflict {
+                    commit_ts: 20,
+                    conflict_key: b"b".to_vec(),
+                    conflict_ts: 10,
+                },
+            ]
+        );
+        assert!(storage.get_sequencer_decision(20).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sequencer_interval_index_rebuild_is_equivalent() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let batch = seq_op(vec![
+            range_delete_txn(b"t1", 1, 10, b"a", b"f"),
+            seq_txn(b"t2", 1, 12, b"r2", &[], &[(b"e", b"v")]),
+        ]);
+        storage
+            .apply_sequencer_op(&batch, 1, applied_for(1))
+            .unwrap();
+
+        let point = Some(SequencerIndexHit {
+            key: b"e".to_vec(),
+            commit_ts: 12,
+        });
+        let interval = SequencerRangeQuery::Hit(SequencerIndexHit {
+            key: b"a".to_vec(),
+            commit_ts: 10,
+        });
+        assert_eq!(
+            storage.sequencer_point_query(b"c", 5).unwrap(),
+            Some(SequencerIndexHit {
+                key: b"a".to_vec(),
+                commit_ts: 10,
+            })
+        );
+        assert_eq!(
+            storage.sequencer_range_query(b"a", b"e", 0, 0).unwrap(),
+            interval
+        );
+        assert_eq!(
+            storage.sequencer_range_query(b"a", b"z", 0, 0).unwrap(),
+            SequencerRangeQuery::Hit(SequencerIndexHit {
+                key: b"e".to_vec(),
+                commit_ts: 12,
+            })
+        );
+        assert_eq!(storage.sequencer_point_query(b"e", 0).unwrap(), point);
+
+        let stats = storage.rebuild_sequencer_validation_index(16).unwrap();
+        assert_eq!(stats.decisions, 2);
+        assert_eq!(storage.sequencer_index_last_ts().unwrap(), 12);
+        assert_eq!(
+            storage.sequencer_range_query(b"a", b"e", 0, 0).unwrap(),
+            SequencerRangeQuery::Hit(SequencerIndexHit {
+                key: b"a".to_vec(),
+                commit_ts: 10,
+            })
+        );
+        assert_eq!(storage.sequencer_point_query(b"e", 0).unwrap(), point);
+    }
+
+    #[test]
+    fn test_sequencer_interval_index_survives_snapshot() {
+        use crate::storage::snapshot::{export_snapshot_data, import_snapshot_data};
+
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_sequencer_op(
+                &seq_op(vec![range_delete_txn(b"t1", 1, 10, b"a", b"f")]),
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+        let data = export_snapshot_data(&storage, 1, 1).unwrap();
+        let (_restored_dir, restored) = create_commit_ts_storage();
+        import_snapshot_data(&restored, &data).unwrap();
+
+        assert_eq!(
+            restored.sequencer_point_query(b"c", 5).unwrap(),
+            Some(SequencerIndexHit {
+                key: b"a".to_vec(),
+                commit_ts: 10,
+            })
+        );
+        assert_eq!(
+            restored.sequencer_range_query(b"a", b"c", 5, 0).unwrap(),
+            SequencerRangeQuery::Hit(SequencerIndexHit {
+                key: b"a".to_vec(),
+                commit_ts: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn test_sequencer_interval_scan_budget_is_fail_closed() {
+        use crate::raft::type_config::{SequencerInvalid, SequencerOutcome};
+        let (_dir, storage) = create_commit_ts_storage();
+        for i in 0..5u64 {
+            let start = format!("k{i}");
+            let end = format!("k{i}z");
+            storage
+                .apply_sequencer_op(
+                    &seq_op(vec![range_delete_txn(
+                        format!("t{i}").as_bytes(),
+                        1,
+                        10 + i,
+                        start.as_bytes(),
+                        end.as_bytes(),
+                    )]),
+                    i + 1,
+                    applied_for(i + 1),
+                )
+                .unwrap();
+        }
+
+        let outcomes = storage
+            .apply_sequencer_op(
+                &seq_op_with_ranges(
+                    vec![seq_txn_with_ranges(b"t9", 1, 20, b"r9", &[b"nope"], &[], &[])],
+                    4_096,
+                    3,
+                ),
+                7,
+                applied_for(7),
+            )
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Invalid {
+                commit_ts: 20,
+                reason: SequencerInvalid::RangeScanExceeded,
+            }]
+        );
+        assert!(storage.get_sequencer_decision(20).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_apply_commit_decisions_delete_range_is_atomic_and_replays() {
+        use crate::storage::mvcc::EventType;
+
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"a", b"1", None, 3, applied_for(1))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"b", b"2", None, 4, applied_for(2))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"c", b"3", None, 5, applied_for(3))
+            .unwrap();
+
+        let applied = [decision(
+            10,
+            vec![range_delete(b"a", b"d"), put(b"d", b"v")],
+        )];
+        let result = storage
+            .apply_commit_decisions(&applied, 4, applied_for(4))
+            .unwrap();
+        assert_eq!(result.through_ts, 10);
+        assert_eq!(result.decisions, 1);
+        assert_eq!(storage.get(b"a").unwrap(), None);
+        assert_eq!(storage.get(b"b").unwrap(), None);
+        assert_eq!(storage.get(b"c").unwrap(), None);
+        assert_eq!(storage.get(b"d").unwrap(), Some(b"v".to_vec()));
+        assert_eq!(storage.current_revision(), 10);
+        assert_eq!(storage.last_applied_decision_ts().unwrap(), 10);
+
+        let events = storage.read_changelog_entries(10).unwrap();
+        let event = events.iter().find(|event| event.revision == 10).unwrap();
+        assert_eq!(event.event_type, EventType::Txn);
+        assert_eq!(event.changes.len(), 4, "three tombstones and one put");
+
+        let replay = storage
+            .apply_commit_decisions(&applied, 5, applied_for(5))
+            .unwrap();
+        assert_eq!(replay.through_ts, 10);
+        assert_eq!(replay.decisions, 0);
+        assert_eq!(storage.get_kv_metadata(b"d").unwrap().unwrap().version, 1);
+    }
+
+    #[test]
+    fn test_apply_commit_decisions_delete_range_stops_at_occupied_ts() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"x", b"1", None, 5, applied_for(1))
+            .unwrap();
+        storage
+            .delete_range_at_commit_ts(b"a", b"d", 10, applied_for(2))
+            .unwrap();
+
+        let result = storage
+            .apply_commit_decisions(
+                &[decision(10, vec![range_delete(b"x", b"z")])],
+                3,
+                applied_for(3),
+            )
+            .unwrap();
+        assert_eq!(result.through_ts, 0, "must not treat a foreign write as applied");
+        assert_eq!(result.decisions, 0);
+        assert_eq!(storage.get(b"x").unwrap(), Some(b"1".to_vec()));
     }
 }

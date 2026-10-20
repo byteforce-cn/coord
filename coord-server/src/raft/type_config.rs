@@ -378,10 +378,11 @@ pub enum TsoOp {
     Allocate { batch_size: u32 },
 }
 
-/// Commit Sequencer 事务写操作（point）。
+/// Commit Sequencer 事务写操作（point / range）。
 ///
-/// 区间写/range 谓词由 #147/#149 扩展；这里刻意不提供 range 字段，
-/// 避免 sequencer 收下后静默忽略（D4 的谓词校验不能被“看不见”）。
+/// `DeleteRange` 是末尾追加的变体：旧决策日志用 postcard 编码，给枚举末尾加
+/// 变体不会破坏解码；不要调整既有变体顺序。区间写没有单一 key，调用方用
+/// [`SequencerMutation::point_key`] 显式区分。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SequencerMutation {
     Put {
@@ -392,12 +393,19 @@ pub enum SequencerMutation {
     Delete {
         key: Vec<u8>,
     },
+    /// 删除 `[start, end)`；`end` 非空（RPC 层已校验）。
+    DeleteRange {
+        start: Vec<u8>,
+        end: Vec<u8>,
+    },
 }
 
 impl SequencerMutation {
-    pub fn key(&self) -> &[u8] {
+    /// 点写的 key；区间写返回 `None`（没有单一归属 key）。
+    pub fn point_key(&self) -> Option<&[u8]> {
         match self {
-            Self::Put { key, .. } | Self::Delete { key } => key,
+            Self::Put { key, .. } | Self::Delete { key } => Some(key),
+            Self::DeleteRange { .. } => None,
         }
     }
 }
