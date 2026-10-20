@@ -190,22 +190,19 @@ impl CommitLogShardTable {
                     meta.shard_id, meta.end_ts, meta.start_ts
                 )));
             }
-            match self.shards.get(index + 1) {
-                Some(next) => {
-                    if meta.end_ts == 0 {
-                        return Err(Error::Storage(format!(
-                            "unbounded commit log shard {} must be the last shard",
-                            meta.shard_id
-                        )));
-                    }
-                    if next.start_ts != meta.end_ts {
-                        return Err(Error::Storage(format!(
-                            "commit log shard table has a gap/overlap: shard {} end {} != shard {} start {}",
-                            meta.shard_id, meta.end_ts, next.shard_id, next.start_ts
-                        )));
-                    }
+            if let Some(next) = self.shards.get(index + 1) {
+                if meta.end_ts == 0 {
+                    return Err(Error::Storage(format!(
+                        "unbounded commit log shard {} must be the last shard",
+                        meta.shard_id
+                    )));
                 }
-                None => {}
+                if next.start_ts != meta.end_ts {
+                    return Err(Error::Storage(format!(
+                        "commit log shard table has a gap/overlap: shard {} end {} != shard {} start {}",
+                        meta.shard_id, meta.end_ts, next.shard_id, next.start_ts
+                    )));
+                }
             }
         }
         Ok(())

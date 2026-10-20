@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -71,9 +71,6 @@ pub struct CommitLogShardManager {
     /// 串行化 shard 运行时装配（避免并发 tick/读取重复 spawn 同一组）
     spawn_lock: tokio::sync::Mutex<()>,
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
-    /// 已 ship 记录数（进程内计数，指标用；不参与恢复）
-    shipped_total: AtomicU64,
-    rejected_total: AtomicU64,
 }
 
 impl CommitLogShardManager {
@@ -103,8 +100,6 @@ impl CommitLogShardManager {
             runtimes: RwLock::new(BTreeMap::new()),
             spawn_lock: tokio::sync::Mutex::new(()),
             clock: Arc::new(wall_clock_ms),
-            shipped_total: AtomicU64::new(0),
-            rejected_total: AtomicU64::new(0),
         }
     }
 
@@ -124,14 +119,6 @@ impl CommitLogShardManager {
 
     pub(crate) fn now_ms(&self) -> u64 {
         (self.clock)()
-    }
-
-    pub(crate) fn shipped_total(&self) -> u64 {
-        self.shipped_total.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn rejected_total(&self) -> u64 {
-        self.rejected_total.load(Ordering::Relaxed)
     }
 
     /// 本地已装配的 shard runtime 快照（按 shard_id 升序）。
@@ -336,10 +323,6 @@ impl CommitLogShardManager {
             tick.rejected += rejected;
         }
 
-        self.shipped_total
-            .fetch_add(tick.shipped, Ordering::Relaxed);
-        self.rejected_total
-            .fetch_add(tick.rejected, Ordering::Relaxed);
         Ok(tick)
     }
 
