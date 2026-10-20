@@ -17,6 +17,7 @@ pub mod envelope;
 pub mod mvcc;
 pub mod object_store;
 pub mod redb_backend;
+pub mod region_table;
 pub mod snapshot;
 pub mod snapshot_limiter;
 pub mod snapshot_scheduler;

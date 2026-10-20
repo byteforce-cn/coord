@@ -78,7 +78,7 @@ pub enum PeerRole {
 }
 
 /// Region 副本信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
     /// 节点唯一标识
     pub node_id: NodeID,
@@ -91,7 +91,7 @@ pub struct Peer {
 /// Region 元数据
 ///
 /// 描述一个 Region 的 Key Range、Epoch、副本分布和近似统计信息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionMeta {
     /// Region 全局唯一标识
     pub region_id: RegionId,
