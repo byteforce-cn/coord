@@ -351,6 +351,22 @@ impl WatchNode {
         self.now.fetch_add(delta, Ordering::SeqCst);
     }
 
+    /// 反复 tick 直到 region 0 表推进到期望的回收水位。
+    async fn wait_until_gc_before(&self, expected: u64) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            self.shards.tick().await.expect("shard tick");
+            if self.shards.table().expect("shard table").gc_before_ts == expected {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "commit log gc did not reach {expected}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// 反复 tick 直到指定 shard 已 seal（seal 依赖 watermark 越过 end_ts）。
     async fn wait_until_sealed(&self, shard_id: u64) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -579,7 +595,7 @@ async fn test_watch_history_unavailable() {
 
     // 窗口到点：回收 shard 1；seal 状态保留，本地组与数据目录删除。
     fx.advance_clock_ms(1);
-    fx.shards.tick().await.unwrap();
+    fx.wait_until_gc_before(gc_before).await;
     let table = fx.shards.table().unwrap();
     assert_eq!(table.gc_before_ts, gc_before);
     assert_ne!(
@@ -673,7 +689,7 @@ async fn test_gc_keeps_unsealed_shard_and_its_history() {
     let second_ts = fx.commit_pairs(&[(b"bb", b"v2")]).await;
     fx.wait_until_sealed(1).await;
     fx.advance_clock_ms(60_000);
-    fx.shards.tick().await.unwrap();
+    fx.wait_until_gc_before(second_ts).await;
     let table = fx.shards.table().unwrap();
     assert_eq!(table.gc_before_ts, second_ts);
     assert!(fx.shards.runtime(1).is_none());

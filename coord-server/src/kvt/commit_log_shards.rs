@@ -1406,7 +1406,18 @@ mod tests {
 
         // 到点：回收 shard 1，删除本地组与数据目录。
         fx.set_now(sealed_at + 60_000);
-        let tick = fx.manager.tick().await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let tick = loop {
+            let tick = fx.manager.tick().await.unwrap();
+            if fx.manager.table().unwrap().gc_before_ts == 11 {
+                break tick;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gc did not advance when the retention window elapsed"
+            );
+            sleep(Duration::from_millis(50)).await;
+        };
         let table = fx.manager.table().unwrap();
         assert_eq!(table.gc_before_ts, 11);
         assert_eq!(tick.gc_before_ts, 11);
