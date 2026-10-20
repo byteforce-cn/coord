@@ -1,6 +1,6 @@
 # KV-T G5 动态 Region 表 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 把 Region 元数据从静态配置升级为 region 0 raft 中的权威表：支持原子 add/update/remove、区间平铺与 epoch 单调校验、全节点收敛到 `RegionManager` 路由表，作为 split/merge（#162–#164）的元数据基座。
 
@@ -61,7 +61,7 @@
   - `init`：校验后用给定区间建表并把 `version` 置 1；已有表 → `false`。
   - `apply`：逐条应用后按 `start_key` 排序并 `validate`；`Add` 已存在且完全相同 → no-op，不同 → `InvalidArgument`；`Update` 不存在 → `InvalidArgument`；`Remove` 的 epoch 不匹配 → `InvalidArgument`；成功后 `version += 1`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `region_table.rs` 的 tests 写（`meta(id, start, end, conf_ver, version)` / `meta_v(id, start, end)` 辅助函数）：
 
@@ -157,24 +157,24 @@ fn decode_rejects_trailing_bytes_and_invalid_tables() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-server --lib storage::region_table`
 Expected: 编译失败（模块/类型不存在）。
 
-- [ ] **Step 3: 实现表与校验**
+- [x] **Step 3: 实现表与校验**
 
 - `RegionTable { version: u64, regions: Vec<RegionMeta> }`；`encode` 用 `postcard::to_allocvec`，`decode` 用 `take_from_bytes` + 尾字节拒绝 + `validate`（照 `commit_log_shard.rs` 的写法）。
 - 区间比较用 `Vec<u8>` 字典序；末区 `end_key.is_empty()` 视为无上界。
 - `apply` 在克隆上修改，全部成功后 `version += 1`，失败返回 `Error::InvalidArgument` 且不动原表。
 - 模块头注释写清“region 0 权威元数据/单键整表覆盖写/区间平铺由构造性校验保证”。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-server --lib storage::region_table`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/storage/region_table.rs coord-server/src/storage/mod.rs
@@ -200,7 +200,7 @@ git commit -m "feat(kv-t): add validated dynamic region table type"
   - `MvccStorage::region_table(&self) -> Result<RegionTable>`
 - 语义：`Init`/`Apply` 的内部错误（校验失败）降级为 `Rejected`（warn 日志，表不变）；存储层错误（redb/编码）仍 `Err`。无论 applied/rejected 都写 `META_LAST_APPLIED`；不写 changelog、不上 Watch。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `MvccStorage` 测试模块（参照 `test_commit_log_shard_ops_persist_and_replay_idempotently`）：
 ```rust
@@ -225,24 +225,24 @@ fn test_region_meta_ops_persist_and_reject_without_failing_apply() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-server --lib storage::region_meta`（或新测试目标）
 Expected: 编译失败（`RegionMetaOp` 等不存在）。
 
-- [ ] **Step 3: 实现类型、apply 与响应**
+- [x] **Step 3: 实现类型、apply 与响应**
 
 - `type_config.rs` 末尾追加 `Command::RegionMeta(RegionMetaOp)`；`RegionMetaOp`/`RegionChange` 用 serde；`Response::RegionMeta` + Display 一行。
 - `mvcc.rs`：读 `TABLE_KV/REGION_TABLE_KEY` → `RegionTable::decode`/`default`；执行 `init`/`apply`；`Ok(true)` 时覆盖写；写 `META_LAST_APPLIED`；返回 outcome。`region_table()` 读缺失返回 `default`。
 - `state_machine.rs` 分支：`Command::RegionMeta(op) => sm.apply_region_meta_op(op, revision, applied)` → `Ok((Response::RegionMeta { outcome }, None))`。
 - 不要调用 `note_log_index_revision`（元数据表不推进业务 revision）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-server --lib storage::region_meta && cargo test -p coord-server --lib raft::type_config`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/raft/type_config.rs coord-server/src/raft/state_machine.rs \
@@ -265,7 +265,7 @@ git commit -m "feat(kv-t): apply region metadata ops through region 0 raft"
   - `RegionManager::table_version(&self) -> u64`
 - 语义：已是存在的 handle 走 `replace_meta`（与 runtime 共享同一 `Arc<RegionHandle>`，路由读到的 meta 立即生效）；新 id 建 handle；不 spawn runtime。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `region_manager_test.rs`：
 ```rust
@@ -298,21 +298,21 @@ fn test_apply_region_table_adds_updates_and_removes() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-server --test region_manager_test`
 Expected: 编译失败（`apply_region_table` 不存在）。
 
-- [ ] **Step 3: 实现收敛**
+- [x] **Step 3: 实现收敛**
 
 注意锁顺序：先 `regions.write()` 再 `key_index.write()`（与既有路径一致），版本最后写 `AtomicU64`。`RegionHandle::replace_meta` 先把 `approximate_size/keys` 从旧 meta 带过来，再覆盖。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-server --test region_manager_test`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/raft/region.rs coord-server/tests/region_manager_test.rs
@@ -336,7 +336,7 @@ git commit -m "feat(kv-t): reconcile region manager with the authoritative table
   - `Init` 的 `RegionMeta` 由 `region_seeds` + `region_peers` 构造（全成员 voter peers，与静态装配一致）。
   - 路由刷新失败（redb 读错误）不阻断请求，沿用旧表。
 
-- [ ] **Step 1: 写失败的多节点测试**
+- [x] **Step 1: 写失败的多节点测试**
 
 `coord-server/tests/kv_t_g5_region_table_test.rs`（照 `kv_t_g4_commit_log_shards_multinode_test.rs` 的 `boot` 简化：只建 region 0 raft + `RegionManager`，不建数据 Region）：
 - 3 节点、各自 `RegionManager` 先注册 region 1（`""..""`）。
@@ -350,7 +350,7 @@ git commit -m "feat(kv-t): reconcile region manager with the authoritative table
 Run: `cargo test -p coord-server --test kv_t_g5_region_table_test`
 Expected: FAIL（编译失败/命令未实现）。
 
-- [ ] **Step 2: 实现刷新与种子**
+- [x] **Step 2: 实现刷新与种子**
 
 - `CoordNode::refresh_region_table`：`self.region_manager.is_some()` 且 `self.kvt.is_enabled()` 才读 `self.storage.region_table()`；`manager.apply_region_table`。
 - `kv_target_for_key` / `kv_range_targets` 开头调用 `self.refresh_region_table()`；错误 `tracing::warn!` 后继续。
@@ -360,12 +360,12 @@ Expected: FAIL（编译失败/命令未实现）。
 Run: `cargo test -p coord-server --test kv_t_g5_region_table_test`
 Expected: PASS。
 
-- [ ] **Step 3: 跑相关回归**
+- [x] **Step 3: 跑相关回归**
 
 Run: `cargo test -p coord-server --lib storage::region_table && cargo test -p coord-server --test region_manager_test && cargo test -p coord-server --lib raft::type_config`
 Expected: PASS。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add coord-server/src/server/mod.rs coord/src/main.rs \
@@ -382,16 +382,16 @@ git commit -m "feat(kv-t): seed and refresh the dynamic region table"
 - Modify: `docs/production/ops/boundaries.md`（新增 B-KVT-8：region 表权威、拒绝语义、默认关闭不变）
 - Modify: `apis/contracts/STATUS.md`（仅当有对外可见状态行需要更新）
 
-- [ ] **Step 1: 更新文档**
+- [x] **Step 1: 更新文档**
 
 `boundaries.md` 写清：表是 region 0 权威元数据；非法变更整批拒绝且不失败 apply；路由刷新按表版本；`[kv_t].enabled=false` 时无表、无刷新。`0015-kv-t.md` D6 下补 3–5 行“当前实现”注记（不复制 ADR 语义）。
 
-- [ ] **Step 2: 文档引用检查**
+- [x] **Step 2: 文档引用检查**
 
 Run: `bash scripts/check-doc-refs.sh`
 Expected: 悬空引用 0。
 
-- [ ] **Step 3: 全量门禁**
+- [x] **Step 3: 全量门禁**
 
 ```bash
 cargo fmt --all -- --check
@@ -406,14 +406,14 @@ cargo test -p coord-server --test kv_t_g5_region_table_test
 ```
 Expected: 全绿。
 
-- [ ] **Step 4: 提交文档**
+- [x] **Step 4: 提交文档**
 
 ```bash
 git add docs/ apis/contracts/STATUS.md
 git commit -m "docs(kv-t): document the authoritative region table"
 ```
 
-- [ ] **Step 5: 开 PR（分支 → PR → CI 全绿 → merge → 删分支）**
+- [x] **Step 5: 开 PR（分支 → PR → CI 全绿 → merge → 删分支）**
 
 ```bash
 git push -u origin feat/kv-t-g5-region-table
