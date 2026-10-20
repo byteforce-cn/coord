@@ -372,6 +372,7 @@ fn event_matches_mutations(
 /// 旧 `commit_ts` 会在恢复后重新被接受）。不在 `/_meta/` 是因为快照只逐项挑选
 /// meta 键，`/_sys/` 是整域导出。
 const SAFE_TS_FENCE: &[u8] = b"/_sys/kv_t/safe_ts_fence";
+const COMMIT_WATERMARK: &[u8] = b"/_sys/commit_log/watermark";
 
 /// 单次 TSO 批次分配记录（重放幂等：同 revision 必须返回同一区间）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4566,6 +4567,38 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    /// 读取已发布的 CommitWatermark（缺失 = 0）。
+    pub fn commit_watermark(&self) -> Result<u64> {
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, COMMIT_WATERMARK)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0))
+        })
+    }
+
+    /// 发布 CommitWatermark（region 0 system raft）。
+    ///
+    /// 只前进：watermark 是「<= 它的 `commit_ts` 不会再有新记录」的承诺，回退
+    /// 会让 Watch 重新暴露已跳过的时间段。同一 applied 重放返回当前值。
+    pub fn publish_commit_watermark(&self, watermark: u64, applied: AppliedLogId) -> Result<u64> {
+        self.backend.write(|tx| {
+            let prev = tx
+                .get(TABLE_KV, COMMIT_WATERMARK)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0);
+            if Self::applied_contains(tx, applied)? {
+                return Ok(prev);
+            }
+            let effective = prev.max(watermark);
+            if effective > prev {
+                tx.insert(TABLE_KV, COMMIT_WATERMARK, &effective.to_be_bytes())?;
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(effective)
+        })
+    }
+
     /// 把已 apply 水位抬到 `commit_ts`（不写数据/changelog）。
     ///
     /// 这是 safe-point fence 在数据 Region 的落地：之后 `commit_ts <= 水位` 的
@@ -5104,6 +5137,40 @@ mod tests {
         let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
         let reopened = MvccStorage::new(backend).unwrap();
         assert_eq!(reopened.safe_ts_fence().unwrap(), 900);
+    }
+
+    #[test]
+    fn test_commit_watermark_is_monotonic_persistent_and_replay_safe() {
+        let (dir, storage) = create_storage();
+        assert_eq!(storage.commit_watermark().unwrap(), 0);
+
+        assert_eq!(
+            storage
+                .publish_commit_watermark(900, applied_for(1))
+                .unwrap(),
+            900
+        );
+        assert_eq!(
+            storage
+                .publish_commit_watermark(800, applied_for(2))
+                .unwrap(),
+            900,
+            "watermark 只前进"
+        );
+        assert_eq!(storage.commit_watermark().unwrap(), 900);
+
+        // 同一 applied 重放：返回当前值，不改写。
+        assert_eq!(
+            storage
+                .publish_commit_watermark(950, applied_for(2))
+                .unwrap(),
+            900
+        );
+
+        drop(storage);
+        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
+        let reopened = MvccStorage::new(backend).unwrap();
+        assert_eq!(reopened.commit_watermark().unwrap(), 900);
     }
 
     #[test]

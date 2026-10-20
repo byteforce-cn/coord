@@ -231,7 +231,7 @@ pub fn seal_due(records: u64, age_ms: u64, shard_records: u64, shard_secs: u64) 
     records >= shard_records || u128::from(age_ms) >= u128::from(shard_secs) * 1_000
 }
 
-/// seal 超时：定界后等待 in-flight 记录的上限（#155 的 watermark 到位前的兜底）。
+/// seal 超时：定界后等待 `CommitWatermark >= end_ts` 的兜底（watermark 停滞时）。
 pub fn seal_timeout_due(ended_at_ms: u64, now_ms: u64, timeout_secs: u64) -> bool {
     ended_at_ms != 0
         && u128::from(now_ms) >= u128::from(ended_at_ms) + u128::from(timeout_secs) * 1_000

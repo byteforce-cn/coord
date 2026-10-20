@@ -146,8 +146,12 @@
   阈值按 D9：1,000,000 条或 1 小时先到先 seal，达到 80% 预创建下一个 shard，
   定界后 seal 超时 5 分钟。数据 Region 的本地 outbox 是写前日志（与数据 apply
   同事务），由 shard leader 幂等搬入 shard 组；换 leader/重启从 per-Region
-  shipped 水位续传。**不做**：watermark 发布与基于 watermark 的 seal（#155）、
-  保留窗口与 GC（#157）、跨 shard 顺序读与 cursor（#156）。
+  shipped 水位续传。CommitWatermark 是「不再出现更小 `commit_ts` 记录」的单调
+  水位：无 in-flight 时等于最后决策的 `commit_ts`，否则为最早未 apply/未搬运的
+  `commit_ts - 1`；shard 只在 `watermark >= end_ts` 时 seal，停滞超过 5 分钟按
+  超时 seal 并计入 `coord_kv_t_commit_watermark_stalls_total`，sealed shard 仍
+  接受区间内迟到记录。**不做**：保留窗口与 GC（#157）、跨 shard 顺序读与
+  cursor（#156）。
 - **路由**：可带 metadata `coord-routing-epoch`；epoch 过期返回 `ABORTED` +
   `EPOCH_STALE`，刷新路由后重试。
 - **对象存储**：manifest 用 `commit_ts`；`/obj/` 固定 Region 区间，不参与任意

@@ -95,6 +95,14 @@ struct MetricsInner {
     pub kv_t_commit_log_records_shipped_total: AtomicU64,
     /// shard 组拒收的记录数（越界/坏记录，待重试；#154）
     pub kv_t_commit_log_records_rejected_total: AtomicU64,
+    /// 已发布的 CommitWatermark（<= 它的 commit_ts 不会再有新记录）
+    pub kv_t_commit_watermark: AtomicU64,
+    /// 钉住 watermark 的未完成项数量（未 apply 决策 + 未搬运记录）
+    pub kv_t_commit_in_flight: AtomicU64,
+    /// 有界未 seal shard 的最大等待秒数
+    pub kv_t_commit_log_seal_lag_seconds: AtomicU64,
+    /// watermark 停滞超时后 seal 的 shard 数
+    pub kv_t_commit_watermark_stalls_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的请求次数
     pub kv_v2_safe_ts_wait_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的累计毫秒
@@ -266,6 +274,10 @@ impl Default for MetricsInner {
             kv_t_commit_log_shards_sealed: AtomicU64::new(0),
             kv_t_commit_log_records_shipped_total: AtomicU64::new(0),
             kv_t_commit_log_records_rejected_total: AtomicU64::new(0),
+            kv_t_commit_watermark: AtomicU64::new(0),
+            kv_t_commit_in_flight: AtomicU64::new(0),
+            kv_t_commit_log_seal_lag_seconds: AtomicU64::new(0),
+            kv_t_commit_watermark_stalls_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_millis_total: AtomicU64::new(0),
             kvt_sequencer_batches_total: AtomicU64::new(0),
@@ -693,6 +705,30 @@ impl Metrics {
             .fetch_add(rejected, Ordering::Relaxed);
     }
 
+    /// 发布 CommitWatermark 与钉住它的未完成项数量（gauge）。
+    pub fn set_kv_t_commit_watermark(&self, watermark: u64, in_flight: u64) {
+        self.inner
+            .kv_t_commit_watermark
+            .store(watermark, Ordering::Relaxed);
+        self.inner
+            .kv_t_commit_in_flight
+            .store(in_flight, Ordering::Relaxed);
+    }
+
+    /// 记录有界未 seal shard 的最大等待秒数（gauge）。
+    pub fn set_kv_t_commit_log_seal_lag(&self, seconds: u64) {
+        self.inner
+            .kv_t_commit_log_seal_lag_seconds
+            .store(seconds, Ordering::Relaxed);
+    }
+
+    /// watermark 停滞超时后 seal：计数 +1。
+    pub fn inc_kv_t_commit_watermark_stall(&self) {
+        self.inner
+            .kv_t_commit_watermark_stalls_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// v2 KV 读等待 safe_ts：请求数 +1、累计等待毫秒。
     pub fn inc_kv_v2_safe_ts_wait(&self, waited_millis: u64) {
         self.inner
@@ -963,6 +999,38 @@ impl Metrics {
             "coord_kv_t_commit_log_records_rejected_total {}\n",
             inner
                 .kv_t_commit_log_records_rejected_total
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_watermark Published commit watermark: no record with a smaller commit_ts can appear later\n");
+        out.push_str("# TYPE coord_kv_t_commit_watermark gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_watermark {}\n",
+            inner.kv_t_commit_watermark.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_in_flight Pending decisions/records pinning the commit watermark\n");
+        out.push_str("# TYPE coord_kv_t_commit_in_flight gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_in_flight {}\n",
+            inner.kv_t_commit_in_flight.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_log_seal_lag_seconds Max wait of a bounded, unsealed Commit Log shard\n");
+        out.push_str("# TYPE coord_kv_t_commit_log_seal_lag_seconds gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_log_seal_lag_seconds {}\n",
+            inner
+                .kv_t_commit_log_seal_lag_seconds
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_watermark_stalls_total Commit Log shards sealed on the stall timeout\n");
+        out.push_str("# TYPE coord_kv_t_commit_watermark_stalls_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_watermark_stalls_total {}\n",
+            inner
+                .kv_t_commit_watermark_stalls_total
                 .load(Ordering::Relaxed)
         ));
 
@@ -1664,5 +1732,19 @@ mod tests {
         assert!(output.contains("grpc_method_slow_requests_total{method=\"/coord.kv.KV/Put\"} 1"));
         assert!(output.contains("grpc_method_requests_total{method=\"/coord.kv.KV/Range\"} 1"));
         assert!(output.contains("grpc_method_errors_total{method=\"/coord.kv.KV/Range\"} 0"));
+    }
+    #[test]
+    fn test_metrics_commit_watermark() {
+        let m = Metrics::new();
+        m.set_kv_t_commit_watermark(120, 3);
+        m.set_kv_t_commit_log_seal_lag(42);
+        m.inc_kv_t_commit_watermark_stall();
+        m.inc_kv_t_commit_watermark_stall();
+
+        let output = m.render_prometheus_text();
+        assert!(output.contains("coord_kv_t_commit_watermark 120"));
+        assert!(output.contains("coord_kv_t_commit_in_flight 3"));
+        assert!(output.contains("coord_kv_t_commit_log_seal_lag_seconds 42"));
+        assert!(output.contains("coord_kv_t_commit_watermark_stalls_total 2"));
     }
 }

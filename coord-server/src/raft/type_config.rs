@@ -665,6 +665,11 @@ pub enum Command {
         max_txn_bytes: u64,
         records: Vec<crate::storage::commit_log::CommitRecord>,
     },
+    /// 发布 CommitWatermark（仅 region 0 system raft 提出）。
+    ///
+    /// **末尾追加**；`watermark` 是「<= 它的 `commit_ts` 不会再有新 CommitRecord」
+    /// 的单调承诺，apply 不推进 revision、不写 changelog。
+    PublishCommitWatermark { watermark: u64 },
 }
 
 impl std::fmt::Display for Command {
@@ -748,6 +753,9 @@ impl std::fmt::Display for Command {
                 "CommitLogAppend(shard={shard_id}, records={})",
                 records.len()
             ),
+            Command::PublishCommitWatermark { watermark } => {
+                write!(f, "PublishCommitWatermark(watermark={watermark})")
+            }
         }
     }
 }
@@ -853,6 +861,10 @@ pub enum Response {
         rejected: u64,
         cursor_ts: u64,
     },
+    /// CommitWatermark 发布结果（实际生效值）。
+    CommitWatermarkPublished {
+        watermark: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -927,6 +939,9 @@ impl std::fmt::Display for Response {
                 f,
                 "CommitLogAppend(inserted={inserted}, duplicates={duplicates}, rejected={rejected}, cursor={cursor_ts})"
             ),
+            Response::CommitWatermarkPublished { watermark } => {
+                write!(f, "CommitWatermarkPublished(watermark={watermark})")
+            }
         }
     }
 }
