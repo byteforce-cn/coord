@@ -444,7 +444,9 @@ auto-resolve 语义，处置是人工的。
   滚动验签。
 - 若计数长期不降：确认轮换确实执行（换新会改变 active serial）。
 
-### KV-T v2 Watch 订阅 — 无事件 / 背压 / 历史不足
+## 7. KV-T v2 Watch 排障（无独立告警）
+
+### 订阅无事件 / 背压 / 历史不足
 
 - 指标：`coord_kv_t_watch_streams`（当前流数）、`coord_kv_t_watch_batches_total`、
   `coord_kv_t_watch_events_total`、`coord_kv_t_watch_lag_commit_ts`（最近一批的
@@ -461,7 +463,7 @@ auto-resolve 语义，处置是人工的。
 
 ---
 
-## 7. 演练纪律
+## 8. 演练纪律
 
 - 每次演练产出一份记录：`docs/production/ops/drills/<UTC 时间戳>-<场景>.md`，
   含：谁跑的 / commit / 命令 / 预期 / 实际 / 结论 / 未通过时的后续项。
