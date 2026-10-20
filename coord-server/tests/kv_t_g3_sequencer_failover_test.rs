@@ -667,3 +667,92 @@ async fn test_sequencer_restart_rejoins_and_replays() {
             .await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_sequencer_partitioned_leader_heals_without_duplicate_decisions() {
+    let cluster = FailoverCluster::start().await;
+    let leader = cluster.leader().await;
+    let start_a = cluster.tso(leader).get_ts().await.unwrap();
+    let ts_a = committed_ts(
+        &failover_commit_until(
+            cluster.sequencer(leader),
+            vec![candidate(
+                b"partition-a",
+                start_a,
+                b"req-a",
+                &[],
+                &[(b"p-a", b"1")],
+            )],
+            DEADLINE,
+        )
+        .await,
+    );
+
+    cluster.partition(leader);
+    let alive = cluster
+        .ids()
+        .into_iter()
+        .filter(|id| *id != leader)
+        .collect::<Vec<_>>();
+    let new_leader = cluster
+        .wait_leader_among(&alive, Duration::from_secs(10))
+        .await;
+    let start_b = cluster.tso(new_leader).get_ts().await.unwrap();
+    let ts_b = committed_ts(
+        &failover_commit_until(
+            cluster.sequencer(new_leader),
+            vec![candidate(
+                b"partition-b",
+                start_b,
+                b"req-b",
+                &[],
+                &[(b"p-b", b"2")],
+            )],
+            DEADLINE,
+        )
+        .await,
+    );
+    assert!(ts_b > ts_a);
+
+    // 隔离节点不能看到故障期间的新决策（无部分可见）。
+    assert_eq!(
+        cluster.decisions(leader),
+        vec![(ts_a, b"partition-a".to_vec())],
+        "partitioned leader must not observe the new decision"
+    );
+
+    cluster.heal(leader);
+    let expected = vec![
+        (ts_a, b"partition-a".to_vec()),
+        (ts_b, b"partition-b".to_vec()),
+    ];
+    cluster
+        .wait_decisions(leader, &expected, Duration::from_secs(15))
+        .await;
+
+    let leader_now = cluster
+        .wait_leader_among(&cluster.ids(), Duration::from_secs(15))
+        .await;
+    let replay = failover_commit_until(
+        cluster.sequencer(leader_now),
+        vec![candidate(
+            b"partition-b",
+            start_b,
+            b"req-b",
+            &[],
+            &[(b"p-b", b"2")],
+        )],
+        DEADLINE,
+    )
+    .await;
+    assert_eq!(
+        replay,
+        vec![SequencerOutcome::Duplicate { commit_ts: ts_b }]
+    );
+
+    for id in NODE_IDS {
+        cluster
+            .wait_decisions(id, &expected, Duration::from_secs(15))
+            .await;
+    }
+}
