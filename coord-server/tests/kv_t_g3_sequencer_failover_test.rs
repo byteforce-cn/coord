@@ -480,3 +480,190 @@ async fn test_sequencer_failover_replays_and_continues() {
             .await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_sequencer_failover_mid_batch_keeps_one_decision_per_txn() {
+    let mut cluster = FailoverCluster::start().await;
+    let leader = cluster.leader().await;
+    let start = cluster.tso(leader).get_ts().await.unwrap();
+    let candidates = vec![
+        candidate(b"mid-batch-1", start, b"req-1", &[], &[(b"m1", b"1")]),
+        candidate(b"mid-batch-2", start, b"req-2", &[], &[(b"m2", b"2")]),
+    ];
+
+    // max_batch_count=1：两个候选必然拆成两次 raft 提案，kill 可能落在任意
+    // 批次之间；无论落在哪里，重试后每个事务都只能有一条决策。
+    let sequencer = cluster.sequencer_with_batch(leader, 1);
+    let retry_candidates = candidates.clone();
+    let submit = tokio::spawn(async move { sequencer.validate_and_commit(candidates).await });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    cluster.kill(leader).await;
+    let first = tokio::time::timeout(Duration::from_secs(15), submit)
+        .await
+        .expect("interrupted submission must settle")
+        .expect("submit task must not panic");
+    let first_ts = match &first {
+        Ok(outcomes) => Some(
+            outcomes
+                .iter()
+                .map(|outcome| match outcome {
+                    SequencerOutcome::Committed { commit_ts }
+                    | SequencerOutcome::Duplicate { commit_ts } => *commit_ts,
+                    other => panic!("unexpected first outcome: {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Err(CoordError::NotLeader { .. } | CoordError::ClusterUnavailable(_)) => None,
+        Err(other) => panic!("unexpected first error: {other}"),
+    };
+
+    let alive = cluster
+        .ids()
+        .into_iter()
+        .filter(|id| *id != leader)
+        .collect::<Vec<_>>();
+    let new_leader = cluster
+        .wait_leader_among(&alive, Duration::from_secs(10))
+        .await;
+    let retry =
+        failover_commit_until(cluster.sequencer(new_leader), retry_candidates, DEADLINE).await;
+    assert_eq!(retry.len(), 2);
+    for (index, outcome) in retry.iter().enumerate() {
+        match outcome {
+            SequencerOutcome::Committed { commit_ts }
+            | SequencerOutcome::Duplicate { commit_ts } => {
+                if let Some(first_ts) = &first_ts {
+                    assert_eq!(
+                        *commit_ts, first_ts[index],
+                        "retry must replay the decision already taken"
+                    );
+                }
+            }
+            other => panic!("unexpected retry outcome {index}: {other:?}"),
+        }
+    }
+
+    let expected_txns = [b"mid-batch-1".to_vec(), b"mid-batch-2".to_vec()];
+    for id in &alive {
+        let decisions = cluster.decisions(*id);
+        assert_eq!(decisions.len(), 2, "node {id}: {decisions:?}");
+        for txn in &expected_txns {
+            assert_eq!(
+                decisions.iter().filter(|(_, seen)| seen == txn).count(),
+                1,
+                "txn {txn:?} must have exactly one decision on node {id}"
+            );
+        }
+        let mut timestamps = decisions
+            .iter()
+            .map(|(commit_ts, _)| *commit_ts)
+            .collect::<Vec<_>>();
+        timestamps.sort_unstable();
+        timestamps.dedup();
+        assert_eq!(timestamps.len(), 2, "commit_ts must be unique");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_sequencer_restart_rejoins_and_replays() {
+    let mut cluster = FailoverCluster::start().await;
+    let leader = cluster.leader().await;
+    let start_a = cluster.tso(leader).get_ts().await.unwrap();
+    let ts_a = committed_ts(
+        &failover_commit_until(
+            cluster.sequencer(leader),
+            vec![candidate(
+                b"restart-a",
+                start_a,
+                b"req-a",
+                &[],
+                &[(b"r-a", b"1")],
+            )],
+            DEADLINE,
+        )
+        .await,
+    );
+
+    cluster.kill(leader).await;
+    let alive = cluster
+        .ids()
+        .into_iter()
+        .filter(|id| *id != leader)
+        .collect::<Vec<_>>();
+    let new_leader = cluster
+        .wait_leader_among(&alive, Duration::from_secs(10))
+        .await;
+    let start_b = cluster.tso(new_leader).get_ts().await.unwrap();
+    let ts_b = committed_ts(
+        &failover_commit_until(
+            cluster.sequencer(new_leader),
+            vec![candidate(
+                b"restart-b",
+                start_b,
+                b"req-b",
+                &[],
+                &[(b"r-b", b"2")],
+            )],
+            DEADLINE,
+        )
+        .await,
+    );
+    assert!(ts_b > ts_a);
+
+    cluster.restart(leader).await;
+    cluster
+        .wait_decisions(
+            leader,
+            &[(ts_a, b"restart-a".to_vec()), (ts_b, b"restart-b".to_vec())],
+            Duration::from_secs(15),
+        )
+        .await;
+
+    let leader_now = cluster
+        .wait_leader_among(&cluster.ids(), Duration::from_secs(15))
+        .await;
+    let replay = failover_commit_until(
+        cluster.sequencer(leader_now),
+        vec![candidate(
+            b"restart-a",
+            start_a,
+            b"req-a",
+            &[],
+            &[(b"r-a", b"1")],
+        )],
+        DEADLINE,
+    )
+    .await;
+    assert_eq!(
+        replay,
+        vec![SequencerOutcome::Duplicate { commit_ts: ts_a }]
+    );
+
+    let start_c = cluster.tso(leader_now).get_ts().await.unwrap();
+    let ts_c = committed_ts(
+        &failover_commit_until(
+            cluster.sequencer(leader_now),
+            vec![candidate(
+                b"restart-c",
+                start_c,
+                b"req-c",
+                &[],
+                &[(b"r-c", b"3")],
+            )],
+            DEADLINE,
+        )
+        .await,
+    );
+    assert!(ts_c > ts_b, "new decisions must keep advancing commit_ts");
+
+    let expected = vec![
+        (ts_a, b"restart-a".to_vec()),
+        (ts_b, b"restart-b".to_vec()),
+        (ts_c, b"restart-c".to_vec()),
+    ];
+    for id in NODE_IDS {
+        cluster
+            .wait_decisions(id, &expected, Duration::from_secs(15))
+            .await;
+    }
+}
