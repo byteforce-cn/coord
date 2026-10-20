@@ -492,6 +492,13 @@ impl CoordNode {
         &self.txn_sessions
     }
 
+    /// 启动 v2 事务会话 TTL 回收（仅 `[kv_t].enabled=true` 时由 main 调用）。
+    ///
+    /// 过期判定本身是惰性的；这个任务只负责释放不再被访问的会话内存。
+    pub fn start_kvt_txn_reaper(self: &Arc<Self>, interval: std::time::Duration) {
+        self.txn_sessions.spawn_reaper(interval);
+    }
+
     /// 注入运行时资源限制（由配置层在启动时调用；默认值可直接使用）。
     pub fn set_limits(&self, limits: RuntimeLimits) {
         *self.limits.write() = limits;

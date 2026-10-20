@@ -5,6 +5,7 @@
 //! 协调节点内存里（不复制），丢失/过期只能让客户端重跑整个事务。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -152,23 +153,37 @@ struct TxnSession {
     read_set: ReadSet,
 }
 
+/// 会话表的可变部分：后台 reaper 与 drain guard 共享同一把锁，
+/// 保证「清理过期会话」与「登记 drain 区间」看到的是一致快照。
+#[derive(Default)]
+struct TxnTable {
+    sessions: BTreeMap<Vec<u8>, TxnSession>,
+}
+
+fn sweep(table: &mut TxnTable, now: Instant) -> usize {
+    let before = table.sessions.len();
+    table.sessions.retain(|_, session| session.expires_at > now);
+    before - table.sessions.len()
+}
+
 /// 协调节点的会话表（ADR-0015 D12.2：不复制）。
 pub(crate) struct TxnSessions {
-    sessions: Mutex<BTreeMap<Vec<u8>, TxnSession>>,
+    table: Arc<Mutex<TxnTable>>,
 }
 
 impl TxnSessions {
     pub(crate) fn new() -> Self {
         Self {
-            sessions: Mutex::new(BTreeMap::new()),
+            table: Arc::new(Mutex::new(TxnTable::default())),
         }
     }
 
     pub(crate) fn begin(&self, start_ts: u64, ttl: Duration) -> Vec<u8> {
-        self.purge_expired();
         let id = uuid::Uuid::new_v4().as_bytes().to_vec();
         let now = Instant::now();
-        self.sessions.lock().insert(
+        let mut table = self.table.lock();
+        sweep(&mut table, now);
+        table.sessions.insert(
             id.clone(),
             TxnSession {
                 start_ts,
@@ -190,15 +205,16 @@ impl TxnSessions {
         max_read_set: usize,
     ) -> Result<u64, SessionError> {
         let now = Instant::now();
-        let mut sessions = self.sessions.lock();
-        if sessions
+        let mut table = self.table.lock();
+        if table
+            .sessions
             .get(id)
             .is_some_and(|session| session.expires_at <= now)
         {
-            sessions.remove(id);
+            table.sessions.remove(id);
             return Err(SessionError::NotFound);
         }
-        let session = sessions.get_mut(id).ok_or(SessionError::NotFound)?;
+        let session = table.sessions.get_mut(id).ok_or(SessionError::NotFound)?;
         match intent {
             ReadIntent::Point(key) => session.read_set.try_add_point(key, max_read_set),
             ReadIntent::Range { start, end } => {
@@ -211,20 +227,41 @@ impl TxnSessions {
 
     /// 幂等删除：未知/过期/已 abort 的会话不报错。
     pub(crate) fn abort(&self, id: &[u8]) {
-        self.sessions.lock().remove(id);
+        self.table.lock().sessions.remove(id);
     }
 
-    pub(crate) fn purge_expired(&self) {
-        let now = Instant::now();
-        self.sessions
-            .lock()
-            .retain(|_, session| session.expires_at > now);
+    /// 清掉过期会话并返回删除数量（测试直接驱动；生产路径由 reaper 调 `sweep`）。
+    #[cfg(test)]
+    pub(crate) fn purge_expired(&self) -> usize {
+        sweep(&mut self.table.lock(), Instant::now())
+    }
+
+    /// 后台 TTL 回收：每 `interval` 清一次过期会话。
+    ///
+    /// 过期本身是惰性语义（读/写会检查 `expires_at`），reaper 只负责释放
+    /// 不再被访问的会话内存；只在 `[kv_t].enabled=true` 时由 main 启动。
+    pub(crate) fn spawn_reaper(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
+        let table = Arc::clone(&self.table);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                sweep(&mut table.lock(), Instant::now());
+            }
+        })
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.table.lock().sessions.len()
     }
 
     #[cfg(test)]
     fn read_set(&self, id: &[u8]) -> Option<ReadSet> {
-        self.sessions
+        self.table
             .lock()
+            .sessions
             .get(id)
             .map(|session| session.read_set.clone())
     }
@@ -307,6 +344,30 @@ mod tests {
         sessions.abort(&id);
         sessions.abort(&id);
         assert_eq!(sessions.read_set(&id), None);
+    }
+
+    #[test]
+    fn purge_expired_removes_only_expired_sessions_and_reports_count() {
+        let sessions = TxnSessions::new();
+        let long = sessions.begin(7, Duration::from_secs(30));
+        let short = sessions.begin(8, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert_eq!(sessions.purge_expired(), 1);
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.read_set(&long).is_some());
+        assert!(sessions.read_set(&short).is_none());
+        // 幂等：没有新过期会话时返回 0。
+        assert_eq!(sessions.purge_expired(), 0);
+    }
+
+    #[tokio::test]
+    async fn reaper_reclaims_expired_sessions() {
+        let sessions = TxnSessions::new();
+        let _reaper = sessions.spawn_reaper(Duration::from_millis(5));
+        let _id = sessions.begin(9, Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(sessions.len(), 0);
     }
 
     #[test]
