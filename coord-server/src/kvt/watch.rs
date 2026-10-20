@@ -10,7 +10,9 @@
 //! 已 apply 决策）；否则 `local_watermark` 会保守地停在最早未完成的决策，
 //! 只影响时延、不会跳事件。跨节点服务方式由 RPC 层决定。
 //!
-//! RPC/授权/指标在 `coord.watch.v2` 的 RPC 层；保留窗口与 GC 归后续 gate。
+//! RPC/授权/指标在 `coord.watch.v2` 的 RPC 层。保留窗口由 region 0 表的
+//! `gc_before_ts` 表达：起点/续订落在回收区间时返回 [`WatchError::HistoryUnavailable`]，
+//! 不静默跳过被回收的事件。
 
 use std::sync::Arc;
 
@@ -34,6 +36,16 @@ pub const WATCH_MAX_BYTES_PER_BATCH: usize = 1024 * 1024;
 pub struct WatchCursor {
     pub shard_id: u64,
     pub commit_ts: u64,
+}
+
+impl std::fmt::Display for WatchCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "shard {}, commit_ts {}",
+            self.shard_id, self.commit_ts
+        )
+    }
 }
 
 impl WatchCursor {
@@ -221,6 +233,10 @@ pub struct WatchBatch {
     pub sealed: bool,
     /// 是否因批上限提前停止；调用方可以立即继续轮询。
     pub has_more: bool,
+    /// 当前最老可读位点（`gc_before_ts == 0` 时为 [`WatchCursor::beginning`]）。
+    ///
+    /// 供 RPC 层在 `HISTORY_UNAVAILABLE` 时回显/诊断；客户端只需全量重同步。
+    pub oldest_available: WatchCursor,
 }
 
 /// 订阅起点：`start_revision` 与 `start_cursor` 互斥。
@@ -240,6 +256,17 @@ pub enum WatchError {
     InvalidRequest(String),
     #[error("watch cursor at shard {shard_id} is no longer available")]
     CursorUnavailable { shard_id: u64 },
+    /// 起点/续订位置已被保留窗口回收；`requested` 是第一个不可读的 `commit_ts`。
+    ///
+    /// 不可重试：调用方必须全量重同步（`coord.watch.v2` 映射为 `OUT_OF_RANGE` +
+    /// `HISTORY_UNAVAILABLE`）。
+    #[error(
+        "watch history unavailable: commit_ts {requested} is before the oldest retained position ({oldest_available})"
+    )]
+    HistoryUnavailable {
+        requested: u64,
+        oldest_available: WatchCursor,
+    },
     #[error("watch is temporarily unavailable: {0}")]
     Unavailable(String),
     #[error(transparent)]
@@ -279,20 +306,22 @@ impl WatchCoordinator {
     pub async fn start(&self, start: WatchStart) -> Result<WatchCursor, WatchError> {
         validate_start(&start)?;
         let table = self.shards.table()?;
-        if let Some(cursor) = start.start_cursor {
+        let cursor = if let Some(cursor) = start.start_cursor {
             resolve_position(&table, cursor)?;
-            return Ok(cursor);
-        }
-        if start.start_revision == 0 {
+            cursor
+        } else if start.start_revision == 0 {
             let watermark = self
                 .shards
                 .local_watermark()
                 .await
                 .map_err(WatchError::Unavailable)?
                 .watermark;
-            return Ok(position_before(&table, watermark));
-        }
-        Ok(position_before(&table, start.start_revision - 1))
+            position_before(&table, watermark)
+        } else {
+            position_before(&table, start.start_revision - 1)
+        };
+        ensure_available(&table, cursor)?;
+        Ok(cursor)
     }
 
     /// 读取一批事件；`cursor` 是上一批返回的位置。
@@ -304,8 +333,30 @@ impl WatchCoordinator {
         cursor: WatchCursor,
         filter: &WatchFilter,
     ) -> Result<WatchBatch, WatchError> {
-        filter.validate()?;
         let table = self.shards.table()?;
+        match self.poll_with_table(&table, cursor, filter).await {
+            Ok(batch) => Ok(batch),
+            Err(err) => {
+                // GC 可能在可用性检查与 shard 读取之间推进：此时正确的语义是
+                // HISTORY_UNAVAILABLE，而不是把内部错误泄露给调用方。
+                if let Ok(fresh) = self.shards.table() {
+                    if let Err(history) = ensure_available(&fresh, cursor) {
+                        return Err(history);
+                    }
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn poll_with_table(
+        &self,
+        table: &CommitLogShardTable,
+        cursor: WatchCursor,
+        filter: &WatchFilter,
+    ) -> Result<WatchBatch, WatchError> {
+        filter.validate()?;
+        ensure_available(table, cursor)?;
         let watermark = self
             .shards
             .local_watermark()
@@ -319,10 +370,11 @@ impl WatchCoordinator {
                 watermark,
                 sealed: false,
                 has_more: false,
+                oldest_available: oldest_available(table),
             });
         }
 
-        let (mut index, mut after) = resolve_position(&table, cursor)?;
+        let (mut index, mut after) = resolve_position(table, cursor)?;
         let mut builder = BatchBuilder::new(self.max_changes, self.max_bytes);
         let mut stopped_for_limit = false;
 
@@ -374,6 +426,7 @@ impl WatchCoordinator {
             watermark,
             sealed: meta.sealed_at_ms != 0,
             has_more: stopped_for_limit,
+            oldest_available: oldest_available(table),
         })
     }
 
@@ -434,6 +487,35 @@ fn read_bound(meta: &CommitLogShardMeta, watermark: u64) -> u64 {
 /// 离开当前 shard 的条件：已定界、已 seal，且 watermark 越过 `end_ts`。
 fn may_cross(meta: &CommitLogShardMeta, watermark: u64) -> bool {
     meta.end_ts != 0 && meta.sealed_at_ms != 0 && watermark >= meta.end_ts
+}
+
+/// 历史可用性：第一个未读事件（`cursor.commit_ts + 1`）必须仍在保留窗口内。
+///
+/// 过滤条件不参与判定——被过滤掉的事件同样必须先可读，否则 cursor 无法证明
+/// 「消费过该段历史」。
+fn ensure_available(
+    table: &CommitLogShardTable,
+    cursor: WatchCursor,
+) -> Result<(), WatchError> {
+    let requested = cursor.commit_ts.saturating_add(1);
+    if table.gc_before_ts == 0 || requested >= table.gc_before_ts {
+        return Ok(());
+    }
+    Err(WatchError::HistoryUnavailable {
+        requested,
+        oldest_available: oldest_available(table),
+    })
+}
+
+/// 最老可续订位点：回收水位前一个 `commit_ts`（`0` = 尚未回收）。
+///
+/// 返回的 cursor 满足 `commit_ts + 1 == gc_before_ts`，因此可以直接交给
+/// [`WatchCoordinator::poll`] 从最老保留事件继续读取。
+pub fn oldest_available(table: &CommitLogShardTable) -> WatchCursor {
+    if table.gc_before_ts == 0 {
+        return WatchCursor::beginning();
+    }
+    position_before(table, table.gc_before_ts.saturating_sub(1))
 }
 
 /// `start_revision` 与 `start_cursor` 同时设置是请求歧义，不是「后者优先」。
@@ -794,6 +876,77 @@ mod tests {
         assert!(
             !may_cross(&shard(2, 101, 0), 10_000),
             "the latest shard is unbounded"
+        );
+    }
+
+    #[test]
+    fn history_before_the_gc_boundary_is_unavailable() {
+        let table = CommitLogShardTable {
+            shards: vec![shard(1, 1, 101), shard(2, 101, 0)],
+            gc_before_ts: 101,
+        };
+        assert!(matches!(
+            ensure_available(&table, WatchCursor::beginning()),
+            Err(WatchError::HistoryUnavailable { requested: 1, .. })
+        ));
+        let err = ensure_available(
+            &table,
+            WatchCursor {
+                shard_id: 1,
+                commit_ts: 99,
+            },
+        )
+        .unwrap_err();
+        match err {
+            WatchError::HistoryUnavailable {
+                requested,
+                oldest_available,
+            } => {
+                assert_eq!(requested, 100);
+                assert_eq!(
+                    oldest_available,
+                    WatchCursor {
+                        shard_id: 1,
+                        commit_ts: 100
+                    }
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        assert!(ensure_available(
+            &table,
+            WatchCursor {
+                shard_id: 1,
+                commit_ts: 100
+            }
+        )
+        .is_ok());
+        assert!(ensure_available(
+            &table,
+            WatchCursor {
+                shard_id: 2,
+                commit_ts: 100
+            }
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn oldest_available_points_at_the_last_reclaimed_ts() {
+        assert_eq!(
+            oldest_available(&CommitLogShardTable::default()),
+            WatchCursor::beginning()
+        );
+        let table = CommitLogShardTable {
+            shards: vec![shard(1, 1, 101), shard(2, 101, 0)],
+            gc_before_ts: 101,
+        };
+        assert_eq!(
+            oldest_available(&table),
+            WatchCursor {
+                shard_id: 1,
+                commit_ts: 100
+            }
         );
     }
 
