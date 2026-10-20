@@ -1165,13 +1165,17 @@ impl lease_v2::lease_server::Lease for CoordNode {
 
 #[tonic::async_trait]
 impl watch_v2::watch_server::Watch for CoordNode {
-    type WatchStream = ShellStream<watch_v2::WatchResponse>;
+    type WatchStream =
+        tokio_stream::wrappers::ReceiverStream<Result<watch_v2::WatchResponse, Status>>;
 
     async fn watch(
         &self,
-        _request: Request<Streaming<watch_v2::WatchRequest>>,
+        request: Request<Streaming<watch_v2::WatchRequest>>,
     ) -> Result<Response<Self::WatchStream>, Status> {
-        Err(shell(KvTCapability::Watch, self))
+        let response = super::watch_rpc::serve(self, request).await?;
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            response.into_inner(),
+        )))
     }
 }
 

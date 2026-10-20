@@ -2862,6 +2862,7 @@ async fn run_server(
             coord_server::kvt::KvTCapability::Tso,
             coord_server::kvt::KvTCapability::Kv,
             coord_server::kvt::KvTCapability::Txn,
+            coord_server::kvt::KvTCapability::Watch,
             coord_server::kvt::KvTCapability::Lease,
         ]),
     );
