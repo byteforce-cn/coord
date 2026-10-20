@@ -9732,18 +9732,10 @@ mod tests {
         // Non-boundary and still-unsealed targets are metadata-level rejections:
         // they must not fail the raft apply (D11.5).
         storage
-            .apply_commit_log_shard_op(
-                &CommitLogShardOp::Gc { through_ts: 150 },
-                7,
-                applied_for(7),
-            )
+            .apply_commit_log_shard_op(&CommitLogShardOp::Gc { through_ts: 150 }, 7, applied_for(7))
             .unwrap();
         storage
-            .apply_commit_log_shard_op(
-                &CommitLogShardOp::Gc { through_ts: 201 },
-                8,
-                applied_for(8),
-            )
+            .apply_commit_log_shard_op(&CommitLogShardOp::Gc { through_ts: 201 }, 8, applied_for(8))
             .unwrap();
         assert_eq!(
             storage.commit_log_shard_table().unwrap().gc_before_ts,

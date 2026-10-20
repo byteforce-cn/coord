@@ -549,7 +549,10 @@ async fn test_watch_history_unavailable() {
 
     let table = fx.shards.table().unwrap();
     let gc_before = table.shards[0].end_ts;
-    assert_eq!(gc_before, second_ts, "shard 2 starts at the first retained ts");
+    assert_eq!(
+        gc_before, second_ts,
+        "shard 2 starts at the first retained ts"
+    );
     let sealed_at = table.shards[0].sealed_at_ms;
     assert!(sealed_at != 0);
 
@@ -565,9 +568,7 @@ async fn test_watch_history_unavailable() {
         })
         .await
         .expect("history is still inside the window");
-    let (events, cursor) = fx
-        .poll_until(&reader, cursor, WatchFilter::all(), 1)
-        .await;
+    let (events, cursor) = fx.poll_until(&reader, cursor, WatchFilter::all(), 1).await;
     assert_eq!(events[0].commit_ts, first_ts);
     let batch = reader.poll(cursor, &WatchFilter::all()).await.unwrap();
     assert_eq!(
@@ -615,9 +616,7 @@ async fn test_watch_history_unavailable() {
         })
         .await
         .expect("the oldest available cursor must still resume");
-    let (events, _) = fx
-        .poll_until(&reader, resumed, WatchFilter::all(), 1)
-        .await;
+    let (events, _) = fx.poll_until(&reader, resumed, WatchFilter::all(), 1).await;
     assert_eq!(
         events[0].commit_ts, second_ts,
         "the first retained event is exactly the shard boundary"
@@ -661,9 +660,7 @@ async fn test_gc_keeps_unsealed_shard_and_its_history() {
         })
         .await
         .expect("an unsealed shard keeps its history");
-    let (events, cursor) = fx
-        .poll_until(&reader, cursor, WatchFilter::all(), 1)
-        .await;
+    let (events, cursor) = fx.poll_until(&reader, cursor, WatchFilter::all(), 1).await;
     assert_eq!(events[0].commit_ts, first_ts);
     let batch = reader.poll(cursor, &WatchFilter::all()).await.unwrap();
     assert_eq!(

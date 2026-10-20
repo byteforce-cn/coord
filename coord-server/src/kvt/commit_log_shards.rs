@@ -164,11 +164,7 @@ impl CommitLogShardManager {
             in_flight.extend(pending_decision(applied, next));
         }
 
-        for meta in table
-            .shards
-            .iter()
-            .filter(|meta| !table.is_reclaimed(meta))
-        {
+        for meta in table.shards.iter().filter(|meta| !table.is_reclaimed(meta)) {
             let shard_rt = self.ensure_runtime(meta.shard_id).await?;
             for rt in &regions {
                 let region_id = rt.region_id();
@@ -273,11 +269,7 @@ impl CommitLogShardManager {
         let table = self
             .table()
             .map_err(|err| format!("read commit log shard table: {err}"))?;
-        let Some(meta) = table
-            .shards
-            .iter()
-            .find(|meta| meta.shard_id == shard_id)
-        else {
+        let Some(meta) = table.shards.iter().find(|meta| meta.shard_id == shard_id) else {
             return Err(format!(
                 "commit log shard {shard_id} is not in the region 0 table"
             ));
@@ -391,11 +383,7 @@ impl CommitLogShardManager {
             .map_err(|err| format!("read commit log shard table: {err}"))?;
         // 先清理上一轮已标记回收的本地组：之后任何装配都不应把它们重新拉起。
         tick.gc_shards += self.gc_local(&table).await?;
-        for meta in table
-            .shards
-            .iter()
-            .filter(|meta| !table.is_reclaimed(meta))
-        {
+        for meta in table.shards.iter().filter(|meta| !table.is_reclaimed(meta)) {
             self.ensure_runtime(meta.shard_id).await?;
         }
 
@@ -403,11 +391,7 @@ impl CommitLogShardManager {
         let table = self
             .table()
             .map_err(|err| format!("read commit log shard table: {err}"))?;
-        for meta in table
-            .shards
-            .iter()
-            .filter(|meta| !table.is_reclaimed(meta))
-        {
+        for meta in table.shards.iter().filter(|meta| !table.is_reclaimed(meta)) {
             let Some(rt) = self.runtime(meta.shard_id) else {
                 continue;
             };
@@ -600,10 +584,7 @@ impl CommitLogShardManager {
     /// 先 shutdown 再移除运行时并删除数据目录：openraft 任务停止后 redb 句柄
     /// 随 `RegionRuntime` 释放，删除不会与写入竞争。shutdown 失败时保留运行时，
     /// 下一次 tick 重试——宁可晚删，也不让一个仍活着的 raft 组丢文件。
-    pub async fn gc_local(
-        &self,
-        table: &CommitLogShardTable,
-    ) -> std::result::Result<u64, String> {
+    pub async fn gc_local(&self, table: &CommitLogShardTable) -> std::result::Result<u64, String> {
         let reclaimed: Vec<(u64, Arc<RegionRuntime>)> = self
             .runtimes()
             .into_iter()
@@ -1457,6 +1438,7 @@ mod tests {
         };
         let fx = ShardFixture::start_with(config, 1_000_000).await;
         fx.manager.tick().await.unwrap(); // open shard 1
+
         // 决策 11 未 apply：watermark 停在 10，shard [1, 11) 不能 seal。
         fx.write_decisions(&[10, 11]);
         fx.apply_decisions(&[10]);

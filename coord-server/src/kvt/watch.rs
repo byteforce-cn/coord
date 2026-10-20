@@ -40,11 +40,7 @@ pub struct WatchCursor {
 
 impl std::fmt::Display for WatchCursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "shard {}, commit_ts {}",
-            self.shard_id, self.commit_ts
-        )
+        write!(f, "shard {}, commit_ts {}", self.shard_id, self.commit_ts)
     }
 }
 
@@ -493,10 +489,7 @@ fn may_cross(meta: &CommitLogShardMeta, watermark: u64) -> bool {
 ///
 /// 过滤条件不参与判定——被过滤掉的事件同样必须先可读，否则 cursor 无法证明
 /// 「消费过该段历史」。
-fn ensure_available(
-    table: &CommitLogShardTable,
-    cursor: WatchCursor,
-) -> Result<(), WatchError> {
+fn ensure_available(table: &CommitLogShardTable, cursor: WatchCursor) -> Result<(), WatchError> {
     let requested = cursor.commit_ts.saturating_add(1);
     if table.gc_before_ts == 0 || requested >= table.gc_before_ts {
         return Ok(());

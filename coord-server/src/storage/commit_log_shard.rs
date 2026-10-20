@@ -192,9 +192,11 @@ impl CommitLogShardTable {
                 "commit log gc boundary {through_ts} is not a shard end_ts"
             )));
         }
-        if let Some(unsealed) = self.shards.iter().find(|meta| {
-            meta.end_ts != 0 && meta.end_ts <= through_ts && meta.sealed_at_ms == 0
-        }) {
+        if let Some(unsealed) = self
+            .shards
+            .iter()
+            .find(|meta| meta.end_ts != 0 && meta.end_ts <= through_ts && meta.sealed_at_ms == 0)
+        {
             return Err(Error::InvalidArgument(format!(
                 "commit log shard {} is not sealed; gc cannot pass it",
                 unsealed.shard_id
@@ -288,17 +290,11 @@ pub fn seal_timeout_due(ended_at_ms: u64, now_ms: u64, timeout_secs: u64) -> boo
 ///
 /// 锚点用 `sealed_at_ms` 而不是 `ended_at_ms`：超时 seal 只证明「可以停止等待」，
 /// 不证明区间内不会再有迟到记录；调用方必须同时给出 `watermark >= end_ts`。
-pub fn gc_due(
-    meta: &CommitLogShardMeta,
-    watermark: u64,
-    now_ms: u64,
-    retention_secs: u64,
-) -> bool {
+pub fn gc_due(meta: &CommitLogShardMeta, watermark: u64, now_ms: u64, retention_secs: u64) -> bool {
     meta.end_ts != 0
         && meta.sealed_at_ms != 0
         && watermark >= meta.end_ts
-        && u128::from(now_ms)
-            >= u128::from(meta.sealed_at_ms) + u128::from(retention_secs) * 1_000
+        && u128::from(now_ms) >= u128::from(meta.sealed_at_ms) + u128::from(retention_secs) * 1_000
 }
 
 /// 本轮可推进到的回收边界：从 `gc_before_ts` 之后连续满足 [`gc_due`] 的 shard
@@ -440,7 +436,10 @@ mod tests {
             "watermark must pass end_ts"
         );
         assert!(!gc_due(&sealed, 101, 10_059_999, 60), "window must elapse");
-        assert!(gc_due(&sealed, 101, 10_060_000, 60), "boundary is inclusive");
+        assert!(
+            gc_due(&sealed, 101, 10_060_000, 60),
+            "boundary is inclusive"
+        );
         let unsealed = CommitLogShardMeta {
             sealed_at_ms: 0,
             ..sealed.clone()
