@@ -748,6 +748,10 @@ fn txn_session_status(err: SessionError) -> Status {
             ),
             CoordErrorCode::ReadSetTooLarge,
         ),
+        SessionError::Draining => attach(
+            Status::unavailable("key range is draining for split; retry with backoff"),
+            CoordErrorCode::Unavailable,
+        ),
     }
 }
 
@@ -1006,5 +1010,18 @@ impl storage_v2::storage_server::Storage for CoordNode {
         _request: Request<storage_v2::DeleteRequest>,
     ) -> Result<Response<storage_v2::DeleteResponse>, Status> {
         Err(shell(KvTCapability::Storage, self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coord_core::error_code::error_code_of;
+
+    #[test]
+    fn draining_session_error_is_retryable_unavailable() {
+        let status = txn_session_status(SessionError::Draining);
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(error_code_of(&status).as_deref(), Some("UNAVAILABLE"));
     }
 }
