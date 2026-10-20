@@ -33,6 +33,7 @@ use crate::raft::region_runtime::{
 use crate::raft::RaftConfig;
 use crate::storage::mvcc::RevisionMode;
 use crate::storage::object_store::ObjectStoreCtx;
+use crate::storage::region_table::RegionTable;
 
 // ============================================================================
 // RegionHandle
@@ -197,6 +198,17 @@ impl RegionHandle {
         meta.epoch.version += 1;
     }
 
+    /// 用权威表条目替换 range/epoch/peers。
+    ///
+    /// 近似统计是心跳派生的本地瞬态，表不承载它——替换时保留当前值，避免
+    /// 路由表刷新把刚上报的容量/Key 数清零。
+    pub fn replace_meta(&self, mut meta: RegionMeta) {
+        let mut current = self.meta.write();
+        meta.approximate_size = current.approximate_size;
+        meta.approximate_keys = current.approximate_keys;
+        *current = meta;
+    }
+
     /// 更新近似统计数据
     pub fn update_stats(&self, size: u64, keys: u64) {
         let mut meta = self.meta.write();
@@ -225,6 +237,10 @@ pub struct RegionManager {
     key_index: RwLock<BTreeMap<Vec<u8>, RegionId>>,
     /// Region 运行时注册表（装配后的 raft/存储句柄；路由见 regions/key_index）
     runtimes: RwLock<BTreeMap<RegionId, Arc<RegionRuntime>>>,
+    /// 已应用到本路由表的权威 Region 表版本（0 = 尚未应用）。
+    table_version: AtomicU64,
+    /// 串行化并发刷新：两个请求同时读到版本 2/3 时，旧表不能覆盖新表。
+    table_apply_lock: parking_lot::Mutex<()>,
 }
 
 impl RegionManager {
@@ -235,6 +251,8 @@ impl RegionManager {
             regions: RwLock::new(BTreeMap::new()),
             key_index: RwLock::new(BTreeMap::new()),
             runtimes: RwLock::new(BTreeMap::new()),
+            table_version: AtomicU64::new(0),
+            table_apply_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -322,6 +340,64 @@ impl RegionManager {
 
         tracing::info!("Region {} unregistered", region_id);
         Ok(())
+    }
+
+    /// 已应用到本节点路由表的权威 Region 表版本。
+    pub fn table_version(&self) -> u64 {
+        self.table_version.load(Ordering::SeqCst)
+    }
+
+    /// 用 region 0 的权威表收敛路由表（#159）。
+    ///
+    /// - 表版本不前进 → `Ok(false)`（重复刷新/旧快照 no-op）；
+    /// - 已注册的 region 原地 `replace_meta`（与 runtime 共享同一 handle）；
+    /// - 新 region 建 handle（运行时 spawn 归 #160，不在本方法内）；
+    /// - 表中已删除的 region 同时丢弃 handle 与 runtime，避免“无 handle 有
+    ///   runtime”的半状态。
+    ///
+    /// 两个索引顺序替换（不嵌套持锁）与既有 register/unregister 一致：替换窗口内
+    /// 路由可能 `RouteNotReady`/`RegionNotFound`，调用方按可重试错误处理，不会
+    /// 读错 Region。
+    pub fn apply_region_table(&self, table: &RegionTable) -> Result<bool> {
+        let _guard = self.table_apply_lock.lock();
+        if table.version <= self.table_version() {
+            return Ok(false);
+        }
+        table.validate()?;
+
+        let (next_regions, next_index) = {
+            let current = self.regions.read();
+            let mut next_regions = BTreeMap::new();
+            let mut next_index = BTreeMap::new();
+            for meta in &table.regions {
+                let handle = match current.get(&meta.region_id) {
+                    Some(existing) => {
+                        existing.replace_meta(meta.clone());
+                        Arc::clone(existing)
+                    }
+                    None => Arc::new(RegionHandle::new(meta.clone())),
+                };
+                next_index.insert(meta.start_key.clone(), meta.region_id);
+                next_regions.insert(meta.region_id, handle);
+            }
+            (next_regions, next_index)
+        };
+
+        let keep: std::collections::BTreeSet<RegionId> =
+            table.regions.iter().map(|meta| meta.region_id).collect();
+        *self.regions.write() = next_regions;
+        *self.key_index.write() = next_index;
+        self.runtimes
+            .write()
+            .retain(|region_id, _| keep.contains(region_id));
+        self.table_version.store(table.version, Ordering::SeqCst);
+
+        tracing::info!(
+            version = table.version,
+            regions = table.regions.len(),
+            "region manager converged to authoritative region table"
+        );
+        Ok(true)
     }
 
     // ──── Region 查询 ────

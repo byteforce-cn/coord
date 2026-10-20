@@ -425,3 +425,76 @@ fn test_resolve_range_rejects_gap_and_unroutable_start() {
         Err(Error::RouteNotReady)
     ));
 }
+
+// ============================================================================
+// 权威 Region 表收敛（#159）
+// ============================================================================
+
+#[test]
+fn test_apply_region_table_adds_updates_and_removes() {
+    use coord_server::storage::region_table::RegionTable;
+
+    let rm = RegionManager::new(1);
+    rm.register_region(make_test_meta(1, vec![], vec![]))
+        .unwrap();
+
+    let mut table = RegionTable::default();
+    table.init(vec![make_test_meta(1, vec![], vec![])]).unwrap();
+    assert!(rm.apply_region_table(&table).unwrap());
+    assert_eq!(rm.table_version(), 1);
+
+    let split = RegionTable {
+        version: 2,
+        regions: vec![
+            make_test_meta(1, vec![], b"m".to_vec()),
+            make_test_meta(2, b"m".to_vec(), vec![]),
+        ],
+    };
+    assert!(rm.apply_region_table(&split).unwrap());
+    assert_eq!(rm.route(b"a").unwrap().region_id(), 1);
+    assert_eq!(rm.route(b"z").unwrap().region_id(), 2);
+    assert_eq!(rm.get_region(1).unwrap().meta.read().end_key, b"m".to_vec());
+
+    let merged = RegionTable {
+        version: 3,
+        regions: vec![make_test_meta(1, vec![], vec![])],
+    };
+    assert!(rm.apply_region_table(&merged).unwrap());
+    assert!(rm.get_region(2).is_none());
+    assert_eq!(rm.route(b"z").unwrap().region_id(), 1);
+    assert!(
+        !rm.apply_region_table(&merged).unwrap(),
+        "stale version is a no-op"
+    );
+}
+
+#[test]
+fn test_apply_region_table_keeps_local_approximate_stats() {
+    use coord_server::storage::region_table::RegionTable;
+
+    let rm = RegionManager::new(1);
+    let handle = rm
+        .register_region(make_test_meta(1, vec![], vec![]))
+        .unwrap();
+    handle.update_stats(4_096, 12);
+
+    let mut table = RegionTable::default();
+    table
+        .init(vec![
+            make_test_meta(1, vec![], b"k".to_vec()),
+            make_test_meta(2, b"k".to_vec(), vec![]),
+        ])
+        .unwrap();
+    let mut updated = table.regions[0].clone();
+    updated.epoch.conf_ver = 2;
+    let table = RegionTable {
+        version: 1,
+        regions: vec![updated, table.regions[1].clone()],
+    };
+    assert!(rm.apply_region_table(&table).unwrap());
+
+    let meta = rm.get_region(1).unwrap().meta.read().clone();
+    assert_eq!(meta.end_key, b"k".to_vec());
+    assert_eq!(meta.approximate_size, 4_096);
+    assert_eq!(meta.approximate_keys, 12);
+}
