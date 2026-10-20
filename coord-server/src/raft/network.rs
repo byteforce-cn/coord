@@ -539,8 +539,10 @@ fn to_rpc_error(e: tonic::Status) -> RPCError<TypeConfig> {
 
 /// Raft 网络客户端枚举，统一正常通信和分区模拟两种模式。
 ///
-/// - `Real`: 正常的 gRPC 网络通信，每次 RPC 调用前会检查 blocklist（支持动态分区模拟）
-/// - `Blocked`: 模拟网络分区，所有 RPC 返回 Unreachable
+/// - `Real`: 正常 gRPC 通信，每次 RPC 前动态检查 blocklist——分区期间创建
+///   的网络对象在 unblock 后自动恢复（真实分区愈合不会更换传输）。
+/// - `Blocked`: 目标地址不可解析（配置错误），所有 RPC 返回 Unreachable。
+///   不得用它表示「当前被 blocklist 阻止」：那会把一次分区固化成永久故障。
 pub enum RaftNetwork {
     Real {
         inner: RaftNetworkImpl,
@@ -574,8 +576,7 @@ impl RaftNetwork {
             }
             RaftNetwork::Blocked { target_id } => {
                 let status = tonic::Status::unavailable(format!(
-                    "simulated network partition: node {} is unreachable",
-                    target_id
+                    "raft target node {target_id} is unreachable (no resolved address)"
                 ));
                 Err(RPCError::Unreachable(openraft::error::Unreachable::new(
                     &status,
@@ -585,27 +586,26 @@ impl RaftNetwork {
     }
 
     fn to_streaming_error(&self) -> StreamingError<TypeConfig> {
-        let target_id = match self {
-            RaftNetwork::Real { target_id, .. } => target_id,
-            RaftNetwork::Blocked { target_id } => target_id,
+        let status = match self {
+            RaftNetwork::Real { target_id, .. } => tonic::Status::unavailable(format!(
+                "simulated network partition: node {target_id} is unreachable"
+            )),
+            RaftNetwork::Blocked { target_id } => tonic::Status::unavailable(format!(
+                "raft target node {target_id} is unreachable (no resolved address)"
+            )),
         };
-        let status = tonic::Status::unavailable(format!(
-            "simulated network partition: node {} is unreachable",
-            target_id
-        ));
         StreamingError::Unreachable(openraft::error::Unreachable::new(&status))
     }
 
-    /// `Blocked` 状态下的 RPC 错误（与 `ensure_not_blocked` 同一语义，
-    /// 供 match 的兜底分支使用：返回错误而非 panic）。
+    /// `Blocked` 状态下的 RPC 错误（地址不可解析；供 match 的兜底分支使用，
+    /// 返回错误而非 panic）。
     fn blocked_rpc_error(&self) -> RPCError<TypeConfig> {
         let target_id = match self {
             RaftNetwork::Real { target_id, .. } => target_id,
             RaftNetwork::Blocked { target_id } => target_id,
         };
         let status = tonic::Status::unavailable(format!(
-            "simulated network partition: node {} is unreachable",
-            target_id
+            "raft target node {target_id} is unreachable (no resolved address)"
         ));
         to_rpc_error(status)
     }
@@ -689,15 +689,15 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
         target: u64,
         node: &openraft::impls::BasicNode,
     ) -> Self::Network {
-        // 检查网络分区模拟：目标节点是否被阻止
-        let blocked = self.is_blocked(target);
-        if blocked {
+        // 被 blocklist 阻止时仍返回 Real：拒绝发生在每次 RPC 的动态检查里，
+        // unblock 后同一网络对象即可恢复（heartbeat worker / 复制流会跨分区
+        // 复用对象，若在创建时固化成 Blocked，愈合后永远不可达）。
+        if self.is_blocked(target) {
             tracing::debug!(
                 "[partition-sim] node {} → node {}: BLOCKED (simulated partition)",
                 self.node_id,
                 target
             );
-            return RaftNetwork::Blocked { target_id: target };
         }
 
         // 优先使用 openraft 传入的 membership 地址（BasicNode.addr），
@@ -1099,6 +1099,10 @@ impl RaftNetworkFactory<TypeConfig> for RegionRaftNetworkFactory {
 /// Multi-Raft：入站 RaftMessage 携带 `region_id`，按 region
 /// 解复用到对应 Raft 实例。单 Raft 模式 region_id=0 使用默认实例（`set_raft`），
 /// 兼容既有调用方。
+///
+/// Clone 共享同一张 region→raft 表（字段均为 `Arc`）：故障恢复测试需要在
+/// gRPC 服务不重绑监听器的前提下替换本节点的 raft 实例。
+#[derive(Clone)]
 pub struct RaftRpcService {
     /// 本地 Raft 实例表：region_id → Raft（region 0 = 单 Raft 默认实例）
     rafts: Arc<RwLock<HashMap<u64, CoordRaft>>>,
