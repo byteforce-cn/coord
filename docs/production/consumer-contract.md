@@ -116,7 +116,10 @@
   丢会话，需 `TXN_NOT_FOUND` 后重跑整个事务）。写集 4MiB / 读集 4096 / 单 range
   10000 key 上限（写集超限
   `TXN_TOO_LARGE`，读集超限 `READ_SET_TOO_LARGE`，均 `INVALID_ARGUMENT`）。
-  `DELETE_RANGE` 尚未交付（`UNIMPLEMENTED`，按单 key 删除）。TTL 从 `Begin`
+  `DELETE_RANGE` 删除 `[key, range_end)`（`range_end` 必须非空且大于 `key`），
+  与同一事务的其它 mutation 共享 `commit_ts`，跨 Region 由 `safe_ts` 收敛后
+  原子可见；point/range 读集与区间写按相交判冲突（冲突返回 `TXN_CONFLICT`；
+  校验索引扫描超 `max_range` 返回 `READ_SET_TOO_LARGE`）。TTL 从 `Begin`
   起算、`Read` 不续期；split drain 期间命中被 drain 区间的 `Read` 返回
   `UNAVAILABLE`（退避后重试同一会话，或重跑）。
 - **Lease v2**：Grant/Revoke/KeepAlive/TimeToLive 由 region 0 leader 服务；租约
