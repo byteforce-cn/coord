@@ -10,6 +10,7 @@
 // - envelope:              持久化值统一格式信封（魔数+版本前缀，bincode 退场 P0）
 
 pub mod commit_log;
+pub mod commit_log_shard;
 pub mod compaction;
 pub mod disk_watermark;
 pub mod envelope;
