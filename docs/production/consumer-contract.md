@@ -112,7 +112,9 @@
   `commit_ts`（不等待各 Region apply，读用 `read_ts >= commit_ts`）；冲突
   `ABORTED` + `TXN_CONFLICT`（换 `start_ts` 重跑）；会话丢失/已提交再读
   `TXN_NOT_FOUND`（重跑）；同一 `txn_id` + `request_id` 在 TTL 内幂等回放首次
-  `commit_ts`。写集 4MiB / 读集 4096 / 单 range 10000 key 上限（写集超限
+  `commit_ts`（协调节点存活、region 0 leader 切换时同样成立；协调节点崩溃会
+  丢会话，需 `TXN_NOT_FOUND` 后重跑整个事务）。写集 4MiB / 读集 4096 / 单 range
+  10000 key 上限（写集超限
   `TXN_TOO_LARGE`，读集超限 `READ_SET_TOO_LARGE`，均 `INVALID_ARGUMENT`）。
   `DELETE_RANGE` 尚未交付（`UNIMPLEMENTED`，按单 key 删除）。TTL 从 `Begin`
   起算、`Read` 不续期；split drain 期间命中被 drain 区间的 `Read` 返回
