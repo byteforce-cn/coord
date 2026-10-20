@@ -294,9 +294,7 @@ fn event_matches_mutations(
                 SequencerMutation::Put { key, value, .. } => {
                     change.key == *key && change.value.as_deref() == Some(value.as_slice())
                 }
-                SequencerMutation::Delete { key } => {
-                    change.key == *key && change.value.is_none()
-                }
+                SequencerMutation::Delete { key } => change.key == *key && change.value.is_none(),
                 SequencerMutation::DeleteRange { .. } => false,
             })
 }
@@ -3502,7 +3500,9 @@ impl<B: StorageBackend> MvccStorage<B> {
                     );
                     let prev = tx
                         .get(TABLE_KV, &index_key)?
-                        .and_then(|b| crate::storage::envelope::decode::<SequencerIntervalWrite>(&b).ok())
+                        .and_then(|b| {
+                            crate::storage::envelope::decode::<SequencerIntervalWrite>(&b).ok()
+                        })
                         .unwrap_or(SequencerIntervalWrite {
                             start: Vec::new(),
                             end: Vec::new(),
@@ -3688,10 +3688,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                                 prev_value: None,
                             });
                         }
-                        crate::raft::type_config::SequencerMutation::DeleteRange {
-                            start,
-                            end,
-                        } => {
+                        crate::raft::type_config::SequencerMutation::DeleteRange { start, end } => {
                             let internal_start = encode_kv_key(start);
                             let internal_end = if end.is_empty() {
                                 prefix_upper_bound(KV_PREFIX)
@@ -3903,8 +3900,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                 continue;
             }
             let write_starts_before_end = end.is_empty() || entry.start.as_slice() < end;
-            let read_starts_before_write_end =
-                entry.end.is_empty() || start < entry.end.as_slice();
+            let read_starts_before_write_end = entry.end.is_empty() || start < entry.end.as_slice();
             if write_starts_before_end && read_starts_before_write_end {
                 let hit = SequencerIndexHit {
                     key: entry.start,
@@ -8623,10 +8619,7 @@ mod tests {
 
     // ──── OCC 区间写（#198）────
 
-    fn range_delete(
-        start: &[u8],
-        end: &[u8],
-    ) -> crate::raft::type_config::SequencerMutation {
+    fn range_delete(start: &[u8], end: &[u8]) -> crate::raft::type_config::SequencerMutation {
         crate::raft::type_config::SequencerMutation::DeleteRange {
             start: start.to_vec(),
             end: end.to_vec(),
@@ -8662,7 +8655,10 @@ mod tests {
                 applied_for(1),
             )
             .unwrap();
-        assert_eq!(outcomes, vec![SequencerOutcome::Committed { commit_ts: 10 }]);
+        assert_eq!(
+            outcomes,
+            vec![SequencerOutcome::Committed { commit_ts: 10 }]
+        );
 
         let hit = |key: &[u8], commit_ts: u64| {
             Some(SequencerIndexHit {
@@ -8670,7 +8666,10 @@ mod tests {
                 commit_ts,
             })
         };
-        assert_eq!(storage.sequencer_point_query(b"c", 5).unwrap(), hit(b"b", 10));
+        assert_eq!(
+            storage.sequencer_point_query(b"c", 5).unwrap(),
+            hit(b"b", 10)
+        );
         assert_eq!(
             storage.sequencer_point_query(b"c", 10).unwrap(),
             None,
@@ -8851,7 +8850,15 @@ mod tests {
         let outcomes = storage
             .apply_sequencer_op(
                 &seq_op_with_ranges(
-                    vec![seq_txn_with_ranges(b"t9", 1, 20, b"r9", &[b"nope"], &[], &[])],
+                    vec![seq_txn_with_ranges(
+                        b"t9",
+                        1,
+                        20,
+                        b"r9",
+                        &[b"nope"],
+                        &[],
+                        &[],
+                    )],
                     4_096,
                     3,
                 ),
@@ -8930,7 +8937,10 @@ mod tests {
                 applied_for(3),
             )
             .unwrap();
-        assert_eq!(result.through_ts, 0, "must not treat a foreign write as applied");
+        assert_eq!(
+            result.through_ts, 0,
+            "must not treat a foreign write as applied"
+        );
         assert_eq!(result.decisions, 0);
         assert_eq!(storage.get(b"x").unwrap(), Some(b"1".to_vec()));
     }
