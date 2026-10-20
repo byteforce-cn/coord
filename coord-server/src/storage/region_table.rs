@@ -474,8 +474,10 @@ mod tests {
         bytes.push(0);
         assert!(RegionTable::decode(&bytes).is_err());
 
-        let mut broken = RegionTable::default();
-        broken.version = 1;
+        let broken = RegionTable {
+            version: 1,
+            regions: Vec::new(),
+        };
         assert!(broken.encode().is_ok());
         assert!(RegionTable::decode(&broken.encode().unwrap()).is_err());
     }
