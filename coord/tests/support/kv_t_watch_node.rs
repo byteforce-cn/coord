@@ -106,6 +106,11 @@ impl WatchServerHandle {
         }
         let _ = self.handle.await;
     }
+
+    /// 立即断开：模拟网络/进程故障（in-flight 流全部收到传输错误）。
+    pub fn abort(self) {
+        self.handle.abort();
+    }
 }
 
 pub struct WatchNode {
@@ -275,7 +280,14 @@ impl WatchNode {
     /// Maintenance 是 `coord_client::Client` 找 leader 的入口；v2 watch 本身
     /// 任何持有 Commit Log shard 的节点都能服务，仍复用同一连接。
     pub async fn serve(&self) -> WatchServerHandle {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        self.serve_at(0).await
+    }
+
+    /// 在指定端口挂载（`0` = 随机端口）。重启重连测试需要在同一端口重新监听。
+    pub async fn serve_at(&self, port: u16) -> WatchServerHandle {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         let (tx, rx) = oneshot::channel();

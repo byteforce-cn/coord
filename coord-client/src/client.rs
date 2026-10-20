@@ -212,6 +212,16 @@ impl Client {
         crate::txn_v2::TxnV2Client::new(self.clone())
     }
 
+    /// 返回 v2 Watch 客户端（`coord.watch.v2` 订阅 + cursor 续订）。
+    pub fn watch_v2(&self) -> crate::watch_v2::WatchV2Client {
+        crate::watch_v2::WatchV2Client::new(self.clone())
+    }
+
+    /// 客户端 retry 参数（长连接订阅复用同一份配置）。
+    pub(crate) fn retry_config(&self) -> &Config {
+        &self.inner.config
+    }
+
     /// 返回 KV v2 客户端（KV-T G1 最小面：显式 commit_ts / read_ts）。
     pub fn kv_v2(&self) -> KvV2Client {
         KvV2Client::new(self.clone())

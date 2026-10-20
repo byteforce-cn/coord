@@ -322,3 +322,130 @@ async fn test_watch_rpc_gate_guards_and_reserved_namespaces() {
     assert_eq!(err.code(), Code::InvalidArgument);
     server.shutdown().await;
 }
+
+// ──── coord-client 包装：cursor 续订、断线重连、历史不足终止 ────
+
+async fn client_for(addr: &str) -> coord_client::Client {
+    coord_client::Client::new(
+        coord_client::Config::new(vec![addr.to_string()]).with_max_retries(10),
+    )
+    .await
+    .expect("client")
+}
+
+async fn client_batch(sub: &mut coord_client::WatchV2Subscription) -> coord_client::WatchV2Batch {
+    tokio::time::timeout(Duration::from_secs(10), sub.recv())
+        .await
+        .expect("client batch timed out")
+        .expect("subscription closed")
+        .expect("subscription error")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_watch_client_resumes_from_cursor() {
+    let fx = WatchNode::start().await;
+    fx.open_first_shard().await;
+    let ts1 = fx.commit_pairs(&[(b"aa", b"v1")]).await;
+    let server = fx.serve().await;
+    let client = client_for(&server.addr).await;
+
+    let mut sub = client
+        .watch_v2()
+        .watch(coord_client::WatchV2Options::new(b"").from_revision(ts1))
+        .await
+        .expect("subscribe");
+    let first = client_batch(&mut sub).await;
+    assert_eq!(
+        first.events.iter().map(|e| e.commit_ts).collect::<Vec<_>>(),
+        vec![ts1]
+    );
+    let cursor = sub.cursor().expect("cursor after the first batch");
+    sub.cancel().await;
+
+    let ts2 = fx.commit_pairs(&[(b"bb", b"v2")]).await;
+    let mut resumed = client
+        .watch_v2()
+        .watch(coord_client::WatchV2Options::new(b"").from_cursor(cursor))
+        .await
+        .expect("resume");
+    let next = client_batch(&mut resumed).await;
+    assert_eq!(
+        next.events.iter().map(|e| e.commit_ts).collect::<Vec<_>>(),
+        vec![ts2],
+        "cursor resume must not replay the consumed batch"
+    );
+    resumed.cancel().await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_watch_client_reconnects_after_server_restart() {
+    let fx = WatchNode::start().await;
+    fx.open_first_shard().await;
+    let ts1 = fx.commit_pairs(&[(b"aa", b"v1")]).await;
+    let server = fx.serve().await;
+    let port: u16 = server.addr.rsplit(':').next().unwrap().parse().unwrap();
+    let client = client_for(&server.addr).await;
+
+    let mut sub = client
+        .watch_v2()
+        .watch(coord_client::WatchV2Options::new(b"").from_revision(ts1))
+        .await
+        .expect("subscribe");
+    let first = client_batch(&mut sub).await;
+    assert_eq!(
+        first.events.iter().map(|e| e.commit_ts).collect::<Vec<_>>(),
+        vec![ts1]
+    );
+
+    // 模拟进程/网络故障：立即断开全部流；数据面（raft/shard）仍在。
+    server.abort();
+    let ts2 = fx.commit_pairs(&[(b"bb", b"v2")]).await;
+    let server = fx.serve_at(port).await;
+
+    let next = client_batch(&mut sub).await;
+    assert_eq!(
+        next.events.iter().map(|e| e.commit_ts).collect::<Vec<_>>(),
+        vec![ts2],
+        "the wrapper must resume from the last cursor without replaying ts1"
+    );
+    sub.cancel().await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_watch_client_history_unavailable_is_terminal() {
+    let fx = WatchNode::start().await;
+    fx.open_first_shard().await;
+    let _first_ts = fx.commit_pairs(&[(b"aa", b"v1")]).await;
+    let second_ts = fx.commit_pairs(&[(b"bb", b"v2")]).await;
+    fx.wait_until_sealed(1).await;
+    let gc_before = fx.shards.table().unwrap().shards[0].end_ts;
+    assert_eq!(gc_before, second_ts);
+    fx.advance_clock_ms(60_000);
+    fx.wait_until_gc_before(gc_before).await;
+
+    let server = fx.serve().await;
+    let client = client_for(&server.addr).await;
+    let mut sub = client
+        .watch_v2()
+        .watch(coord_client::WatchV2Options::new(b"").from_revision(1))
+        .await
+        .expect("subscribe");
+
+    let err = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+        .await
+        .expect("history error timed out")
+        .expect("subscription closed without an error")
+        .expect_err("reclaimed history must fail the subscription");
+    assert!(
+        matches!(err, coord_core::error::Error::HistoryUnavailable { .. }),
+        "unexpected error: {err}"
+    );
+    // 终止而不是重连：通道随即关闭。
+    assert!(tokio::time::timeout(Duration::from_secs(1), sub.recv())
+        .await
+        .expect("subscription must end after a terminal error")
+        .is_none());
+    server.shutdown().await;
+}
