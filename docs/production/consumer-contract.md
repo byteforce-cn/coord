@@ -150,8 +150,13 @@
   水位：无 in-flight 时等于最后决策的 `commit_ts`，否则为最早未 apply/未搬运的
   `commit_ts - 1`；shard 只在 `watermark >= end_ts` 时 seal，停滞超过 5 分钟按
   超时 seal 并计入 `coord_kv_t_commit_watermark_stalls_total`，sealed shard 仍
-  接受区间内迟到记录。**不做**：保留窗口与 GC（#157）、跨 shard 顺序读与
-  cursor（#156）。
+  接受区间内迟到记录。**Watch 读取**：Coordinator 按 shard 顺序读，shard 内按
+  `commit_ts` 整组读取；上界取本节点 watermark，跨 shard 只在 shard sealed 且
+  watermark 越过 `end_ts` 后推进。同一事务的 Region 分片合并为一个事件，单批
+  ≤1000 条 change 或 1MB（事务自身超限不拆批）。cursor 为
+  `WatchCursor(shard_id, commit_ts)`，`shard_id=0` 表示首个 shard 之前；
+  key/range 与 put/delete 过滤只裁剪事件内容，cursor 仍推进。**尚未提供**：
+  保留窗口与 GC、v2 Watch RPC/授权/指标（后续 gate）。
 - **路由**：可带 metadata `coord-routing-epoch`；epoch 过期返回 `ABORTED` +
   `EPOCH_STALE`，刷新路由后重试。
 - **对象存储**：manifest 用 `commit_ts`；`/obj/` 固定 Region 区间，不参与任意

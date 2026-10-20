@@ -22,6 +22,7 @@ pub mod safe_ts;
 pub mod sequencer;
 mod services;
 pub(crate) mod txn;
+pub mod watch;
 
 use coord_core::error_code::{attach, CoordErrorCode};
 use tonic::{Code, Status};
