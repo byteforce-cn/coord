@@ -483,17 +483,26 @@ fn may_cross(meta: &CommitLogShardMeta, watermark: u64) -> bool {
     meta.end_ts != 0 && meta.sealed_at_ms != 0 && watermark >= meta.end_ts
 }
 
-/// 历史可用性：第一个未读事件（`cursor.commit_ts + 1`）必须仍在保留窗口内。
+/// 历史可用性：第一个未读事件必须仍在保留窗口内。
 ///
-/// 过滤条件不参与判定——被过滤掉的事件同样必须先可读，否则 cursor 无法证明
-/// 「消费过该段历史」。
+/// `commit_ts = 0`（含跨 shard 后的 `{shard_id, 0}`）表示「在该 shard 起点之前」，
+/// 第一个未读事件是 `start_ts` 而不是 `1`；直接按 `commit_ts + 1` 判定会把一个
+/// 已追平、停在 shard 起点的订阅误判成超出窗口。过滤条件不参与判定——被过滤掉
+/// 的事件同样必须先可读，否则 cursor 无法证明「消费过该段历史」。
 fn ensure_available(table: &CommitLogShardTable, cursor: WatchCursor) -> Result<(), WatchError> {
-    let requested = cursor.commit_ts.saturating_add(1);
-    if table.gc_before_ts == 0 || requested >= table.gc_before_ts {
+    let first_unread = match table
+        .shards
+        .iter()
+        .find(|meta| meta.shard_id == cursor.shard_id)
+    {
+        Some(meta) if cursor.commit_ts < meta.start_ts => meta.start_ts,
+        _ => cursor.commit_ts.saturating_add(1),
+    };
+    if table.gc_before_ts == 0 || first_unread >= table.gc_before_ts {
         return Ok(());
     }
     Err(WatchError::HistoryUnavailable {
-        requested,
+        requested: first_unread,
         oldest_available: oldest_available(table),
     })
 }
@@ -920,6 +929,33 @@ mod tests {
             }
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_cursor_parked_at_a_shard_start_is_not_before_the_window() {
+        let table = CommitLogShardTable {
+            shards: vec![shard(1, 1, 101), shard(2, 101, 0)],
+            gc_before_ts: 101,
+        };
+        assert!(
+            ensure_available(
+                &table,
+                WatchCursor {
+                    shard_id: 2,
+                    commit_ts: 0
+                }
+            )
+            .is_ok(),
+            "crossing into shard 2 yields a start cursor, not history from ts 1"
+        );
+        assert!(ensure_available(
+            &table,
+            WatchCursor {
+                shard_id: 1,
+                commit_ts: 0
+            }
+        )
+        .is_err());
     }
 
     #[test]

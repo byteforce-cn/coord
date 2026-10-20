@@ -25,7 +25,7 @@
 
 - **Ruling:** 回收后保留 shard 元数据行，只推进表上的 `gc_before_ts` — shard id 保持连续、`shard_for_ts` 与 cursor 解析仍能按 commit_ts 定位；代价是元数据行永久累积（每 shard 至少 1 小时一个，可忽略）。
 - **Ruling:** 物理回收 = shutdown 该 shard 的 raft 组、从本节点运行时表移除、删除其数据目录；`tick` / `local_watermark` / `ensure_runtime` 都跳过已回收 shard，避免下一次 tick 把它空组重新拉起来 — 代价是回收后该 shard 在本节点不可再读（这正是语义），且依赖 openraft `shutdown()` 能及时停止任务。
-- **Ruling:** 可用性判定只看 `cursor.commit_ts + 1 >= gc_before_ts`（第一个未读事件是否还在）— 与 etcd compact 同口径；被过滤掉的事件同样算「可读」，因此过滤条件不参与判定。
+- **Ruling:** 可用性判定只看「第一个未读事件」是否还在：普通 cursor 是 `commit_ts + 1`；`commit_ts < shard.start_ts`（含跨 shard 后返回的 `{shard_id, 0}`）取 `shard.start_ts`。只看 `commit_ts + 1` 会把已追平、停在 shard 起点的订阅误判成越界。被过滤掉的事件同样算「可读」，因此过滤条件不参与判定。
 - **Ruling:** 不新增 proto 字段；`WatchError::HistoryUnavailable` 携带最老可用 `WatchCursor`，`WatchBatch` 同样回显 — #158 的 RPC 层决定如何把它放到 `OUT_OF_RANGE` + `HISTORY_UNAVAILABLE` 上。
 - **Ruling:** 时间锚点用 `sealed_at_ms`（seal 完成时刻），并要求回收时 `watermark >= end_ts` — 超时 seal 可能发生在 watermark 越过之前，仅凭 `sealed_at_ms` 不能证明「不会再有迟到记录」。
 
@@ -133,9 +133,10 @@ git commit -m "feat(kv-t): add commit log gc watermark to the shard table"
   - `pub fn oldest_available(table: &CommitLogShardTable) -> WatchCursor`
   - 私有 `fn ensure_available(table: &CommitLogShardTable, cursor: WatchCursor) -> Result<(), WatchError>`
 - 语义：
-  - 可用性：`cursor.commit_ts.saturating_add(1) >= table.gc_before_ts`；`gc_before_ts == 0` 恒可用。
+  - 可用性：第一个未读事件（`commit_ts + 1`；`commit_ts` 在 shard 起点之前时取 `start_ts`）`>= table.gc_before_ts`；`gc_before_ts == 0` 恒可用。
   - `oldest_available` = `position_before(table, gc_before_ts - 1)`；`gc_before_ts == 0` = `WatchCursor::beginning()`。
   - `start()` 解析出 cursor 后、`poll()` 读取前都要 `ensure_available`；`poll` 返回的批携带 `oldest_available`。
+  - 回归：跨 shard 后 poll 返回的 `{shard_id, 0}` 必须仍可续订（第一个保留事件就是该 shard 起点）。
   - `poll` 读 shard 期间若 GC 刚好推进（`ensure_runtime` 拒绝），必须重读表并转成 `HistoryUnavailable`，不得把内部错误泄露给调用方。
 
 - [ ] **Step 1: 写失败测试**

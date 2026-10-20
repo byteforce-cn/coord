@@ -178,6 +178,13 @@ impl CommitLogShardTable {
         meta.end_ts != 0 && meta.end_ts <= self.gc_before_ts
     }
 
+    /// 未回收的 shard（按 `commit_ts` 顺序）。
+    ///
+    /// 回收判定只在这一处过滤，避免每个读取/搬运入口各写一遍 `!is_reclaimed`。
+    pub fn live_shards(&self) -> impl Iterator<Item = &CommitLogShardMeta> {
+        self.shards.iter().filter(|meta| !self.is_reclaimed(meta))
+    }
+
     /// 把回收水位推进到某个已 seal shard 的 `end_ts`。
     ///
     /// 回收以整 shard 为单位：目标必须是真实边界，且边界以内的 shard 必须全部

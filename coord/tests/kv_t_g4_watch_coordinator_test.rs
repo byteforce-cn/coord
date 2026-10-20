@@ -638,6 +638,24 @@ async fn test_watch_history_unavailable() {
         "the first retained event is exactly the shard boundary"
     );
 
+    // poll 跨入 shard 2 后返回的 cursor 是 `(2, 0)`（该 shard 起点之前）：
+    // 已追平的订阅不得被当成「从 ts 1 开始」而误报 HISTORY_UNAVAILABLE。
+    let at_shard_start = reader
+        .start(WatchStart {
+            start_revision: 0,
+            start_cursor: Some(WatchCursor {
+                shard_id: 2,
+                commit_ts: 0,
+            }),
+        })
+        .await
+        .expect("a cursor parked at shard 2's start is still inside the window");
+    let batch = reader
+        .poll(at_shard_start, &WatchFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(batch.events[0].commit_ts, second_ts);
+
     // 重启读取端：状态来自 region 0 表，不会复活已回收 shard。
     let restarted = WatchCoordinator::new(Arc::clone(&fx.shards));
     assert!(matches!(

@@ -162,8 +162,9 @@
   `end_ts`；`commit_ts < gc_before_ts` 的事件不可读，起点/续订落入该区间返回
   `OUT_OF_RANGE` + `HISTORY_UNAVAILABLE`（客户端全量重同步），最老可用
   `WatchCursor` 随错误与批返回。shard 元数据行保留（id 连续、按 `commit_ts`
-  路由），本地 shard 组与数据目录删除，重启不复活。容量上界由窗口 × 写入速率
-  决定（MVCC 与 Commit Log 各存一份完整 value）；回收进度看
+  路由），本地 shard 组与数据目录删除，重启不复活。shard 组副本随窗口回收；
+  **数据 Region 的 staging outbox 尚未裁剪**，因此磁盘上界暂不严格等于
+  窗口 × 写入速率（裁剪归 #174 的容量工作）；回收进度看
   `coord_kv_t_commit_log_gc_before` 与 `coord_kv_t_commit_log_shards_gc_total`。
   **尚未提供**：v2 Watch RPC/授权/订阅指标（后续 gate）。
 - **路由**：可带 metadata `coord-routing-epoch`；epoch 过期返回 `ABORTED` +

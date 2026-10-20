@@ -12,7 +12,8 @@
 //   与数据同事务落盘，保证「数据可见 ⇒ 记录已落盘」。搬运是幂等的（同键同内容
 //   = Duplicate），中断/换 leader/重启后从 per-Region shipped 水位续传。
 //
-// 读取（#156）以 shard 组为准；outbox 的回收与保留窗口归 #157。
+// 读取（#156）以 shard 组为准；shard 组按保留窗口回收（#157），数据 Region 的
+// staging outbox 尚未裁剪（容量工作归 #174）。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -558,10 +559,7 @@ impl CommitLogShardManager {
     ///
     /// 回收以整 shard 为单位；`gc_boundary` 只在「sealed + watermark 越过
     /// end_ts + 留存窗口到点」连续成立时前进，因此不会跨过仍可能迟到的区间。
-    async fn advance_gc_metadata(
-        &self,
-        watermark: u64,
-    ) -> std::result::Result<Option<u64>, String> {
+    async fn advance_gc_metadata(&self, watermark: u64) -> std::result::Result<(), String> {
         let table = self
             .table()
             .map_err(|err| format!("read commit log shard table: {err}"))?;
@@ -571,12 +569,12 @@ impl CommitLogShardManager {
             self.now_ms(),
             self.config.watch_retention,
         ) else {
-            return Ok(None);
+            return Ok(());
         };
         self.propose(CommitLogShardOp::Gc { through_ts })
             .await
             .map_err(|err| format!("advance commit log gc to {through_ts}: {err}"))?;
-        Ok(Some(through_ts))
+        Ok(())
     }
 
     /// 回收本地已不可读的 shard 组（每个节点按本地已 apply 的表各自执行）。
@@ -1419,7 +1417,7 @@ mod tests {
             sleep(Duration::from_millis(50)).await;
         };
         let table = fx.manager.table().unwrap();
-        assert_eq!(table.gc_before_ts, 11);
+        assert_eq!(table.gc_before_ts, table.shards[0].end_ts);
         assert_eq!(tick.gc_before_ts, 11);
         assert_eq!(tick.gc_shards, 1);
         assert_ne!(
