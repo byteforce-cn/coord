@@ -148,6 +148,14 @@ impl ReadSet {
             .retain(|point| !ranges.iter().any(|r| r.contains(point)));
     }
 
+    /// 拆成 sequencer 需要的形式：point key 集合 + range 谓词（含空谓词）。
+    /// 空谓词对 `[start, end)` 区间查询本来就没有命中，保留它们不改变校验结果。
+    pub(crate) fn into_parts(self) -> (BTreeSet<Vec<u8>>, Vec<ReadRange>) {
+        let mut ranges = self.ranges;
+        ranges.extend(self.empty_ranges);
+        (self.points, ranges)
+    }
+
     /// 读集是否与 `range` 有共同 key（drain 等待/准入共用）。
     /// 空谓词读不到任何 key，不计入。
     // G5（#163）在 split/merge 中消费 drain 契约；本 gate 先交付测试过的原语，
@@ -183,15 +191,43 @@ impl ReadIntent<'_> {
 pub(crate) enum SessionError {
     /// 会话不存在、已过期或已 abort。
     NotFound,
+    /// 会话存在但已开始提交或已提交：读集已经冻结，不再接受读。
+    Closed,
+    /// 已用另一个 `request_id` 提交成功（幂等回放只认同一个键）。
+    Committed,
+    /// 另一个 `request_id` 的提交正在进行。
+    CommitInProgress,
     ReadSetLimit(ReadSetLimit),
     /// 读区间正在为 split/merge drain；会话仍有效，退避后重试。
     Draining,
+}
+
+/// 会话的一次读阶段/提交阶段状态。
+///
+/// 提交开始即冻结读集：若仍允许 `Read`，快照之后记录的谓词不会进入 OCC 校验。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionState {
+    Active,
+    Committing { request_id: Vec<u8> },
+    Committed { request_id: Vec<u8>, commit_ts: u64 },
 }
 
 struct TxnSession {
     start_ts: u64,
     expires_at: Instant,
     read_set: ReadSet,
+    state: SessionState,
+}
+
+/// `Commit` 开始时冻结的会话视图。
+///
+/// `replay` 为 `Some` 时同一 `request_id` 已决策：直接返回首次 `commit_ts`，
+/// 不再提案（sequencer 侧也有同样的幂等索引，这里是省一次 raft 往返）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommitInput {
+    pub(crate) start_ts: u64,
+    pub(crate) read_set: ReadSet,
+    pub(crate) replay: Option<u64>,
 }
 
 /// 会话表的可变部分：后台 reaper 与 drain guard 共享同一把锁，
@@ -290,6 +326,7 @@ impl TxnSessions {
                 start_ts,
                 expires_at: now + ttl,
                 read_set: ReadSet::default(),
+                state: SessionState::Active,
             },
         );
         id
@@ -315,8 +352,17 @@ impl TxnSessions {
             table.sessions.remove(id);
             return Err(SessionError::NotFound);
         }
-        if !table.sessions.contains_key(id) {
-            return Err(SessionError::NotFound);
+        // 提交开始后读集已冻结；先按状态拒绝，避免新谓词绕过 OCC 校验。
+        if !table
+            .sessions
+            .get(id)
+            .is_some_and(|session| session.state == SessionState::Active)
+        {
+            return Err(if table.sessions.contains_key(id) {
+                SessionError::Closed
+            } else {
+                SessionError::NotFound
+            });
         }
         if table.drains.iter().any(|range| intent.intersects(range)) {
             return Err(SessionError::Draining);
@@ -333,8 +379,91 @@ impl TxnSessions {
     }
 
     /// 幂等删除：未知/过期/已 abort 的会话不报错。
+    ///
+    /// 只删除 `Active` 会话：提交在途/已提交的会话保留，否则重试 `Commit`
+    /// 会拿到 `TXN_NOT_FOUND` 而不是首次 `commit_ts`。
     pub(crate) fn abort(&self, id: &[u8]) {
-        self.table.lock().sessions.remove(id);
+        let mut table = self.table.lock();
+        if table
+            .sessions
+            .get(id)
+            .is_some_and(|session| session.state == SessionState::Active)
+        {
+            table.sessions.remove(id);
+        }
+    }
+
+    /// 冻结读集并开始提交；返回本次提交的会话视图。
+    ///
+    /// 同一 `request_id` 的重试可再次提案（sequencer 幂等），已决策则直接回放；
+    /// 不同 `request_id` 不能同时声称同一个会话的提交结果。
+    pub(crate) fn begin_commit(
+        &self,
+        id: &[u8],
+        request_id: &[u8],
+    ) -> Result<CommitInput, SessionError> {
+        let now = Instant::now();
+        let mut table = self.table.lock();
+        if table
+            .sessions
+            .get(id)
+            .is_some_and(|session| session.expires_at <= now)
+        {
+            table.sessions.remove(id);
+        }
+        let session = table.sessions.get_mut(id).ok_or(SessionError::NotFound)?;
+        let replay = match &session.state {
+            SessionState::Committed {
+                request_id: committed_by,
+                commit_ts,
+            } if committed_by == request_id => Some(*commit_ts),
+            SessionState::Committed { .. } => return Err(SessionError::Committed),
+            SessionState::Committing {
+                request_id: claimed_by,
+            } if claimed_by != request_id => {
+                return Err(SessionError::CommitInProgress);
+            }
+            SessionState::Committing { .. } | SessionState::Active => None,
+        };
+        if session.state == SessionState::Active {
+            session.state = SessionState::Committing {
+                request_id: request_id.to_vec(),
+            };
+        }
+        Ok(CommitInput {
+            start_ts: session.start_ts,
+            read_set: session.read_set.clone(),
+            replay,
+        })
+    }
+
+    /// 决策已落盘：记录首次 `commit_ts`，供同一 `request_id` 在 TTL 内回放。
+    pub(crate) fn finish_commit(&self, id: &[u8], request_id: &[u8], commit_ts: u64) {
+        let mut table = self.table.lock();
+        if let Some(session) = table.sessions.get_mut(id) {
+            if matches!(
+                &session.state,
+                SessionState::Committing { request_id: claimed } if claimed == request_id
+            ) {
+                session.state = SessionState::Committed {
+                    request_id: request_id.to_vec(),
+                    commit_ts,
+                };
+            }
+        }
+    }
+
+    /// 本次提交没有产生决策（冲突/非法/传输失败）：释放占用，允许重试。
+    pub(crate) fn cancel_commit(&self, id: &[u8], request_id: &[u8]) {
+        let mut table = self.table.lock();
+        if let Some(session) = table.sessions.get_mut(id) {
+            if matches!(
+                &session.state,
+                SessionState::Committing { request_id: claimed } if claimed == request_id
+            ) {
+                session.state = SessionState::Active;
+            }
+        }
     }
 
     /// 标记 `range` 进入 drain：新读命中该区间返回 `Draining`，
@@ -600,6 +729,84 @@ mod tests {
         assert_eq!(
             sessions.record_read(&id, ReadIntent::Point(b"d"), 10),
             Ok(1)
+        );
+    }
+
+    #[test]
+    fn commit_freezes_read_set_and_replays_same_request_id() {
+        let sessions = TxnSessions::new();
+        let id = sessions.begin(7, Duration::from_secs(30));
+        sessions
+            .record_read(&id, ReadIntent::Point(b"a"), 10)
+            .unwrap();
+
+        let first = sessions.begin_commit(&id, b"req-1").unwrap();
+        assert_eq!(first.start_ts, 7);
+        assert!(first.replay.is_none());
+        assert_eq!(first.read_set.len(), 1);
+
+        // 提交开始后读被拒绝，新谓词无法绕过已冻结的读集。
+        assert_eq!(
+            sessions.record_read(&id, ReadIntent::Point(b"b"), 10),
+            Err(SessionError::Closed)
+        );
+        // 同一 request_id 重试允许重新提案；不同 request_id 被拒绝。
+        assert!(sessions
+            .begin_commit(&id, b"req-1")
+            .unwrap()
+            .replay
+            .is_none());
+        assert_eq!(
+            sessions.begin_commit(&id, b"req-2"),
+            Err(SessionError::CommitInProgress)
+        );
+
+        sessions.finish_commit(&id, b"req-1", 100);
+        assert_eq!(
+            sessions.begin_commit(&id, b"req-1").unwrap().replay,
+            Some(100)
+        );
+        assert_eq!(
+            sessions.begin_commit(&id, b"req-2"),
+            Err(SessionError::Committed)
+        );
+        assert_eq!(
+            sessions.record_read(&id, ReadIntent::Point(b"c"), 10),
+            Err(SessionError::Closed)
+        );
+        // 已提交会话的 abort 不得丢掉幂等记录。
+        sessions.abort(&id);
+        assert_eq!(
+            sessions.begin_commit(&id, b"req-1").unwrap().replay,
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn cancel_commit_restores_active_and_abort_drops_active_session() {
+        let sessions = TxnSessions::new();
+        let id = sessions.begin(9, Duration::from_secs(30));
+        sessions.begin_commit(&id, b"req").unwrap();
+        sessions.cancel_commit(&id, b"req");
+
+        assert!(sessions
+            .record_read(&id, ReadIntent::Point(b"k"), 10)
+            .is_ok());
+
+        // 在途提交的 abort 是 no-op：决策可能已落盘，必须保留回放记录。
+        sessions.begin_commit(&id, b"req").unwrap();
+        sessions.abort(&id);
+        sessions.finish_commit(&id, b"req", 120);
+        assert_eq!(
+            sessions.begin_commit(&id, b"req").unwrap().replay,
+            Some(120)
+        );
+
+        let other = sessions.begin(11, Duration::from_secs(30));
+        sessions.abort(&other);
+        assert_eq!(
+            sessions.begin_commit(&other, b"req"),
+            Err(SessionError::NotFound)
         );
     }
 
