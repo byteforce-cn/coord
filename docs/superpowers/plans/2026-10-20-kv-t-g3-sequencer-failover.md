@@ -441,8 +441,8 @@ git switch main && git pull
 - `cargo fmt --all -- --check`、`cargo clippy --workspace --lib --bins -- -D warnings`、
   `bash scripts/check-panics.sh`、`cargo audit --no-fetch`、`cargo deny check` 全部通过。
 - `bash scripts/check-doc-refs.sh`：本次改动无悬空引用；脚本仍报 3 条
-  `docs/pki-assessment/` 的既有悬空引用——该目录被 `.gitignore:40 docs/*` 忽略，
-  不在 git 树内（与 #146 记录一致）。
+  pki-assessment 历史文档的既有悬空引用——该目录被 `.gitignore` 的 docs 白名单
+  规则忽略，不在 git 树内（与 #146 记录一致）。
 
 ### 执行中的裁定
 
