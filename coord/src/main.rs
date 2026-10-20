@@ -2903,6 +2903,10 @@ async fn run_server(
                     storage,
                     cfg.kv_t.commit_sequencer_batch as usize,
                     cfg.kv_t.max_txn_bytes as usize,
+                    coord_server::raft::type_config::SequencerValidationLimits {
+                        max_read_set: cfg.kv_t.max_read_set,
+                        max_range: cfg.kv_t.max_range,
+                    },
                     std::time::Duration::from_millis(cfg.limits.write_timeout_ms),
                 ),
             ));

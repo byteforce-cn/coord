@@ -15,7 +15,10 @@ use coord_core::error::{Error, Result};
 use coord_core::types::NodeID;
 
 use crate::raft::tso::TsoClient;
-use crate::raft::type_config::{Command, Response, SequencerMutation, SequencerOp, SequencerTxn};
+use crate::raft::type_config::{
+    Command, Response, SequencerMutation, SequencerOp, SequencerReadRange, SequencerTxn,
+    SequencerTxnWithRanges, SequencerValidationLimits,
+};
 use crate::raft::CoordRaft;
 use crate::storage::mvcc::MvccStorage;
 use crate::storage::redb_backend::RedbBackend;
@@ -37,13 +40,31 @@ pub struct CommitCandidate {
     pub request_id: Vec<u8>,
     /// point read set（`BTreeSet` 去重、顺序稳定）。
     pub read_set: BTreeSet<Vec<u8>>,
+    /// range 读谓词（`[start, end)`；`end` 空 = 无上界）。
+    pub read_ranges: Vec<SequencerReadRange>,
     pub mutations: Vec<SequencerMutation>,
 }
 
 impl CommitCandidate {
     /// 粗估 wire 字节数（key/value 实际长度 + 固定开销），用于字节上限切批。
     pub fn wire_bytes(&self) -> usize {
-        let reads: usize = self.read_set.iter().map(Vec::len).sum();
+        let reads: usize = self
+            .read_set
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+            .saturating_add(
+                self.read_ranges
+                    .iter()
+                    .map(|range| {
+                        range
+                            .start
+                            .len()
+                            .saturating_add(range.end.len())
+                            .saturating_add(16)
+                    })
+                    .sum(),
+            );
         let writes: usize = self
             .mutations
             .iter()
@@ -96,6 +117,8 @@ pub struct CommitSequencer {
     storage: Arc<MvccStorage<RedbBackend>>,
     max_batch_count: usize,
     max_batch_bytes: usize,
+    /// OCC 校验上限；随命令写入 raft 日志，apply 不读本地配置。
+    limits: SequencerValidationLimits,
     propose_timeout: Duration,
     /// 串行化「取 TSO → 提案」：否则并发提案可能让 `commit_ts` 顺序与日志顺序
     /// 不一致，OCC 校验会漏掉本应冲突的事务。等待锁即背压：并发调用串行排队。
@@ -103,6 +126,7 @@ pub struct CommitSequencer {
 }
 
 impl CommitSequencer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         raft: CoordRaft,
         node_id: NodeID,
@@ -110,6 +134,7 @@ impl CommitSequencer {
         storage: Arc<MvccStorage<RedbBackend>>,
         max_batch_count: usize,
         max_batch_bytes: usize,
+        limits: SequencerValidationLimits,
         propose_timeout: Duration,
     ) -> Self {
         Self {
@@ -119,6 +144,7 @@ impl CommitSequencer {
             storage,
             max_batch_count: max_batch_count.max(1),
             max_batch_bytes: max_batch_bytes.max(1),
+            limits,
             propose_timeout,
             propose: tokio::sync::Mutex::new(()),
         }
@@ -162,17 +188,23 @@ impl CommitSequencer {
         let mut txns = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let commit_ts = self.tso.get_ts_above(fence).await?;
-            txns.push(SequencerTxn {
-                txn_id: candidate.txn_id.clone(),
-                start_ts: candidate.start_ts,
-                commit_ts,
-                request_id: candidate.request_id.clone(),
-                read_set: candidate.read_set.iter().cloned().collect(),
-                mutations: candidate.mutations.clone(),
+            txns.push(SequencerTxnWithRanges {
+                txn: SequencerTxn {
+                    txn_id: candidate.txn_id.clone(),
+                    start_ts: candidate.start_ts,
+                    commit_ts,
+                    request_id: candidate.request_id.clone(),
+                    read_set: candidate.read_set.iter().cloned().collect(),
+                    mutations: candidate.mutations.clone(),
+                },
+                read_ranges: candidate.read_ranges.clone(),
             });
         }
 
-        let command = Command::Sequencer(SequencerOp::ValidateAndCommit { txns });
+        let command = Command::Sequencer(SequencerOp::ValidateAndCommitWithRanges {
+            txns,
+            limits: self.limits,
+        });
         let response =
             match tokio::time::timeout(self.propose_timeout, self.raft.client_write(command)).await
             {

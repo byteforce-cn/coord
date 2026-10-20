@@ -416,7 +416,8 @@ pub struct CommitDecisionApply {
 /// 一条待 Commit Sequencer 校验的事务。
 ///
 /// `commit_ts` 由 region 0 leader 从 TSO 取号后写入日志；apply 只校验/落盘它，
-/// 不再分配（确定性）。`read_set` 是去重后的 point key；range 谓词归 #147/#149。
+/// 不再分配（确定性）。`read_set` 是去重后的 point key；range 谓词放在
+/// [`SequencerTxnWithRanges`] 里，避免旧日志因结构体新增字段而无法解码。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequencerTxn {
     pub txn_id: Vec<u8>,
@@ -427,6 +428,33 @@ pub struct SequencerTxn {
     pub mutations: Vec<SequencerMutation>,
 }
 
+/// 半开 range 读谓词 `[start, end)`；`end` 为空 = 无上界。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencerReadRange {
+    pub start: Vec<u8>,
+    pub end: Vec<u8>,
+}
+
+/// 带 range 读谓词的候选事务（#149）。
+///
+/// 与 [`SequencerTxn`] 分开是为了让 `SequencerOp` 以**末尾追加变体**的方式升级：
+/// raft 日志用 postcard（非自描述），给既有结构体加字段会让旧日志解码失败。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencerTxnWithRanges {
+    pub txn: SequencerTxn,
+    pub read_ranges: Vec<SequencerReadRange>,
+}
+
+/// OCC 校验上限（#149）。
+///
+/// 由 leader 按 `[kv_t]` 配置写入命令；apply 只读日志里的值，保证各节点即使
+/// 配置漂移也得到同一判定。`0` 沿用区间查询约定：不限制。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencerValidationLimits {
+    pub max_read_set: u32,
+    pub max_range: u32,
+}
+
 /// 非法候选事务（用户级输入问题，不是 raft 错误）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SequencerInvalid {
@@ -434,6 +462,10 @@ pub enum SequencerInvalid {
     CommitTsNotAboveStart,
     /// 空 `txn_id` 无法建立单次提交索引。
     MissingTxnId,
+    /// point + range 读集条目超过 `max_read_set`（映射 `READ_SET_TOO_LARGE`）。
+    ReadSetTooLarge,
+    /// range 校验扫描的索引项超过 `max_range`；无法证明无冲突，必须 fail-closed。
+    RangeScanExceeded,
 }
 
 /// apply 对单条事务的结果（用户级结果一律走响应，不让 apply 返回 `Err`）。
@@ -461,10 +493,17 @@ pub enum SequencerOutcome {
 /// Commit Sequencer 命令（仅 region 0 system raft 提出）。
 ///
 /// **末尾追加变体**（旧日志/快照兼容）。批内顺序已由 leader 按 `commit_ts`
-/// 递增排列；apply 按数组顺序校验。
+/// 递增排列；apply 按数组顺序校验。带 range 谓词的命令把上限一并写入日志，
+/// apply 不读本地配置，因此判定在节点间确定。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SequencerOp {
-    ValidateAndCommit { txns: Vec<SequencerTxn> },
+    ValidateAndCommit {
+        txns: Vec<SequencerTxn>,
+    },
+    ValidateAndCommitWithRanges {
+        txns: Vec<SequencerTxnWithRanges>,
+        limits: SequencerValidationLimits,
+    },
 }
 
 /// Raft 日志负载：客户端提交的状态机命令
@@ -622,6 +661,9 @@ impl std::fmt::Display for Command {
             }
             Command::Sequencer(SequencerOp::ValidateAndCommit { txns }) => {
                 write!(f, "Sequencer(txns={})", txns.len())
+            }
+            Command::Sequencer(SequencerOp::ValidateAndCommitWithRanges { txns, .. }) => {
+                write!(f, "SequencerWithRanges(txns={})", txns.len())
             }
             Command::ApplyCommitDecisions { decisions } => {
                 write!(f, "ApplyCommitDecisions(decisions={})", decisions.len())

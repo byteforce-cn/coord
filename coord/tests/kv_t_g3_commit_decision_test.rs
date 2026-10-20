@@ -28,7 +28,9 @@ use coord_server::raft::region::RegionManager;
 use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
-use coord_server::raft::type_config::{SequencerMutation, SequencerOutcome};
+use coord_server::raft::type_config::{
+    SequencerMutation, SequencerOutcome, SequencerValidationLimits,
+};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
 use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
@@ -193,6 +195,10 @@ impl G3Node {
             Arc::clone(&root_mvcc),
             256,
             4 * 1024 * 1024,
+            SequencerValidationLimits {
+                max_read_set: 4_096,
+                max_range: 10_000,
+            },
             Duration::from_secs(5),
         )));
         let node = Arc::new(node);
@@ -217,6 +223,7 @@ impl G3Node {
                 start_ts: 0,
                 request_id: b"req-1".to_vec(),
                 read_set: BTreeSet::new(),
+                read_ranges: Vec::new(),
                 mutations: writes
                     .iter()
                     .map(|(key, value)| SequencerMutation::Put {
