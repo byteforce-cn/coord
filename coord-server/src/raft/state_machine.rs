@@ -925,6 +925,19 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::PublishCommitWatermark { watermark } => {
+                // #155：与 #142 的 fence 相同——内部水位不上 Watch，重放由
+                // applied-index 守卫返回当前值。
+                let effective = sm
+                    .publish_commit_watermark(*watermark, applied)
+                    .map_err(io_err)?;
+                Ok((
+                    Response::CommitWatermarkPublished {
+                        watermark: effective,
+                    },
+                    None,
+                ))
+            }
             Command::AdvanceSafeTs { commit_ts } => {
                 // 数据 Region 的 safe-point fence：只抬 META_CURRENT_REVISION，
                 // 不产生数据/事件；之后的旧 commit_ts 写入由存储层拒绝。
@@ -1696,6 +1709,40 @@ mod tests {
             .expect("publish replay must not fail raft");
         match resp {
             Response::SafeTsPublished { fence_ts } => assert_eq!(fence_ts, 2_000),
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_publish_commit_watermark_is_monotonic_and_eventless() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+
+        let (resp, event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::PublishCommitWatermark { watermark: 2_000 },
+                5,
+                applied_at(5),
+            )
+            .expect("publish commit watermark apply");
+        match resp {
+            Response::CommitWatermarkPublished { watermark } => assert_eq!(watermark, 2_000),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(event.is_none(), "watermark 不得产生 Watch 事件");
+        assert_eq!(store.state_machine.commit_watermark().unwrap(), 2_000);
+
+        // 同一 applied 重放：不报错、不倒退。
+        let (resp, _) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::PublishCommitWatermark { watermark: 1_000 },
+                5,
+                applied_at(5),
+            )
+            .expect("publish replay must not fail raft");
+        match resp {
+            Response::CommitWatermarkPublished { watermark } => assert_eq!(watermark, 2_000),
             other => panic!("unexpected response: {other:?}"),
         }
     }
