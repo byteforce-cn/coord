@@ -8,7 +8,7 @@
 //! `start_ts` 重跑读阶段。隐藏重试会把「读到旧快照」变成不可观测的重复读。
 
 use coord_core::error::{Error, Result};
-use coord_core::error_code::{attach, error_code_of, CoordErrorCode};
+use coord_core::error_code::{error_code_of, CoordErrorCode};
 use coord_proto::kv::v2 as kv_v2;
 use coord_proto::txn::v2 as proto;
 
@@ -229,6 +229,7 @@ pub(crate) fn txn_error(status: tonic::Status) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coord_core::error_code::attach;
 
     #[test]
     fn commit_conflict_is_a_result_not_an_error() {
