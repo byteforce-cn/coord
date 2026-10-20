@@ -547,6 +547,11 @@ pub enum CommitLogShardOp {
     },
     /// 标记已定界 shard 为 sealed（幂等）。
     Seal { shard_id: u64, now_ms: u64 },
+    /// 推进回收水位：`commit_ts < through_ts` 的记录已不可读（幂等）。
+    ///
+    /// `through_ts` 必须是某个已 seal shard 的 `end_ts`；回收以整 shard 为
+    /// 单位，元数据行保留，Watch 起点据此返回 `HISTORY_UNAVAILABLE`。
+    Gc { through_ts: u64 },
 }
 
 /// Raft 日志负载：客户端提交的状态机命令

@@ -12,7 +12,8 @@
 //   与数据同事务落盘，保证「数据可见 ⇒ 记录已落盘」。搬运是幂等的（同键同内容
 //   = Duplicate），中断/换 leader/重启后从 per-Region shipped 水位续传。
 //
-// 读取（#156）以 shard 组为准；outbox 的回收与保留窗口归 #157。
+// 读取（#156）以 shard 组为准；shard 组按保留窗口回收（#157），数据 Region 的
+// staging outbox 尚未裁剪（容量工作归 #174）。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -36,8 +37,8 @@ use crate::raft::type_config::{Command, CommitLogShardOp, Response};
 use crate::raft::{CoordRaft, RaftConfig};
 use crate::storage::commit_log::CommitRecord;
 use crate::storage::commit_log_shard::{
-    precreate_due, seal_due, seal_timeout_due, shard_region_id, split_end_ts, CommitLogShardMeta,
-    CommitLogShardTable,
+    gc_boundary, precreate_due, seal_due, seal_timeout_due, shard_region_id, split_end_ts,
+    CommitLogShardMeta, CommitLogShardTable,
 };
 use crate::storage::mvcc::{MvccStorage, RevisionMode};
 use crate::storage::redb_backend::RedbBackend;
@@ -164,7 +165,7 @@ impl CommitLogShardManager {
             in_flight.extend(pending_decision(applied, next));
         }
 
-        for meta in &table.shards {
+        for meta in table.shards.iter().filter(|meta| !table.is_reclaimed(meta)) {
             let shard_rt = self.ensure_runtime(meta.shard_id).await?;
             for rt in &regions {
                 let region_id = rt.region_id();
@@ -266,15 +267,18 @@ impl CommitLogShardManager {
         if let Some(rt) = self.runtime(shard_id) {
             return Ok(rt);
         }
-        let exists = self
+        let table = self
             .table()
-            .map_err(|err| format!("read commit log shard table: {err}"))?
-            .shards
-            .into_iter()
-            .any(|meta| meta.shard_id == shard_id);
-        if !exists {
+            .map_err(|err| format!("read commit log shard table: {err}"))?;
+        let Some(meta) = table.shards.iter().find(|meta| meta.shard_id == shard_id) else {
             return Err(format!(
                 "commit log shard {shard_id} is not in the region 0 table"
+            ));
+        };
+        if table.is_reclaimed(meta) {
+            return Err(format!(
+                "commit log shard {shard_id} was reclaimed (gc_before_ts {})",
+                table.gc_before_ts
             ));
         }
         let peers = self
@@ -378,7 +382,9 @@ impl CommitLogShardManager {
         let table = self
             .table()
             .map_err(|err| format!("read commit log shard table: {err}"))?;
-        for meta in &table.shards {
+        // 先清理上一轮已标记回收的本地组：之后任何装配都不应把它们重新拉起。
+        tick.gc_shards += self.gc_local(&table).await?;
+        for meta in table.shards.iter().filter(|meta| !table.is_reclaimed(meta)) {
             self.ensure_runtime(meta.shard_id).await?;
         }
 
@@ -386,7 +392,7 @@ impl CommitLogShardManager {
         let table = self
             .table()
             .map_err(|err| format!("read commit log shard table: {err}"))?;
-        for meta in &table.shards {
+        for meta in table.shards.iter().filter(|meta| !table.is_reclaimed(meta)) {
             let Some(rt) = self.runtime(meta.shard_id) else {
                 continue;
             };
@@ -402,7 +408,8 @@ impl CommitLogShardManager {
         tick.watermark = state.watermark;
         tick.in_flight = state.in_flight;
 
-        if self.is_region0_leader().await {
+        let is_leader = self.is_region0_leader().await;
+        if is_leader {
             if state.watermark > self.published_watermark()? {
                 self.publish_watermark(state.watermark).await?;
             }
@@ -410,12 +417,17 @@ impl CommitLogShardManager {
             tick.opened = opened;
             tick.sealed = sealed;
             tick.stalls = stalls;
+            // 提案之后再回收本地组：本节点也要等到表里出现新水位才能删。
+            self.advance_gc_metadata(state.watermark).await?;
         }
 
         let now = self.now_ms();
-        tick.seal_lag_secs = self
+        let table = self
             .table()
-            .map_err(|err| format!("read commit log shard table: {err}"))?
+            .map_err(|err| format!("read commit log shard table: {err}"))?;
+        tick.gc_shards += self.gc_local(&table).await?;
+        tick.gc_before_ts = table.gc_before_ts;
+        tick.seal_lag_secs = table
             .shards
             .iter()
             .filter(|meta| meta.end_ts != 0 && meta.sealed_at_ms == 0)
@@ -455,14 +467,15 @@ impl CommitLogShardManager {
             return Ok((1, 0, 0));
         };
 
-        let rt = self.ensure_runtime(latest.shard_id).await?;
-        let records = rt
-            .mvcc
-            .commit_log_record_count()
-            .map_err(|err| format!("count shard {} records: {err}", latest.shard_id))?;
-        let age = now.saturating_sub(latest.opened_at_ms);
-
         if latest.end_ts == 0 {
+            // 只有未定界 shard 需要记录数/年龄来触发定界；已定界（甚至已回收）
+            // 的 shard 不装配运行时，避免把回收过的空组重新拉起来。
+            let rt = self.ensure_runtime(latest.shard_id).await?;
+            let records = rt
+                .mvcc
+                .commit_log_record_count()
+                .map_err(|err| format!("count shard {} records: {err}", latest.shard_id))?;
+            let age = now.saturating_sub(latest.opened_at_ms);
             let full = seal_due(
                 records,
                 age,
@@ -540,6 +553,76 @@ impl CommitLogShardManager {
             }
         }
         Ok((opened, sealed, stalls))
+    }
+
+    /// 推进回收水位（只有 region 0 leader 调用）。
+    ///
+    /// 回收以整 shard 为单位；`gc_boundary` 只在「sealed + watermark 越过
+    /// end_ts + 留存窗口到点」连续成立时前进，因此不会跨过仍可能迟到的区间。
+    async fn advance_gc_metadata(&self, watermark: u64) -> std::result::Result<(), String> {
+        let table = self
+            .table()
+            .map_err(|err| format!("read commit log shard table: {err}"))?;
+        let Some(through_ts) = gc_boundary(
+            &table,
+            watermark,
+            self.now_ms(),
+            self.config.watch_retention,
+        ) else {
+            return Ok(());
+        };
+        self.propose(CommitLogShardOp::Gc { through_ts })
+            .await
+            .map_err(|err| format!("advance commit log gc to {through_ts}: {err}"))?;
+        Ok(())
+    }
+
+    /// 回收本地已不可读的 shard 组（每个节点按本地已 apply 的表各自执行）。
+    ///
+    /// 先 shutdown 再移除运行时并删除数据目录：openraft 任务停止后 redb 句柄
+    /// 随 `RegionRuntime` 释放，删除不会与写入竞争。shutdown 失败时保留运行时，
+    /// 下一次 tick 重试——宁可晚删，也不让一个仍活着的 raft 组丢文件。
+    pub async fn gc_local(&self, table: &CommitLogShardTable) -> std::result::Result<u64, String> {
+        let reclaimed: Vec<(u64, Arc<RegionRuntime>)> = self
+            .runtimes()
+            .into_iter()
+            .filter(|(shard_id, _)| {
+                table
+                    .shards
+                    .iter()
+                    .find(|meta| meta.shard_id == *shard_id)
+                    .is_some_and(|meta| table.is_reclaimed(meta))
+            })
+            .collect();
+        let mut removed = 0;
+        for (shard_id, rt) in reclaimed {
+            if let Err(err) = rt.raft.shutdown().await {
+                tracing::warn!(
+                    shard_id,
+                    error = %err,
+                    "commit log shard raft shutdown failed; keeping it for the next gc tick"
+                );
+                continue;
+            }
+            self.runtimes
+                .write()
+                .map_err(|_| "commit log shard runtime registry poisoned".to_string())?
+                .remove(&shard_id);
+            match tokio::fs::remove_dir_all(&rt.data_dir).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(
+                        shard_id,
+                        dir = %rt.data_dir.display(),
+                        error = %err,
+                        "remove reclaimed commit log shard directory failed"
+                    );
+                }
+            }
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     /// 把一个 shard 的 outbox 记录搬进 shard raft 组（仅本地 shard leader）。
@@ -629,6 +712,10 @@ pub struct CommitLogShardTick {
     pub stalls: u64,
     /// 有界未 seal shard 的最大等待秒数（无 = 0）。
     pub seal_lag_secs: u64,
+    /// 本轮结束后 region 0 表的回收水位（0 = 尚未回收）。
+    pub gc_before_ts: u64,
+    /// 本轮在本节点实际回收的 shard 组数。
+    pub gc_shards: u64,
 }
 
 /// 单批记录条数上限（与 sequencer 批同量级；raft 负载由字节预算再切）。
@@ -693,6 +780,10 @@ pub fn start_shard_manager(
                         metrics.add_kv_t_commit_log_records(tick.shipped, tick.rejected);
                         metrics.set_kv_t_commit_watermark(tick.watermark, tick.in_flight);
                         metrics.set_kv_t_commit_log_seal_lag(tick.seal_lag_secs);
+                        metrics.set_kv_t_commit_log_gc_before(tick.gc_before_ts);
+                        if tick.gc_shards > 0 {
+                            metrics.add_kv_t_commit_log_shards_gc(tick.gc_shards);
+                        }
                         for _ in 0..tick.stalls {
                             metrics.inc_kv_t_commit_watermark_stall();
                         }
@@ -1275,5 +1366,135 @@ mod tests {
             other => panic!("unexpected response: {other:?}"),
         }
         assert!(fx.manager.records_at(1, 3).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gc_reclaims_only_a_sealed_completed_shard_after_retention() {
+        let config = KvTRuntimeConfig {
+            watch_retention: 60,
+            ..KvTRuntimeConfig::default()
+        };
+        let fx = ShardFixture::start_with(config, 1_000_000).await;
+        fx.manager.tick().await.unwrap(); // open shard 1
+        fx.write_decisions(&[10, 11]);
+        fx.apply_decisions(&[10, 11]);
+        fx.manager.tick().await.unwrap(); // ship 10/11, watermark = 11
+        fx.manager
+            .propose(CommitLogShardOp::SetEnd {
+                shard_id: 1,
+                end_ts: 11,
+                now_ms: 1_000_000,
+            })
+            .await
+            .unwrap();
+
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.sealed, 1, "watermark 11 seals shard [1, 11)");
+        let table = fx.manager.table().unwrap();
+        assert_eq!(table.gc_before_ts, 0);
+        let sealed_at = table.shards[0].sealed_at_ms;
+        assert!(sealed_at != 0);
+        assert!(fx.manager.runtime(1).is_some());
+
+        // 窗口最后 1ms：不回收。
+        fx.set_now(sealed_at + 59_999);
+        fx.manager.tick().await.unwrap();
+        assert_eq!(fx.manager.table().unwrap().gc_before_ts, 0);
+        assert!(fx.manager.runtime(1).is_some());
+
+        // 到点：回收 shard 1，删除本地组与数据目录。
+        fx.set_now(sealed_at + 60_000);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let tick = loop {
+            let tick = fx.manager.tick().await.unwrap();
+            if fx.manager.table().unwrap().gc_before_ts == 11 {
+                break tick;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gc did not advance when the retention window elapsed"
+            );
+            sleep(Duration::from_millis(50)).await;
+        };
+        let table = fx.manager.table().unwrap();
+        assert_eq!(table.gc_before_ts, table.shards[0].end_ts);
+        assert_eq!(tick.gc_before_ts, 11);
+        assert_eq!(tick.gc_shards, 1);
+        assert_ne!(
+            table.shards[0].sealed_at_ms, 0,
+            "gc must keep the seal metadata"
+        );
+        assert!(fx.manager.runtime(1).is_none(), "the shard group is gone");
+        assert!(
+            !region_data_dir(fx.dir.path(), shard_region_id(1)).exists(),
+            "the shard data directory is removed"
+        );
+
+        // 再 tick：不复活空组，watermark 不回退。
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.gc_shards, 0);
+        assert!(fx.manager.runtime(1).is_none());
+        assert!(tick.watermark >= 11);
+        assert!(fx.manager.table().unwrap().validate().is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gc_never_reclaims_an_incomplete_shard() {
+        let config = KvTRuntimeConfig {
+            shard_seal_timeout_secs: 1,
+            watch_retention: 60,
+            ..KvTRuntimeConfig::default()
+        };
+        let fx = ShardFixture::start_with(config, 1_000_000).await;
+        fx.manager.tick().await.unwrap(); // open shard 1
+
+        // 决策 11 未 apply：watermark 停在 10，shard [1, 11) 不能 seal。
+        fx.write_decisions(&[10, 11]);
+        fx.apply_decisions(&[10]);
+        fx.manager
+            .propose(CommitLogShardOp::SetEnd {
+                shard_id: 1,
+                end_ts: 11,
+                now_ms: 1_000_000,
+            })
+            .await
+            .unwrap();
+        fx.manager.tick().await.unwrap();
+
+        fx.set_now(1_002_000);
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.sealed, 1, "timeout seals the bounded shard");
+        assert_eq!(tick.stalls, 1);
+        let end_ts = fx.manager.table().unwrap().shards[0].end_ts;
+
+        // 窗口已过，但 watermark 未越过 end_ts：不得回收。
+        fx.set_now(1_002_000 + 60_000);
+        fx.manager.tick().await.unwrap();
+        assert_eq!(fx.manager.table().unwrap().gc_before_ts, 0);
+        assert!(fx.manager.runtime(1).is_some());
+
+        // 打开后继 shard，等决策 11 落进它、watermark 越过 end_ts 后才回收。
+        fx.manager
+            .propose(CommitLogShardOp::Open {
+                start_ts: 11,
+                opened_at_ms: 1_062_000,
+            })
+            .await
+            .unwrap();
+        fx.apply_decisions(&[11]);
+        // 新 shard 组要先选出 leader 才能搬运；用真实等待而不是紧凑 tick。
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            fx.manager.tick().await.unwrap();
+            if fx.manager.table().unwrap().gc_before_ts == end_ts {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gc did not advance after the watermark caught up"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
+        assert!(fx.manager.runtime(1).is_none());
     }
 }

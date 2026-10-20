@@ -52,6 +52,11 @@ impl CommitLogShardMeta {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitLogShardTable {
     pub shards: Vec<CommitLogShardMeta>,
+    /// 所有 `commit_ts < gc_before_ts` 的 Commit Log 记录已回收；`0` = 尚未回收。
+    ///
+    /// 只前进、且只等于某个 shard 的 `end_ts`：回收以整 shard 为单位，元数据行
+    /// 永久保留，cursor 与 `shard_for_ts` 仍能按 `commit_ts` 定位。
+    pub gc_before_ts: u64,
 }
 
 impl CommitLogShardTable {
@@ -168,6 +173,46 @@ impl CommitLogShardTable {
         Ok(true)
     }
 
+    /// 该 shard 是否已整体回收（回收水位只落在 shard 边界上）。
+    pub fn is_reclaimed(&self, meta: &CommitLogShardMeta) -> bool {
+        meta.end_ts != 0 && meta.end_ts <= self.gc_before_ts
+    }
+
+    /// 未回收的 shard（按 `commit_ts` 顺序）。
+    ///
+    /// 回收判定只在这一处过滤，避免每个读取/搬运入口各写一遍 `!is_reclaimed`。
+    pub fn live_shards(&self) -> impl Iterator<Item = &CommitLogShardMeta> {
+        self.shards.iter().filter(|meta| !self.is_reclaimed(meta))
+    }
+
+    /// 把回收水位推进到某个已 seal shard 的 `end_ts`。
+    ///
+    /// 回收以整 shard 为单位：目标必须是真实边界，且边界以内的 shard 必须全部
+    /// sealed（否则会把仍可能有迟到记录的区间标成不可读）。同值/更小值是
+    /// 幂等 no-op，便于 raft 重放。
+    pub fn advance_gc(&mut self, through_ts: u64) -> Result<bool> {
+        if through_ts == 0 || through_ts <= self.gc_before_ts {
+            return Ok(false);
+        }
+        if !self.shards.iter().any(|meta| meta.end_ts == through_ts) {
+            return Err(Error::InvalidArgument(format!(
+                "commit log gc boundary {through_ts} is not a shard end_ts"
+            )));
+        }
+        if let Some(unsealed) = self
+            .shards
+            .iter()
+            .find(|meta| meta.end_ts != 0 && meta.end_ts <= through_ts && meta.sealed_at_ms == 0)
+        {
+            return Err(Error::InvalidArgument(format!(
+                "commit log shard {} is not sealed; gc cannot pass it",
+                unsealed.shard_id
+            )));
+        }
+        self.gc_before_ts = through_ts;
+        Ok(true)
+    }
+
     /// 表不变量：id 连续、start > 0、半开区间首尾相接、最多一个未定界 shard。
     pub fn validate(&self) -> Result<()> {
         for (index, meta) in self.shards.iter().enumerate() {
@@ -205,6 +250,17 @@ impl CommitLogShardTable {
                 }
             }
         }
+        if self.gc_before_ts != 0
+            && !self
+                .shards
+                .iter()
+                .any(|meta| meta.end_ts == self.gc_before_ts)
+        {
+            return Err(Error::Storage(format!(
+                "commit log gc watermark {} is not a shard boundary",
+                self.gc_before_ts
+            )));
+        }
         Ok(())
     }
 }
@@ -235,6 +291,38 @@ pub fn seal_due(records: u64, age_ms: u64, shard_records: u64, shard_secs: u64) 
 pub fn seal_timeout_due(ended_at_ms: u64, now_ms: u64, timeout_secs: u64) -> bool {
     ended_at_ms != 0
         && u128::from(now_ms) >= u128::from(ended_at_ms) + u128::from(timeout_secs) * 1_000
+}
+
+/// 回收条件：整 shard 已完成（seal + watermark 越过 `end_ts`）且留存窗口已到。
+///
+/// 锚点用 `sealed_at_ms` 而不是 `ended_at_ms`：超时 seal 只证明「可以停止等待」，
+/// 不证明区间内不会再有迟到记录；调用方必须同时给出 `watermark >= end_ts`。
+pub fn gc_due(meta: &CommitLogShardMeta, watermark: u64, now_ms: u64, retention_secs: u64) -> bool {
+    meta.end_ts != 0
+        && meta.sealed_at_ms != 0
+        && watermark >= meta.end_ts
+        && u128::from(now_ms) >= u128::from(meta.sealed_at_ms) + u128::from(retention_secs) * 1_000
+}
+
+/// 本轮可推进到的回收边界：从 `gc_before_ts` 之后连续满足 [`gc_due`] 的 shard
+/// 的最大 `end_ts`；遇到未完成/未到窗口的 shard 立即停止（不允许跨洞回收）。
+pub fn gc_boundary(
+    table: &CommitLogShardTable,
+    watermark: u64,
+    now_ms: u64,
+    retention_secs: u64,
+) -> Option<u64> {
+    let mut through = None;
+    for meta in &table.shards {
+        if table.is_reclaimed(meta) {
+            continue;
+        }
+        if !gc_due(meta, watermark, now_ms, retention_secs) {
+            break;
+        }
+        through = Some(meta.end_ts);
+    }
+    through
 }
 
 #[cfg(test)]
@@ -338,6 +426,118 @@ mod tests {
         assert_eq!(split_end_ts(0, 0, 7), 8);
         assert_eq!(split_end_ts(105, 109, 7), 110);
         assert_eq!(split_end_ts(3, 4, 9), 10);
+    }
+
+    #[test]
+    fn gc_requires_seal_completeness_and_the_retention_window() {
+        let sealed = CommitLogShardMeta {
+            shard_id: 1,
+            start_ts: 1,
+            end_ts: 101,
+            opened_at_ms: 0,
+            ended_at_ms: 1_000,
+            sealed_at_ms: 10_000_000,
+        };
+        assert!(
+            !gc_due(&sealed, 100, 10_060_000, 60),
+            "watermark must pass end_ts"
+        );
+        assert!(!gc_due(&sealed, 101, 10_059_999, 60), "window must elapse");
+        assert!(
+            gc_due(&sealed, 101, 10_060_000, 60),
+            "boundary is inclusive"
+        );
+        let unsealed = CommitLogShardMeta {
+            sealed_at_ms: 0,
+            ..sealed.clone()
+        };
+        assert!(!gc_due(&unsealed, 1_000, 100_000_000, 60));
+        let unbounded = CommitLogShardMeta {
+            end_ts: 0,
+            ..sealed.clone()
+        };
+        assert!(!gc_due(&unbounded, 1_000, 100_000_000, 60));
+    }
+
+    #[test]
+    fn gc_advances_only_through_sealed_shard_boundaries() {
+        let mut table = CommitLogShardTable::default();
+        table.open(1, 1_000).unwrap();
+        table.set_end(1, 101, 1_500).unwrap();
+        table.open(101, 1_600).unwrap();
+        table.set_end(2, 201, 1_700).unwrap();
+        table.open(201, 1_800).unwrap();
+
+        assert!(
+            table.advance_gc(101).is_err(),
+            "an unsealed shard cannot be reclaimed"
+        );
+        assert!(
+            table.advance_gc(150).is_err(),
+            "only shard boundaries are accepted"
+        );
+        table.seal(1, 2_000).unwrap();
+        assert!(table.advance_gc(101).unwrap());
+        assert_eq!(table.gc_before_ts, 101);
+        assert!(table.is_reclaimed(&table.shards[0]));
+        assert!(!table.is_reclaimed(&table.shards[1]));
+        assert!(!table.advance_gc(101).unwrap(), "same boundary is a no-op");
+        assert!(!table.advance_gc(50).unwrap(), "gc never rewinds");
+        assert!(table.advance_gc(201).is_err(), "shard 2 is still unsealed");
+        table.seal(2, 2_100).unwrap();
+        assert!(table.advance_gc(201).unwrap());
+        table.validate().expect("gc leaves a structural table");
+
+        let decoded = CommitLogShardTable::decode(&table.encode().unwrap()).unwrap();
+        assert_eq!(decoded.gc_before_ts, 201, "gc watermark survives the wire");
+        let mut bogus = decoded.clone();
+        bogus.gc_before_ts = 150;
+        assert!(
+            bogus.validate().is_err(),
+            "gc watermark must be a shard boundary"
+        );
+    }
+
+    #[test]
+    fn gc_boundary_stops_at_the_first_shard_that_is_not_due() {
+        let mut table = CommitLogShardTable::default();
+        table.open(1, 0).unwrap();
+        table.set_end(1, 101, 1_000).unwrap();
+        table.open(101, 1_000).unwrap();
+        table.set_end(2, 201, 2_000).unwrap();
+        table.open(201, 2_000).unwrap();
+        table.seal(1, 10_000).unwrap();
+        table.seal(2, 100_000).unwrap();
+
+        assert_eq!(
+            gc_boundary(&table, 100, 10_000_000, 60),
+            None,
+            "an incomplete shard blocks every later shard"
+        );
+        assert_eq!(
+            gc_boundary(&table, 101, 10_060_000, 60),
+            Some(101),
+            "shard 2 is not complete yet"
+        );
+        assert_eq!(
+            gc_boundary(&table, 201, 159_999, 60),
+            Some(101),
+            "shard 2 is complete but not old enough"
+        );
+        assert_eq!(gc_boundary(&table, 201, 160_000, 60), Some(201));
+
+        table.gc_before_ts = 101;
+        assert_eq!(
+            gc_boundary(&table, 201, 160_000, 60),
+            Some(201),
+            "a later gc resumes from the previous watermark"
+        );
+        table.gc_before_ts = 201;
+        assert_eq!(
+            gc_boundary(&table, 10_000, 100_000_000, 60),
+            None,
+            "the unbounded shard is never reclaimed"
+        );
     }
 
     #[test]

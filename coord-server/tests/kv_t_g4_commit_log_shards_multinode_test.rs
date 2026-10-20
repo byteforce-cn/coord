@@ -255,7 +255,14 @@ impl ShardCluster {
     async fn tick_all(&self) -> Vec<CommitLogShardTick> {
         let mut ticks = Vec::new();
         for node in &self.nodes {
-            ticks.push(node.shards.tick().await.expect("shard tick"));
+            match node.shards.tick().await {
+                Ok(tick) => ticks.push(tick),
+                // leader 切换与 tick 并发：region 0 或 shard 组的 leader 可能刚在
+                // proposal 前易主。这是可重试的竞态，不是测试失败；下一轮 tick 再试。
+                Err(err)
+                    if err.contains("not leader") || err.contains("has to forward request") => {}
+                Err(err) => panic!("shard tick: {err}"),
+            }
         }
         ticks
     }
