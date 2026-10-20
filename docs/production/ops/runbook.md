@@ -444,9 +444,26 @@ auto-resolve 语义，处置是人工的。
   滚动验签。
 - 若计数长期不降：确认轮换确实执行（换新会改变 active serial）。
 
+## 7. KV-T v2 Watch 排障（无独立告警）
+
+### 订阅无事件 / 背压 / 历史不足
+
+- 指标：`coord_kv_t_watch_streams`（当前流数）、`coord_kv_t_watch_batches_total`、
+  `coord_kv_t_watch_events_total`、`coord_kv_t_watch_lag_commit_ts`（最近一批的
+  `watermark - 批末位置`）、`coord_kv_t_watch_history_unavailable_total`、
+  `coord_kv_t_watch_backpressure_total`。
+- `coord_kv_t_watch_streams` 持续增长但 `events_total` 不涨：检查消费端是否只建流
+  不读（背压计数会同步上升）；服务端通道有界，**不会**为此丢事件。
+- `history_unavailable_total` 上升 = 客户端起点早于 `watch_retention`：让客户端
+  全量重同步（`Range` 重建快照 + 从新 revision 订阅）；不要调大窗口掩盖问题。
+- `lag_commit_ts` 长期高：先看 `coord_kv_t_commit_watermark` 与
+  `coord_kv_t_commit_log_*` 是否推进；本地 watermark 不走，watch 只能看到它之前的事件。
+- 排障期间可用 `Range` 读当前值校对：“watch 没收到”与“写入没提交”是两类问题
+  （后者看 `COMMIT_REJECTED` / sequencer 指标）。
+
 ---
 
-## 7. 演练纪律
+## 8. 演练纪律
 
 - 每次演练产出一份记录：`docs/production/ops/drills/<UTC 时间戳>-<场景>.md`，
   含：谁跑的 / commit / 命令 / 预期 / 实际 / 结论 / 未通过时的后续项。

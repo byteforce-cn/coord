@@ -107,6 +107,18 @@ struct MetricsInner {
     pub kv_t_commit_log_gc_before: AtomicU64,
     /// 本节点实际回收的 Commit Log shard 组数
     pub kv_t_commit_log_shards_gc_total: AtomicU64,
+    /// 当前打开的 `coord.watch.v2` 流数
+    pub kv_t_watch_streams: AtomicI64,
+    /// 已下发的 v2 watch 批数
+    pub kv_t_watch_batches_total: AtomicU64,
+    /// 已下发的 v2 watch 事件数（一个事务 = 一个事件）
+    pub kv_t_watch_events_total: AtomicU64,
+    /// 最近一次下发批的 watermark 与批末位置之差（commit_ts 单位）
+    pub kv_t_watch_lag_commit_ts: AtomicU64,
+    /// 因历史窗口不足终止的 v2 watch 订阅数
+    pub kv_t_watch_history_unavailable_total: AtomicU64,
+    /// v2 watch 响应通道满、进入背压等待的次数
+    pub kv_t_watch_backpressure_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的请求次数
     pub kv_v2_safe_ts_wait_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的累计毫秒
@@ -284,6 +296,12 @@ impl Default for MetricsInner {
             kv_t_commit_watermark_stalls_total: AtomicU64::new(0),
             kv_t_commit_log_gc_before: AtomicU64::new(0),
             kv_t_commit_log_shards_gc_total: AtomicU64::new(0),
+            kv_t_watch_streams: AtomicI64::new(0),
+            kv_t_watch_batches_total: AtomicU64::new(0),
+            kv_t_watch_events_total: AtomicU64::new(0),
+            kv_t_watch_lag_commit_ts: AtomicU64::new(0),
+            kv_t_watch_history_unavailable_total: AtomicU64::new(0),
+            kv_t_watch_backpressure_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_millis_total: AtomicU64::new(0),
             kvt_sequencer_batches_total: AtomicU64::new(0),
@@ -749,6 +767,47 @@ impl Metrics {
             .fetch_add(shards, Ordering::Relaxed);
     }
 
+    /// 一条 `coord.watch.v2` 流建立（gauge +1）。
+    pub fn inc_kv_t_watch_streams(&self) {
+        self.inner
+            .kv_t_watch_streams
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 一条 `coord.watch.v2` 流（含全部订阅任务）结束（gauge -1）。
+    pub fn dec_kv_t_watch_streams(&self) {
+        self.inner
+            .kv_t_watch_streams
+            .fetch_add(-1, Ordering::Relaxed);
+    }
+
+    /// 记录一批下发：事件数与 `watermark - 批末位置`。
+    pub fn record_kv_t_watch_batch(&self, events: u64, lag: u64) {
+        self.inner
+            .kv_t_watch_batches_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .kv_t_watch_events_total
+            .fetch_add(events, Ordering::Relaxed);
+        self.inner
+            .kv_t_watch_lag_commit_ts
+            .store(lag, Ordering::Relaxed);
+    }
+
+    /// 因历史窗口不足终止的订阅数（counter）。
+    pub fn inc_kv_t_watch_history_unavailable(&self) {
+        self.inner
+            .kv_t_watch_history_unavailable_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 响应通道满、进入背压等待的次数（counter）。
+    pub fn inc_kv_t_watch_backpressure(&self) {
+        self.inner
+            .kv_t_watch_backpressure_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// v2 KV 读等待 safe_ts：请求数 +1、累计等待毫秒。
     pub fn inc_kv_v2_safe_ts_wait(&self, waited_millis: u64) {
         self.inner
@@ -1068,6 +1127,52 @@ impl Metrics {
             inner
                 .kv_t_commit_log_shards_gc_total
                 .load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_kv_t_watch_streams Open coord.watch.v2 streams on this node\n",
+        );
+        out.push_str("# TYPE coord_kv_t_watch_streams gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_watch_streams {}\n",
+            inner.kv_t_watch_streams.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_watch_batches_total Watch batches delivered to coord.watch.v2 clients\n");
+        out.push_str("# TYPE coord_kv_t_watch_batches_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_watch_batches_total {}\n",
+            inner.kv_t_watch_batches_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_watch_events_total Watch events (one txn = one event) delivered to coord.watch.v2 clients\n");
+        out.push_str("# TYPE coord_kv_t_watch_events_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_watch_events_total {}\n",
+            inner.kv_t_watch_events_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_watch_lag_commit_ts Lag of the most recently delivered watch batch (watermark - batch position)\n");
+        out.push_str("# TYPE coord_kv_t_watch_lag_commit_ts gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_watch_lag_commit_ts {}\n",
+            inner.kv_t_watch_lag_commit_ts.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_watch_history_unavailable_total Watch subscriptions terminated because history was reclaimed\n");
+        out.push_str("# TYPE coord_kv_t_watch_history_unavailable_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_watch_history_unavailable_total {}\n",
+            inner
+                .kv_t_watch_history_unavailable_total
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_watch_backpressure_total Watch responses that had to wait for buffer space\n");
+        out.push_str("# TYPE coord_kv_t_watch_backpressure_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_watch_backpressure_total {}\n",
+            inner.kv_t_watch_backpressure_total.load(Ordering::Relaxed)
         ));
 
         out.push_str(
@@ -1778,6 +1883,25 @@ mod tests {
         let output = m.render_prometheus_text();
         assert!(output.contains("coord_kv_t_commit_log_gc_before 101"));
         assert!(output.contains("coord_kv_t_commit_log_shards_gc_total 2"));
+    }
+
+    #[test]
+    fn test_metrics_watch_streams_and_batches() {
+        let m = Metrics::new();
+        m.inc_kv_t_watch_streams();
+        m.inc_kv_t_watch_streams();
+        m.dec_kv_t_watch_streams();
+        m.record_kv_t_watch_batch(3, 7);
+        m.inc_kv_t_watch_history_unavailable();
+        m.inc_kv_t_watch_backpressure();
+
+        let output = m.render_prometheus_text();
+        assert!(output.contains("coord_kv_t_watch_streams 1"));
+        assert!(output.contains("coord_kv_t_watch_batches_total 1"));
+        assert!(output.contains("coord_kv_t_watch_events_total 3"));
+        assert!(output.contains("coord_kv_t_watch_lag_commit_ts 7"));
+        assert!(output.contains("coord_kv_t_watch_history_unavailable_total 1"));
+        assert!(output.contains("coord_kv_t_watch_backpressure_total 1"));
     }
 
     #[test]
