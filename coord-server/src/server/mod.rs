@@ -297,6 +297,10 @@ pub struct CoordNode {
     metrics: Option<Arc<crate::metrics::Metrics>>,
     /// `coord.txn.v2` 服务端会话（ADR-0015 D12.2）：只在协调节点内存，不复制。
     txn_sessions: crate::kvt::txn::TxnSessions,
+    /// Commit Log shard 协调器（#154；`[kv_t].enabled` + Multi-Raft 时注入）。
+    ///
+    /// `None` = 未启用：不建任何 shard raft 组、不启动协调任务（ADR-0001）。
+    commit_log_shards: Option<Arc<crate::kvt::commit_log_shards::CommitLogShardManager>>,
 }
 
 /// KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
@@ -382,6 +386,7 @@ impl CoordNode {
             commit_sequencer: None,
             metrics: None,
             txn_sessions: crate::kvt::txn::TxnSessions::new(),
+            commit_log_shards: None,
         }
     }
 
@@ -485,6 +490,20 @@ impl CoordNode {
     /// Commit Sequencer（未装配时为 `None`；#151 的 Commit handler 据此门禁）。
     pub fn commit_sequencer(&self) -> Option<&Arc<crate::kvt::sequencer::CommitSequencer>> {
         self.commit_sequencer.as_ref()
+    }
+
+    /// 注入 Commit Log shard 协调器（#154；仅 kv_t + Multi-Raft 装配时调用）。
+    pub fn set_commit_log_shards(
+        &mut self,
+        manager: Arc<crate::kvt::commit_log_shards::CommitLogShardManager>,
+    ) {
+        self.commit_log_shards = Some(manager);
+    }
+
+    pub fn commit_log_shards(
+        &self,
+    ) -> Option<&Arc<crate::kvt::commit_log_shards::CommitLogShardManager>> {
+        self.commit_log_shards.as_ref()
     }
 
     /// `coord.txn.v2` 会话表（只在协调节点内存，不随节点复制）。

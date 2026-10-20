@@ -138,6 +138,16 @@
   Region 历史），zstd 压缩，写集 4MiB 上限在 Commit 阶段强制；记录值与 MVCC
   同信封（保留 `key_id`），DEK 轮换窗口须 ≥ `watch_retention`（默认 24h，最大
   7d），否则超出窗口的旧事件不可解密。Commit Log 随快照/备份恢复归 #169。
+- **Commit Log 分片**：shard 是 `commit_ts` 的半开区间 `[start_ts,end_ts)`
+  （`end_ts=0` 表示未定界，仅最后一个 shard），由 region 0 权威元数据唯一
+  定义、按前一 shard 的 `end_ts` 首尾相接（无重叠/空洞）；第一个 shard 从
+  `start_ts=1` 起，覆盖建表前的历史。每个 shard 一个独立 Raft 组：记录按
+  `commit_ts` 存完整 change record（含 `prev_kv`），读取以 shard 组为准。
+  阈值按 D9：1,000,000 条或 1 小时先到先 seal，达到 80% 预创建下一个 shard，
+  定界后 seal 超时 5 分钟。数据 Region 的本地 outbox 是写前日志（与数据 apply
+  同事务），由 shard leader 幂等搬入 shard 组；换 leader/重启从 per-Region
+  shipped 水位续传。**不做**：watermark 发布与基于 watermark 的 seal（#155）、
+  保留窗口与 GC（#157）、跨 shard 顺序读与 cursor（#156）。
 - **路由**：可带 metadata `coord-routing-epoch`；epoch 过期返回 `ABORTED` +
   `EPOCH_STALE`，刷新路由后重试。
 - **对象存储**：manifest 用 `commit_ts`；`/obj/` 固定 Region 区间，不参与任意

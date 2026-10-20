@@ -21,7 +21,13 @@ use coord_core::types::{LeaseID, Revision};
 
 use crate::raft::type_config::CommitDecisionApplyLog;
 use crate::security::barrier::Barrier;
-use crate::storage::commit_log::{CommitChange, CommitLogAppend, CommitPrevValue, CommitRecord};
+use crate::storage::commit_log::{
+    CommitChange, CommitLogAppend, CommitLogAppendResult, CommitPrevValue, CommitRecord,
+    COMMIT_LOG_COUNT_KEY, COMMIT_LOG_CURSOR_KEY,
+};
+use crate::storage::commit_log_shard::{
+    CommitLogShardMeta, CommitLogShardTable, COMMIT_LOG_SHARD_TABLE_KEY,
+};
 
 // ──── Key 空间常量 ────
 
@@ -3342,6 +3348,208 @@ impl<B: StorageBackend> MvccStorage<B> {
             };
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
             Ok(outcomes)
+        })
+    }
+
+    // ──── Commit Log shard 元数据（#154）────
+
+    /// 应用一条 shard 元数据操作（region 0 system raft）。
+    ///
+    /// 非法操作（未知 shard、回退边界、seal 未定界 shard）只记 warning 并保持
+    /// 原表：这些都是用户级/元数据级拒绝，不得让 raft apply 返回 `Err`。三个
+    /// 操作本身幂等，因此同一日志重放不会改变表。
+    pub fn apply_commit_log_shard_op(
+        &self,
+        op: &crate::raft::type_config::CommitLogShardOp,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<Vec<CommitLogShardMeta>> {
+        use crate::raft::type_config::CommitLogShardOp;
+
+        self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
+            let mut table = match tx.get(TABLE_KV, COMMIT_LOG_SHARD_TABLE_KEY)? {
+                Some(bytes) => CommitLogShardTable::decode(&bytes)?,
+                None => CommitLogShardTable::default(),
+            };
+            let outcome = match op {
+                CommitLogShardOp::Open {
+                    start_ts,
+                    opened_at_ms,
+                } => table.open(*start_ts, *opened_at_ms),
+                CommitLogShardOp::SetEnd {
+                    shard_id,
+                    end_ts,
+                    now_ms,
+                } => table.set_end(*shard_id, *end_ts, *now_ms),
+                CommitLogShardOp::Seal { shard_id, now_ms } => table.seal(*shard_id, *now_ms),
+            };
+            let changed = match outcome {
+                Ok(changed) => changed,
+                Err(err) => {
+                    tracing::warn!(
+                        revision,
+                        op = ?op,
+                        error = %err,
+                        "commit log shard op rejected; table unchanged"
+                    );
+                    false
+                }
+            };
+            if changed {
+                tx.insert(TABLE_KV, COMMIT_LOG_SHARD_TABLE_KEY, &table.encode()?)?;
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(table.shards)
+        })
+    }
+
+    /// 读取 region 0 的 Commit Log shard 表（缺失 = 空表）。
+    pub fn commit_log_shard_table(&self) -> Result<CommitLogShardTable> {
+        self.backend
+            .read(|tx| match tx.get(TABLE_KV, COMMIT_LOG_SHARD_TABLE_KEY)? {
+                Some(bytes) => CommitLogShardTable::decode(&bytes),
+                None => Ok(CommitLogShardTable::default()),
+            })
+    }
+
+    // ──── Commit Log shard 组记录追加（#154）────
+
+    /// 向 shard 组追加一批记录（shard raft 组 apply）。
+    ///
+    /// 幂等：同键同内容 = Duplicate；越界/编码失败只计数（D11.5 不得失败
+    /// apply），由 shipper 刷新路由后重试。游标、计数与每 Region 的 shipped
+    /// 水位同事务推进，shipper 据此断点续传且不跳过边界 `commit_ts`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_commit_log_append(
+        &self,
+        shard_id: u64,
+        start_ts: u64,
+        end_ts: u64,
+        records: &[CommitRecord],
+        max_txn_bytes: u64,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<CommitLogAppendResult> {
+        self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
+            let previous_cursor = tx
+                .get(TABLE_KV, COMMIT_LOG_CURSOR_KEY)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0);
+            let previous_count = tx
+                .get(TABLE_KV, COMMIT_LOG_COUNT_KEY)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0);
+            let mut result = CommitLogAppendResult {
+                cursor_ts: previous_cursor,
+                ..CommitLogAppendResult::default()
+            };
+            let mut shipped: std::collections::BTreeMap<u64, u64> =
+                std::collections::BTreeMap::new();
+            for record in records {
+                if record.shard_id != shard_id
+                    || record.commit_ts < start_ts
+                    || (end_ts != 0 && record.commit_ts >= end_ts)
+                {
+                    result.rejected += 1;
+                    tracing::warn!(
+                        shard_id,
+                        commit_ts = record.commit_ts,
+                        start_ts,
+                        end_ts,
+                        record_shard = record.shard_id,
+                        "commit log record outside the shard range; retry after routing refresh"
+                    );
+                    continue;
+                }
+                let appended = crate::storage::commit_log::append_commit_record_in_tx(
+                    tx,
+                    record,
+                    max_txn_bytes,
+                );
+                match appended {
+                    Ok(CommitLogAppend::Inserted) => {
+                        result.inserted += 1;
+                        result.cursor_ts = result.cursor_ts.max(record.commit_ts);
+                    }
+                    Ok(CommitLogAppend::Duplicate) => {
+                        result.duplicates += 1;
+                        result.cursor_ts = result.cursor_ts.max(record.commit_ts);
+                    }
+                    Err(err) => {
+                        result.rejected += 1;
+                        tracing::warn!(
+                            shard_id,
+                            commit_ts = record.commit_ts,
+                            error = %err,
+                            "commit log record rejected; keeping the existing row"
+                        );
+                        continue;
+                    }
+                }
+                shipped
+                    .entry(record.region_id)
+                    .and_modify(|ts| *ts = (*ts).max(record.commit_ts))
+                    .or_insert(record.commit_ts);
+            }
+            if result.inserted > 0 {
+                tx.insert(
+                    TABLE_KV,
+                    COMMIT_LOG_COUNT_KEY,
+                    &(previous_count + result.inserted).to_be_bytes(),
+                )?;
+            }
+            if result.cursor_ts > previous_cursor {
+                tx.insert(
+                    TABLE_KV,
+                    COMMIT_LOG_CURSOR_KEY,
+                    &result.cursor_ts.to_be_bytes(),
+                )?;
+            }
+            for (region_id, ts) in shipped {
+                let key = crate::storage::commit_log::shipped_key(region_id);
+                let previous = tx
+                    .get(TABLE_KV, &key)?
+                    .and_then(|bytes| decode_u64(&bytes))
+                    .unwrap_or(0);
+                if ts > previous {
+                    tx.insert(TABLE_KV, &key, &ts.to_be_bytes())?;
+                }
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(result)
+        })
+    }
+
+    /// shard 组内已追加的最大 `commit_ts`（缺失 = 0）。
+    pub fn commit_log_cursor(&self) -> Result<u64> {
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, COMMIT_LOG_CURSOR_KEY)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0))
+        })
+    }
+
+    /// shard 组内已插入的记录总数（缺失 = 0；重复写入不增加）。
+    pub fn commit_log_record_count(&self) -> Result<u64> {
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, COMMIT_LOG_COUNT_KEY)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0))
+        })
+    }
+
+    /// 某数据 Region 在本 shard 组内已追加的最大 `commit_ts`（缺失 = 0）。
+    pub fn commit_log_shipped_through(&self, region_id: u64) -> Result<u64> {
+        let key = crate::storage::commit_log::shipped_key(region_id);
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, &key)?
+                .and_then(|bytes| decode_u64(&bytes))
+                .unwrap_or(0))
         })
     }
 
@@ -9338,6 +9546,171 @@ mod tests {
             vec![record]
         );
     }
+    // ──── Commit Log shard 元数据（#154）────
+
+    #[test]
+    fn test_commit_log_shard_ops_persist_and_replay_idempotently() {
+        use crate::raft::type_config::CommitLogShardOp;
+
+        let (_dir, storage) = create_storage();
+        let open = CommitLogShardOp::Open {
+            start_ts: 1,
+            opened_at_ms: 1_000,
+        };
+        let shards = storage
+            .apply_commit_log_shard_op(&open, 7, applied_for(7))
+            .unwrap();
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].shard_id, 1);
+        assert_eq!(shards[0].start_ts, 1);
+        assert!(shards[0].covers(1) && shards[0].covers(u64::MAX / 2));
+
+        // 同一 revision 重放：不重复建表，也不报错（raft 重放路径）。
+        let replayed = storage
+            .apply_commit_log_shard_op(&open, 7, applied_for(7))
+            .unwrap();
+        assert_eq!(replayed, shards);
+
+        let end = CommitLogShardOp::SetEnd {
+            shard_id: 1,
+            end_ts: 100,
+            now_ms: 2_000,
+        };
+        storage
+            .apply_commit_log_shard_op(&end, 8, applied_for(8))
+            .unwrap();
+        let seal = CommitLogShardOp::Seal {
+            shard_id: 1,
+            now_ms: 3_000,
+        };
+        let shards = storage
+            .apply_commit_log_shard_op(&seal, 9, applied_for(9))
+            .unwrap();
+        assert_eq!(shards[0].end_ts, 100);
+        assert_eq!(shards[0].sealed_at_ms, 3_000);
+        assert_eq!(
+            storage.commit_log_shard_table().unwrap().shards,
+            shards,
+            "the same table is readable through the public accessor"
+        );
+    }
+
+    #[test]
+    fn test_invalid_commit_log_shard_ops_do_not_fail_apply() {
+        use crate::raft::type_config::CommitLogShardOp;
+
+        let (_dir, storage) = create_storage();
+        storage
+            .apply_commit_log_shard_op(
+                &CommitLogShardOp::Seal {
+                    shard_id: 9,
+                    now_ms: 1,
+                },
+                1,
+                applied_for(1),
+            )
+            .expect("unknown shard seal is a no-op, not an apply error");
+        assert!(storage.commit_log_shard_table().unwrap().shards.is_empty());
+    }
+
+    // ──── Commit Log shard 组记录追加（#154）────
+
+    fn shard_record(
+        commit_ts: Revision,
+        shard_id: u64,
+        region_id: u64,
+        key: &[u8],
+        value: &[u8],
+    ) -> crate::storage::commit_log::CommitRecord {
+        use crate::storage::commit_log::{CommitChange, CommitRecord};
+        CommitRecord {
+            shard_id,
+            commit_ts,
+            txn_id: format!("txn-{commit_ts}-{region_id}").into_bytes(),
+            start_ts: commit_ts.saturating_sub(1),
+            region_id,
+            txn_bytes: 32,
+            changes: vec![CommitChange {
+                key: key.to_vec(),
+                value: Some(value.to_vec()),
+                prev: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn test_commit_log_append_is_idempotent_and_rejects_out_of_range() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let in_range = shard_record(150, 2, 7, b"k", b"v");
+        let out_of_range = shard_record(250, 2, 7, b"k", b"v");
+        let result = storage
+            .apply_commit_log_append(
+                2,
+                100,
+                200,
+                &[in_range.clone(), out_of_range],
+                4 * 1024 * 1024,
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+        assert_eq!(
+            (result.inserted, result.rejected, result.cursor_ts),
+            (1, 1, 150)
+        );
+        assert_eq!(storage.commit_log_record_count().unwrap(), 1);
+        assert_eq!(storage.commit_log_shipped_through(7).unwrap(), 150);
+
+        let replay = storage
+            .apply_commit_log_append(2, 100, 200, &[in_range], 4 * 1024 * 1024, 2, applied_for(2))
+            .unwrap();
+        assert_eq!((replay.inserted, replay.duplicates), (0, 1));
+        assert_eq!(
+            storage.commit_log_record_count().unwrap(),
+            1,
+            "duplicates must not double count"
+        );
+        assert_eq!(storage.commit_log_cursor().unwrap(), 150);
+        assert_eq!(storage.commit_records_after(2, 0, 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_commit_log_shipped_watermark_is_per_region_and_monotonic() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_commit_log_append(
+                2,
+                100,
+                200,
+                &[shard_record(150, 2, 7, b"k", b"v")],
+                4 * 1024 * 1024,
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+        storage
+            .apply_commit_log_append(
+                2,
+                100,
+                200,
+                &[
+                    shard_record(120, 2, 7, b"k", b"v"),
+                    shard_record(130, 2, 8, b"k", b"v"),
+                ],
+                4 * 1024 * 1024,
+                2,
+                applied_for(2),
+            )
+            .unwrap();
+        assert_eq!(
+            storage.commit_log_shipped_through(7).unwrap(),
+            150,
+            "watermark never goes backwards"
+        );
+        assert_eq!(storage.commit_log_shipped_through(8).unwrap(), 130);
+        assert_eq!(storage.commit_log_shipped_through(9).unwrap(), 0);
+    }
+
     // ──── CommitRecord 写入（#153）────
 
     fn logged_decision(

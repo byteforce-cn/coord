@@ -87,6 +87,14 @@ struct MetricsInner {
     pub kv_t_safe_ts: AtomicU64,
     /// region 0 已发布的 safe-point fence（TSO 分配边界；0 = 未发布）
     pub kv_t_safe_ts_fence: AtomicU64,
+    /// 本节点已装配的 Commit Log shard raft 组数（#154）
+    pub kv_t_commit_log_shards: AtomicU64,
+    /// 已 seal 的 Commit Log shard 数（本地表视图，#154）
+    pub kv_t_commit_log_shards_sealed: AtomicU64,
+    /// 搬进 shard 组的记录数（含幂等重复；#154）
+    pub kv_t_commit_log_records_shipped_total: AtomicU64,
+    /// shard 组拒收的记录数（越界/坏记录，待重试；#154）
+    pub kv_t_commit_log_records_rejected_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的请求次数
     pub kv_v2_safe_ts_wait_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的累计毫秒
@@ -254,6 +262,10 @@ impl Default for MetricsInner {
             kv_v2_safe_ts_lag_total: AtomicU64::new(0),
             kv_t_safe_ts: AtomicU64::new(0),
             kv_t_safe_ts_fence: AtomicU64::new(0),
+            kv_t_commit_log_shards: AtomicU64::new(0),
+            kv_t_commit_log_shards_sealed: AtomicU64::new(0),
+            kv_t_commit_log_records_shipped_total: AtomicU64::new(0),
+            kv_t_commit_log_records_rejected_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_total: AtomicU64::new(0),
             kv_v2_safe_ts_wait_millis_total: AtomicU64::new(0),
             kvt_sequencer_batches_total: AtomicU64::new(0),
@@ -661,6 +673,26 @@ impl Metrics {
         self.inner.kv_t_safe_ts_fence.store(ts, Ordering::Relaxed);
     }
 
+    /// 发布 Commit Log shard 组数与已 seal 数（gauge）。
+    pub fn set_kv_t_commit_log_shards(&self, total: u64, sealed: u64) {
+        self.inner
+            .kv_t_commit_log_shards
+            .store(total, Ordering::Relaxed);
+        self.inner
+            .kv_t_commit_log_shards_sealed
+            .store(sealed, Ordering::Relaxed);
+    }
+
+    /// shard 组搬运/拒收计数（counter）。
+    pub fn add_kv_t_commit_log_records(&self, shipped: u64, rejected: u64) {
+        self.inner
+            .kv_t_commit_log_records_shipped_total
+            .fetch_add(shipped, Ordering::Relaxed);
+        self.inner
+            .kv_t_commit_log_records_rejected_total
+            .fetch_add(rejected, Ordering::Relaxed);
+    }
+
     /// v2 KV 读等待 safe_ts：请求数 +1、累计等待毫秒。
     pub fn inc_kv_v2_safe_ts_wait(&self, waited_millis: u64) {
         self.inner
@@ -900,6 +932,38 @@ impl Metrics {
         out.push_str(&format!(
             "coord_kv_t_safe_ts_fence {}\n",
             inner.kv_t_safe_ts_fence.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_log_shards Commit Log shard raft groups assembled on this node\n");
+        out.push_str("# TYPE coord_kv_t_commit_log_shards gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_log_shards {}\n",
+            inner.kv_t_commit_log_shards.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_log_shards_sealed Sealed Commit Log shards in the region 0 table\n");
+        out.push_str("# TYPE coord_kv_t_commit_log_shards_sealed gauge\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_log_shards_sealed {}\n",
+            inner.kv_t_commit_log_shards_sealed.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_log_records_shipped_total Commit records shipped into shard raft groups\n");
+        out.push_str("# TYPE coord_kv_t_commit_log_records_shipped_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_log_records_shipped_total {}\n",
+            inner
+                .kv_t_commit_log_records_shipped_total
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_log_records_rejected_total Commit records rejected by shard range checks\n");
+        out.push_str("# TYPE coord_kv_t_commit_log_records_rejected_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_log_records_rejected_total {}\n",
+            inner
+                .kv_t_commit_log_records_rejected_total
+                .load(Ordering::Relaxed)
         ));
 
         out.push_str(

@@ -212,6 +212,36 @@ impl CommitRecord {
     }
 }
 
+/// shard 组内已追加的最大 `commit_ts`（`TABLE_KV`；缺失 = 0）。
+pub(crate) const COMMIT_LOG_CURSOR_KEY: &[u8] = b"/_sys/commit_log/cursor";
+
+/// shard 组内已插入记录总数（`TABLE_KV`；缺失 = 0）。
+pub(crate) const COMMIT_LOG_COUNT_KEY: &[u8] = b"/_sys/commit_log/count";
+
+/// 每个数据 Region 在本 shard 组内已追加的最大 `commit_ts`（`TABLE_KV`）。
+///
+/// shipper 的扫描下界取「所有 shard 对该 Region 水位的**最小值**」：中断在跨
+/// shard 批次中间时，只会有 shard 水位前进、其它不动，最小值仍停在边界上，
+/// 补扫不会跳过任何 `commit_ts`。
+pub(crate) const COMMIT_LOG_SHIPPED_PREFIX: &[u8] = b"/_sys/commit_log/shipped/";
+
+pub(crate) fn shipped_key(region_id: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(COMMIT_LOG_SHIPPED_PREFIX.len() + 8);
+    key.extend_from_slice(COMMIT_LOG_SHIPPED_PREFIX);
+    key.extend_from_slice(&region_id.to_be_bytes());
+    key
+}
+
+/// 一次 shard 组追加的结果。越界/坏记录只计数（不失败 apply），由 shipper
+/// 刷新路由后重试。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitLogAppendResult {
+    pub inserted: u64,
+    pub duplicates: u64,
+    pub rejected: u64,
+    pub cursor_ts: u64,
+}
+
 /// 一个 shard 的键前缀（`commit_records_after` 的扫描边界）。
 pub(crate) fn commit_log_shard_prefix(shard_id: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(COMMIT_LOG_PREFIX.len() + 8);

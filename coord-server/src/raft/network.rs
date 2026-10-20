@@ -1145,14 +1145,17 @@ impl RaftRpcService {
         self.rafts.write().remove(&region_id);
     }
 
-    /// 按 region_id 取 Raft 实例（region 0 回退到默认实例）。
+    /// 按 region_id 取 Raft 实例（仅纯单 Raft 模式回退到默认实例）。
+    ///
+    /// 回退仅当表里**只有** region 0（legacy 单 Raft：所有请求都按 region 0
+    /// 寻址）；多 Raft 模式下未知 region 一律拒绝——否则发往尚未装配的 shard
+    /// 组的 raft 消息会被错误地交给 region 0 状态机（跨组串流）。
     fn get_raft_for_region(&self, region_id: u64) -> Result<CoordRaft, tonic::Status> {
         let rafts = self.rafts.read();
         if let Some(r) = rafts.get(&region_id) {
             return Ok(r.clone());
         }
-        // 兼容：单 Raft 模式下 region_id=0 查默认；未知 region 拒绝（fail-closed）
-        if region_id != 0 {
+        if region_id != 0 && rafts.len() == 1 {
             if let Some(r) = rafts.get(&0) {
                 return Ok(r.clone());
             }

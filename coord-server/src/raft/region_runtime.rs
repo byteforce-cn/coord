@@ -56,6 +56,7 @@ pub fn region_data_dir(base_data_dir: &Path, region_id: RegionId) -> PathBuf {
 }
 
 /// 单个 Region 的装配描述
+#[derive(Clone)]
 pub struct RegionRuntimeSpec {
     /// Region 元数据（id / key range / epoch / peers）
     pub meta: RegionMeta,

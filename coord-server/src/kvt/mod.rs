@@ -14,6 +14,7 @@
 
 use std::collections::BTreeSet;
 
+pub mod commit_log_shards;
 pub mod decision_apply;
 pub(crate) mod lease;
 pub mod safe_ts;
