@@ -7029,6 +7029,80 @@ mod tests {
     }
 
     #[test]
+    fn test_sequencer_batch_rejections_do_not_block_later_txns() {
+        use crate::raft::type_config::{SequencerInvalid, SequencerOutcome};
+        let (_dir, storage) = create_commit_ts_storage();
+
+        // 同一个命令里混入乱序/冲突/非法：每条只跳过自身，后续合法事务仍提交。
+        let batch = seq_op(vec![
+            seq_txn(b"t1", 1, 10, b"r1", &[], &[(b"b", b"v1")]),
+            seq_txn(b"t2", 1, 9, b"r2", &[], &[(b"x", b"v2")]),
+            seq_txn(b"t3", 5, 12, b"r3", &[b"b"], &[]),
+            seq_txn(b"t4", 20, 20, b"r4", &[], &[(b"c", b"v4")]),
+            seq_txn(b"t5", 12, 13, b"r5", &[], &[(b"d", b"v5")]),
+        ]);
+        let outcomes = storage
+            .apply_sequencer_op(&batch, 1, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                SequencerOutcome::Committed { commit_ts: 10 },
+                SequencerOutcome::OutOfOrder {
+                    commit_ts: 9,
+                    last_commit_ts: 10,
+                },
+                SequencerOutcome::Conflict {
+                    commit_ts: 12,
+                    conflict_key: b"b".to_vec(),
+                    conflict_ts: 10,
+                },
+                SequencerOutcome::Invalid {
+                    commit_ts: 20,
+                    reason: SequencerInvalid::CommitTsNotAboveStart,
+                },
+                SequencerOutcome::Committed { commit_ts: 13 },
+            ]
+        );
+
+        // 被拒条目不写决策；决策扫描跨过时间戳空洞继续前进。
+        let decisions = storage.sequencer_decisions_after(0, 16).unwrap();
+        assert_eq!(
+            decisions
+                .iter()
+                .map(|decision| decision.commit_ts)
+                .collect::<Vec<_>>(),
+            vec![10, 13]
+        );
+        assert_eq!(storage.sequencer_last_commit_ts().unwrap(), 13);
+    }
+
+    #[test]
+    fn test_sequencer_duplicate_in_same_batch_writes_one_decision() {
+        use crate::raft::type_config::SequencerOutcome;
+        let (_dir, storage) = create_commit_ts_storage();
+
+        // 同一命令内重复提交同一 txn_id：第二条返回首次 commit_ts，不写第二个决策。
+        let batch = seq_op(vec![
+            seq_txn(b"t1", 1, 10, b"r1", &[], &[(b"a", b"v1")]),
+            seq_txn(b"t1", 1, 11, b"r1", &[], &[(b"a", b"v2")]),
+        ]);
+        let outcomes = storage
+            .apply_sequencer_op(&batch, 1, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                SequencerOutcome::Committed { commit_ts: 10 },
+                SequencerOutcome::Duplicate { commit_ts: 10 },
+            ]
+        );
+        assert!(storage.get_sequencer_decision(11).unwrap().is_none());
+        assert_eq!(storage.sequencer_last_commit_ts().unwrap(), 10);
+        assert_eq!(storage.sequencer_decisions_after(0, 8).unwrap().len(), 1);
+    }
+
+    #[test]
     fn test_sequencer_conflict_writes_no_decision() {
         use crate::raft::type_config::SequencerOutcome;
         let (_dir, storage) = create_commit_ts_storage();
