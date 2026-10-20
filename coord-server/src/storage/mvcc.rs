@@ -3942,6 +3942,10 @@ impl<B: StorageBackend> MvccStorage<B> {
     }
 
     /// `commit_ts > after_ts` 的分片，最多 `limit` 行（`0` = 不限）。
+    ///
+    /// `after_ts` 是**严格**下界：limit 可能截断同一 `commit_ts` 的剩余 Region
+    /// 分片，调用方必须先整组消费该 ts（[`Self::commit_records_at`]）再推进游标，
+    /// 否则会跳过同事务的其它 key。
     pub fn commit_records_after(
         &self,
         shard_id: u64,
