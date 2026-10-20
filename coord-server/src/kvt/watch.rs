@@ -8,9 +8,13 @@
 //!
 //! RPC/授权/指标在 `coord.watch.v2` 的 RPC 层（#158）；保留窗口与 GC 归 #157。
 
+use std::sync::Arc;
+
 use coord_core::error::Error;
 
+use crate::kvt::commit_log_shards::CommitLogShardManager;
 use crate::storage::commit_log::{CommitChange, CommitPrevValue, CommitRecord};
+use crate::storage::commit_log_shard::{CommitLogShardMeta, CommitLogShardTable};
 
 /// 单批 change 条数上限（D9；协议同口径）。
 pub const WATCH_MAX_CHANGES_PER_BATCH: usize = 1_000;
@@ -241,6 +245,133 @@ pub enum WatchError {
     Storage(#[from] Error),
 }
 
+/// Watch 读取端：只依赖 Commit Log shard 组，不持有订阅状态。
+///
+/// 读取是拉模型，每次 `poll` 最多组装一批；调用方（RPC 流）负责节奏与
+/// 有界通道，服务端不维护无界缓冲。
+pub struct WatchCoordinator {
+    shards: Arc<CommitLogShardManager>,
+    max_changes: usize,
+    max_bytes: usize,
+}
+
+impl WatchCoordinator {
+    pub fn new(shards: Arc<CommitLogShardManager>) -> Self {
+        Self {
+            shards,
+            max_changes: WATCH_MAX_CHANGES_PER_BATCH,
+            max_bytes: WATCH_MAX_BYTES_PER_BATCH,
+        }
+    }
+
+    /// 覆盖批上限（测试/运维调参；`0` 视为 1，避免永不返回事件）。
+    pub fn with_limits(mut self, max_changes: usize, max_bytes: usize) -> Self {
+        self.max_changes = max_changes.max(1);
+        self.max_bytes = max_bytes.max(1);
+        self
+    }
+
+    /// 解析订阅起点。
+    ///
+    /// `start_revision = 0` 表示「当前 watermark + 1」；`> 0` 含该 revision。
+    /// 显式 cursor 与 start_revision 互斥，避免两个起点产生歧义。
+    pub async fn start(&self, start: WatchStart) -> Result<WatchCursor, WatchError> {
+        validate_start(&start)?;
+        let table = self.shards.table()?;
+        if let Some(cursor) = start.start_cursor {
+            resolve_position(&table, cursor)?;
+            return Ok(cursor);
+        }
+        if start.start_revision == 0 {
+            let watermark = self
+                .shards
+                .local_watermark()
+                .await
+                .map_err(WatchError::Unavailable)?
+                .watermark;
+            return Ok(position_before(&table, watermark));
+        }
+        Ok(position_before(&table, start.start_revision - 1))
+    }
+}
+
+/// `start_revision` 与 `start_cursor` 同时设置是请求歧义，不是「后者优先」。
+fn validate_start(start: &WatchStart) -> Result<(), WatchError> {
+    if start.start_cursor.is_some() && start.start_revision != 0 {
+        return Err(WatchError::InvalidRequest(
+            "start_revision and start_cursor are mutually exclusive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 把「已消费到 `ts`」换算成 `(shard, ts)`；表空时返回最小位点。
+fn position_before(table: &CommitLogShardTable, ts: u64) -> WatchCursor {
+    if ts == 0 || table.shards.is_empty() {
+        return WatchCursor::beginning();
+    }
+    let Some(meta) = table.covering(ts) else {
+        return WatchCursor::beginning();
+    };
+    if ts < meta.start_ts {
+        WatchCursor {
+            shard_id: meta.shard_id,
+            commit_ts: 0,
+        }
+    } else {
+        WatchCursor {
+            shard_id: meta.shard_id,
+            commit_ts: ts,
+        }
+    }
+}
+
+/// 校验 cursor 并把 shard_id 解析成表下标；返回 `(index, after_ts)`。
+///
+/// `after_ts` 是「已消费到的 commit_ts」，读取时严格取更大值；shard 起点之前
+/// 的 cursor 规整为 `start_ts - 1`，避免把 `0` 误当成真实时间戳。
+fn resolve_position(
+    table: &CommitLogShardTable,
+    cursor: WatchCursor,
+) -> Result<(usize, u64), WatchError> {
+    if table.shards.is_empty() {
+        if cursor.shard_id == 0 {
+            return Ok((0, cursor.commit_ts));
+        }
+        return Err(WatchError::CursorUnavailable {
+            shard_id: cursor.shard_id,
+        });
+    }
+    if cursor.shard_id == 0 {
+        return Ok((0, cursor.commit_ts));
+    }
+    let Some(index) = table
+        .shards
+        .iter()
+        .position(|meta| meta.shard_id == cursor.shard_id)
+    else {
+        return Err(WatchError::CursorUnavailable {
+            shard_id: cursor.shard_id,
+        });
+    };
+    let meta = &table.shards[index];
+    if cursor.commit_ts == 0 || cursor.commit_ts < meta.start_ts {
+        return Ok((index, meta.start_ts.saturating_sub(1)));
+    }
+    if meta.end_ts != 0 && cursor.commit_ts >= meta.end_ts {
+        // 续订 cursor 已越过该 shard 的末尾：定位到覆盖该 ts 的 shard。
+        if let Some(cover) = table.covering(cursor.commit_ts) {
+            let cover_index = table
+                .shards
+                .iter()
+                .position(|candidate| candidate.shard_id == cover.shard_id)
+                .expect("covering shard must be in the table");
+            return Ok((cover_index, cursor.commit_ts));
+        }
+    }
+    Ok((index, cursor.commit_ts))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +519,130 @@ mod tests {
         let mut builder = BatchBuilder::new(1000, 64);
         assert!(builder.try_push(event_with_bytes(32)));
         assert!(!builder.try_push(event_with_bytes(64)));
+    }
+
+    fn shard(id: u64, start: u64, end: u64) -> CommitLogShardMeta {
+        CommitLogShardMeta {
+            shard_id: id,
+            start_ts: start,
+            end_ts: end,
+            opened_at_ms: 1,
+            ended_at_ms: if end == 0 { 0 } else { 2 },
+            sealed_at_ms: 0,
+        }
+    }
+
+    fn two_shards() -> CommitLogShardTable {
+        CommitLogShardTable {
+            shards: vec![shard(1, 1, 101), shard(2, 101, 0)],
+        }
+    }
+
+    #[test]
+    fn start_revision_resolves_to_the_previous_position() {
+        let table = two_shards();
+        assert_eq!(position_before(&table, 0), WatchCursor::beginning());
+        assert_eq!(
+            position_before(&table, 1),
+            WatchCursor {
+                shard_id: 1,
+                commit_ts: 1
+            }
+        );
+        assert_eq!(
+            position_before(&table, 50),
+            WatchCursor {
+                shard_id: 1,
+                commit_ts: 50
+            }
+        );
+        assert_eq!(
+            position_before(&table, 100),
+            WatchCursor {
+                shard_id: 1,
+                commit_ts: 100
+            }
+        );
+        assert_eq!(
+            position_before(&table, 101),
+            WatchCursor {
+                shard_id: 2,
+                commit_ts: 101
+            }
+        );
+        assert_eq!(
+            position_before(&CommitLogShardTable::default(), 42),
+            WatchCursor::beginning(),
+            "an empty table has no position to point at yet"
+        );
+    }
+
+    #[test]
+    fn resolve_position_crosses_a_consumed_shard_and_rejects_unknown_shards() {
+        let table = two_shards();
+        assert_eq!(
+            resolve_position(
+                &table,
+                WatchCursor {
+                    shard_id: 1,
+                    commit_ts: 100
+                }
+            )
+            .unwrap(),
+            (0, 100)
+        );
+        assert_eq!(
+            resolve_position(
+                &table,
+                WatchCursor {
+                    shard_id: 1,
+                    commit_ts: 101
+                }
+            )
+            .unwrap(),
+            (1, 101),
+            "a cursor past the shard end resumes in the covering shard"
+        );
+        assert_eq!(
+            resolve_position(
+                &table,
+                WatchCursor {
+                    shard_id: 2,
+                    commit_ts: 0
+                }
+            )
+            .unwrap(),
+            (1, 100),
+            "zero means the start of that shard"
+        );
+        assert!(resolve_position(
+            &table,
+            WatchCursor {
+                shard_id: 9,
+                commit_ts: 0
+            }
+        )
+        .is_err());
+        assert_eq!(
+            resolve_position(&CommitLogShardTable::default(), WatchCursor::beginning()).unwrap(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn start_rejects_dual_positioning() {
+        let dual = WatchStart {
+            start_revision: 5,
+            start_cursor: Some(WatchCursor::beginning()),
+        };
+        assert!(matches!(
+            validate_start(&dual),
+            Err(WatchError::InvalidRequest(_))
+        ));
+        assert!(validate_start(&WatchStart {
+            start_revision: 0,
+            start_cursor: Some(WatchCursor::beginning()),
+        })
+        .is_ok());
     }
 }
