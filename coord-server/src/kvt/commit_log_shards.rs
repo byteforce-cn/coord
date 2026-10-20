@@ -412,6 +412,17 @@ impl CommitLogShardManager {
             tick.stalls = stalls;
         }
 
+        let now = self.now_ms();
+        tick.seal_lag_secs = self
+            .table()
+            .map_err(|err| format!("read commit log shard table: {err}"))?
+            .shards
+            .iter()
+            .filter(|meta| meta.end_ts != 0 && meta.sealed_at_ms == 0)
+            .map(|meta| now.saturating_sub(meta.ended_at_ms) / 1_000)
+            .max()
+            .unwrap_or(0);
+
         Ok(tick)
     }
 
@@ -616,6 +627,8 @@ pub struct CommitLogShardTick {
     pub in_flight: u64,
     /// 因 watermark 停滞超时而 seal 的 shard 数。
     pub stalls: u64,
+    /// 有界未 seal shard 的最大等待秒数（无 = 0）。
+    pub seal_lag_secs: u64,
 }
 
 /// 单批记录条数上限（与 sequencer 批同量级；raft 负载由字节预算再切）。
@@ -678,6 +691,11 @@ pub fn start_shard_manager(
                             .unwrap_or((0, 0));
                         metrics.set_kv_t_commit_log_shards(total, sealed);
                         metrics.add_kv_t_commit_log_records(tick.shipped, tick.rejected);
+                        metrics.set_kv_t_commit_watermark(tick.watermark, tick.in_flight);
+                        metrics.set_kv_t_commit_log_seal_lag(tick.seal_lag_secs);
+                        for _ in 0..tick.stalls {
+                            metrics.inc_kv_t_commit_watermark_stall();
+                        }
                     }
                     if tick.opened > 0 || tick.sealed > 0 || tick.shipped > 0 || tick.rejected > 0 {
                         tracing::debug!(
@@ -1202,6 +1220,11 @@ mod tests {
         // 决策 2 未 apply：watermark 停在 1，< end_ts。
         let tick = fx.manager.tick().await.unwrap();
         assert_eq!(tick.sealed, 0);
+        assert_eq!(tick.stalls, 0);
+
+        fx.set_now(2_000 + 150_000);
+        let tick = fx.manager.tick().await.unwrap();
+        assert_eq!(tick.seal_lag_secs, 150, "seal 延迟按秒上报");
         assert_eq!(tick.stalls, 0);
 
         fx.set_now(2_000 + 300_000);
