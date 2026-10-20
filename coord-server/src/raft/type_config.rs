@@ -531,6 +531,24 @@ pub enum SequencerOp {
     },
 }
 
+/// Commit Log shard 元数据操作（仅 region 0 system raft 提出，#154）。
+///
+/// apply 只依赖日志内容：边界与时间戳都随命令携带，节点间判定确定。非法操作
+/// 降级为 no-op（D11.5：用户级/元数据级拒绝不得让 raft apply 返回 `Err`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommitLogShardOp {
+    /// 打开新 shard：表空时用 `start_ts`，否则起点取前一 shard 的 `end_ts`。
+    Open { start_ts: u64, opened_at_ms: u64 },
+    /// 给最后一个未定界 shard 定界（不可回退）。
+    SetEnd {
+        shard_id: u64,
+        end_ts: u64,
+        now_ms: u64,
+    },
+    /// 标记已定界 shard 为 sealed（幂等）。
+    Seal { shard_id: u64, now_ms: u64 },
+}
+
 /// Raft 日志负载：客户端提交的状态机命令
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
@@ -631,6 +649,10 @@ pub enum Command {
         max_txn_bytes: u64,
         decisions: Vec<CommitDecisionApplyLog>,
     },
+    /// Commit Log shard 元数据（仅 region 0 system raft 提出，#154）。
+    ///
+    /// **末尾追加**；数据 Region 收到按无害记录 apply（不触碰业务 keyspace）。
+    CommitLogShard(CommitLogShardOp),
 }
 
 impl std::fmt::Display for Command {
@@ -706,6 +728,7 @@ impl std::fmt::Display for Command {
                 "ApplyCommitDecisionsWithLog(decisions={})",
                 decisions.len()
             ),
+            Command::CommitLogShard(op) => write!(f, "CommitLogShard({op:?})"),
         }
     }
 }
@@ -800,6 +823,10 @@ pub enum Response {
         through_ts: u64,
         decisions: u64,
     },
+    /// region 0 应用 shard 元数据操作后的整表视图（#154）。
+    CommitLogShard {
+        shards: Vec<crate::storage::commit_log_shard::CommitLogShardMeta>,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -862,6 +889,9 @@ impl std::fmt::Display for Response {
                 f,
                 "CommitDecisionsApplied(through={through_ts}, decisions={decisions})"
             ),
+            Response::CommitLogShard { shards } => {
+                write!(f, "CommitLogShard(shards={})", shards.len())
+            }
         }
     }
 }

@@ -22,6 +22,9 @@ use coord_core::types::{LeaseID, Revision};
 use crate::raft::type_config::CommitDecisionApplyLog;
 use crate::security::barrier::Barrier;
 use crate::storage::commit_log::{CommitChange, CommitLogAppend, CommitPrevValue, CommitRecord};
+use crate::storage::commit_log_shard::{
+    CommitLogShardMeta, CommitLogShardTable, COMMIT_LOG_SHARD_TABLE_KEY,
+};
 
 // ──── Key 空间常量 ────
 
@@ -3343,6 +3346,68 @@ impl<B: StorageBackend> MvccStorage<B> {
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
             Ok(outcomes)
         })
+    }
+
+    // ──── Commit Log shard 元数据（#154）────
+
+    /// 应用一条 shard 元数据操作（region 0 system raft）。
+    ///
+    /// 非法操作（未知 shard、回退边界、seal 未定界 shard）只记 warning 并保持
+    /// 原表：这些都是用户级/元数据级拒绝，不得让 raft apply 返回 `Err`。三个
+    /// 操作本身幂等，因此同一日志重放不会改变表。
+    pub fn apply_commit_log_shard_op(
+        &self,
+        op: &crate::raft::type_config::CommitLogShardOp,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<Vec<CommitLogShardMeta>> {
+        use crate::raft::type_config::CommitLogShardOp;
+
+        self.backend.write(|tx| {
+            self.note_log_index_revision(tx, revision)?;
+            let mut table = match tx.get(TABLE_KV, COMMIT_LOG_SHARD_TABLE_KEY)? {
+                Some(bytes) => CommitLogShardTable::decode(&bytes)?,
+                None => CommitLogShardTable::default(),
+            };
+            let outcome = match op {
+                CommitLogShardOp::Open {
+                    start_ts,
+                    opened_at_ms,
+                } => table.open(*start_ts, *opened_at_ms),
+                CommitLogShardOp::SetEnd {
+                    shard_id,
+                    end_ts,
+                    now_ms,
+                } => table.set_end(*shard_id, *end_ts, *now_ms),
+                CommitLogShardOp::Seal { shard_id, now_ms } => table.seal(*shard_id, *now_ms),
+            };
+            let changed = match outcome {
+                Ok(changed) => changed,
+                Err(err) => {
+                    tracing::warn!(
+                        revision,
+                        op = ?op,
+                        error = %err,
+                        "commit log shard op rejected; table unchanged"
+                    );
+                    false
+                }
+            };
+            if changed {
+                tx.insert(TABLE_KV, COMMIT_LOG_SHARD_TABLE_KEY, &table.encode()?)?;
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(table.shards)
+        })
+    }
+
+    /// 读取 region 0 的 Commit Log shard 表（缺失 = 空表）。
+    pub fn commit_log_shard_table(&self) -> Result<CommitLogShardTable> {
+        self.backend
+            .read(|tx| match tx.get(TABLE_KV, COMMIT_LOG_SHARD_TABLE_KEY)? {
+                Some(bytes) => CommitLogShardTable::decode(&bytes),
+                None => Ok(CommitLogShardTable::default()),
+            })
     }
 
     /// 单条事务的 OCC 校验与决策落盘。
@@ -9338,6 +9403,73 @@ mod tests {
             vec![record]
         );
     }
+    // ──── Commit Log shard 元数据（#154）────
+
+    #[test]
+    fn test_commit_log_shard_ops_persist_and_replay_idempotently() {
+        use crate::raft::type_config::CommitLogShardOp;
+
+        let (_dir, storage) = create_storage();
+        let open = CommitLogShardOp::Open {
+            start_ts: 1,
+            opened_at_ms: 1_000,
+        };
+        let shards = storage
+            .apply_commit_log_shard_op(&open, 7, applied_for(7))
+            .unwrap();
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].shard_id, 1);
+        assert_eq!(shards[0].start_ts, 1);
+        assert!(shards[0].covers(1) && shards[0].covers(u64::MAX / 2));
+
+        // 同一 revision 重放：不重复建表，也不报错（raft 重放路径）。
+        let replayed = storage
+            .apply_commit_log_shard_op(&open, 7, applied_for(7))
+            .unwrap();
+        assert_eq!(replayed, shards);
+
+        let end = CommitLogShardOp::SetEnd {
+            shard_id: 1,
+            end_ts: 100,
+            now_ms: 2_000,
+        };
+        storage
+            .apply_commit_log_shard_op(&end, 8, applied_for(8))
+            .unwrap();
+        let seal = CommitLogShardOp::Seal {
+            shard_id: 1,
+            now_ms: 3_000,
+        };
+        let shards = storage
+            .apply_commit_log_shard_op(&seal, 9, applied_for(9))
+            .unwrap();
+        assert_eq!(shards[0].end_ts, 100);
+        assert_eq!(shards[0].sealed_at_ms, 3_000);
+        assert_eq!(
+            storage.commit_log_shard_table().unwrap().shards,
+            shards,
+            "the same table is readable through the public accessor"
+        );
+    }
+
+    #[test]
+    fn test_invalid_commit_log_shard_ops_do_not_fail_apply() {
+        use crate::raft::type_config::CommitLogShardOp;
+
+        let (_dir, storage) = create_storage();
+        storage
+            .apply_commit_log_shard_op(
+                &CommitLogShardOp::Seal {
+                    shard_id: 9,
+                    now_ms: 1,
+                },
+                1,
+                applied_for(1),
+            )
+            .expect("unknown shard seal is a no-op, not an apply error");
+        assert!(storage.commit_log_shard_table().unwrap().shards.is_empty());
+    }
+
     // ──── CommitRecord 写入（#153）────
 
     fn logged_decision(

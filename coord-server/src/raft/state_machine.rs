@@ -751,6 +751,14 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::CommitLogShard(op) => {
+                // region 0 的 shard 元数据：无 Watch 事件，非法操作在 apply 内降级
+                // 为 no-op（D11.5）。
+                let shards = sm
+                    .apply_commit_log_shard_op(op, revision, applied)
+                    .map_err(io_err)?;
+                Ok((Response::CommitLogShard { shards }, None))
+            }
             Command::Lease(op) => {
                 let (outcome, changes) =
                     sm.apply_lease_op(op, revision, applied).map_err(io_err)?;
