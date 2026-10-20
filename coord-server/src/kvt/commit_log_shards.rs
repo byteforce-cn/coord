@@ -192,7 +192,7 @@ impl CommitLogShardManager {
         Ok(commit_watermark(decision_last, &in_flight))
     }
 
-    /// 已发布的 watermark（region 0 视图；Watch 读取口径，#156）。
+    /// 已发布的 watermark（region 0 视图；Watch 协调器的读取口径）。
     pub fn published_watermark(&self) -> std::result::Result<u64, String> {
         self.mvcc
             .commit_watermark()
@@ -368,8 +368,8 @@ impl CommitLogShardManager {
         rt.mvcc.commit_records_after(shard_id, after_ts, limit)
     }
 
-    /// 一次协调周期：装配缺失的 shard 组 → （region 0 leader）推进元数据 →
-    /// （本地 shard leader）搬运 outbox 记录。
+    /// 一次协调周期：装配缺失的 shard 组 → 本地 shard leader 搬运 outbox →
+    /// 计算/发布 watermark → （region 0 leader）推进元数据。
     ///
     /// 单 shard/单数据 Region 的失败只告警并跳过，不阻塞其它 shard；返回值只用于
     /// 指标与测试。
