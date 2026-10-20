@@ -3384,6 +3384,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     now_ms,
                 } => table.set_end(*shard_id, *end_ts, *now_ms),
                 CommitLogShardOp::Seal { shard_id, now_ms } => table.seal(*shard_id, *now_ms),
+                CommitLogShardOp::Gc { through_ts } => table.advance_gc(*through_ts),
             };
             let changed = match outcome {
                 Ok(changed) => changed,
@@ -9678,6 +9679,77 @@ mod tests {
             )
             .expect("unknown shard seal is a no-op, not an apply error");
         assert!(storage.commit_log_shard_table().unwrap().shards.is_empty());
+    }
+
+    #[test]
+    fn test_apply_commit_log_gc_is_monotonic_and_structural() {
+        use crate::raft::type_config::CommitLogShardOp;
+
+        let (_dir, storage) = create_storage();
+        let ops = [
+            CommitLogShardOp::Open {
+                start_ts: 1,
+                opened_at_ms: 1_000,
+            },
+            CommitLogShardOp::SetEnd {
+                shard_id: 1,
+                end_ts: 101,
+                now_ms: 2_000,
+            },
+            CommitLogShardOp::Seal {
+                shard_id: 1,
+                now_ms: 3_000,
+            },
+            CommitLogShardOp::Open {
+                start_ts: 101,
+                opened_at_ms: 3_000,
+            },
+            CommitLogShardOp::SetEnd {
+                shard_id: 2,
+                end_ts: 201,
+                now_ms: 4_000,
+            },
+        ];
+        for (index, op) in ops.iter().enumerate() {
+            let revision = index as u64 + 1;
+            storage
+                .apply_commit_log_shard_op(op, revision, applied_for(revision))
+                .unwrap();
+        }
+
+        let gc = CommitLogShardOp::Gc { through_ts: 101 };
+        storage
+            .apply_commit_log_shard_op(&gc, 6, applied_for(6))
+            .unwrap();
+        assert_eq!(storage.commit_log_shard_table().unwrap().gc_before_ts, 101);
+
+        // Raft replay of the same command must not move the watermark again.
+        storage
+            .apply_commit_log_shard_op(&gc, 6, applied_for(6))
+            .unwrap();
+        assert_eq!(storage.commit_log_shard_table().unwrap().gc_before_ts, 101);
+
+        // Non-boundary and still-unsealed targets are metadata-level rejections:
+        // they must not fail the raft apply (D11.5).
+        storage
+            .apply_commit_log_shard_op(
+                &CommitLogShardOp::Gc { through_ts: 150 },
+                7,
+                applied_for(7),
+            )
+            .unwrap();
+        storage
+            .apply_commit_log_shard_op(
+                &CommitLogShardOp::Gc { through_ts: 201 },
+                8,
+                applied_for(8),
+            )
+            .unwrap();
+        assert_eq!(
+            storage.commit_log_shard_table().unwrap().gc_before_ts,
+            101,
+            "rejected gc ops leave the table unchanged"
+        );
     }
 
     // ──── Commit Log shard 组记录追加（#154）────

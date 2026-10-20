@@ -677,6 +677,7 @@ mod tests {
     fn two_shards() -> CommitLogShardTable {
         CommitLogShardTable {
             shards: vec![shard(1, 1, 101), shard(2, 101, 0)],
+            gc_before_ts: 0,
         }
     }
 
