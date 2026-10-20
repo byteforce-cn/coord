@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use coord_core::error::{Error, Result};
-use coord_core::storage::{ReadTx, WriteTx};
+use coord_core::storage::WriteTx;
 
 use crate::raft::type_config::SequencerMutation;
 use crate::storage::mvcc::TABLE_COMMIT_LOG;

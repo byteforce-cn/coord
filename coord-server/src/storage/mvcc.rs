@@ -19,8 +19,9 @@ use coord_core::kv_range::RangeSemantics;
 use coord_core::storage::{ReadTx, StorageBackend, WriteTx};
 use coord_core::types::{LeaseID, Revision};
 
+use crate::raft::type_config::CommitDecisionApplyLog;
 use crate::security::barrier::Barrier;
-use crate::storage::commit_log::{CommitLogAppend, CommitRecord};
+use crate::storage::commit_log::{CommitChange, CommitLogAppend, CommitPrevValue, CommitRecord};
 
 // ──── Key 空间常量 ────
 
@@ -175,6 +176,55 @@ pub struct SequencerDecision {
     pub start_ts: u64,
     pub commit_ts: u64,
     pub mutations: Vec<crate::raft::type_config::SequencerMutation>,
+}
+
+/// apply 的两种来源：旧日志（无记录元数据）与 #153 新日志（带记录元数据）。
+enum DecisionView<'a> {
+    Plain(&'a crate::raft::type_config::CommitDecisionApply),
+    Logged(&'a crate::raft::type_config::CommitDecisionApplyLog),
+}
+
+impl DecisionView<'_> {
+    fn commit_ts(&self) -> Revision {
+        match self {
+            Self::Plain(decision) => decision.commit_ts,
+            Self::Logged(decision) => decision.commit_ts,
+        }
+    }
+
+    fn mutations(&self) -> &[crate::raft::type_config::SequencerMutation] {
+        match self {
+            Self::Plain(decision) => &decision.mutations,
+            Self::Logged(decision) => &decision.mutations,
+        }
+    }
+
+    fn logged(&self) -> Option<&crate::raft::type_config::CommitDecisionApplyLog> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Logged(decision) => Some(decision),
+        }
+    }
+}
+
+/// 记录旧值（MVCC 落盘字节，加密时即同一份密文）；逻辑删除的 key 没有 prev。
+fn commit_prev_value(
+    tx: &dyn ReadTx,
+    internal_key: &[u8],
+    meta: &KvMetadata,
+) -> Result<Option<CommitPrevValue>> {
+    if meta.deleted {
+        return Ok(None);
+    }
+    Ok(tx
+        .get(TABLE_KV, internal_key)?
+        .map(|value| CommitPrevValue {
+            value,
+            create_revision: meta.create_revision,
+            mod_revision: meta.mod_revision,
+            version: meta.version,
+            lease_id: meta.lease_id,
+        }))
 }
 
 /// `apply_commit_decisions` 的进度：游标推进到哪、本次推进了几条决策。
@@ -3623,6 +3673,32 @@ impl<B: StorageBackend> MvccStorage<B> {
         revision: Revision,
         applied: AppliedLogId,
     ) -> Result<CommitDecisionApplyResult> {
+        let views: Vec<DecisionView<'_>> = decisions.iter().map(DecisionView::Plain).collect();
+        self.apply_commit_decisions_core(&views, revision, applied, 0)
+    }
+
+    /// 应用带 Commit Log 元数据的决策，并在同一 redb 事务里写 CommitRecord（#153）。
+    ///
+    /// 记录写失败（编码/校验）只记 error、不阻断 apply：数据可见性与 safe_ts 游标
+    /// 优先于 Watch 历史；正常路径上限校验在 Commit 阶段已经通过。
+    pub fn apply_commit_decisions_with_log(
+        &self,
+        decisions: &[CommitDecisionApplyLog],
+        revision: Revision,
+        applied: AppliedLogId,
+        max_txn_bytes: u64,
+    ) -> Result<CommitDecisionApplyResult> {
+        let views: Vec<DecisionView<'_>> = decisions.iter().map(DecisionView::Logged).collect();
+        self.apply_commit_decisions_core(&views, revision, applied, max_txn_bytes)
+    }
+
+    fn apply_commit_decisions_core(
+        &self,
+        decisions: &[DecisionView<'_>],
+        revision: Revision,
+        applied: AppliedLogId,
+        max_txn_bytes: u64,
+    ) -> Result<CommitDecisionApplyResult> {
         let cursor = self.last_applied_decision_ts()?;
         let result = self.backend.write(|tx| {
             let mut current = Self::current_revision_in_tx(tx, self.revision_mode)?;
@@ -3630,40 +3706,44 @@ impl<B: StorageBackend> MvccStorage<B> {
             let mut count = 0u64;
             let mut previous = None;
 
-            for decision in decisions {
-                if decision.commit_ts <= through {
+            for view in decisions {
+                let commit_ts = view.commit_ts();
+                let mutations = view.mutations();
+                let logged = view.logged();
+                if commit_ts <= through {
                     continue; // 已应用/游标之前的重放
                 }
-                if previous.is_some_and(|ts| decision.commit_ts <= ts) {
+                if previous.is_some_and(|ts| commit_ts <= ts) {
                     break; // 载荷必须按 commit_ts 严格递增
                 }
-                previous = Some(decision.commit_ts);
+                previous = Some(commit_ts);
 
                 let existing = tx
-                    .get(TABLE_CHANGELOG, &encode_changelog_key(decision.commit_ts))?
+                    .get(TABLE_CHANGELOG, &encode_changelog_key(commit_ts))?
                     .map(|bytes| ChangeEvent::from_bytes(&bytes))
                     .transpose()?;
                 if let Some(event) = existing {
-                    if event_matches_mutations(&event, &decision.mutations) {
-                        through = decision.commit_ts;
+                    if event_matches_mutations(&event, mutations) {
+                        through = commit_ts;
                         count += 1;
                         continue;
                     }
                     break;
                 }
-                if decision.commit_ts <= current {
-                    if decision.mutations.is_empty() {
+                if commit_ts <= current {
+                    if mutations.is_empty() {
                         // 空决策没有 changelog 可作重放证据；游标丢失后只要水位
                         // 已越过它就说明当时已应用（或本来就没有本 Region 的写）。
-                        through = decision.commit_ts;
+                        through = commit_ts;
                         count += 1;
                         continue;
                     }
                     break;
                 }
 
-                let mut changes = Vec::with_capacity(decision.mutations.len());
-                for mutation in &decision.mutations {
+                let mut changes = Vec::with_capacity(mutations.len());
+                let mut record_changes = Vec::new();
+                for mutation in mutations {
                     match mutation {
                         crate::raft::type_config::SequencerMutation::Put {
                             key,
@@ -3676,11 +3756,22 @@ impl<B: StorageBackend> MvccStorage<B> {
                             let existing_meta = tx
                                 .get(TABLE_KV_META, &meta_key)?
                                 .and_then(|bytes| KvMetadata::from_bytes(&bytes));
+                            let prev = match (logged.is_some(), existing_meta.as_ref()) {
+                                (true, Some(meta)) => commit_prev_value(tx, &internal_key, meta)?,
+                                _ => None,
+                            };
                             let meta = match existing_meta {
-                                Some(meta) => meta.update(decision.commit_ts, lease_id),
-                                None => KvMetadata::new_key(decision.commit_ts, lease_id),
+                                Some(meta) => meta.update(commit_ts, lease_id),
+                                None => KvMetadata::new_key(commit_ts, lease_id),
                             };
                             let encrypted = self.encrypt_value(&internal_key, value)?;
+                            if logged.is_some() {
+                                record_changes.push(CommitChange {
+                                    key: key.clone(),
+                                    value: Some(encrypted.clone()),
+                                    prev,
+                                });
+                            }
                             tx.insert(TABLE_KV, &internal_key, &encrypted)?;
                             tx.insert(TABLE_KV_META, &meta_key, &meta.to_bytes())?;
                             changes.push(KeyValueChange {
@@ -3690,16 +3781,28 @@ impl<B: StorageBackend> MvccStorage<B> {
                             });
                         }
                         crate::raft::type_config::SequencerMutation::Delete { key } => {
+                            let internal_key = encode_kv_key(key);
                             let meta_key = encode_kv_meta_key(key);
                             let existing_meta = tx
                                 .get(TABLE_KV_META, &meta_key)?
                                 .and_then(|bytes| KvMetadata::from_bytes(&bytes));
+                            let prev = match (logged.is_some(), existing_meta.as_ref()) {
+                                (true, Some(meta)) => commit_prev_value(tx, &internal_key, meta)?,
+                                _ => None,
+                            };
                             if let Some(meta) = existing_meta.filter(|meta| !meta.deleted) {
                                 tx.insert(
                                     TABLE_KV_META,
                                     &meta_key,
-                                    &meta.mark_deleted(decision.commit_ts).to_bytes(),
+                                    &meta.mark_deleted(commit_ts).to_bytes(),
                                 )?;
+                            }
+                            if logged.is_some() {
+                                record_changes.push(CommitChange {
+                                    key: key.clone(),
+                                    value: None,
+                                    prev,
+                                });
                             }
                             changes.push(KeyValueChange {
                                 key: key.clone(),
@@ -3715,7 +3818,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                                 encode_kv_key(end)
                             };
                             let rows = tx.iter_range(TABLE_KV, &internal_start, &internal_end)?;
-                            for (internal_key, _value) in rows {
+                            for (internal_key, value) in rows {
                                 let Some(user_key) = decode_kv_key(&internal_key) else {
                                     continue;
                                 };
@@ -3727,10 +3830,23 @@ impl<B: StorageBackend> MvccStorage<B> {
                                     .get(TABLE_KV_META, &meta_key)?
                                     .and_then(|bytes| KvMetadata::from_bytes(&bytes));
                                 if let Some(meta) = existing_meta.filter(|meta| !meta.deleted) {
+                                    if logged.is_some() {
+                                        record_changes.push(CommitChange {
+                                            key: user_key.to_vec(),
+                                            value: None,
+                                            prev: Some(CommitPrevValue {
+                                                value,
+                                                create_revision: meta.create_revision,
+                                                mod_revision: meta.mod_revision,
+                                                version: meta.version,
+                                                lease_id: meta.lease_id,
+                                            }),
+                                        });
+                                    }
                                     tx.insert(
                                         TABLE_KV_META,
                                         &meta_key,
-                                        &meta.mark_deleted(decision.commit_ts).to_bytes(),
+                                        &meta.mark_deleted(commit_ts).to_bytes(),
                                     )?;
                                     changes.push(KeyValueChange {
                                         key: user_key.to_vec(),
@@ -3744,18 +3860,44 @@ impl<B: StorageBackend> MvccStorage<B> {
                 }
                 if !changes.is_empty() {
                     let event = ChangeEvent {
-                        revision: decision.commit_ts,
+                        revision: commit_ts,
                         changes,
                         event_type: EventType::Txn,
                     };
                     tx.insert(
                         TABLE_CHANGELOG,
-                        &encode_changelog_key(decision.commit_ts),
+                        &encode_changelog_key(commit_ts),
                         &event.to_bytes(),
                     )?;
                 }
-                current = decision.commit_ts;
-                through = decision.commit_ts;
+                if let Some(log) = logged {
+                    if !record_changes.is_empty() {
+                        let record = CommitRecord {
+                            shard_id: log.shard_id,
+                            commit_ts,
+                            txn_id: log.txn_id.clone(),
+                            start_ts: log.start_ts,
+                            region_id: log.region_id,
+                            txn_bytes: u32::try_from(CommitRecord::txn_write_bytes(mutations))
+                                .unwrap_or(u32::MAX),
+                            changes: record_changes,
+                        };
+                        if let Err(err) = crate::storage::commit_log::append_commit_record_in_tx(
+                            &mut *tx,
+                            &record,
+                            max_txn_bytes,
+                        ) {
+                            tracing::error!(
+                                commit_ts,
+                                region_id = log.region_id,
+                                error = %err,
+                                "commit record write failed; data apply continues"
+                            );
+                        }
+                    }
+                }
+                current = commit_ts;
+                through = commit_ts;
                 count += 1;
             }
 
@@ -9190,6 +9332,179 @@ mod tests {
         assert_eq!(
             reopened.commit_records_after(shard, 0, 0).unwrap(),
             vec![record]
+        );
+    }
+    // ──── CommitRecord 写入（#153）────
+
+    fn logged_decision(
+        commit_ts: Revision,
+        region_id: u64,
+        txn_id: &[u8],
+        mutations: Vec<crate::raft::type_config::SequencerMutation>,
+    ) -> crate::raft::type_config::CommitDecisionApplyLog {
+        crate::raft::type_config::CommitDecisionApplyLog {
+            shard_id: crate::storage::commit_log::COMMIT_LOG_STAGING_SHARD_ID,
+            region_id,
+            commit_ts,
+            txn_id: txn_id.to_vec(),
+            start_ts: commit_ts.saturating_sub(1),
+            mutations,
+        }
+    }
+
+    #[test]
+    fn test_apply_decision_with_log_writes_full_record_and_prev() {
+        use crate::security::key_management::Keyring;
+        use std::sync::Arc;
+
+        let (_dir, storage) = create_commit_ts_storage();
+        let (keyring, _dek) = Keyring::bootstrap_from_root_key(&[0xABu8; 32]).unwrap();
+        let barrier = Barrier::new(Arc::new(keyring));
+        storage.set_barrier(barrier.clone());
+
+        storage
+            .put_at_commit_ts(b"a", b"old", None, 5, applied_for(1))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"d", b"dv", None, 6, applied_for(2))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"e", b"ev", None, 7, applied_for(3))
+            .unwrap();
+
+        let entry = logged_decision(
+            10,
+            7,
+            b"txn-10",
+            vec![put(b"c", b"cv"), delete(b"a"), range_delete(b"d", b"f")],
+        );
+        let result = storage
+            .apply_commit_decisions_with_log(&[entry], 4, applied_for(4), 4 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(result.through_ts, 10);
+        assert_eq!(result.decisions, 1);
+
+        let records = storage.commit_records_at(1, 10).unwrap();
+        assert_eq!(records.len(), 1, "one fragment per region");
+        let record = &records[0];
+        assert_eq!(record.region_id, 7);
+        assert_eq!(record.txn_id, b"txn-10");
+        assert_eq!(record.start_ts, 9);
+        let keys: Vec<&[u8]> = record.changes.iter().map(|c| c.key.as_slice()).collect();
+        assert_eq!(keys, vec![b"c".as_slice(), b"a", b"d", b"e"]);
+        let put_value = record.changes[0]
+            .value
+            .as_deref()
+            .expect("put carries a value");
+        assert_ne!(
+            put_value, b"cv",
+            "the record stores the same ciphertext as MVCC"
+        );
+        assert_eq!(barrier.decrypt(put_value).unwrap(), b"cv");
+        assert!(record.changes[0].prev.is_none());
+        assert!(record.changes[1].value.is_none(), "delete is a tombstone");
+        assert_eq!(
+            record.changes[1].prev.as_ref().unwrap().mod_revision,
+            5,
+            "prev carries the pre-image metadata"
+        );
+        assert_eq!(
+            barrier
+                .decrypt(&record.changes[1].prev.as_ref().unwrap().value)
+                .unwrap(),
+            b"old"
+        );
+        assert_eq!(record.changes[2].prev.as_ref().unwrap().mod_revision, 6);
+        assert_eq!(record.changes[3].prev.as_ref().unwrap().mod_revision, 7);
+
+        let rows = commit_log_rows(&storage);
+        assert_eq!(rows.len(), 1);
+        for plain in [b"cv".as_slice(), b"old", b"dv", b"ev"] {
+            assert!(
+                !rows[0].1.windows(plain.len()).any(|window| window == plain),
+                "commit log row must not contain plaintext {:?}",
+                String::from_utf8_lossy(plain)
+            );
+        }
+        assert!(storage.get(b"a").unwrap().is_none());
+        assert_eq!(storage.get(b"c").unwrap(), Some(b"cv".to_vec()));
+        assert!(storage.get(b"d").unwrap().is_none());
+        assert!(storage.get(b"e").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_apply_decision_with_log_replay_writes_record_once() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let entry = logged_decision(10, 1, b"txn-10", vec![put(b"k", b"v")]);
+        storage
+            .apply_commit_decisions_with_log(
+                std::slice::from_ref(&entry),
+                1,
+                applied_for(1),
+                4 * 1024 * 1024,
+            )
+            .unwrap();
+        storage
+            .apply_commit_decisions_with_log(
+                std::slice::from_ref(&entry),
+                2,
+                applied_for(2),
+                4 * 1024 * 1024,
+            )
+            .unwrap();
+
+        assert_eq!(commit_log_rows(&storage).len(), 1);
+        assert_eq!(storage.commit_records_at(1, 10).unwrap().len(), 1);
+        assert_eq!(storage.get_kv_metadata(b"k").unwrap().unwrap().version, 1);
+    }
+
+    #[test]
+    fn test_apply_decision_with_log_skips_empty_fragment() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let result = storage
+            .apply_commit_decisions_with_log(
+                &[logged_decision(11, 7, b"txn-11", Vec::new())],
+                1,
+                applied_for(1),
+                4 * 1024 * 1024,
+            )
+            .unwrap();
+
+        assert_eq!(result.through_ts, 11);
+        assert!(storage.commit_records_after(1, 0, 10).unwrap().is_empty());
+        assert_eq!(storage.last_applied_decision_ts().unwrap(), 11);
+    }
+
+    #[test]
+    fn test_apply_decision_with_log_oversize_record_keeps_raft_alive() {
+        let (_dir, storage) = create_commit_ts_storage();
+        let value = vec![7u8; 2048];
+        let result = storage
+            .apply_commit_decisions_with_log(
+                &[logged_decision(10, 7, b"txn-10", vec![put(b"z", &value)])],
+                1,
+                applied_for(1),
+                1,
+            )
+            .unwrap();
+
+        assert_eq!(result.through_ts, 10);
+        assert_eq!(storage.get(b"z").unwrap(), Some(value));
+        assert!(
+            storage.commit_records_at(1, 10).unwrap().is_empty(),
+            "an unencodable record must not block data apply"
+        );
+    }
+
+    #[test]
+    fn test_apply_commit_decisions_plain_path_writes_no_records() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .apply_commit_decisions(&[decision(10, vec![put(b"k", b"v")])], 1, applied_for(1))
+            .unwrap();
+        assert!(
+            commit_log_rows(&storage).is_empty(),
+            "the legacy command path must not write commit records"
         );
     }
 }
