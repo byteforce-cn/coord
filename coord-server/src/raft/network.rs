@@ -1099,6 +1099,10 @@ impl RaftNetworkFactory<TypeConfig> for RegionRaftNetworkFactory {
 /// Multi-Raft：入站 RaftMessage 携带 `region_id`，按 region
 /// 解复用到对应 Raft 实例。单 Raft 模式 region_id=0 使用默认实例（`set_raft`），
 /// 兼容既有调用方。
+///
+/// Clone 共享同一张 region→raft 表（字段均为 `Arc`）：故障恢复测试需要在
+/// gRPC 服务不重绑监听器的前提下替换本节点的 raft 实例。
+#[derive(Clone)]
 pub struct RaftRpcService {
     /// 本地 Raft 实例表：region_id → Raft（region 0 = 单 Raft 默认实例）
     rafts: Arc<RwLock<HashMap<u64, CoordRaft>>>,
