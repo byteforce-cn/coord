@@ -40,6 +40,37 @@ fn mutation_bytes(mutation: &SequencerMutation) -> usize {
     match mutation {
         SequencerMutation::Put { key, value, .. } => key.len() + value.len() + 24,
         SequencerMutation::Delete { key } => key.len() + 16,
+        SequencerMutation::DeleteRange { start, end } => start.len() + end.len() + 32,
+    }
+}
+
+/// 把区间写裁剪到 Region 的 `[start, end)`；完全不相交返回 `None`。
+///
+/// Region/写区间的空 `end` 都表示 +∞；`DeleteRange.end` 在 RPC 层非空，这里
+/// 仍按通用语义处理，避免直接调用方（测试/回放）越界。
+fn clip_range(meta: &RegionMeta, start: &[u8], end: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let clip_start = start.max(meta.start_key.as_slice());
+    let clip_end = match (meta.end_key.is_empty(), end.is_empty()) {
+        (_, true) => meta.end_key.clone(),
+        (true, false) => end.to_vec(),
+        (false, false) => end.min(meta.end_key.as_slice()).to_vec(),
+    };
+    if clip_end.is_empty() || clip_start < clip_end.as_slice() {
+        Some((clip_start.to_vec(), clip_end))
+    } else {
+        None
+    }
+}
+
+/// 按 Region 裁剪一条 mutation；点写按 key 归属，区间写按区间相交。
+fn clip_mutation(meta: &RegionMeta, mutation: &SequencerMutation) -> Option<SequencerMutation> {
+    match mutation {
+        SequencerMutation::Put { .. } | SequencerMutation::Delete { .. } => mutation
+            .point_key()
+            .filter(|key| key_in_region(meta, key))
+            .map(|_| mutation.clone()),
+        SequencerMutation::DeleteRange { start, end } => clip_range(meta, start, end)
+            .map(|(start, end)| SequencerMutation::DeleteRange { start, end }),
     }
 }
 
@@ -59,8 +90,7 @@ fn build_apply_batch(
         let mutations: Vec<SequencerMutation> = decision
             .mutations
             .iter()
-            .filter(|mutation| key_in_region(meta, mutation.key()))
-            .cloned()
+            .filter_map(|mutation| clip_mutation(meta, mutation))
             .collect();
         let size = 24 + mutations.iter().map(mutation_bytes).sum::<usize>();
         if !payload.is_empty() && bytes.saturating_add(size) > max_bytes.max(1) {
@@ -275,7 +305,7 @@ mod tests {
         let payload = build_apply_batch(&decisions, &region, 10, usize::MAX);
         assert_eq!(payload.len(), 1);
         assert_eq!(payload[0].mutations.len(), 1);
-        assert_eq!(payload[0].mutations[0].key(), b"n");
+        assert_eq!(payload[0].mutations[0].point_key(), Some(b"n".as_slice()));
     }
 
     #[test]
@@ -290,5 +320,74 @@ mod tests {
         assert!(key_in_region(&unbounded, b"m"));
         assert!(key_in_region(&unbounded, b"zzz"));
         assert!(!key_in_region(&unbounded, b"l"));
+    }
+
+    fn delete_range(start: &[u8], end: &[u8]) -> SequencerMutation {
+        SequencerMutation::DeleteRange {
+            start: start.to_vec(),
+            end: end.to_vec(),
+        }
+    }
+
+    #[test]
+    fn clip_mutation_clips_delete_range_per_region() {
+        let left = meta(b"", b"m");
+        let right = meta(b"m", b"");
+
+        assert_eq!(
+            clip_mutation(&left, &delete_range(b"a", b"z")),
+            Some(delete_range(b"a", b"m"))
+        );
+        assert_eq!(
+            clip_mutation(&right, &delete_range(b"a", b"z")),
+            Some(delete_range(b"m", b"z"))
+        );
+        assert_eq!(
+            clip_mutation(&right, &delete_range(b"a", b"b")),
+            None,
+            "a range that ends before the region start has no mutations"
+        );
+        assert_eq!(
+            clip_mutation(&left, &put(b"apple", b"1")),
+            Some(put(b"apple", b"1"))
+        );
+        assert_eq!(clip_mutation(&right, &put(b"apple", b"1")), None);
+        assert_eq!(
+            clip_mutation(
+                &right,
+                &SequencerMutation::Delete {
+                    key: b"melon".to_vec()
+                }
+            ),
+            Some(SequencerMutation::Delete {
+                key: b"melon".to_vec()
+            })
+        );
+    }
+
+    #[test]
+    fn build_apply_batch_keeps_decision_without_region_mutations() {
+        let region = meta(b"m", b"t");
+        let payload = build_apply_batch(
+            &[decision(10, vec![delete_range(b"a", b"b")])],
+            &region,
+            10,
+            usize::MAX,
+        );
+        assert_eq!(payload.len(), 1, "the cursor must still advance");
+        assert_eq!(payload[0].commit_ts, 10);
+        assert!(payload[0].mutations.is_empty());
+    }
+
+    #[test]
+    fn build_apply_batch_accounts_delete_range_bytes() {
+        let all = meta(b"", b"");
+        let decisions = vec![
+            decision(10, vec![delete_range(b"a", &[0xffu8; 100])]),
+            decision(20, vec![delete_range(b"b", &[0xffu8; 100])]),
+        ];
+        let payload = build_apply_batch(&decisions, &all, 10, 150);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0].commit_ts, 10);
     }
 }

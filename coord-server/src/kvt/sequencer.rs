@@ -71,6 +71,9 @@ impl CommitCandidate {
             .map(|mutation| match mutation {
                 SequencerMutation::Put { key, value, .. } => key.len() + value.len() + 16,
                 SequencerMutation::Delete { key } => key.len() + 8,
+                SequencerMutation::DeleteRange { start, end } => {
+                    start.len().saturating_add(end.len()).saturating_add(32)
+                }
             })
             .sum();
         SEQUENCER_TXN_OVERHEAD_BYTES
@@ -273,5 +276,25 @@ mod tests {
         // 0 字节上限按 1 处理；0 字节条目本身不占额度，不会触发切批。
         assert_eq!(batch_ranges(&[0, 0], 256, 0), vec![0..2]);
         assert_eq!(batch_ranges(&[1, 1], 256, 0), vec![0..1, 1..2]);
+    }
+
+    #[test]
+    fn test_wire_bytes_counts_delete_range() {
+        use crate::raft::type_config::SequencerMutation;
+
+        let base = CommitCandidate {
+            txn_id: b"t".to_vec(),
+            start_ts: 1,
+            request_id: b"r".to_vec(),
+            read_set: BTreeSet::new(),
+            read_ranges: Vec::new(),
+            mutations: Vec::new(),
+        };
+        let mut ranged = base.clone();
+        ranged.mutations = vec![SequencerMutation::DeleteRange {
+            start: b"a".to_vec(),
+            end: vec![0u8; 4_096],
+        }];
+        assert_eq!(ranged.wire_bytes() - base.wire_bytes(), 1 + 4_096 + 32);
     }
 }

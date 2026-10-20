@@ -737,9 +737,9 @@ impl kv_v2::kv_server::Kv for CoordNode {
 /// 把 wire 上的写集转成 sequencer 事务，并在进入会话前拒绝非法形状。
 ///
 /// 用户级输入错误用 `INVALID_ARGUMENT`（不可重试）：形状校验先于会话提交占用，
-/// 非法请求不会把会话卡在 `Committing`。区间写尚未交付（`SequencerMutation`
-/// 只有 point 写，OCC 写索引按 key 枚举），因此 `DELETE_RANGE` fail-closed，
-/// 不静默退化成单 key。
+/// 非法请求不会把会话卡在 `Committing`。`DELETE_RANGE` 要求 `range_end` 非空
+/// 且 `key < range_end`；空区间不是「无操作」，而是形状错误（避免调用方以为
+/// 删除生效）。
 fn validate_commit_mutations(
     mutations: &[txn_v2::Mutation],
 ) -> Result<Vec<SequencerMutation>, Status> {
@@ -763,9 +763,22 @@ fn validate_commit_mutations(
                 key: mutation.key.clone(),
             },
             Op::DeleteRange => {
-                return Err(Status::unimplemented(
-                    "txn DELETE_RANGE is not implemented; delete keys individually",
-                ))
+                if mutation.range_end.is_empty() {
+                    return Err(attach(
+                        Status::invalid_argument("DELETE_RANGE requires a non-empty range_end"),
+                        CoordErrorCode::InvalidArgument,
+                    ));
+                }
+                if mutation.range_end <= mutation.key {
+                    return Err(attach(
+                        Status::invalid_argument("DELETE_RANGE requires key < range_end"),
+                        CoordErrorCode::InvalidArgument,
+                    ));
+                }
+                SequencerMutation::DeleteRange {
+                    start: mutation.key.clone(),
+                    end: mutation.range_end.clone(),
+                }
             }
             Op::Put | Op::Delete | Op::Unspecified => {
                 return Err(attach(
@@ -1236,13 +1249,8 @@ mod tests {
             assert_eq!(error_code_of(&err).as_deref(), Some("INVALID_ARGUMENT"));
         }
 
-        // 区间写尚未交付：fail-closed 而不是静默退化成单 key。
-        assert_eq!(
-            validate_commit_mutations(&[mutation(Op::DeleteRange, b"a", b"b")])
-                .expect_err("delete range")
-                .code(),
-            tonic::Code::Unimplemented
-        );
+        // 区间写已交付；点写的 range_end 仍必须为空。
+        assert!(validate_commit_mutations(&[mutation(Op::DeleteRange, b"a", b"b")]).is_ok());
 
         let mut negative_lease = mutation(Op::Put, b"k", b"");
         negative_lease.lease_id = -1;
@@ -1252,6 +1260,34 @@ mod tests {
                 .code(),
             tonic::Code::InvalidArgument
         );
+    }
+
+    #[test]
+    fn test_validate_commit_mutations_accepts_delete_range() {
+        use txn_v2::mutation::Op;
+
+        assert_eq!(
+            validate_commit_mutations(&[mutation(Op::DeleteRange, b"a", b"m")]).unwrap(),
+            vec![SequencerMutation::DeleteRange {
+                start: b"a".to_vec(),
+                end: b"m".to_vec(),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_validate_commit_mutations_rejects_bad_delete_range() {
+        use txn_v2::mutation::Op;
+
+        for bad in [
+            mutation(Op::DeleteRange, b"a", b""),
+            mutation(Op::DeleteRange, b"b", b"a"),
+            mutation(Op::DeleteRange, b"a", b"a"),
+        ] {
+            let err = validate_commit_mutations(&[bad]).expect_err("invalid range");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+            assert_eq!(error_code_of(&err).as_deref(), Some("INVALID_ARGUMENT"));
+        }
     }
 
     #[test]

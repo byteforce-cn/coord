@@ -2917,8 +2917,7 @@ async fn run_server(
             "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2), KV (coord.kv.v2), \
              Txn (coord.txn.v2 Begin/Read/Commit/Abort, OCC + Commit Sequencer) and Lease \
              (coord.lease.v2) are available; Watch/Storage v2 stay \
-             FAILED_PRECONDITION/UNIMPLEMENTED and txn DELETE_RANGE stays UNIMPLEMENTED \
-             until their gate lands"
+             FAILED_PRECONDITION/UNIMPLEMENTED until their gate lands"
         );
     } else {
         tracing::info!(
