@@ -6,6 +6,10 @@
 //! - 同一 `commit_ts` 的全部 Region 分片合并为一个原子事件，绝不拆批；
 //! - cursor 为 `(shard_id, commit_ts)`，`shard_id = 0` 表示首个 shard 之前。
 //!
+//! 读取端必须在持有数据面 outbox 的节点上运行（本地是数据 Region leader /
+//! 已 apply 决策）；否则 `local_watermark` 会保守地停在最早未完成的决策，
+//! 只影响时延、不会跳事件。跨节点服务方式由 RPC 层决定。
+//!
 //! RPC/授权/指标在 `coord.watch.v2` 的 RPC 层（#158）；保留窗口与 GC 归 #157。
 
 use std::sync::Arc;
@@ -224,7 +228,7 @@ pub struct WatchBatch {
 pub struct WatchStart {
     /// 首个期望的 `commit_ts`（含）；`0` = 当前 watermark + 1。
     pub start_revision: u64,
-    /// 断点续订的精确位置；`Some` 时忽略 `start_revision`。
+    /// 断点续订的精确位置；`Some` 时不得再设置 `start_revision`。
     pub start_cursor: Option<WatchCursor>,
 }
 

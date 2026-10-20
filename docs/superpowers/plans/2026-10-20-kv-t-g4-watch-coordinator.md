@@ -21,6 +21,12 @@
 - 临时文件只放 `/tmp`。
 - 提交前本机必须跑通 `cargo fmt --all -- --check`、`cargo clippy --workspace --lib --bins -- -D warnings`、`bash scripts/check-panics.sh`、`cargo audit`、`cargo deny check`；涉及文档跑 `bash scripts/check-doc-refs.sh`。
 
+## Ledger
+
+- **Ruling:** open shard 也读到 `local_watermark`，跨 shard 才要求 sealed + watermark 越过 end_ts — D9 的 watermark 已承诺「不会再有更小 ts」，只按 sealed 读会让 Watch 最长等 1 小时；代价是 watermark 停滞时 Watch 也停滞（可观测，#155 已有 stall 指标）。
+- **Ruling:** 读取上界用本节点 `local_watermark`，不用 region 0 已发布 watermark — 副本的 shard 状态机可能尚未 apply 某条 append，直接用发布值会跳过记录；代价是非数据面节点的 Watch 时延变高，#158 负责选择服务节点/路由。
+- **Ruling:** `poll` 是拉模型，不建后台订阅任务 — 背压天然有界（每次最多一批），单批上限由调用方可见；#158 的 RPC 流再套有界通道。
+
 ## Review Focus
 
 - **只读已确定的区间**：shard 内上界 = `min(shard.end_ts - 1, local_watermark)`。watermark 承诺「不会再有更小的 commit_ts 记录」，因此 open shard 也能安全读到 watermark；跨 shard 仍只在 `sealed && watermark >= end_ts` 后发生（D9）。
@@ -53,7 +59,7 @@
 - `WatchEvent::from_records(commit_ts, records, filter)`：合并同 ts 的 Region 分片、过滤 change、`prev_kv=false` 时清空 prev；返回 `Option<Self>`（过滤后为空 = None）。
 - 批上限工具 `BatchBuilder`（`pub(crate)` 或私有 + 单测）：`try_push(event) -> bool`；空批的第一条事件无论多大都接受。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `watch.rs` 的 `#[cfg(test)] mod tests` 中：
 
@@ -127,23 +133,23 @@ fn batch_respects_the_byte_budget() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-server --lib kvt::watch::tests`
 Expected: FAIL（模块/类型不存在）
 
-- [ ] **Step 3: 实现模型与过滤**
+- [x] **Step 3: 实现模型与过滤**
 
 实现上述类型；`validate()` 只拒绝 `range_end` 非空且 `range_end <= key`（空 `range_end` = 单 key）。`WatchEvent::from_records` 按 records 顺序拼接 changes，过滤后为空返回 `None`。
 
 约 180 行，含注释。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-server --lib kvt::watch::tests`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/kvt/watch.rs coord-server/src/kvt/mod.rs
@@ -172,7 +178,7 @@ git commit -m "feat(kv-t): model watch cursor, filters and batch limits"
 - `start_cursor` 与 `start_revision` 同时设置 → `InvalidRequest`；cursor 的 shard 不在表中 → `CursorUnavailable`。
 - 空表（尚未 open 第一个 shard）时允许 `beginning()`，等 shard 出现后从 1 开始；`start_revision > 0` 时用 `(0, start_revision - 1)` 表达「首个 shard、跳过更早的 ts」。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 fn shard(id: u64, start: u64, end: u64) -> CommitLogShardMeta { ... }
@@ -203,21 +209,21 @@ fn start_rejects_dual_positioning() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-server --lib kvt::watch::tests`
 Expected: FAIL（函数不存在）
 
-- [ ] **Step 3: 实现解析**
+- [x] **Step 3: 实现解析**
 
 实现 `validate_start`、`position_before`、`resolve_position` 与 `start()`。`start()` 在 `start_revision == 0` 时调用 `shards.local_watermark().await` 并映射错误到 `Unavailable`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-server --lib kvt::watch::tests`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/kvt/watch.rs
@@ -243,7 +249,7 @@ git commit -m "feat(kv-t): resolve watch start revision and cursor"
   7. 返回 cursor：`after < shard.start_ts` 时规整为 `commit_ts = 0`；`sealed` = cursor 所在 shard 已 seal；`has_more` = 因批上限停止。
 - `poll` 先 `filter.validate()`；未知 cursor shard → `CursorUnavailable`；shard 读失败 → `Storage`/`Unavailable`。
 
-- [ ] **Step 1: 写失败测试（纯辅助函数）**
+- [x] **Step 1: 写失败测试（纯辅助函数）**
 
 把「批剩余空间 + 是否可跨 shard」抽成可单测的小函数：
 
@@ -268,21 +274,21 @@ fn crossing_requires_a_sealed_shard_below_the_watermark() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-server --lib kvt::watch::tests`
 Expected: FAIL（`read_bound`/`may_cross` 不存在）
 
-- [ ] **Step 3: 实现 `poll` 与辅助函数**
+- [x] **Step 3: 实现 `poll` 与辅助函数**
 
 实现 `read_bound`、`may_cross`、`scan_shard`、`poll`。`scan_shard` 的批满返回 `(stopped_before_ts, full=true)`，确保 cursor 不越过未进批的事件。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-server --lib kvt::watch::tests`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/kvt/watch.rs
@@ -304,7 +310,7 @@ git commit -m "feat(kv-t): read commit log shards in global watch order"
 - `open_first_shard()`：`shards.tick()`。
 - `poll_all(coordinator, cursor, filter) -> (Vec<WatchEvent>, WatchCursor)`：循环 `poll` 直到 `has_more == false` 且不再有事件（加超时上限，避免空转）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -367,21 +373,21 @@ async fn test_watch_cursor_resumes_without_gap_or_duplicate() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord --test kv_t_g4_watch_coordinator_test`
 Expected: FAIL（文件/类型不存在）
 
-- [ ] **Step 3: 实现测试夹具并让测试通过**
+- [x] **Step 3: 实现测试夹具并让测试通过**
 
 夹具照抄 #154 测试的 region 0/数据 Region 装配；`commit_pairs` 与 `apply_pending_decisions` 同 #154；`poll_until` 在 20s 超时前循环 `poll`，每次推进 cursor。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord --test kv_t_g4_watch_coordinator_test`
 Expected: PASS（3 tests）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord/tests/kv_t_g4_watch_coordinator_test.rs
@@ -402,14 +408,14 @@ git commit -m "test(kv-t): cover global order, atomic txn and cursor resume"
 - 单批 ≤1000 change 或 1MB，单事务原子批不拆；`prev_kv` 可选，过滤 key/range/put/delete 后 cursor 仍推进。
 - 仍不做：保留窗口/GC（#157）、RPC/授权/指标（#158）。
 
-- [ ] **Step 1: 更新文档**
+- [x] **Step 1: 更新文档**
 
-- [ ] **Step 2: 跑引用检查**
+- [x] **Step 2: 跑引用检查**
 
 Run: `bash scripts/check-doc-refs.sh`
 Expected: 悬空路径 0
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add docs/production/consumer-contract.md
@@ -420,7 +426,7 @@ git commit -m "docs(kv-t): document watch coordinator read and cursor semantics"
 
 ### Task 6: 门禁与 PR
 
-- [ ] **Step 1: 全量门禁**
+- [x] **Step 1: 全量门禁**
 
 ```bash
 cargo fmt --all -- --check
