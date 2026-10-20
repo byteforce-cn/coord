@@ -1,4 +1,4 @@
-//! CommitWatermark 计算（ADR-0015 D5/D9，#155）。
+//! CommitWatermark 计算（ADR-0015 D5/D9）。
 //!
 //! D9 口径：`watermark = min(in-flight commit_ts) - 1`；无 in-flight 时等于
 //! `max_committed_ts`。in-flight 有两类来源，均以「最早未完成 ts」表示：

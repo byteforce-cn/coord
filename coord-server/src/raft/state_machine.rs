@@ -926,7 +926,7 @@ impl StateMachineStore {
                 ))
             }
             Command::PublishCommitWatermark { watermark } => {
-                // #155：与 #142 的 fence 相同——内部水位不上 Watch，重放由
+                // 与 `PublishSafeTs` 的 fence 相同——内部水位不上 Watch，重放由
                 // applied-index 守卫返回当前值。
                 let effective = sm
                     .publish_commit_watermark(*watermark, applied)

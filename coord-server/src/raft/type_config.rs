@@ -665,7 +665,7 @@ pub enum Command {
         max_txn_bytes: u64,
         records: Vec<crate::storage::commit_log::CommitRecord>,
     },
-    /// 发布 CommitWatermark（仅 region 0 system raft 提出，#155）。
+    /// 发布 CommitWatermark（仅 region 0 system raft 提出）。
     ///
     /// **末尾追加**；`watermark` 是「<= 它的 `commit_ts` 不会再有新 CommitRecord」
     /// 的单调承诺，apply 不推进 revision、不写 changelog。
@@ -861,7 +861,7 @@ pub enum Response {
         rejected: u64,
         cursor_ts: u64,
     },
-    /// CommitWatermark 发布结果（#155；实际生效值）。
+    /// CommitWatermark 发布结果（实际生效值）。
     CommitWatermarkPublished {
         watermark: u64,
     },

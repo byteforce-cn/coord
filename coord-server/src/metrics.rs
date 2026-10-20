@@ -95,13 +95,13 @@ struct MetricsInner {
     pub kv_t_commit_log_records_shipped_total: AtomicU64,
     /// shard 组拒收的记录数（越界/坏记录，待重试；#154）
     pub kv_t_commit_log_records_rejected_total: AtomicU64,
-    /// 已发布的 CommitWatermark（<= 它的 commit_ts 不会再有新记录；#155）
+    /// 已发布的 CommitWatermark（<= 它的 commit_ts 不会再有新记录）
     pub kv_t_commit_watermark: AtomicU64,
-    /// 钉住 watermark 的未完成项数量（未 apply 决策 + 未搬运记录；#155）
+    /// 钉住 watermark 的未完成项数量（未 apply 决策 + 未搬运记录）
     pub kv_t_commit_in_flight: AtomicU64,
-    /// 有界未 seal shard 的最大等待秒数（#155）
+    /// 有界未 seal shard 的最大等待秒数
     pub kv_t_commit_log_seal_lag_seconds: AtomicU64,
-    /// watermark 停滞超时后 seal 的 shard 数（#155）
+    /// watermark 停滞超时后 seal 的 shard 数
     pub kv_t_commit_watermark_stalls_total: AtomicU64,
     /// v2 KV 读等待 safe_ts 的请求次数
     pub kv_v2_safe_ts_wait_total: AtomicU64,
