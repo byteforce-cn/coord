@@ -74,7 +74,7 @@ commit/abort/TTL 到期，等待本身有超时上限。
   `CoordNode::start_kvt_txn_reaper(self: &Arc<Self>, interval: Duration)`。
 - Consumes: 既有 `TxnSessions::begin/abort`、`TxnSession.expires_at`。
 
-- [ ] **Step 1: 写失败测试（`coord-server/src/kvt/txn.rs` 的 tests 模块）**
+- [x] **Step 1: 写失败测试（`coord-server/src/kvt/txn.rs` 的 tests 模块）**
 
 ```rust
 #[test]
@@ -102,12 +102,12 @@ async fn reaper_reclaims_expired_sessions() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test -p coord-server --lib kvt::txn::tests::purge_expired_removes_only_expired_sessions_and_reports_count`
 Expected: FAIL — `purge_expired` 返回 `()`，且 `len`/`spawn_reaper` 不存在。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `coord-server/src/kvt/txn.rs`：
 
@@ -160,12 +160,12 @@ node.start_kvt_txn_reaper(std::time::Duration::from_secs(
 ));
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test -p coord-server --lib kvt::txn::`
 Expected: PASS（既有会话测试 + 新增 2 个）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/kvt/txn.rs coord-server/src/server/mod.rs coord/src/main.rs
@@ -192,7 +192,7 @@ git commit -m "feat(kv-t): reap expired txn sessions in background (#150)"
   - `SessionError::Draining`
 - Consumes: Task 1 的 `TxnTable`/`sweep`。
 
-- [ ] **Step 1: 写失败测试（`txn.rs` tests 模块）**
+- [x] **Step 1: 写失败测试（`txn.rs` tests 模块）**
 
 ```rust
 #[test]
@@ -313,12 +313,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test -p coord-server --lib kvt::txn::tests::drain_rejects_new_reads_only_inside_range`
 Expected: FAIL — `drain`/`DrainOutcome`/`Draining` 不存在。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```rust
 impl ReadRange {
@@ -394,12 +394,12 @@ SessionError::Draining => attach(
   「TTL 从 `Begin` 起算、不续期；split drain 期间命中被 drain 区间的 `Read`
   返回 `UNAVAILABLE`（退避后重试同一会话或重跑）。」
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test -p coord-server --lib kvt::txn:: && cargo test -p coord-server --lib kvt::services::tests`
 Expected: PASS（Task 1 测试 + 新增 5 个 drain 测试 + 1 个映射测试）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/kvt/txn.rs coord-server/src/kvt/services.rs \
@@ -413,8 +413,8 @@ git commit -m "feat(kv-t): add bounded split drain for txn sessions (#150)"
 
 **Files:** 无（只跑命令与 PR 描述）
 
-- [ ] **Step 1: 勾选本计划并写验证记录**（测试名/命令/边界）
-- [ ] **Step 2: 本机跑 CI 基础门禁**
+- [x] **Step 1: 勾选本计划并写验证记录**（测试名/命令/边界）
+- [x] **Step 2: 本机跑 CI 基础门禁**
 
 ```bash
 cargo fmt --all -- --check
