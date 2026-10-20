@@ -438,6 +438,9 @@ impl TxnSessions {
     }
 
     /// 决策已落盘：记录首次 `commit_ts`，供同一 `request_id` 在 TTL 内回放。
+    ///
+    /// 读集随提交完成释放：已决策会话不会再读，drain 若继续等待它只会
+    /// 白等到 TTL 超时（split 只需要等仍然活跃的读）。
     pub(crate) fn finish_commit(&self, id: &[u8], request_id: &[u8], commit_ts: u64) {
         let mut table = self.table.lock();
         if let Some(session) = table.sessions.get_mut(id) {
@@ -449,6 +452,7 @@ impl TxnSessions {
                     request_id: request_id.to_vec(),
                     commit_ts,
                 };
+                session.read_set = ReadSet::default();
             }
         }
     }
@@ -780,6 +784,8 @@ mod tests {
             sessions.begin_commit(&id, b"req-1").unwrap().replay,
             Some(100)
         );
+        // 读集随提交完成释放：drain 不应再等待已决策会话。
+        assert_eq!(sessions.read_set(&id).unwrap(), ReadSet::default());
     }
 
     #[test]
