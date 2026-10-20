@@ -100,7 +100,7 @@ Commit Sequencer：写集校验、读集快照、冲突/重复/非法结果的�
   - `ReadSet::into_parts(self) -> (BTreeSet<Vec<u8>>, Vec<ReadRange>)`
 - Consumes: 既有 `TxnTable`/`sweep`/`ReadSet`。
 
-- [ ] **Step 1: 写失败测试（`txn.rs` tests 模块）**
+- [x] **Step 1: 写失败测试（`txn.rs` tests 模块）**
 
 ```rust
 #[test]
@@ -151,7 +151,7 @@ fn commit_freezes_read_set_and_replays_same_request_id() {
 }
 
 #[test]
-fn cancel_commit_restores_active_and_abort_drops_it() {
+fn cancel_commit_restores_active_and_abort_drops_active_session() {
     let sessions = TxnSessions::new();
     let id = sessions.begin(9, Duration::from_secs(30));
     sessions.begin_commit(&id, b"req").unwrap();
@@ -161,21 +161,30 @@ fn cancel_commit_restores_active_and_abort_drops_it() {
         .record_read(&id, ReadIntent::Point(b"k"), 10)
         .is_ok());
 
+    // 在途提交的 abort 是 no-op：决策可能已落盘，必须保留回放记录。
     sessions.begin_commit(&id, b"req").unwrap();
     sessions.abort(&id);
+    sessions.finish_commit(&id, b"req", 120);
     assert_eq!(
-        sessions.begin_commit(&id, b"req"),
+        sessions.begin_commit(&id, b"req").unwrap().replay,
+        Some(120)
+    );
+
+    let other = sessions.begin(11, Duration::from_secs(30));
+    sessions.abort(&other);
+    assert_eq!(
+        sessions.begin_commit(&other, b"req"),
         Err(SessionError::NotFound)
     );
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test -p coord-server --lib kvt::txn::tests::commit_`
 Expected: FAIL — `begin_commit`/`finish_commit`/`cancel_commit`/`SessionError::Closed` 不存在。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,12 +251,12 @@ match &session.state {
 - `abort`：只删除 `Active` / `Committing` 会话；`Committed` 保留（幂等回放）。
 - `ReadSet::into_parts`：`points` 与 `ranges` + `empty_ranges` 合并后返回。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test -p coord-server --lib kvt::txn::`
 Expected: PASS（既有会话/drain 测试 + 新增 2 个）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/kvt/txn.rs
@@ -269,7 +278,7 @@ git commit -m "feat(kv-t): freeze txn read set on commit and replay by request i
 - Produces: `Txn.Commit` 的可用实现；`fn validate_commit_mutations(&[txn_v2::Mutation]) -> Result<Vec<SequencerMutation>, Status>`；
   `txn_session_status` 新增 `Closed`/`Committed`/`CommitInProgress` 分支。
 
-- [ ] **Step 1: 写失败测试（`services.rs` tests 模块）**
+- [x] **Step 1: 写失败测试（`services.rs` tests 模块）**
 
 ```rust
 #[test]
@@ -285,19 +294,21 @@ fn commit_mutations_validate_ops_and_ranges() {
     };
     assert!(validate_commit_mutations(&[put(Op::Put, b"k", b"")]).is_ok());
     assert!(validate_commit_mutations(&[put(Op::Delete, b"k", b"")]).is_ok());
-    assert!(validate_commit_mutations(&[put(Op::DeleteRange, b"a", b"b")]).is_ok());
 
     for bad in [
         put(Op::Unspecified, b"k", b""),
         put(Op::Put, b"k", b"z"),          // PUT 必须是单 key
         put(Op::Delete, b"k", b"z"),       // DELETE 必须是单 key
-        put(Op::DeleteRange, b"a", b""),   // 必须给上界
-        put(Op::DeleteRange, b"b", b"a"),  // 空区间
     ] {
         let err = validate_commit_mutations(&[bad]).expect_err("invalid mutation");
         assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
         assert_eq!(error_code_of(&err).as_deref(), Some("INVALID_ARGUMENT"));
     }
+
+    // 区间写尚未交付：fail-closed，不静默退化成单 key。
+    let err = validate_commit_mutations(&[put(Op::DeleteRange, b"a", b"b")])
+        .expect_err("delete range");
+    assert_eq!(err.code(), Code::Unimplemented, "{err:?}");
 }
 
 #[test]
@@ -321,12 +332,12 @@ fn session_errors_map_to_protocol_codes() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test -p coord-server --lib kvt::services::tests::commit_`
 Expected: FAIL — `validate_commit_mutations`/新 `SessionError` 分支不存在。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `txn_session_status` 新增：
 
@@ -514,12 +525,12 @@ async fn commit(
 > 会话在 `Conflict`/`Invalid` 上回到 `Active`（`cancel_commit`），在
 > `Committed`/`Duplicate` 上 `finish_commit`；传输错误同样 `cancel_commit`。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test -p coord-server --lib kvt::`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-server/src/kvt/services.rs coord-server/src/kvt/mod.rs
@@ -539,7 +550,7 @@ git commit -m "feat(kv-t): wire txn Commit to the commit sequencer (#151)"
   region 0 + 两个数据 Region 装配，`FakeTso` 高水位从 1000 起）。
 - Produces: 验收测试，PR 描述与 issue 证据引用的测试名。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 夹具要点：
 
@@ -601,7 +612,8 @@ async fn test_txn_conflict_then_retry_with_new_start_ts() {
     assert_eq!(error_code_of(&err).as_deref(), Some("TXN_CONFLICT"));
     // 冲突不写决策：A 分配的 commit_ts 在日志里不存在。
     assert!(fx.node.storage.get_sequencer_decision(b_ts + 1).unwrap().is_none());
-    // 会话已不可继续提交。
+    // 会话回到 Active：Abort 后按不存在处理。
+    fx.abort(&a.txn_id).await;
     let err = fx.commit(&a.txn_id, &[(b"apple", b"from-a")], b"req-a").await.unwrap_err();
     assert_eq!(error_code_of(&err).as_deref(), Some("TXN_NOT_FOUND"));
 
@@ -640,12 +652,16 @@ async fn test_txn_commit_limits_and_invalid_mutations_keep_session_usable() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test -p coord --test kv_t_g3_txn_commit_test`
 Expected: FAIL — `Commit` 返回 `UNIMPLEMENTED`（以及测试文件不存在）。
 
-- [ ] **Step 3: 实现夹具并跑通**
+- [x] **Step 3: 实现夹具并跑通**
+
+夹具另加 `start_with(max_txn_bytes, with_sequencer)`：第四个 e2e
+`test_txn_commit_requires_sequencer_when_absent` 断言无 sequencer 时
+`FAILED_PRECONDITION` 且失败释放提交占用。
 
 - 夹具从 `kv_t_g3_commit_decision_test.rs` 复制 region 0 + 数据 Region 装配，
   增加 `set_commit_sequencer` 与 seed；`begin`/`read`/`commit`/`abort` 调
@@ -653,12 +669,12 @@ Expected: FAIL — `Commit` 返回 `UNIMPLEMENTED`（以及测试文件不存在
 - 断言错误码用 `coord_core::error_code::error_code_of`。
 - `commit` 辅助函数把 `(key, value)` 转成 `Mutation { op: Put, .. }`。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test -p coord --test kv_t_g3_txn_commit_test`
 Expected: PASS 3/3。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord/tests/kv_t_g3_txn_commit_test.rs
@@ -684,33 +700,39 @@ git commit -m "test(kv-t): cover txn commit visibility, conflict and replay (#15
 - Consumes: `Client::get_leader_channel/return_channel`、`coord_proto::txn::v2`、
   `error_code_of`。
 
-- [ ] **Step 1: 写失败测试（`txn_v2.rs` tests 模块）**
+- [x] **Step 1: 写失败测试（`txn_v2.rs` tests 模块）**
 
 ```rust
 #[test]
-fn txn_status_maps_protocol_codes() {
-    let conflict = attach(Status::aborted("conflict"), CoordErrorCode::TxnConflict);
-    assert!(matches!(
-        txn_commit_error(conflict).unwrap_err(),
-        Error::TxnConflictStub
-    ));
-    let missing = attach(Status::aborted("missing"), CoordErrorCode::TxnNotFound);
+fn commit_conflict_is_a_result_not_an_error() {
+    let status = attach(Status::aborted("conflict"), CoordErrorCode::TxnConflict);
+    assert!(is_txn_conflict(&status));
+    assert!(!is_txn_conflict(&attach(
+        Status::aborted("missing"),
+        CoordErrorCode::TxnNotFound
+    )));
+}
+
+#[test]
+fn txn_error_maps_protocol_codes() {
+    let missing = attach(Status::aborted("gone"), CoordErrorCode::TxnNotFound);
     assert!(matches!(
         txn_error(missing),
         Error::NotFound { resource: "transaction", .. }
     ));
+    assert!(matches!(
+        txn_error(attach(Status::invalid_argument("big"), CoordErrorCode::TxnTooLarge)),
+        Error::InvalidArgument(_)
+    ));
 }
 ```
-（实现时把 `TxnConflictStub` 换成实际决策：`commit` 把 `TXN_CONFLICT` 映射为
-`Ok(TxnCommit::Conflict)`，因此测试直接断言 `is_txn_conflict(&status)` 与
-`txn_error` 的 `NotFound` 映射。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test -p coord-client --lib txn_v2::`
 Expected: FAIL — 模块/函数不存在。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```rust
 pub struct TxnV2Client { client: Client }
@@ -761,12 +783,12 @@ impl TxnV2Client {
 - `docs/production/ops/boundaries.md` B-KVT-9 的「盲写」表述改为：drain 只等待
   读集相交的会话；提交路径不因 drain 拒绝写，写侧路由由 #163 cutover 收口。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test -p coord-client --lib txn_v2:: && bash scripts/check-doc-refs.sh`
 Expected: PASS；文档引用悬空 = 0。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add coord-client/src/txn_v2.rs coord-client/src/lib.rs coord-client/src/client.rs \
