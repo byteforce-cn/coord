@@ -293,6 +293,146 @@ impl WatchCoordinator {
         }
         Ok(position_before(&table, start.start_revision - 1))
     }
+
+    /// 读取一批事件；`cursor` 是上一批返回的位置。
+    ///
+    /// 上界取本地 watermark：它只由本地已 apply 的决策/已 ship 的记录计算，
+    /// 副本再滞后也不会把尚未到达本地的记录当成「不存在」而跳过。
+    pub async fn poll(
+        &self,
+        cursor: WatchCursor,
+        filter: &WatchFilter,
+    ) -> Result<WatchBatch, WatchError> {
+        filter.validate()?;
+        let table = self.shards.table()?;
+        let watermark = self
+            .shards
+            .local_watermark()
+            .await
+            .map_err(WatchError::Unavailable)?
+            .watermark;
+        if table.shards.is_empty() {
+            return Ok(WatchBatch {
+                events: Vec::new(),
+                cursor,
+                watermark,
+                sealed: false,
+                has_more: false,
+            });
+        }
+
+        let (mut index, mut after) = resolve_position(&table, cursor)?;
+        let mut builder = BatchBuilder::new(self.max_changes, self.max_bytes);
+        let mut stopped_for_limit = false;
+
+        loop {
+            let meta = &table.shards[index];
+            if after < meta.start_ts.saturating_sub(1) {
+                after = meta.start_ts.saturating_sub(1);
+            }
+            let bound = read_bound(meta, watermark);
+            if after < bound {
+                match self
+                    .scan_shard(meta, after, bound, filter, &mut builder)
+                    .await?
+                {
+                    ScanOutcome::Done(next_after) => after = next_after,
+                    ScanOutcome::Full(next_after) => {
+                        after = next_after;
+                        stopped_for_limit = true;
+                        break;
+                    }
+                }
+            }
+
+            // 跨 shard 只在 sealed 且 watermark 越过 end_ts 后发生：此时区间内
+            // 不会再有迟到记录，下一 shard 的最小 ts 也不可能更小。
+            if !stopped_for_limit && index + 1 < table.shards.len() && may_cross(meta, watermark) {
+                index += 1;
+                after = table.shards[index].start_ts.saturating_sub(1);
+                continue;
+            }
+            break;
+        }
+
+        let meta = &table.shards[index];
+        let cursor = if after < meta.start_ts {
+            WatchCursor {
+                shard_id: meta.shard_id,
+                commit_ts: 0,
+            }
+        } else {
+            WatchCursor {
+                shard_id: meta.shard_id,
+                commit_ts: after,
+            }
+        };
+        Ok(WatchBatch {
+            events: builder.into_events(),
+            cursor,
+            watermark,
+            sealed: meta.sealed_at_ms != 0,
+            has_more: stopped_for_limit,
+        })
+    }
+
+    /// 读取单个 shard 内 `(after, bound]` 的事件。
+    ///
+    /// 先取「下一个 ts」再按 ts 取整组：`records_after` 的 limit 可能切在同一
+    /// 事务的 Region 分片中间，只有 `records_at` 能保证原子事件完整。
+    async fn scan_shard(
+        &self,
+        meta: &CommitLogShardMeta,
+        mut after: u64,
+        bound: u64,
+        filter: &WatchFilter,
+        builder: &mut BatchBuilder,
+    ) -> Result<ScanOutcome, WatchError> {
+        loop {
+            let rows = self.shards.records_after(meta.shard_id, after, 1).await?;
+            let Some(first) = rows.first() else {
+                return Ok(ScanOutcome::Done(after));
+            };
+            let commit_ts = first.commit_ts;
+            if commit_ts > bound {
+                return Ok(ScanOutcome::Done(after));
+            }
+            let records = self.shards.records_at(meta.shard_id, commit_ts).await?;
+            if records.is_empty() {
+                return Err(WatchError::Unavailable(format!(
+                    "commit log shard {} has no records for commit_ts {commit_ts}",
+                    meta.shard_id
+                )));
+            }
+            if let Some(event) = WatchEvent::from_records(commit_ts, records, filter) {
+                if !builder.try_push(event) {
+                    // 批满：cursor 停在这条事件之前，下轮重新读取它。
+                    return Ok(ScanOutcome::Full(after));
+                }
+            }
+            after = commit_ts;
+        }
+    }
+}
+
+/// 单 shard 读取的停止原因：正常读到上界，或因批上限停在某事件之前。
+enum ScanOutcome {
+    Done(u64),
+    Full(u64),
+}
+
+/// shard 内可安全读取的最大 `commit_ts`（未定界 shard 只受 watermark 限制）。
+fn read_bound(meta: &CommitLogShardMeta, watermark: u64) -> u64 {
+    if meta.end_ts == 0 {
+        watermark
+    } else {
+        watermark.min(meta.end_ts - 1)
+    }
+}
+
+/// 离开当前 shard 的条件：已定界、已 seal，且 watermark 越过 `end_ts`。
+fn may_cross(meta: &CommitLogShardMeta, watermark: u64) -> bool {
+    meta.end_ts != 0 && meta.sealed_at_ms != 0 && watermark >= meta.end_ts
 }
 
 /// `start_revision` 与 `start_cursor` 同时设置是请求歧义，不是「后者优先」。
@@ -626,6 +766,31 @@ mod tests {
         assert_eq!(
             resolve_position(&CommitLogShardTable::default(), WatchCursor::beginning()).unwrap(),
             (0, 0)
+        );
+    }
+
+    #[test]
+    fn shard_read_bound_is_the_watermark_or_the_shard_end() {
+        let open = shard(1, 1, 0);
+        assert_eq!(read_bound(&open, 50), 50);
+        let bounded = shard(2, 101, 201);
+        assert_eq!(read_bound(&bounded, 500), 200);
+        assert_eq!(read_bound(&bounded, 150), 150);
+    }
+
+    #[test]
+    fn crossing_requires_a_sealed_shard_below_the_watermark() {
+        let bounded = shard(1, 1, 101);
+        assert!(!may_cross(&bounded, 100), "not sealed yet");
+        let sealed = CommitLogShardMeta {
+            sealed_at_ms: 1,
+            ..bounded
+        };
+        assert!(!may_cross(&sealed, 100), "watermark must reach end_ts");
+        assert!(may_cross(&sealed, 101));
+        assert!(
+            !may_cross(&shard(2, 101, 0), 10_000),
+            "the latest shard is unbounded"
         );
     }
 
