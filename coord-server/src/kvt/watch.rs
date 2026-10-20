@@ -10,7 +10,7 @@
 //! 已 apply 决策）；否则 `local_watermark` 会保守地停在最早未完成的决策，
 //! 只影响时延、不会跳事件。跨节点服务方式由 RPC 层决定。
 //!
-//! RPC/授权/指标在 `coord.watch.v2` 的 RPC 层（#158）；保留窗口与 GC 归 #157。
+//! RPC/授权/指标在 `coord.watch.v2` 的 RPC 层；保留窗口与 GC 归后续 gate。
 
 use std::sync::Arc;
 
