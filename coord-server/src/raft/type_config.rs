@@ -653,6 +653,18 @@ pub enum Command {
     ///
     /// **末尾追加**；数据 Region 收到按无害记录 apply（不触碰业务 keyspace）。
     CommitLogShard(CommitLogShardOp),
+    /// 向 Commit Log shard 组追加一批记录（仅 shard raft 组提出，#154）。
+    ///
+    /// **末尾追加**；`start_ts/end_ts` 是该 shard 的边界，apply 据此拒收越界
+    /// 记录（路由竞态由 shipper 刷新后重试，不丢数据）。`max_txn_bytes` 随命令
+    /// 携带，重放节点不读本地配置。
+    CommitLogAppend {
+        shard_id: u64,
+        start_ts: u64,
+        end_ts: u64,
+        max_txn_bytes: u64,
+        records: Vec<crate::storage::commit_log::CommitRecord>,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -729,6 +741,13 @@ impl std::fmt::Display for Command {
                 decisions.len()
             ),
             Command::CommitLogShard(op) => write!(f, "CommitLogShard({op:?})"),
+            Command::CommitLogAppend {
+                shard_id, records, ..
+            } => write!(
+                f,
+                "CommitLogAppend(shard={shard_id}, records={})",
+                records.len()
+            ),
         }
     }
 }
@@ -827,6 +846,13 @@ pub enum Response {
     CommitLogShard {
         shards: Vec<crate::storage::commit_log_shard::CommitLogShardMeta>,
     },
+    /// shard 组追加结果（#154）：重复与越界都只计数，不失败 apply。
+    CommitLogAppend {
+        inserted: u64,
+        duplicates: u64,
+        rejected: u64,
+        cursor_ts: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -892,6 +918,15 @@ impl std::fmt::Display for Response {
             Response::CommitLogShard { shards } => {
                 write!(f, "CommitLogShard(shards={})", shards.len())
             }
+            Response::CommitLogAppend {
+                inserted,
+                duplicates,
+                rejected,
+                cursor_ts,
+            } => write!(
+                f,
+                "CommitLogAppend(inserted={inserted}, duplicates={duplicates}, rejected={rejected}, cursor={cursor_ts})"
+            ),
         }
     }
 }

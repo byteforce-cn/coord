@@ -759,6 +759,35 @@ impl StateMachineStore {
                     .map_err(io_err)?;
                 Ok((Response::CommitLogShard { shards }, None))
             }
+            Command::CommitLogAppend {
+                shard_id,
+                start_ts,
+                end_ts,
+                max_txn_bytes,
+                records,
+            } => {
+                // shard 组只存记录，不产生业务 Watch 事件（Watch 读路径归 #156）。
+                let result = sm
+                    .apply_commit_log_append(
+                        *shard_id,
+                        *start_ts,
+                        *end_ts,
+                        records,
+                        *max_txn_bytes,
+                        revision,
+                        applied,
+                    )
+                    .map_err(io_err)?;
+                Ok((
+                    Response::CommitLogAppend {
+                        inserted: result.inserted,
+                        duplicates: result.duplicates,
+                        rejected: result.rejected,
+                        cursor_ts: result.cursor_ts,
+                    },
+                    None,
+                ))
+            }
             Command::Lease(op) => {
                 let (outcome, changes) =
                     sm.apply_lease_op(op, revision, applied).map_err(io_err)?;
