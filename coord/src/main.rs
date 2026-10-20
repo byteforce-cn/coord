@@ -2943,6 +2943,10 @@ async fn run_server(
     if cfg.kv_t.enabled && node.raft.is_some() {
         node.start_kvt_lease_expiry_worker();
         node.start_kvt_lease_revoker(lease_v2_revoke_rx);
+        // 会话 TTL 回收：周期与 TTL 挂钩，避免 TTL 很短时过期会话长期滞留内存。
+        node.start_kvt_txn_reaper(std::time::Duration::from_secs(
+            (cfg.kv_t.txn_ttl_secs / 4).clamp(1, 30),
+        ));
     }
 
     // 6.6 Auth 根密钥：HKDF 派生 CCT 签名密钥。

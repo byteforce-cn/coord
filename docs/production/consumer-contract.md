@@ -110,7 +110,9 @@
   数值/单调；跨节点同一快照或 read-your-writes 请用显式 `read_ts`。
 - **事务**：`Begin` 建服务端读集会话；冲突 `ABORTED` + `TXN_CONFLICT`（换
   `start_ts` 重跑）；会话丢失 `TXN_NOT_FOUND`（重跑）；写集 4MiB / 读集 4096 /
-  单 range 10000 key 上限（超限 `INVALID_ARGUMENT`）。
+  单 range 10000 key 上限（超限 `INVALID_ARGUMENT`）。TTL 从 `Begin` 起算、
+  `Read` 不续期；split drain 期间命中被 drain 区间的 `Read` 返回 `UNAVAILABLE`
+  （退避后重试同一会话，或重跑）。
 - **Lease v2**：Grant/Revoke/KeepAlive/TimeToLive 由 region 0 leader 服务；租约
   元数据在 region 0，绑定关系由各数据 Region 的 `KvMetadata.lease_id` 维护。
   `Revoke` 返回清理决策的 `commit_ts`（未知/已吊销 lease 幂等返回 0）；跨 Region

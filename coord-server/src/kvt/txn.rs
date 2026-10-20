@@ -3,8 +3,20 @@
 //! 读集由服务端持有：`Read` 在把 point key / range 谓词记入会话后，才在
 //! `start_ts` 快照上取数；`Commit` 交由 #151 消费这份读集。会话只活在
 //! 协调节点内存里（不复制），丢失/过期只能让客户端重跑整个事务。
+//!
+//! TTL 从 `Begin` 起算且**不因读续期**；过期是惰性判定（读/写先看
+//! `expires_at`），后台 reaper 只负责释放不再被访问的会话内存。
+//!
+//! OCC 读阶段没有 intent/lock：`abort` 只丢会话（读集随之释放），不写
+//! MVCC/决策；已决策事务的 apply 不受 abort 影响（#148）。
+//!
+//! Split/merge 的 drain 是节点本地原语：标记区间后拒绝命中它的新读
+//! （`UNAVAILABLE`，可重试），`DrainGuard::wait` 等待相交会话
+//! commit/abort/TTL 到期并有超时上限。读集之外的盲写由 #151 提交路径与
+//! #163 的 cutover/epoch 拒绝。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -43,6 +55,11 @@ impl ReadRange {
 
     fn covers(&self, other: &Self) -> bool {
         !self.is_empty() && self.start <= other.start && other.end <= self.end
+    }
+
+    /// 有共同 key（相邻区间 `[a,c)`/`[c,e)` 不重叠）。
+    fn overlaps(&self, other: &Self) -> bool {
+        !self.is_empty() && !other.is_empty() && self.start < other.end && other.start < self.end
     }
 
     /// 重叠或相邻（`[a,c)` 与 `[c,d)` 可合并为一个谓词）。
@@ -130,6 +147,19 @@ impl ReadSet {
         self.points
             .retain(|point| !ranges.iter().any(|r| r.contains(point)));
     }
+
+    /// 读集是否与 `range` 有共同 key（drain 等待/准入共用）。
+    /// 空谓词读不到任何 key，不计入。
+    // G5（#163）在 split/merge 中消费 drain 契约；本 gate 先交付测试过的原语，
+    // 生产调用点尚未接入。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn intersects(&self, range: &ReadRange) -> bool {
+        if range.is_empty() {
+            return false;
+        }
+        self.points.iter().any(|point| range.contains(point))
+            || self.ranges.iter().any(|r| r.overlaps(range))
+    }
 }
 
 /// 一次 `Read` 对读集的增量。
@@ -139,11 +169,23 @@ pub(crate) enum ReadIntent<'a> {
     Range { start: &'a [u8], end: &'a [u8] },
 }
 
+impl ReadIntent<'_> {
+    /// 该读是否会碰到 `range`（空谓词不碰任何 key）。
+    fn intersects(&self, range: &ReadRange) -> bool {
+        match self {
+            Self::Point(key) => range.contains(key),
+            Self::Range { start, end } => ReadRange::new(start, end).overlaps(range),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionError {
     /// 会话不存在、已过期或已 abort。
     NotFound,
     ReadSetLimit(ReadSetLimit),
+    /// 读区间正在为 split/merge drain；会话仍有效，退避后重试。
+    Draining,
 }
 
 struct TxnSession {
@@ -152,23 +194,97 @@ struct TxnSession {
     read_set: ReadSet,
 }
 
+/// 会话表的可变部分：后台 reaper 与 drain guard 共享同一把锁，
+/// 保证「清理过期会话」与「登记 drain 区间」看到的是一致快照。
+#[derive(Default)]
+struct TxnTable {
+    sessions: BTreeMap<Vec<u8>, TxnSession>,
+    /// 正在 drain 的区间；同区间可重复登记（每个 guard 一条）。
+    drains: Vec<ReadRange>,
+}
+
+/// drain 的结果：`TimedOut` 带上截止时仍相交的会话数（调用方据此决定回滚/重试）。
+// G5（#163）消费；见 `ReadSet::intersects` 的说明。
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DrainOutcome {
+    Drained,
+    TimedOut { active: usize },
+}
+
+/// split/merge 的 drain 标记；drop 即解除（成功/失败/回滚都要释放）。
+// G5（#163）消费；见 `ReadSet::intersects` 的说明。
+#[cfg_attr(not(test), allow(dead_code))]
+#[must_use = "drop 会立即解除 drain 标记"]
+pub(crate) struct DrainGuard {
+    table: Arc<Mutex<TxnTable>>,
+    range: ReadRange,
+}
+
+impl DrainGuard {
+    /// 等到没有会话的读集与 `range` 相交，或 `timeout` 到期。
+    ///
+    /// 轮询而非事件通知：每次轮询前清理过期会话，因此 TTL 到期必然放行；
+    /// split 是低频运维动作，10ms 的延迟不值得给每次 abort/commit 加通知开销。
+    // G5（#163）消费；见 `ReadSet::intersects` 的说明。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn wait(&self, timeout: Duration) -> DrainOutcome {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let active = {
+                let mut table = self.table.lock();
+                sweep(&mut table, Instant::now());
+                table
+                    .sessions
+                    .values()
+                    .filter(|session| session.read_set.intersects(&self.range))
+                    .count()
+            };
+            if active == 0 {
+                return DrainOutcome::Drained;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return DrainOutcome::TimedOut { active };
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(10))).await;
+        }
+    }
+}
+
+impl Drop for DrainGuard {
+    fn drop(&mut self) {
+        let mut table = self.table.lock();
+        if let Some(pos) = table.drains.iter().position(|range| range == &self.range) {
+            table.drains.remove(pos);
+        }
+    }
+}
+
+fn sweep(table: &mut TxnTable, now: Instant) -> usize {
+    let before = table.sessions.len();
+    table.sessions.retain(|_, session| session.expires_at > now);
+    before - table.sessions.len()
+}
+
 /// 协调节点的会话表（ADR-0015 D12.2：不复制）。
 pub(crate) struct TxnSessions {
-    sessions: Mutex<BTreeMap<Vec<u8>, TxnSession>>,
+    table: Arc<Mutex<TxnTable>>,
 }
 
 impl TxnSessions {
     pub(crate) fn new() -> Self {
         Self {
-            sessions: Mutex::new(BTreeMap::new()),
+            table: Arc::new(Mutex::new(TxnTable::default())),
         }
     }
 
     pub(crate) fn begin(&self, start_ts: u64, ttl: Duration) -> Vec<u8> {
-        self.purge_expired();
         let id = uuid::Uuid::new_v4().as_bytes().to_vec();
         let now = Instant::now();
-        self.sessions.lock().insert(
+        let mut table = self.table.lock();
+        sweep(&mut table, now);
+        table.sessions.insert(
             id.clone(),
             TxnSession {
                 start_ts,
@@ -190,15 +306,22 @@ impl TxnSessions {
         max_read_set: usize,
     ) -> Result<u64, SessionError> {
         let now = Instant::now();
-        let mut sessions = self.sessions.lock();
-        if sessions
+        let mut table = self.table.lock();
+        if table
+            .sessions
             .get(id)
             .is_some_and(|session| session.expires_at <= now)
         {
-            sessions.remove(id);
+            table.sessions.remove(id);
             return Err(SessionError::NotFound);
         }
-        let session = sessions.get_mut(id).ok_or(SessionError::NotFound)?;
+        if !table.sessions.contains_key(id) {
+            return Err(SessionError::NotFound);
+        }
+        if table.drains.iter().any(|range| intent.intersects(range)) {
+            return Err(SessionError::Draining);
+        }
+        let session = table.sessions.get_mut(id).ok_or(SessionError::NotFound)?;
         match intent {
             ReadIntent::Point(key) => session.read_set.try_add_point(key, max_read_set),
             ReadIntent::Range { start, end } => {
@@ -211,20 +334,53 @@ impl TxnSessions {
 
     /// 幂等删除：未知/过期/已 abort 的会话不报错。
     pub(crate) fn abort(&self, id: &[u8]) {
-        self.sessions.lock().remove(id);
+        self.table.lock().sessions.remove(id);
     }
 
-    pub(crate) fn purge_expired(&self) {
-        let now = Instant::now();
-        self.sessions
-            .lock()
-            .retain(|_, session| session.expires_at > now);
+    /// 标记 `range` 进入 drain：新读命中该区间返回 `Draining`，
+    /// 已存在且读集相交的会话通过 [`DrainGuard::wait`] 等待其结束/过期。
+    // G5（#163）消费；见 `ReadSet::intersects` 的说明。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn drain(&self, range: ReadRange) -> DrainGuard {
+        self.table.lock().drains.push(range.clone());
+        DrainGuard {
+            table: Arc::clone(&self.table),
+            range,
+        }
+    }
+
+    /// 清掉过期会话并返回删除数量（测试直接驱动；生产路径由 reaper 调 `sweep`）。
+    #[cfg(test)]
+    pub(crate) fn purge_expired(&self) -> usize {
+        sweep(&mut self.table.lock(), Instant::now())
+    }
+
+    /// 后台 TTL 回收：每 `interval` 清一次过期会话。
+    ///
+    /// 过期本身是惰性语义（读/写会检查 `expires_at`），reaper 只负责释放
+    /// 不再被访问的会话内存；只在 `[kv_t].enabled=true` 时由 main 启动。
+    pub(crate) fn spawn_reaper(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
+        let table = Arc::clone(&self.table);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                sweep(&mut table.lock(), Instant::now());
+            }
+        })
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.table.lock().sessions.len()
     }
 
     #[cfg(test)]
     fn read_set(&self, id: &[u8]) -> Option<ReadSet> {
-        self.sessions
+        self.table
             .lock()
+            .sessions
             .get(id)
             .map(|session| session.read_set.clone())
     }
@@ -307,6 +463,144 @@ mod tests {
         sessions.abort(&id);
         sessions.abort(&id);
         assert_eq!(sessions.read_set(&id), None);
+    }
+
+    #[test]
+    fn purge_expired_removes_only_expired_sessions_and_reports_count() {
+        let sessions = TxnSessions::new();
+        let long = sessions.begin(7, Duration::from_secs(30));
+        let short = sessions.begin(8, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert_eq!(sessions.purge_expired(), 1);
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.read_set(&long).is_some());
+        assert!(sessions.read_set(&short).is_none());
+        // 幂等：没有新过期会话时返回 0。
+        assert_eq!(sessions.purge_expired(), 0);
+    }
+
+    #[tokio::test]
+    async fn reaper_reclaims_expired_sessions() {
+        let sessions = TxnSessions::new();
+        let _reaper = sessions.spawn_reaper(Duration::from_millis(5));
+        let _id = sessions.begin(9, Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(sessions.len(), 0);
+    }
+
+    #[test]
+    fn read_set_intersects_only_real_key_overlap() {
+        let mut set = ReadSet::default();
+        set.try_add_point(b"d", 10).unwrap();
+        set.try_add_range(b"a", b"c", 10).unwrap();
+        set.try_add_range(b"z", b"a", 10).unwrap(); // 空谓词
+
+        assert!(set.intersects(&ReadRange::new(b"c", b"e"))); // d 命中
+        assert!(set.intersects(&ReadRange::new(b"b", b"b1"))); // range 重叠
+        assert!(!set.intersects(&ReadRange::new(b"c", b"d"))); // 相邻 [a,c) 无共同 key
+        assert!(!set.intersects(&ReadRange::new(b"e", b"f")));
+        assert!(!set.intersects(&ReadRange::new(b"z", b"a"))); // 空 drain 区间
+    }
+
+    #[tokio::test]
+    async fn drain_waits_for_intersecting_session_and_times_out() {
+        let sessions = TxnSessions::new();
+        let id = sessions.begin(1, Duration::from_secs(30));
+        sessions
+            .record_read(&id, ReadIntent::Point(b"d"), 10)
+            .unwrap();
+        let guard = sessions.drain(ReadRange::new(b"c", b"e"));
+
+        let outcome = guard.wait(Duration::from_millis(30)).await;
+        assert_eq!(outcome, DrainOutcome::TimedOut { active: 1 });
+
+        sessions.abort(&id);
+        assert_eq!(
+            guard.wait(Duration::from_secs(1)).await,
+            DrainOutcome::Drained
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_ignores_unrelated_and_expired_sessions() {
+        let sessions = TxnSessions::new();
+        let unrelated = sessions.begin(1, Duration::from_secs(30));
+        sessions
+            .record_read(
+                &unrelated,
+                ReadIntent::Range {
+                    start: b"a",
+                    end: b"c",
+                },
+                10,
+            )
+            .unwrap();
+        let expired = sessions.begin(1, Duration::from_millis(1));
+        sessions
+            .record_read(&expired, ReadIntent::Point(b"d"), 10)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+
+        let guard = sessions.drain(ReadRange::new(b"c", b"e"));
+        assert_eq!(
+            guard.wait(Duration::from_millis(50)).await,
+            DrainOutcome::Drained
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_rejects_new_reads_only_inside_range() {
+        let sessions = TxnSessions::new();
+        let id = sessions.begin(1, Duration::from_secs(30));
+        let guard = sessions.drain(ReadRange::new(b"c", b"e"));
+
+        assert_eq!(
+            sessions.record_read(&id, ReadIntent::Point(b"d"), 10),
+            Err(SessionError::Draining)
+        );
+        assert_eq!(
+            sessions.record_read(
+                &id,
+                ReadIntent::Range {
+                    start: b"b",
+                    end: b"d",
+                },
+                10,
+            ),
+            Err(SessionError::Draining)
+        );
+        assert_eq!(
+            sessions.record_read(&id, ReadIntent::Point(b"a"), 10),
+            Ok(1)
+        );
+        // 被拒绝的读不进读集：读集仍只有 a。
+        assert_eq!(sessions.read_set(&id).unwrap().len(), 1);
+
+        drop(guard);
+        assert_eq!(
+            sessions.record_read(&id, ReadIntent::Point(b"d"), 10),
+            Ok(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_drains_release_independently() {
+        let sessions = TxnSessions::new();
+        let id = sessions.begin(1, Duration::from_secs(30));
+        let first = sessions.drain(ReadRange::new(b"c", b"e"));
+        let second = sessions.drain(ReadRange::new(b"c", b"e"));
+
+        drop(first);
+        assert_eq!(
+            sessions.record_read(&id, ReadIntent::Point(b"d"), 10),
+            Err(SessionError::Draining)
+        );
+        drop(second);
+        assert_eq!(
+            sessions.record_read(&id, ReadIntent::Point(b"d"), 10),
+            Ok(1)
+        );
     }
 
     #[test]
