@@ -86,7 +86,7 @@ v2 数据面**默认关闭**；以下边界在 GA 前一直有效。语义单一
 | B-KVT-6 | **MQ v1 在 v2 集群不可用**（fail-closed：不注册/一律拒绝）；**MQ v2 未 GA**（G7，KV-T GA 后另立 ADR）。依赖 MQ 的 workflow 触发路径在 v2 集群不可用 | ADR-0015 D8/D13；issue #178（G7 gate） | MQ v2 设计/契约/实现拆分（G7） |
 | B-KVT-7 | **TSO 批次允许空洞**：`commit_ts`/`read_ts` 不连续；客户端批次是进程内内存态，重启丢弃；服务端保证绝不复用，但**不承诺**时间戳可比较外部实时时间 | ADR-0015 D2/D12；`coord-proto/src/proto/coord/tso/v2/tso.proto` 头注 | 无（这是 TSO 的语义，不是缺陷）；若需要外部时间语义，另立时间源 |
 | B-KVT-8 | **v2 事务会话是节点本地的**：协调节点崩溃/重启或 TTL 到期 ⇒ `ABORTED` + `TXN_NOT_FOUND`，客户端重跑整个事务；commit 是 Sequencer 单次决策，不会部分提交 | ADR-0015 D12.2；`coord-proto/src/proto/coord/txn/v2/txn.proto` 头注 | 复制事务会话（成本高且不改变原子性证明）；当前不计划 |
-| B-KVT-9 | **事务 TTL 不续期；split drain 只覆盖读集**：TTL 从 `Begin` 起算，`Read` 不延长；到期回收后迟到请求 `ABORTED` + `TXN_NOT_FOUND`。drain 是协调节点本地原语：标记区间后拒绝与该区间相交的新读（`UNAVAILABLE`，退避重试），等待已有会话 commit/abort/TTL，等待有超时上限；OCC 读阶段没有 intent，abort 只丢弃会话。读集之外的盲写由 #151 提交路径与 #163 cutover/epoch 拒绝 | ADR-0015 D4/D6/D12.2；`coord-server/src/kvt/txn.rs`（`DrainGuard`/`SessionError::Draining`）、`coord-server/src/kvt/services.rs`（`txn_session_status`） | 复制会话/跨节点 drain（成本高且不改变原子性证明）；盲写保护在 #151/#163 落地前不承诺 |
+| B-KVT-9 | **事务 TTL 不续期；split drain 只覆盖读集**：TTL 从 `Begin` 起算，`Read` 不延长；到期回收后迟到请求 `ABORTED` + `TXN_NOT_FOUND`。drain 是协调节点本地原语：标记区间后拒绝与该区间相交的新读（`UNAVAILABLE`，退避重试），等待已有会话 commit/abort/TTL，等待有超时上限；OCC 读阶段没有 intent，abort 只丢弃会话。drain 只等待读集相交的会话；提交路径不因 drain 拒绝写（写侧路由由 #163 的 cutover/epoch 收口），盲写按 OCC 语义允许（不产生读集冲突） | ADR-0015 D4/D6/D12.2；`coord-server/src/kvt/txn.rs`（`DrainGuard`/`SessionError::Draining`）、`coord-server/src/kvt/services.rs`（`txn_session_status`） | 复制会话/跨节点 drain（成本高且不改变原子性证明）；drain 不阻塞写、不阻止 blind write |
 
 ---
 
