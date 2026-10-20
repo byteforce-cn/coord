@@ -543,7 +543,8 @@ git switch main && git pull
   - `cargo audit` → 仅既有 `RUSTSEC-2024-0449` allowed warning；
   - `cargo deny check` → advisories/bans/licenses/sources 全部 ok；
   - `bash scripts/check-doc-refs.sh` → 清除本机 gitignored 目录
-    （`docs/pki-assessment/`、`.superpowers/`）后为 OK（CI 状态）。
+    （`docs/` 下被 `.gitignore` 排除的本地评估目录、`.superpowers/`）后为
+    OK（CI 状态）。
 
 ## 执行中的裁定
 
@@ -558,9 +559,9 @@ git switch main && git pull
   分别对应证据；不为了拆提交而复制夹具。
 - **字节上限测试改用 `0xff` 上界**：最初用全 `0x00` 作 `end`，实际是
   `end < start` 的非法区间，被裁剪丢弃；测试数据修正，非实现放宽。
-- **本地 doc-refs 的 pki 悬空引用是 gitignored 文件**（`.gitignore` 的
-  `docs/*`），CI 不包含；已在本机将 `docs/pki-assessment/` 与 `.superpowers/`
-  临时移出后验证为 OK。
+- **本地 doc-refs 的悬空引用来自 gitignored 文件**（`.gitignore` 的
+  `docs/*`），CI 不包含；已在本机将本地评估目录与 `.superpowers/` 临时移出
+  后验证为 OK。
 
 ## 验收矩阵
 
