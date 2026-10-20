@@ -9,6 +9,7 @@
 // - write_batcher:         Multi-Raft 共享写入批处理器（v6.0）
 // - envelope:              持久化值统一格式信封（魔数+版本前缀，bincode 退场 P0）
 
+pub mod commit_log;
 pub mod compaction;
 pub mod disk_watermark;
 pub mod envelope;

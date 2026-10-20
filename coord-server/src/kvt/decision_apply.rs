@@ -18,7 +18,7 @@ use tokio::time::MissedTickBehavior;
 use coord_core::types::RegionMeta;
 
 use crate::raft::region_runtime::RegionRuntime;
-use crate::raft::type_config::{Command, CommitDecisionApply, Response, SequencerMutation};
+use crate::raft::type_config::{Command, CommitDecisionApplyLog, Response, SequencerMutation};
 use crate::raft::WatchReceiver;
 use crate::server::CoordNode;
 
@@ -83,7 +83,7 @@ fn build_apply_batch(
     meta: &RegionMeta,
     batch: usize,
     max_bytes: usize,
-) -> Vec<CommitDecisionApply> {
+) -> Vec<CommitDecisionApplyLog> {
     let mut payload = Vec::new();
     let mut bytes = 0usize;
     for decision in decisions.iter().take(batch) {
@@ -97,8 +97,12 @@ fn build_apply_batch(
             break;
         }
         bytes = bytes.saturating_add(size);
-        payload.push(CommitDecisionApply {
+        payload.push(CommitDecisionApplyLog {
+            shard_id: crate::storage::commit_log::COMMIT_LOG_STAGING_SHARD_ID,
+            region_id: meta.region_id,
             commit_ts: decision.commit_ts,
+            txn_id: decision.txn_id.clone(),
+            start_ts: decision.start_ts,
             mutations,
         });
     }
@@ -157,7 +161,10 @@ pub async fn apply_pending_decisions(node: &CoordNode, batch: usize) -> Result<u
 
             match rt
                 .raft
-                .client_write(Command::ApplyCommitDecisions { decisions: payload })
+                .client_write(Command::ApplyCommitDecisionsWithLog {
+                    max_txn_bytes: node.kvt().config().max_txn_bytes,
+                    decisions: payload,
+                })
                 .await
             {
                 Ok(resp) => match resp.response() {
@@ -306,6 +313,13 @@ mod tests {
         assert_eq!(payload.len(), 1);
         assert_eq!(payload[0].mutations.len(), 1);
         assert_eq!(payload[0].mutations[0].point_key(), Some(b"n".as_slice()));
+        assert_eq!(
+            payload[0].shard_id,
+            crate::storage::commit_log::COMMIT_LOG_STAGING_SHARD_ID
+        );
+        assert_eq!(payload[0].region_id, region.region_id);
+        assert_eq!(payload[0].txn_id, b"t10");
+        assert_eq!(payload[0].start_ts, 9);
     }
 
     #[test]

@@ -421,6 +421,23 @@ pub struct CommitDecisionApply {
     pub mutations: Vec<SequencerMutation>,
 }
 
+/// 一条带 Commit Log 元数据的决策切片（#153）。
+///
+/// 与 [`CommitDecisionApply`] 分开而不是加字段：raft 日志是 postcard（非自描述），
+/// 给既有结构体加字段会让旧日志解码失败；新变体末尾追加，旧日志照常重放。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitDecisionApplyLog {
+    /// 记录归属的 Commit Log shard（#154 接管路由前恒为
+    /// `commit_log::COMMIT_LOG_STAGING_SHARD_ID`）。
+    pub shard_id: u64,
+    pub region_id: u64,
+    pub commit_ts: u64,
+    pub txn_id: Vec<u8>,
+    pub start_ts: u64,
+    /// 只含本 Region 的 key（与 [`CommitDecisionApply`] 同一裁剪口径）。
+    pub mutations: Vec<SequencerMutation>,
+}
+
 /// 一条待 Commit Sequencer 校验的事务。
 ///
 /// `commit_ts` 由 region 0 leader 从 TSO 取号后写入日志；apply 只校验/落盘它，
@@ -606,6 +623,14 @@ pub enum Command {
     ///
     /// **末尾追加**；`mutations` 只含本 Region 的 key，空切片用于推进游标。
     ApplyCommitDecisions { decisions: Vec<CommitDecisionApply> },
+    /// 数据 Region 应用一批已决策事务，并在同一 redb 事务里写 CommitRecord（#153）。
+    ///
+    /// **末尾追加**；`max_txn_bytes` 取提出方的 `[kv_t].max_txn_bytes`，让重放节点
+    /// 用与写入方相同的写集上限校验记录（日志内容决定结果，与本地配置无关）。
+    ApplyCommitDecisionsWithLog {
+        max_txn_bytes: u64,
+        decisions: Vec<CommitDecisionApplyLog>,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -676,6 +701,11 @@ impl std::fmt::Display for Command {
             Command::ApplyCommitDecisions { decisions } => {
                 write!(f, "ApplyCommitDecisions(decisions={})", decisions.len())
             }
+            Command::ApplyCommitDecisionsWithLog { decisions, .. } => write!(
+                f,
+                "ApplyCommitDecisionsWithLog(decisions={})",
+                decisions.len()
+            ),
         }
     }
 }
@@ -1241,5 +1271,39 @@ mod tests {
         let s = format!("{resp}");
         assert!(s.contains("Txn"));
         assert!(s.contains("false"));
+    }
+    #[test]
+    fn test_command_apply_commit_decisions_with_log_serde_roundtrip() {
+        let cmd = Command::ApplyCommitDecisionsWithLog {
+            max_txn_bytes: 4 * 1024 * 1024,
+            decisions: vec![CommitDecisionApplyLog {
+                shard_id: 1,
+                region_id: 7,
+                commit_ts: 10,
+                txn_id: b"txn-10".to_vec(),
+                start_ts: 9,
+                mutations: vec![SequencerMutation::Put {
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                    lease_id: None,
+                }],
+            }],
+        };
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
+        match decoded {
+            Command::ApplyCommitDecisionsWithLog {
+                max_txn_bytes,
+                decisions,
+            } => {
+                assert_eq!(max_txn_bytes, 4 * 1024 * 1024);
+                assert_eq!(decisions.len(), 1);
+                assert_eq!(decisions[0].shard_id, 1);
+                assert_eq!(decisions[0].region_id, 7);
+                assert_eq!(decisions[0].txn_id, b"txn-10");
+                assert_eq!(decisions[0].start_ts, 9);
+            }
+            other => panic!("expected ApplyCommitDecisionsWithLog, got {other:?}"),
+        }
     }
 }

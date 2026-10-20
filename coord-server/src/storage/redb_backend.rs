@@ -47,6 +47,9 @@ const TABLE_CHANGELOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cha
 /// 存储每个用户 Key 的版本号、创建/修改 Revision、关联 Lease
 const TABLE_KV_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv_meta");
 
+/// Commit Log 表（#153）：Key=bytes, Value=bytes（zstd 帧）
+const TABLE_COMMIT_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("commit_log");
+
 /// 根据表名返回对应的 TableDefinition。
 /// 显式标注 'static 生命周期以防止 Rust 的 lifetime elision 将返回类型生命周期
 /// 绑定到输入参数（name: &str）上。
@@ -59,6 +62,7 @@ fn resolve_table(name: &str) -> Result<TableDefinition<&'static [u8], &'static [
         "auth" => Ok(TABLE_AUTH),
         "changelog" => Ok(TABLE_CHANGELOG),
         "kv_meta" => Ok(TABLE_KV_META),
+        "commit_log" => Ok(TABLE_COMMIT_LOG),
         unknown => Err(coord_core::error::Error::InvalidArgument(format!(
             "unknown table: {}",
             unknown
@@ -111,6 +115,7 @@ impl StorageBackend for RedbBackend {
                 let _ = write_tx.open_table(TABLE_AUTH);
                 let _ = write_tx.open_table(TABLE_CHANGELOG);
                 let _ = write_tx.open_table(TABLE_KV_META);
+                let _ = write_tx.open_table(TABLE_COMMIT_LOG);
             }
             write_tx.commit().map_err(|e| {
                 coord_core::error::Error::Storage(format!("failed to commit init tx: {}", e))
