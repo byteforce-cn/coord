@@ -574,7 +574,7 @@ impl ChangeEvent {
 // ──── KvMetadata ────
 
 /// 单个 Key 的元数据，用于 Version / Revision 追踪和 Lease 绑定
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KvMetadata {
     /// Key 被修改次数（从 1 开始）
     pub version: i64,
@@ -590,6 +590,20 @@ pub struct KvMetadata {
 
 /// 历史/实时 Range 返回的一行：`(key, value, metadata)`。
 pub type VersionedKv = (Vec<u8>, Vec<u8>, KvMetadata);
+
+/// 源 Region 在单个读快照上的 live range 页（split 数据搬迁的导出单元）。
+///
+/// `revision` 与 `rows` 来自同一个读事务；分页时调用方把 `next_after` 作为下
+/// 一页的 `after`，并用同一 `revision` 作为 `expected_revision` 校验源没有前进。
+#[derive(Debug, Clone)]
+pub struct RangeSnapshotPage {
+    /// 区间内仍存活的 `(key, value, metadata)`，按 key 升序。
+    pub rows: Vec<VersionedKv>,
+    /// 下一页的 `after`（本页最后一个已返回 key）；`None` = 区间已到末尾。
+    pub next_after: Option<Vec<u8>>,
+    /// 本页读取时的源 revision。
+    pub revision: Revision,
+}
 
 impl KvMetadata {
     /// 序列化为 33 字节固定格式：
@@ -1040,6 +1054,248 @@ impl<B: StorageBackend> MvccStorage<B> {
                 .unwrap_or(0),
             RevisionMode::CommitTs => 0,
         }
+    }
+
+    /// 导出一页 live range 快照（split 数据搬迁用）。
+    ///
+    /// 行与 `revision` 取自同一个读事务；`expected_revision` 用于分页期间
+    /// 拒绝源 revision 前进——不同 revision 的行拼进一个快照会让搬迁后的数据
+    /// 既不属于旧快照也不属于新快照。
+    ///
+    /// `after` 是上一页最后一个 key（不含）；`limit == 0` 表示不限制页大小。
+    pub fn export_range_page(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        after: Option<&[u8]>,
+        limit: usize,
+        expected_revision: Option<Revision>,
+    ) -> Result<RangeSnapshotPage> {
+        let lower = match after {
+            Some(after) if after >= start => {
+                let mut next = after.to_vec();
+                // 字节序下的严格后继：`after` 本身不再返回。
+                next.push(0);
+                next
+            }
+            _ => start.to_vec(),
+        };
+        if !end.is_empty() && lower.as_slice() >= end {
+            return Ok(RangeSnapshotPage {
+                rows: Vec::new(),
+                next_after: None,
+                revision: self.current_revision(),
+            });
+        }
+
+        let meta_start = encode_kv_meta_key(&lower);
+        let meta_end = if end.is_empty() {
+            Vec::new()
+        } else {
+            encode_kv_meta_key(end)
+        };
+
+        self.backend.read(|tx| {
+            let revision = Self::current_revision_in_tx(tx, self.revision_mode)?;
+            if let Some(expected) = expected_revision {
+                if revision != expected {
+                    return Err(Error::FailedPrecondition(format!(
+                        "source revision advanced during range export: expected {expected}, \
+                         current {revision}"
+                    )));
+                }
+            }
+
+            let mut rows: Vec<VersionedKv> = Vec::new();
+            let mut has_more = false;
+            for (meta_key, meta_value) in tx.iter_range(TABLE_KV_META, &meta_start, &meta_end)? {
+                let Some(user_key) = meta_key.strip_prefix(KV_META_PREFIX) else {
+                    continue;
+                };
+                if user_key < start {
+                    continue;
+                }
+                if !end.is_empty() && user_key >= end {
+                    break;
+                }
+                let meta = KvMetadata::from_bytes(&meta_value).ok_or_else(|| {
+                    Error::DataCorruption(format!(
+                        "range export: corrupt metadata for key {}",
+                        String::from_utf8_lossy(user_key)
+                    ))
+                })?;
+                if meta.deleted {
+                    continue;
+                }
+                if limit > 0 && rows.len() >= limit {
+                    has_more = true;
+                    break;
+                }
+                let internal_key = encode_kv_key(user_key);
+                let raw = tx.get(TABLE_KV, &internal_key)?.ok_or_else(|| {
+                    Error::DataCorruption(format!(
+                        "range export: live key {} has no value row",
+                        String::from_utf8_lossy(user_key)
+                    ))
+                })?;
+                let value = if raw.is_empty() {
+                    Vec::new()
+                } else {
+                    self.decrypt_value(&internal_key, &raw)?
+                };
+                rows.push((user_key.to_vec(), value, meta));
+            }
+
+            let next_after = if has_more {
+                rows.last().map(|(key, _, _)| key.clone())
+            } else {
+                None
+            };
+            Ok(RangeSnapshotPage {
+                rows,
+                next_after,
+                revision,
+            })
+        })
+    }
+
+    /// 把一个 live range 快照页应用到本 Region（目标 Region raft apply 路径）。
+    ///
+    /// - 保留每行的 `KvMetadata`（`create_revision`/`mod_revision`/`version`/
+    ///   `lease_id`），因此 split 后 lease 绑定与 `mod_revision` 不回退；
+    /// - 目标已有更高 `mod_revision` 的行保持不变（旧页不得覆盖新决策）；
+    /// - `done` 时把 `current_revision` 抬到 `watermark`，并把新 Region 的
+    ///   `compacted_revision` 抬到 `watermark`：split 之前的区域历史明确不可用，
+    ///   而不是用残缺 changelog 拼出错误的历史视图；
+    /// - 同一页重放返回 0，不重复写入。
+    pub fn apply_range_import(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        rows: &[VersionedKv],
+        watermark: Revision,
+        done: bool,
+        applied: AppliedLogId,
+    ) -> Result<u64> {
+        if self.revision_mode != RevisionMode::CommitTs {
+            return Err(Error::FailedPrecondition(
+                "range import requires commit_ts revision semantics".to_string(),
+            ));
+        }
+        if watermark == 0 {
+            return Err(Error::InvalidArgument(
+                "range import watermark must be > 0".to_string(),
+            ));
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, _value, meta) in rows {
+            if key.as_slice() < start || (!end.is_empty() && key.as_slice() >= end) {
+                return Err(Error::InvalidArgument(format!(
+                    "range import key {} is outside [{start:?}, {end:?})",
+                    String::from_utf8_lossy(key)
+                )));
+            }
+            if key.starts_with(b"/_") {
+                return Err(Error::InvalidArgument(format!(
+                    "range import key {} uses a reserved prefix",
+                    String::from_utf8_lossy(key)
+                )));
+            }
+            if !seen.insert(key.clone()) {
+                return Err(Error::InvalidArgument(format!(
+                    "range import page contains duplicate key {}",
+                    String::from_utf8_lossy(key)
+                )));
+            }
+            if meta.deleted {
+                return Err(Error::InvalidArgument(
+                    "range import accepts live rows only".to_string(),
+                ));
+            }
+            if meta.mod_revision <= 0 || meta.mod_revision as u64 > watermark {
+                return Err(Error::InvalidArgument(format!(
+                    "range import mod_revision {} is outside (0, {watermark}]",
+                    meta.mod_revision
+                )));
+            }
+            if meta.create_revision <= 0 || meta.create_revision > meta.mod_revision {
+                return Err(Error::InvalidArgument(format!(
+                    "range import create_revision {} is invalid",
+                    meta.create_revision
+                )));
+            }
+            if meta.version <= 0 {
+                return Err(Error::InvalidArgument(
+                    "range import version must be > 0".to_string(),
+                ));
+            }
+        }
+
+        self.backend.write(|tx| {
+            let current_before = Self::current_revision_in_tx(tx, self.revision_mode)?;
+            let mut imported = 0u64;
+            for (key, value, meta) in rows {
+                let meta_key = encode_kv_meta_key(key);
+                let existing = tx
+                    .get(TABLE_KV_META, &meta_key)?
+                    .and_then(|bytes| KvMetadata::from_bytes(&bytes));
+                if let Some(existing) = existing {
+                    if existing.mod_revision > meta.mod_revision {
+                        continue;
+                    }
+                    if existing.mod_revision == meta.mod_revision {
+                        let internal_key = encode_kv_key(key);
+                        let raw = tx.get(TABLE_KV, &internal_key)?.ok_or_else(|| {
+                            Error::DataCorruption(format!(
+                                "range import: target key {} has metadata but no value",
+                                String::from_utf8_lossy(key)
+                            ))
+                        })?;
+                        let plaintext = if raw.is_empty() {
+                            Vec::new()
+                        } else {
+                            self.decrypt_value(&internal_key, &raw)?
+                        };
+                        if plaintext != *value {
+                            return Err(Error::DataCorruption(format!(
+                                "range import: key {} already has a different value at revision {}",
+                                String::from_utf8_lossy(key),
+                                meta.mod_revision
+                            )));
+                        }
+                        continue;
+                    }
+                }
+
+                let internal_key = encode_kv_key(key);
+                let encrypted = self.encrypt_value(&internal_key, value)?;
+                tx.insert(TABLE_KV, &internal_key, &encrypted)?;
+                tx.insert(TABLE_KV_META, &meta_key, &meta.to_bytes())?;
+                imported += 1;
+            }
+
+            if done {
+                let target_revision = current_before.max(watermark);
+                tx.insert(
+                    TABLE_META,
+                    META_CURRENT_REVISION,
+                    &target_revision.to_be_bytes(),
+                )?;
+                // 只有全新目标 Region 需要把 split 前的历史标成不可用；
+                // merge 的接收方已有自己的历史，不能因为导入右半而压缩它。
+                if current_before == 0 {
+                    let previous_compacted = tx
+                        .get(TABLE_META, META_COMPACT_REVISION)?
+                        .and_then(|bytes| decode_u64(&bytes))
+                        .unwrap_or(0);
+                    let compacted = previous_compacted.max(watermark).min(target_revision);
+                    tx.insert(TABLE_META, META_COMPACT_REVISION, &compacted.to_be_bytes())?;
+                }
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(imported)
+        })
     }
 
     /// 写事务内读取当前 revision（缺失时按持久化 applied 回退；CommitTs 模式为 0）。
@@ -5270,6 +5526,178 @@ mod tests {
             MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap();
         assert_eq!(reopened.current_revision(), 150);
         assert_eq!(reopened.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+    }
+
+    #[test]
+    fn test_export_range_page_preserves_metadata_and_skips_tombstones() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"a", b"1", Some(7), 10, applied_for(1))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"b", b"2", None, 11, applied_for(2))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"c", b"3", None, 12, applied_for(3))
+            .unwrap();
+        storage
+            .delete_at_commit_ts(b"b", 13, applied_for(4))
+            .unwrap();
+
+        let page = storage
+            .export_range_page(b"a", b"d", None, 0, Some(13))
+            .expect("export range");
+        assert_eq!(page.revision, 13);
+        assert_eq!(page.next_after, None);
+        let keys: Vec<&[u8]> = page.rows.iter().map(|(k, _, _)| k.as_slice()).collect();
+        assert_eq!(keys, vec![b"a".as_slice(), b"c".as_slice()]);
+        assert_eq!(page.rows[0].2.mod_revision, 10);
+        assert_eq!(page.rows[0].2.lease_id, 7);
+        assert_eq!(page.rows[1].2.mod_revision, 12);
+    }
+
+    #[test]
+    fn test_export_range_page_paginates_and_rejects_revision_drift() {
+        let (_dir, storage) = create_commit_ts_storage();
+        for (i, key) in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            storage
+                .put_at_commit_ts(key, b"v", None, 10 + i as u64, applied_for(i as u64 + 1))
+                .unwrap();
+        }
+        let first = storage
+            .export_range_page(b"a", b"z", None, 1, None)
+            .unwrap();
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.next_after.as_deref(), Some(&b"a"[..]));
+        let second = storage
+            .export_range_page(
+                b"a",
+                b"z",
+                first.next_after.as_deref(),
+                1,
+                Some(first.revision),
+            )
+            .unwrap();
+        assert_eq!(second.rows[0].0, b"b");
+        storage
+            .put_at_commit_ts(b"d", b"v", None, 20, applied_for(9))
+            .unwrap();
+        let err = storage
+            .export_range_page(
+                b"a",
+                b"z",
+                second.next_after.as_deref(),
+                1,
+                Some(first.revision),
+            )
+            .expect_err("source advanced during export");
+        assert!(matches!(err, Error::FailedPrecondition(_)));
+    }
+
+    #[test]
+    fn test_apply_range_import_preserves_metadata_and_compacts_prior_history() {
+        let (_source_dir, source) = create_commit_ts_storage();
+        source
+            .put_at_commit_ts(b"a", b"1", Some(9), 10, applied_for(1))
+            .unwrap();
+        source
+            .put_at_commit_ts(b"b", b"2", None, 11, applied_for(2))
+            .unwrap();
+        let page = source
+            .export_range_page(b"a", b"z", None, 0, Some(11))
+            .unwrap();
+
+        let (_target_dir, target) = create_commit_ts_storage();
+        let imported = target
+            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, applied_for(5))
+            .expect("import");
+        assert_eq!(imported, 2);
+        assert_eq!(target.get(b"a").unwrap().as_deref(), Some(&b"1"[..]));
+        let meta = target.get_kv_metadata(b"a").unwrap().unwrap();
+        assert_eq!((meta.mod_revision, meta.lease_id), (10, 9));
+        assert_eq!(target.current_revision(), 11);
+        assert_eq!(target.compacted_revision().unwrap(), 11);
+        assert!(matches!(
+            target.range_at_revision(b"a", b"z", 0, 5),
+            Err(Error::RevisionCompacted { .. })
+        ));
+
+        let replay = target
+            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, applied_for(6))
+            .expect("replay");
+        assert_eq!(replay, 0, "同一页重放不得重复写入");
+    }
+
+    #[test]
+    fn test_apply_range_import_keeps_newer_target_values() {
+        let (_target_dir, target) = create_commit_ts_storage();
+        target
+            .put_at_commit_ts(b"a", b"new", None, 20, applied_for(1))
+            .unwrap();
+        let rows = vec![(
+            b"a".to_vec(),
+            b"old".to_vec(),
+            KvMetadata {
+                version: 1,
+                create_revision: 10,
+                mod_revision: 10,
+                lease_id: 0,
+                deleted: false,
+            },
+        )];
+        let imported = target
+            .apply_range_import(b"a", b"z", &rows, 15, true, applied_for(2))
+            .expect("import older page");
+        assert_eq!(imported, 0);
+        assert_eq!(target.get(b"a").unwrap().as_deref(), Some(&b"new"[..]));
+        assert_eq!(target.current_revision(), 20, "导入不得让 revision 倒退");
+    }
+
+    #[test]
+    fn test_apply_range_import_rejects_invalid_pages_and_v1_semantics() {
+        let row = |key: &[u8], value: &[u8], revision: i64| {
+            (
+                key.to_vec(),
+                value.to_vec(),
+                KvMetadata {
+                    version: 1,
+                    create_revision: revision,
+                    mod_revision: revision,
+                    lease_id: 0,
+                    deleted: false,
+                },
+            )
+        };
+
+        let (_dir, v1) = create_storage();
+        let err = v1
+            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 1)], 10, true, applied_for(1))
+            .expect_err("v1 must reject range imports");
+        assert!(matches!(err, Error::FailedPrecondition(_)));
+
+        let (_dir, target) = create_commit_ts_storage();
+        let err = target
+            .apply_range_import(b"m", b"z", &[row(b"a", b"v", 1)], 10, true, applied_for(1))
+            .expect_err("out-of-range key must be rejected");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+        let err = target
+            .apply_range_import(
+                b"a",
+                b"z",
+                &[row(b"a", b"v", 1), row(b"a", b"v", 1)],
+                10,
+                true,
+                applied_for(2),
+            )
+            .expect_err("duplicate key must be rejected");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+        let err = target
+            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 11)], 10, true, applied_for(3))
+            .expect_err("mod_revision above the watermark must be rejected");
+        assert!(matches!(err, Error::InvalidArgument(_)));
     }
 
     #[test]
