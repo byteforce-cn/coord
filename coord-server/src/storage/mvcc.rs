@@ -3184,6 +3184,10 @@ impl<B: StorageBackend> MvccStorage<B> {
                         }
                     }
                 }
+                // split/merge journal（#162）：intent 写入 / 原子 cutover / 清理。
+                // 读取与 CAS 语义由该切片补齐；未实现前保持 no-op（执行器轮询
+                // 超时后保留 intent，绝不谎报成功）。
+                PdOp::RecordIntent { .. } | PdOp::Cutover { .. } | PdOp::ClearIntent { .. } => {}
             }
 
             // 终态裁剪（确定性：键序 = op_id 升序 = 入队序，删最旧终态）

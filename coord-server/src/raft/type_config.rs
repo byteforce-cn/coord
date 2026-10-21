@@ -197,6 +197,51 @@ pub enum PdOp {
     },
     /// 重新入队（Running → Pending、清认领者；认领者失联/可重试时用）
     Requeue { op_id: u64 },
+    /// 写入 split/merge 的执行意图（首次写入生效；同 `op_id` 已存在则保留首个）。
+    ///
+    /// intent 是 cutover 的唯一计划来源：执行器重启后按 `op_id` 重读，不重算
+    /// 边界（重算可能基于已经前进的表视图，产生第二份计划）。
+    RecordIntent { intent: PdIntent },
+    /// 按 intent 原子执行表 cutover（只对 `Prepared` 生效；`expected_table_version`
+    /// 不符时整批拒绝并记 `Rejected`）。
+    Cutover { op_id: u64 },
+    /// 清理 intent（终态幂等删除）。
+    ClearIntent { op_id: u64 },
+}
+
+/// split/merge intent 的阶段（region 0 持久化，cutover 与表写入同事务推进）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntentPhase {
+    /// 已记录计划，等待数据搬迁与 cutover。
+    Prepared,
+    /// 表已按计划原子改写；`table_version` 是改写后的版本。
+    Applied { table_version: u64 },
+    /// 计划无法应用（表版本前进 / 表级校验拒绝）；表内容未变。
+    Rejected { reason: String },
+}
+
+/// 一条 split/merge 执行意图（`/_pd/intents/{op_id:u64be}`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdIntent {
+    /// 队列 operator id（= 入队日志 index）
+    pub op_id: u64,
+    /// 写入方节点（恢复时判断是否由本节点继续）
+    pub owner: NodeID,
+    pub plan: crate::storage::region_table::SplitMergePlan,
+    pub phase: IntentPhase,
+}
+
+impl PdIntent {
+    /// 序列化（与 PD 队列同一种信封格式）。
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        crate::storage::envelope::encode(self)
+            .map_err(|e| Error::Internal(format!("encode pd intent: {e}")))
+    }
+
+    /// 反序列化（损坏记录返回 None，读取方跳过）。
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        crate::storage::envelope::decode(bytes).ok()
+    }
 }
 
 /// region 0 PD 队列条目（`/_pd/ops/{op_id:u64be}` 的信封 V2 载荷）
@@ -1426,4 +1471,37 @@ mod tests {
             other => panic!("expected ApplyCommitDecisionsWithLog, got {other:?}"),
         }
     }
+    #[test]
+    fn test_pd_intent_roundtrip() {
+        use crate::storage::region_table::{plan_split, RegionTable};
+        use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta};
+
+        let mut table = RegionTable::default();
+        table
+            .init(vec![RegionMeta {
+                region_id: 1,
+                start_key: Vec::new(),
+                end_key: Vec::new(),
+                epoch: RegionEpoch::initial(),
+                peers: vec![Peer {
+                    node_id: 1,
+                    raft_addr: "127.0.0.1:1".to_string(),
+                    role: PeerRole::Voter,
+                }],
+                approximate_size: 0,
+                approximate_keys: 0,
+            }])
+            .unwrap();
+        let plan = plan_split(&table, 1, b"m", 2).unwrap();
+        let intent = PdIntent {
+            op_id: 7,
+            owner: 1,
+            plan,
+            phase: IntentPhase::Prepared,
+        };
+        let bytes = intent.to_bytes().unwrap();
+        assert_eq!(PdIntent::from_bytes(&bytes).unwrap(), intent);
+        assert!(PdIntent::from_bytes(b"not an envelope").is_none());
+    }
+
 }

@@ -155,6 +155,7 @@ impl SystemRaftHandle for FakeSystemRaft {
                 }
                 Ok(1)
             }
+            PdOp::RecordIntent { .. } | PdOp::Cutover { .. } | PdOp::ClearIntent { .. } => Ok(1),
         }
     }
 
