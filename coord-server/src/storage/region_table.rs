@@ -18,10 +18,171 @@ use serde::{Deserialize, Serialize};
 use coord_core::error::{Error, Result};
 use coord_core::types::{RegionEpoch, RegionId, RegionMeta};
 
+use crate::storage::object_store::{key_in_object_space, OBJECT_PREFIX};
+
 /// region 0 存整张表的单键。
 pub const REGION_TABLE_KEY: &[u8] = b"/_sys/pd/regions";
 
+/// 对象空间的字典序上界（半开区间 `[/obj/, /obj0)`，与对象存储守卫一致）。
+const OBJECT_SPACE_END: &[u8] = b"/obj0";
+
 /// 一次 Region 表变更（由 `RegionMetaOp::Apply` 成批承载）。
+/// Split/Merge 计划的方向（journal 与执行器共用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitMergeKind {
+    /// 源 Region 缩界，新 Region 接管右半区间。
+    Split,
+    /// 左 Region 吸收右 Region 的区间，右 Region 删除。
+    Merge,
+}
+
+/// 一次 Split/Merge 的表级计划（纯计算，可序列化进 intent journal）。
+///
+/// `expected_table_version` 是计算计划时的表版本：cutover 只在表仍停在该版本时
+/// 整批生效，避免把基于过期视图算出的边界写进权威表。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitMergePlan {
+    pub kind: SplitMergeKind,
+    /// Split = 被缩界的父 Region；Merge = 吸收方（左）Region。
+    pub source_region: RegionId,
+    /// Split = 新 Region；Merge = None。
+    pub target_region: Option<RegionId>,
+    /// 与 `apply` 直接兼容的原子变更批。
+    pub changes: Vec<RegionChange>,
+    pub expected_table_version: u64,
+}
+
+/// 计算 split 计划：父区间收缩到 `split_key`，新 Region 接管右半段。
+///
+/// 拒绝空侧、表外 key、`/obj/` 内 key 与 id 复用——任何一条都意味着调用方的
+/// 视图与权威表不一致，不能靠执行器「修一修」继续。
+pub fn plan_split(
+    table: &RegionTable,
+    region_id: RegionId,
+    split_key: &[u8],
+    new_region_id: RegionId,
+) -> Result<SplitMergePlan> {
+    if table.version == 0 {
+        return Err(Error::InvalidArgument(
+            "region table is not initialized".to_string(),
+        ));
+    }
+    let parent = table
+        .get(region_id)
+        .cloned()
+        .ok_or_else(|| Error::InvalidArgument(format!("region {region_id} is not in the table")))?;
+    if new_region_id == 0 || new_region_id == region_id || table.get(new_region_id).is_some() {
+        return Err(Error::InvalidArgument(format!(
+            "new region id {new_region_id} is invalid or already in use"
+        )));
+    }
+    if split_key <= parent.start_key.as_slice() {
+        return Err(Error::InvalidArgument(format!(
+            "split key {split_key:?} must be strictly inside region {region_id}"
+        )));
+    }
+    if !parent.end_key.is_empty() && split_key >= parent.end_key.as_slice() {
+        return Err(Error::InvalidArgument(format!(
+            "split key {split_key:?} must be strictly inside region {region_id}"
+        )));
+    }
+    if key_in_object_space(split_key) {
+        return Err(Error::InvalidArgument(
+            "split key is inside the reserved /obj/ namespace".to_string(),
+        ));
+    }
+
+    let mut shrunk = parent.clone();
+    shrunk.end_key = split_key.to_vec();
+    shrunk.epoch.version += 1;
+    let child = RegionMeta {
+        region_id: new_region_id,
+        start_key: split_key.to_vec(),
+        end_key: parent.end_key.clone(),
+        epoch: RegionEpoch {
+            conf_ver: parent.epoch.conf_ver,
+            version: parent.epoch.version + 1,
+        },
+        peers: parent.peers.clone(),
+        approximate_size: 0,
+        approximate_keys: 0,
+    };
+    Ok(SplitMergePlan {
+        kind: SplitMergeKind::Split,
+        source_region: region_id,
+        target_region: Some(new_region_id),
+        changes: vec![
+            RegionChange::Update { meta: shrunk },
+            RegionChange::Add { meta: child },
+        ],
+        expected_table_version: table.version,
+    })
+}
+
+/// 计算 merge 计划：左 Region 吸收右 Region 的区间，右 Region 删除。
+///
+/// 只接受真正相邻的半开区间；并集覆盖 `/obj/` 固定区间时拒绝（对象 Region 不得
+/// 被任意 KV merge 消化掉）。
+pub fn plan_merge(
+    table: &RegionTable,
+    left: RegionId,
+    right: RegionId,
+) -> Result<SplitMergePlan> {
+    if table.version == 0 {
+        return Err(Error::InvalidArgument(
+            "region table is not initialized".to_string(),
+        ));
+    }
+    if left == right {
+        return Err(Error::InvalidArgument(
+            "cannot merge a region with itself".to_string(),
+        ));
+    }
+    let left_meta = table
+        .get(left)
+        .cloned()
+        .ok_or_else(|| Error::InvalidArgument(format!("region {left} is not in the table")))?;
+    let right_meta = table
+        .get(right)
+        .cloned()
+        .ok_or_else(|| Error::InvalidArgument(format!("region {right} is not in the table")))?;
+    if left_meta.end_key.is_empty() || left_meta.end_key != right_meta.start_key {
+        return Err(Error::InvalidArgument(format!(
+            "regions {left} and {right} are not adjacent"
+        )));
+    }
+    if is_object_region(&left_meta) || is_object_region(&right_meta) {
+        return Err(Error::InvalidArgument(
+            "merge would absorb the fixed /obj/ region".to_string(),
+        ));
+    }
+
+    let mut merged = left_meta;
+    merged.end_key = right_meta.end_key.clone();
+    merged.epoch.version += 1;
+    Ok(SplitMergePlan {
+        kind: SplitMergeKind::Merge,
+        source_region: left,
+        target_region: None,
+        changes: vec![
+            RegionChange::Update { meta: merged },
+            RegionChange::Remove {
+                region_id: right,
+                expected_epoch: right_meta.epoch,
+            },
+        ],
+        expected_table_version: table.version,
+    })
+}
+
+/// 是否是对象存储的固定 Region 区间（`[/obj/, /obj0)`）。
+///
+/// 只保护「已按 ADR 固定出来的对象 Region」：还没有对象区间时，普通 KV 区间
+/// 跨过 `/obj/` 是合法形态（对象存储未启用），不能被 merge 守卫无故锁死。
+fn is_object_region(meta: &RegionMeta) -> bool {
+    meta.start_key == OBJECT_PREFIX && meta.end_key == OBJECT_SPACE_END
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionChange {
     /// 插入一个新区间；同 id 且字段完全一致时幂等 no-op。
@@ -464,6 +625,92 @@ mod tests {
                 expected_epoch: stale
             }])
             .is_err());
+    }
+
+    fn table_with(regions: Vec<RegionMeta>) -> RegionTable {
+        let mut table = RegionTable::default();
+        table.init(regions).expect("init table");
+        table
+    }
+
+    #[test]
+    fn plan_split_computes_contiguous_child_range() {
+        let table = table_with(vec![meta(1, b"", b"")]);
+        let plan = plan_split(&table, 1, b"m", 2).expect("split plan");
+        assert_eq!(plan.kind, SplitMergeKind::Split);
+        assert_eq!(plan.source_region, 1);
+        assert_eq!(plan.target_region, Some(2));
+        assert_eq!(plan.expected_table_version, table.version);
+
+        let mut next = table.clone();
+        next.apply(&plan.changes).expect("plan applies");
+        let parent = next.get(1).unwrap();
+        let child = next.get(2).unwrap();
+        assert_eq!(parent.end_key, b"m");
+        assert_eq!(child.start_key, b"m");
+        assert_eq!(child.end_key, b"");
+        assert_eq!(
+            parent.epoch.version,
+            table.get(1).unwrap().epoch.version + 1
+        );
+        assert_eq!(child.epoch.version, parent.epoch.version);
+        assert_eq!(child.epoch.conf_ver, parent.epoch.conf_ver);
+        assert_eq!(child.peers, parent.peers);
+    }
+
+    #[test]
+    fn plan_split_rejects_boundaries_object_keys_and_id_reuse() {
+        let table = table_with(vec![
+            meta(1, b"", b"a"),
+            meta(2, b"a", b"z"),
+            meta(3, b"z", b""),
+        ]);
+        for key in [b"a".as_slice(), b"z".as_slice()] {
+            assert!(plan_split(&table, 2, key, 9).is_err(), "boundary {key:?}");
+        }
+        let spanning = table_with(vec![meta(1, b"", b"")]);
+        for key in [b"/obj/".as_slice(), b"/obj/m/x".as_slice()] {
+            assert!(
+                plan_split(&spanning, 1, key, 2).is_err(),
+                "object {key:?}"
+            );
+        }
+        assert!(plan_split(&table, 2, b"m", 2).is_err(), "id reuse of source");
+        assert!(plan_split(&table, 2, b"m", 1).is_err(), "id already in table");
+        assert!(plan_split(&table, 2, b"m", 9).is_ok(), "unused id accepted");
+        assert!(
+            plan_split(&RegionTable::default(), 1, b"m", 9).is_err(),
+            "uninitialized table"
+        );
+        assert!(plan_split(&table, 9, b"m", 10).is_err(), "unknown region");
+    }
+
+    #[test]
+    fn plan_merge_requires_adjacency_and_no_object_space() {
+        let table = table_with(vec![meta(1, b"", b"m"), meta(2, b"m", b"")]);
+        let plan = plan_merge(&table, 1, 2).expect("merge plan");
+        assert_eq!(plan.kind, SplitMergeKind::Merge);
+        assert_eq!(plan.source_region, 1);
+        assert_eq!(plan.target_region, None);
+        let mut next = table.clone();
+        next.apply(&plan.changes).expect("plan applies");
+        assert_eq!(next.get(1).unwrap().end_key, b"");
+        assert!(next.get(2).is_none());
+        assert!(plan_merge(&table, 2, 1).is_err(), "wrong order");
+        assert!(plan_merge(&table, 1, 1).is_err(), "self merge");
+
+        let obj = table_with(vec![
+            meta(1, b"", b"/obj/"),
+            meta(2, b"/obj/", b"/obj0"),
+            meta(3, b"/obj0", b""),
+        ]);
+        assert!(plan_merge(&obj, 1, 2).is_err(), "object region merged away");
+        assert!(plan_merge(&obj, 2, 3).is_err(), "object region merged away");
+        assert!(plan_merge(&obj, 3, 1).is_err(), "non-adjacent");
+
+        // 未固定对象区间时，普通区间跨过 /obj/ 仍可 merge（对象存储未启用）。
+        let plain = table_with(vec![meta(1, b"", b"/obj0"), meta(2, b"/obj0", b"")]);
+        assert!(plan_merge(&plain, 1, 2).is_ok(), "no fixed object region");
     }
 
     #[test]
