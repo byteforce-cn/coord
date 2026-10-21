@@ -236,6 +236,7 @@ pub(crate) async fn serve(
     request: Request<Streaming<watch_v2::WatchRequest>>,
 ) -> Result<tonic::Response<WatchStream>, Status> {
     node.kvt().gate(KvTCapability::Watch)?;
+    super::services::guard_routing_epoch(node, request.metadata())?;
     let Some(shards) = node.commit_log_shards().cloned() else {
         return Err(attach(
             Status::failed_precondition(

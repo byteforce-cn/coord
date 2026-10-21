@@ -183,8 +183,9 @@
   整体 fail-closed（prefix 级 watch 授权待后续 auth 项），handler 在收到
   `DeferredScopeGrants` 时会按首帧区间判定，且保留命名空间（`/_pki/` 等）与
   `/obj/` 的订阅一律拒绝。
-- **路由**：可带 metadata `coord-routing-epoch`；epoch 过期返回 `ABORTED` +
-  `EPOCH_STALE`，刷新路由后重试。
+- **路由**：可带 metadata `coord-routing-epoch`（值为 Region 表 `version`）；
+  与服务端已应用版本不一致返回 `ABORTED` + `EPOCH_STALE`（trailing metadata
+  回传当前版本），刷新路由后重试；不带该 metadata 不校验。
 - **对象存储**：manifest 用 `commit_ts`；`/obj/` 固定 Region 区间，不参与任意
   KV split；chunk 不随 KV split 迁移（`boundaries.md` B-KVT-3）。
 - **不承诺**：v1 数据迁移 / v1 facade；MQ v1 在 v2 集群不可用；MQ v2 未 GA；
