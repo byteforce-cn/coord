@@ -16,6 +16,7 @@
 pub mod log_store;
 pub mod network;
 pub mod region;
+pub mod region_lifecycle;
 pub mod region_runtime;
 pub mod state_machine;
 pub mod system_raft;
@@ -25,6 +26,7 @@ pub mod type_config;
 pub use network::{
     RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService, RegionRaftNetworkFactory,
 };
+pub use region_lifecycle::{ReconcileOutcome, RegionLifecycle, RegionLifecycleSpec};
 pub use region_runtime::{
     region_data_dir, CoordRegionRaftHandle, RegionRaftHandle, RegionRuntime, RegionRuntimeSpec,
 };

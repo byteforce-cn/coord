@@ -352,8 +352,11 @@ impl RegionManager {
     /// - 表版本不前进 → `Ok(false)`（重复刷新/旧快照 no-op）；
     /// - 已注册的 region 原地 `replace_meta`（与 runtime 共享同一 handle）；
     /// - 新 region 建 handle（运行时 spawn 归 #160，不在本方法内）；
-    /// - 表中已删除的 region 同时丢弃 handle 与 runtime，避免“无 handle 有
-    ///   runtime”的半状态。
+    /// - 表中已删除的 region 丢弃 handle（路由立即不可达）；**运行时不在此摘除**
+    ///   ——停 raft 组必须 `await raft.shutdown()`，同步入口做不到，而直接丢
+    ///   `Arc<RegionRuntime>` 会让 openraft 任务失去唯一句柄（泄漏）。运行时归属
+    ///   `RegionLifecycle`（`raft/region_lifecycle.rs`），由它在 reconcile 中停机
+    ///   并摘除。
     ///
     /// 两个索引顺序替换（不嵌套持锁）与既有 register/unregister 一致：替换窗口内
     /// 路由可能 `RouteNotReady`/`RegionNotFound`，调用方按可重试错误处理，不会
@@ -383,13 +386,8 @@ impl RegionManager {
             (next_regions, next_index)
         };
 
-        let keep: std::collections::BTreeSet<RegionId> =
-            table.regions.iter().map(|meta| meta.region_id).collect();
         *self.regions.write() = next_regions;
         *self.key_index.write() = next_index;
-        self.runtimes
-            .write()
-            .retain(|region_id, _| keep.contains(region_id));
         self.table_version.store(table.version, Ordering::SeqCst);
 
         tracing::info!(
@@ -598,6 +596,53 @@ impl RegionManager {
         Ok(runtime)
     }
 
+    /// 为**已注册**的 Region 装配运行时（动态 Region 表述的路径，#159/#160）。
+    ///
+    /// 与 [`Self::spawn_region`] 的区别：不新建/不覆盖路由条目——新 Region 的
+    /// `RegionHandle` 已由 `apply_region_table` 按权威表建好（同一 Arc 与运行时
+    /// 共享），这里只补 raft/存储侧。已装配时幂等返回既有运行时。
+    ///
+    /// 成员初始化沿用 Commit Log shard 组的约定（`kvt/commit_log_shards.rs`）：
+    /// region 0 leader 用 `initialize=true` 建组，其余节点等 leader 复制；并发
+    /// 初始化失败时降级为不带 initialize 的重试。调用方负责串行化（见
+    /// `RegionLifecycle`）。
+    pub async fn spawn_registered_region(
+        &self,
+        shared_factory: &RaftNetworkFactoryImpl,
+        rpc: &RaftRpcService,
+        spec: RegionRuntimeSpec,
+        initialize: bool,
+    ) -> Result<Arc<RegionRuntime>> {
+        let region_id = spec.meta.region_id;
+        if let Some(runtime) = self.runtime(region_id) {
+            return Ok(runtime);
+        }
+        let handle = match self.get_region(region_id) {
+            Some(handle) => handle,
+            None => self.register_region(spec.meta.clone())?,
+        };
+        let runtime =
+            spawn_region_runtime(self.node_id, shared_factory, rpc, spec, handle, initialize)
+                .await?;
+        self.runtimes
+            .write()
+            .insert(region_id, Arc::clone(&runtime));
+        tracing::info!(
+            "node {}: region {region_id} runtime assembled (data_dir={})",
+            self.node_id,
+            runtime.data_dir.display()
+        );
+        Ok(runtime)
+    }
+
+    /// 摘除已装配的运行时（不触碰路由表）
+    ///
+    /// 只给停机路径用：调用方必须已经 `raft.shutdown()`，否则丢句柄会让 openraft
+    /// 任务继续跑。
+    pub fn detach_runtime(&self, region_id: RegionId) -> Option<Arc<RegionRuntime>> {
+        self.runtimes.write().remove(&region_id)
+    }
+
     /// 移除一个 Region 运行时（注销路由 + 运行时；Raft 停机由调用方负责）
     pub fn remove_region_runtime(&self, region_id: RegionId) -> Result<()> {
         self.unregister_region(region_id)?;
@@ -621,13 +666,14 @@ impl RegionManager {
 
     /// 通过 key 路由到 Region 运行时（服务端路由的基础）
     ///
-    /// 先经 `route` 按 key range 二分定位 Region，再取其运行时；
-    /// Region 已注册但尚未装配（无运行时）时返回 RegionNotFound。
+    /// 先经 `route` 按 key range 二分定位 Region，再取其运行时。
+    /// Region 已注册但尚未装配（无运行时）时返回 `RouteNotReady`（可重试）：
+    /// 权威表（#159）收敛与运行时装配（#160）之间存在窗口，"还没装好"不是
+    /// "这个 Region 不存在"，不能给客户端一个终态错误。
     pub fn route_runtime(&self, key: &[u8]) -> Result<Arc<RegionRuntime>> {
         let handle = self.route(key)?;
         let region_id = handle.region_id();
-        self.runtime(region_id)
-            .ok_or(Error::RegionNotFound { region_id })
+        self.runtime(region_id).ok_or(Error::RouteNotReady)
     }
 }
 

@@ -2485,6 +2485,8 @@ async fn run_server(
     let region_raft_config = Arc::clone(&raft_config);
     // Commit Log shard 组的 raft 调优与数据 Region 一致（#154）。
     let shard_raft_config = Arc::clone(&raft_config);
+    // 数据 Region 生命周期后续补装配的 Region 组用同一份调优（#160）。
+    let region_group_raft_config = Arc::clone(&raft_config);
     let raft =
         coord_server::raft::new_raft(node_id, raft_config, network_factory, log_store, sm_store)
             .await
@@ -3558,40 +3560,55 @@ async fn run_server(
         retention
     );
 
-    // per-Region Compaction 后台任务——每个 Region ≥1
-    // 独立推进 compact 水位：leader 经该 Region raft 提案 Command::Compact（节点
-    // 一致 apply），文件级 compact 独立回收各 Region redb 空间；提案成功后推进
-    // RegionHandle::compaction_watermark。
-    let _region_compaction_mgrs: Vec<
-        coord_server::storage::compaction::CompactionManager<
-            coord_server::storage::redb_backend::RedbBackend,
-        >,
-    > = if let Some(manager) = &node.region_manager {
-        let mut mgrs = Vec::new();
+    // 数据 Region 运行时生命周期（#160）：把权威 Region 表（#159）的 add/remove
+    // 落到本节点的 raft 组 / 存储 / CompactionManager 上，而不是继续用启动期的
+    // 一次性快照（旧行为：后建的 Region 拿不到 CompactionManager，B-RG-1）。
+    //
+    // - 启动期已装配的 Region 先接管（每个数据 Region 都获得 compaction）；
+    // - `[kv_t].enabled` 时再启动后台 reconcile 跟随表变化；关闭时没有表写入方，
+    //   静态装配的行为不变（ADR-0001）。
+    let _region_lifecycle = if let Some(manager) = node.region_manager.as_ref() {
+        let region0_raft = match node.raft.as_ref() {
+            Some(raft) => raft.as_ref().clone(),
+            None => return Err("multi-raft region manager requires region 0 raft".into()),
+        };
+        let lifecycle = Arc::new(coord_server::raft::region_lifecycle::RegionLifecycle::new(
+            coord_server::raft::region_lifecycle::RegionLifecycleSpec {
+                node_id,
+                manager: Arc::clone(manager),
+                factory: region_shared_factory.clone(),
+                rpc: raft_rpc_service.clone(),
+                base_dir: data_dir.clone(),
+                raft_config: Arc::clone(&region_group_raft_config),
+                object_store: object_ctx.clone(),
+                revision_mode,
+                table: Arc::clone(&node.storage),
+                region0_raft,
+                metrics: Some(Arc::clone(&metrics)),
+                safe_ts: safe_ts_source.clone(),
+                compaction: coord_server::storage::compaction::CompactionConfig::default(),
+            },
+        ));
         for handle in manager.list_regions() {
-            let rid = handle.region_id();
-            if let Some(rt) = manager.runtime(rid) {
-                let proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
-                    Arc::new(
-                        coord_server::raft::region_runtime::RegionCompactProposer::from_runtime(
-                            cfg.node.id,
-                            &rt,
-                        ),
-                    );
-                let mgr = coord_server::storage::compaction::CompactionManager::start_with_safe_ts(
-                    Arc::clone(&rt.mvcc),
-                    coord_server::storage::compaction::CompactionConfig::default(),
-                    Some(proposer),
-                    Some(Arc::clone(&metrics)),
-                    safe_ts_source.clone(),
-                );
-                tracing::info!("Region {rid} compaction manager started");
-                mgrs.push(mgr);
-            }
+            let meta = handle.meta.read().clone();
+            lifecycle
+                .ensure_region(&meta)
+                .await
+                .map_err(|e| format!("attach region {} runtime: {e}", meta.region_id))?;
         }
-        mgrs
+        if node.kvt().is_enabled() {
+            lifecycle.start_reconcile_loop(
+                coord_server::raft::region_lifecycle::REGION_RECONCILE_INTERVAL,
+            );
+            tracing::info!(
+                regions = lifecycle.member_count(),
+                interval = ?coord_server::raft::region_lifecycle::REGION_RECONCILE_INTERVAL,
+                "Region lifecycle reconcile loop started"
+            );
+        }
+        Some(lifecycle)
     } else {
-        Vec::new()
+        None
     };
 
     // 对象存储 GC 循环（leader-only）：回收 stale Creating 对象 + 孤儿 chunk 文件。
