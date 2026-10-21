@@ -123,11 +123,7 @@ pub fn plan_split(
 ///
 /// 只接受真正相邻的半开区间；并集覆盖 `/obj/` 固定区间时拒绝（对象 Region 不得
 /// 被任意 KV merge 消化掉）。
-pub fn plan_merge(
-    table: &RegionTable,
-    left: RegionId,
-    right: RegionId,
-) -> Result<SplitMergePlan> {
+pub fn plan_merge(table: &RegionTable, left: RegionId, right: RegionId) -> Result<SplitMergePlan> {
     if table.version == 0 {
         return Err(Error::InvalidArgument(
             "region table is not initialized".to_string(),
@@ -670,13 +666,16 @@ mod tests {
         }
         let spanning = table_with(vec![meta(1, b"", b"")]);
         for key in [b"/obj/".as_slice(), b"/obj/m/x".as_slice()] {
-            assert!(
-                plan_split(&spanning, 1, key, 2).is_err(),
-                "object {key:?}"
-            );
+            assert!(plan_split(&spanning, 1, key, 2).is_err(), "object {key:?}");
         }
-        assert!(plan_split(&table, 2, b"m", 2).is_err(), "id reuse of source");
-        assert!(plan_split(&table, 2, b"m", 1).is_err(), "id already in table");
+        assert!(
+            plan_split(&table, 2, b"m", 2).is_err(),
+            "id reuse of source"
+        );
+        assert!(
+            plan_split(&table, 2, b"m", 1).is_err(),
+            "id already in table"
+        );
         assert!(plan_split(&table, 2, b"m", 9).is_ok(), "unused id accepted");
         assert!(
             plan_split(&RegionTable::default(), 1, b"m", 9).is_err(),

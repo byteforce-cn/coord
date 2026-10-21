@@ -1503,5 +1503,4 @@ mod tests {
         assert_eq!(PdIntent::from_bytes(&bytes).unwrap(), intent);
         assert!(PdIntent::from_bytes(b"not an envelope").is_none());
     }
-
 }
