@@ -27,7 +27,7 @@ use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
 use coord_server::raft::region::{spawn_configured_regions, RegionManager, RegionSeed};
 use coord_server::raft::region_lifecycle::{
-    RegionLifecycle, RegionLifecycleSpec, REGION_RECONCILE_INTERVAL,
+    RegionLifecycle, RegionLifecycleSpec, PENDING_TARGET_MARKER, REGION_RECONCILE_INTERVAL,
 };
 use coord_server::raft::region_runtime::{region_data_dir, CoordRangeImportTarget};
 use coord_server::raft::state_machine::StateMachineStore;
@@ -57,6 +57,16 @@ fn raft_config() -> RaftConfig {
     }
 }
 
+/// 测试用 compaction 配置：retention = 1 让少量写入就能观察到水位推进；间隔拉长，
+/// 只由 trigger_compaction 驱动，避免后台 tick 干扰断言。
+fn harness_compaction() -> CompactionConfig {
+    CompactionConfig {
+        changelog_retention_revisions: 1,
+        interval: REGION_RECONCILE_INTERVAL * 3600,
+        auto_compact: true,
+    }
+}
+
 fn region(id: u64, start: &[u8], end: &[u8], conf_ver: u64, version: u64) -> RegionMeta {
     RegionMeta {
         region_id: id,
@@ -79,6 +89,9 @@ struct Harness {
     mvcc0: Arc<MvccStorage<RedbBackend>>,
     manager: Arc<RegionManager>,
     lifecycle: Arc<RegionLifecycle>,
+    factory: RaftNetworkFactoryImpl,
+    rpc: RaftRpcService,
+    raft_config: Arc<RaftConfig>,
 }
 
 impl Harness {
@@ -155,13 +168,7 @@ impl Harness {
             region0_raft: raft0.as_ref().clone(),
             metrics: None,
             safe_ts: None,
-            // retention = 1 让测试用少量写入就能观察到水位推进；间隔拉长，
-            // 只由 trigger_compaction 驱动，避免后台 tick 干扰断言。
-            compaction: CompactionConfig {
-                changelog_retention_revisions: 1,
-                interval: REGION_RECONCILE_INTERVAL * 3600,
-                auto_compact: true,
-            },
+            compaction: harness_compaction(),
         }));
         for handle in manager.list_regions() {
             lifecycle
@@ -176,9 +183,32 @@ impl Harness {
             mvcc0,
             manager,
             lifecycle,
+            factory,
+            rpc,
+            raft_config,
         };
         harness.wait_region0_leader().await;
         harness
+    }
+
+    /// 模拟进程重启：内存态生命周期（pending / members / reclaim）全空，权威表与
+    /// 磁盘目录沿用同一份持久化状态。后台 tick 不启动，由测试逐拍驱动。
+    fn restarted_lifecycle(&self) -> Arc<RegionLifecycle> {
+        Arc::new(RegionLifecycle::new(RegionLifecycleSpec {
+            node_id: NODE_ID,
+            manager: Arc::clone(&self.manager),
+            factory: self.factory.clone(),
+            rpc: self.rpc.clone(),
+            base_dir: self._dir.path().to_path_buf(),
+            raft_config: Arc::clone(&self.raft_config),
+            object_store: None,
+            revision_mode: RevisionMode::CommitTs,
+            table: Arc::clone(&self.mvcc0),
+            region0_raft: self.raft0.as_ref().clone(),
+            metrics: None,
+            safe_ts: None,
+            compaction: harness_compaction(),
+        }))
     }
 
     async fn wait_region0_leader(&self) {
@@ -437,6 +467,11 @@ async fn test_lifecycle_precreates_split_target_and_promotes_after_cutover() {
     assert_eq!(outcome.pending_spawned, 1);
     assert_eq!(harness.lifecycle.pending_count(), 1);
     assert!(harness.lifecycle.migration_target(2).is_some());
+    let target_dir = region_data_dir(harness._dir.path(), 2);
+    assert!(
+        target_dir.join(PENDING_TARGET_MARKER).is_file(),
+        "pre-created target carries the persisted reclaim marker"
+    );
     assert!(
         harness.manager.runtime(2).is_none(),
         "pending target must not join data-plane runtimes"
@@ -502,6 +537,10 @@ async fn test_lifecycle_precreates_split_target_and_promotes_after_cutover() {
     let outcome = harness.lifecycle.reconcile().await.expect("promote target");
     assert_eq!(outcome.pending_promoted, 1);
     assert_eq!(outcome.pending_spawned, 0);
+    assert!(
+        !target_dir.join(PENDING_TARGET_MARKER).exists(),
+        "promotion drops the reclaim marker (a later merge must keep the dir)"
+    );
     assert_eq!(harness.lifecycle.pending_count(), 0);
     assert_eq!(harness.lifecycle.member_count(), 2);
     assert!(harness.lifecycle.has_compaction(2));
@@ -737,4 +776,185 @@ async fn test_lifecycle_skips_regions_this_node_does_not_replicate() {
         Err(other) => panic!("expected RouteNotReady, got {other}"),
         Ok(runtime) => panic!("expected RouteNotReady, routed to {}", runtime.region_id()),
     }
+}
+
+// ─── 崩溃遗留的 split 目标目录（重启后按持久化标记清扫，#163）───
+
+/// 目标 Region 预创建后进程崩溃、intent 在停机期间被清掉：重启后内存里没有任何
+/// reclaim 记录，只剩目录上的持久化标记——第一拍拿到权威表就要把目录扫掉。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lifecycle_sweeps_orphan_split_target_dir_after_restart() {
+    let harness = Harness::boot().await;
+    assert_eq!(
+        harness
+            .propose(RegionMetaOp::Init {
+                regions: vec![region(1, b"", b"", 1, 1)],
+            })
+            .await,
+        RegionMetaOutcome::Applied { version: 1 }
+    );
+    harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile table v1");
+    harness
+        .propose_pd(PdOp::RecordIntent {
+            intent: harness.split_intent(21, 1, b"m", 9),
+        })
+        .await;
+    let outcome = harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("pre-create target");
+    assert_eq!(outcome.pending_spawned, 1);
+    let target_dir = region_data_dir(harness._dir.path(), 9);
+    assert!(target_dir.join(PENDING_TARGET_MARKER).is_file());
+
+    // 崩溃：运行时停在原地，intent 在「停机期间」被清掉（执行失败/被裁掉）。
+    harness
+        .lifecycle
+        .pending_runtime(9)
+        .expect("pending target runtime")
+        .raft
+        .shutdown()
+        .await
+        .expect("shutdown pending target");
+    harness.propose_pd(PdOp::ClearIntent { op_id: 21 }).await;
+
+    let restarted = harness.restarted_lifecycle();
+    assert_eq!(restarted.pending_count(), 0, "重启后内存态从零开始");
+    let outcome = restarted
+        .reconcile()
+        .await
+        .expect("reconcile after restart");
+    assert_eq!(outcome.pending_dirs_swept, 1);
+    assert!(
+        !target_dir.exists(),
+        "orphan split target dir must be reclaimed after restart"
+    );
+    assert_eq!(
+        harness.mvcc0.region_table().unwrap().version,
+        1,
+        "清扫只删目录，不动权威表"
+    );
+    assert_eq!(harness.manager.route(b"z").unwrap().region_id(), 1);
+
+    // 幂等：下一拍没有可扫的目录。
+    let outcome = restarted.reconcile().await.expect("reconcile again");
+    assert_eq!(outcome.pending_dirs_swept, 0);
+}
+
+/// 重启时 intent 仍在（预创建完还没 cutover）：标记目录是活的搬迁目标，不能扫。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lifecycle_keeps_planned_split_target_dir_after_restart() {
+    let harness = Harness::boot().await;
+    assert_eq!(
+        harness
+            .propose(RegionMetaOp::Init {
+                regions: vec![region(1, b"", b"", 1, 1)],
+            })
+            .await,
+        RegionMetaOutcome::Applied { version: 1 }
+    );
+    harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile table v1");
+    harness
+        .propose_pd(PdOp::RecordIntent {
+            intent: harness.split_intent(22, 1, b"m", 10),
+        })
+        .await;
+    let outcome = harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("pre-create target");
+    assert_eq!(outcome.pending_spawned, 1);
+    let target_dir = region_data_dir(harness._dir.path(), 10);
+
+    let restarted = harness.restarted_lifecycle();
+    assert_eq!(
+        restarted.sweep_orphan_split_dirs().await.expect("sweep"),
+        0,
+        "planned target is still claimed by the intent journal"
+    );
+    assert!(
+        target_dir.join(PENDING_TARGET_MARKER).is_file(),
+        "still-planned target dir survives the sweep"
+    );
+}
+
+/// 清扫只认 pending 标记 + 无主张：已提升后从表里移除的 Region 目录（救援路径）
+/// 与表里仍有的 Region 目录都不删。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lifecycle_sweep_keeps_live_and_unmarked_region_dirs() {
+    let harness = Harness::boot().await;
+    assert_eq!(
+        harness
+            .propose(RegionMetaOp::Init {
+                regions: vec![region(1, b"", b"", 1, 1)],
+            })
+            .await,
+        RegionMetaOutcome::Applied { version: 1 }
+    );
+    harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile table v1");
+
+    // 曾经是正式 Region、被 merge/split 从表里移除后留下的目录：没有 pending 标记。
+    let rescued = region_data_dir(harness._dir.path(), 11);
+    std::fs::create_dir_all(&rescued).expect("create rescued dir");
+    std::fs::write(rescued.join("store.db"), b"rescued").expect("write rescued data");
+
+    // 带标记但表里仍有该 id（提升窗口里崩溃/重启）：不能删。
+    let in_table = region_data_dir(harness._dir.path(), 1);
+    std::fs::write(in_table.join(PENDING_TARGET_MARKER), b"pending\n").expect("write marker");
+
+    assert_eq!(
+        harness
+            .lifecycle
+            .sweep_orphan_split_dirs()
+            .await
+            .expect("sweep"),
+        0
+    );
+    assert!(
+        rescued.exists(),
+        "rescued region dir is not a pending target"
+    );
+    assert!(
+        in_table.join(PENDING_TARGET_MARKER).is_file(),
+        "a marked dir whose id is in the table is live, not orphaned"
+    );
+}
+
+/// `version == 0`（v1 静态装配）没有权威判据：不扫目录，也不改 v1 行为。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lifecycle_does_not_sweep_without_an_authoritative_region_table() {
+    let harness = Harness::boot().await;
+    let orphan = region_data_dir(harness._dir.path(), 12);
+    std::fs::create_dir_all(&orphan).expect("create marked dir");
+    std::fs::write(orphan.join(PENDING_TARGET_MARKER), b"pending\n").expect("write marker");
+
+    let outcome = harness.lifecycle.reconcile().await.expect("reconcile");
+    assert_eq!(outcome.pending_dirs_swept, 0);
+    assert!(
+        orphan.exists(),
+        "no authoritative table = no reclaim decision"
+    );
+    assert_eq!(
+        harness
+            .lifecycle
+            .sweep_orphan_split_dirs()
+            .await
+            .expect("sweep"),
+        0
+    );
+    assert!(orphan.exists());
 }
