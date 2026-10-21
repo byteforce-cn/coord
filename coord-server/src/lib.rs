@@ -28,6 +28,7 @@ pub mod pd;
 pub mod raft;
 pub mod security;
 pub mod server;
+pub mod split_merge;
 pub mod storage;
 pub mod supervisor;
 pub mod timer;
