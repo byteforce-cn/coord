@@ -168,6 +168,26 @@ impl ReadSet {
         self.points.iter().any(|point| range.contains(point))
             || self.ranges.iter().any(|r| r.overlaps(range))
     }
+
+    /// drain 专用的交集判定：`drain.end` 为空 = 无上界。
+    ///
+    /// 读谓词的空 `end` 是「空谓词」（#129），但 split 子区间的右端可以落在
+    /// keyspace 末尾；drain 必须把两种空语义分开，否则 split 到末尾时
+    /// 根本没人被挡住。
+    pub(crate) fn intersects_drain(&self, drain: &ReadRange) -> bool {
+        if !drain.end.is_empty() && drain.end <= drain.start {
+            return false;
+        }
+        let contains = |key: &[u8]| {
+            drain.start.as_slice() <= key && (drain.end.is_empty() || key < drain.end.as_slice())
+        };
+        self.points.iter().any(|point| contains(point))
+            || self.ranges.iter().any(|read| {
+                // 读集只把非空谓词放进 `ranges`；`read.end` 必然非空。
+                drain.start.as_slice() < read.end.as_slice()
+                    && (drain.end.is_empty() || read.start.as_slice() < drain.end.as_slice())
+            })
+    }
 }
 
 /// 一次 `Read` 对读集的增量。
@@ -178,11 +198,19 @@ pub(crate) enum ReadIntent<'a> {
 }
 
 impl ReadIntent<'_> {
-    /// 该读是否会碰到 `range`（空谓词不碰任何 key）。
-    fn intersects(&self, range: &ReadRange) -> bool {
+    /// 该读是否会碰到 drain 区间（`drain.end` 为空 = 无上界）。
+    fn intersects_drain(&self, drain: &ReadRange) -> bool {
+        let contains = |key: &[u8]| {
+            drain.start.as_slice() <= key && (drain.end.is_empty() || key < drain.end.as_slice())
+        };
         match self {
-            Self::Point(key) => range.contains(key),
-            Self::Range { start, end } => ReadRange::new(start, end).overlaps(range),
+            Self::Point(key) => contains(key),
+            Self::Range { start, end } => {
+                let read = ReadRange::new(start, end);
+                !read.is_empty()
+                    && drain.start.as_slice() < read.end.as_slice()
+                    && (drain.end.is_empty() || read.start.as_slice() < drain.end.as_slice())
+            }
         }
     }
 }
@@ -273,7 +301,7 @@ impl DrainGuard {
                 table
                     .sessions
                     .values()
-                    .filter(|session| session.read_set.intersects(&self.range))
+                    .filter(|session| session.read_set.intersects_drain(&self.range))
                     .count()
             };
             if active == 0 {
@@ -293,6 +321,26 @@ impl Drop for DrainGuard {
         let mut table = self.table.lock();
         if let Some(pos) = table.drains.iter().position(|range| range == &self.range) {
             table.drains.remove(pos);
+        }
+    }
+}
+
+/// split/merge 搬迁器的 drain 端口：复用会话表的同一套过期清理与 drain 标记。
+/// 超时返回 `Err` —— 调用方不得在未 drain 的区间上导出快照。
+#[async_trait::async_trait]
+impl crate::split_merge::SplitDrain for TxnSessions {
+    async fn drain(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<(), String> {
+        let guard = TxnSessions::drain(self, ReadRange::new(start, end));
+        match guard.wait(timeout).await {
+            DrainOutcome::Drained => Ok(()),
+            DrainOutcome::TimedOut { active } => Err(format!(
+                "split drain timed out with {active} active transaction(s)"
+            )),
         }
     }
 }
@@ -364,7 +412,11 @@ impl TxnSessions {
                 SessionError::NotFound
             });
         }
-        if table.drains.iter().any(|range| intent.intersects(range)) {
+        if table
+            .drains
+            .iter()
+            .any(|drain| intent.intersects_drain(drain))
+        {
             return Err(SessionError::Draining);
         }
         let session = table.sessions.get_mut(id).ok_or(SessionError::NotFound)?;
@@ -472,8 +524,9 @@ impl TxnSessions {
 
     /// 标记 `range` 进入 drain：新读命中该区间返回 `Draining`，
     /// 已存在且读集相交的会话通过 [`DrainGuard::wait`] 等待其结束/过期。
-    // G5（#163）消费；见 `ReadSet::intersects` 的说明。
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// drain 的 `range.end` 为空表示无上界（split 到 keyspace 末尾）。
+    // G5（#163）经 `SplitDrain` 端口消费；见 `ReadSet::intersects_drain` 的说明。
     pub(crate) fn drain(&self, range: ReadRange) -> DrainGuard {
         self.table.lock().drains.push(range.clone());
         DrainGuard {
@@ -715,6 +768,42 @@ mod tests {
             sessions.record_read(&id, ReadIntent::Point(b"d"), 10),
             Ok(1)
         );
+    }
+
+    #[tokio::test]
+    async fn split_drain_times_out_with_intersecting_session() {
+        use crate::split_merge::SplitDrain;
+
+        let sessions = TxnSessions::new();
+        let id = sessions.begin(1, Duration::from_secs(30));
+        sessions
+            .record_read(&id, ReadIntent::Point(b"m"), 10)
+            .unwrap();
+
+        let err = SplitDrain::drain(&sessions, b"m", b"", Duration::from_millis(20))
+            .await
+            .expect_err("an active intersecting session must block the drain");
+        assert!(err.contains("active transaction"), "{err}");
+
+        sessions.abort(&id);
+        SplitDrain::drain(&sessions, b"m", b"", Duration::from_secs(1))
+            .await
+            .expect("drain after the session ended");
+    }
+
+    #[tokio::test]
+    async fn split_drain_passes_without_intersecting_session() {
+        use crate::split_merge::SplitDrain;
+
+        let sessions = TxnSessions::new();
+        let id = sessions.begin(1, Duration::from_secs(30));
+        sessions
+            .record_read(&id, ReadIntent::Point(b"a"), 10)
+            .unwrap();
+
+        SplitDrain::drain(&sessions, b"m", b"", Duration::from_millis(20))
+            .await
+            .expect("an unrelated session must not block the drain");
     }
 
     #[tokio::test]
