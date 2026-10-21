@@ -299,6 +299,11 @@ impl RegionTable {
         Ok(table)
     }
 
+    /// 表里是否已有固定的 `/obj/` Region（对象存储启用时的启动校验）。
+    pub fn has_object_region(&self) -> bool {
+        self.regions.iter().any(is_object_region)
+    }
+
     pub fn get(&self, region_id: RegionId) -> Option<&RegionMeta> {
         self.regions.iter().find(|meta| meta.region_id == region_id)
     }
@@ -567,6 +572,21 @@ mod tests {
             .iter()
             .map(|m| (m.region_id, m.start_key.clone(), m.end_key.clone()))
             .collect()
+    }
+
+    #[test]
+    fn has_object_region_tracks_the_fixed_interval() {
+        let carved = table_with(vec![
+            meta(1, b"", b"/obj/"),
+            meta(2, b"/obj/", b"/obj0"),
+            meta(3, b"/obj0", b""),
+        ]);
+        assert!(carved.has_object_region());
+        let plain = table_with(vec![meta(1, b"", b"")]);
+        assert!(
+            !plain.has_object_region(),
+            "a spanning region is not the fixed interval"
+        );
     }
 
     #[test]

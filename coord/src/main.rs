@@ -2995,11 +2995,7 @@ async fn run_server(
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     continue;
                 }
-                if !table
-                    .regions
-                    .iter()
-                    .any(coord_server::storage::region_table::is_object_region)
-                {
+                if !table.has_object_region() {
                     return Err("region table is already initialized without the fixed \
                                 /obj/ region; enabling [object_storage] on an existing \
                                 [kv_t] cluster is not supported (no silent topology rewrite)"
