@@ -1041,6 +1041,25 @@ mod tests {
         assert!(checker.check(&left, &right).is_none(), "not adjacent");
         let ctx = ScheduleContext::new(vec![left, object, right], vec![]);
         assert!(checker.schedule(&ctx).is_empty());
+
+        // 遗留表：普通区间跨过 /obj/ 时仍可合并（对象存储关闭时那是普通前缀）
+        let straddle = make_region(
+            4,
+            5 * 1024 * 1024,
+            0,
+            b"".to_vec(),
+            b"/obj/x".to_vec(),
+            vec![],
+        );
+        let right2 = make_region(
+            5,
+            5 * 1024 * 1024,
+            0,
+            b"/obj/x".to_vec(),
+            b"".to_vec(),
+            vec![],
+        );
+        assert!(checker.check(&straddle, &right2).is_some());
     }
 
     #[test]

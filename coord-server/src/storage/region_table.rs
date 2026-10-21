@@ -18,13 +18,10 @@ use serde::{Deserialize, Serialize};
 use coord_core::error::{Error, Result};
 use coord_core::types::{RegionEpoch, RegionId, RegionMeta};
 
-use crate::storage::object_store::{key_in_object_space, OBJECT_PREFIX};
+use crate::storage::object_store::{key_in_object_space, OBJECT_PREFIX, OBJECT_SPACE_END};
 
 /// region 0 存整张表的单键。
 pub const REGION_TABLE_KEY: &[u8] = b"/_sys/pd/regions";
-
-/// 对象空间的字典序上界（半开区间 `[/obj/, /obj0)`，与对象存储守卫一致）。
-const OBJECT_SPACE_END: &[u8] = b"/obj0";
 
 /// 一次 Region 表变更（由 `RegionMetaOp::Apply` 成批承载）。
 /// Split/Merge 计划的方向（journal 与执行器共用）。
@@ -175,9 +172,9 @@ pub fn plan_merge(table: &RegionTable, left: RegionId, right: RegionId) -> Resul
 
 /// 是否是对象存储的固定 Region 区间（`[/obj/, /obj0)`）。
 ///
-/// 调度器用它跳过对象 Region；只保护「已按 ADR 固定出来的对象 Region」：还没有
-/// 对象区间时，普通 KV 区间跨过 `/obj/` 是合法形态（对象存储未启用），不能被
-/// merge 守卫无故锁死。
+/// 调度器用它跳过对象 Region，`RegionTable::has_object_region` 用它做启用对象存储
+/// 时的启动校验。只保护「已按 ADR 固定出来的对象 Region」：还没有对象区间时，普通
+/// KV 区间跨过 `/obj/` 是合法形态（对象存储未启用），不能被 merge 守卫无故锁死。
 pub fn is_object_region(meta: &RegionMeta) -> bool {
     meta.start_key == OBJECT_PREFIX && meta.end_key == OBJECT_SPACE_END
 }
@@ -188,7 +185,8 @@ pub fn is_object_region(meta: &RegionMeta) -> bool {
 /// 区间为单位工作——保留空间必须在拓扑里自带边界（ADR-0015 D6/D11.9）。纯计算：
 /// `first_new_id` 由调用方给（种子最大 id + 1，所有节点算出的值相同）；父 Region 收缩
 /// 为左段并保留自身 id/epoch/peers（父本身就是保留区间的左端点时不留左段，父 id
-/// 随之退役），空段不插入。已有固定对象 Region 时幂等返回它。
+/// 随之退役），右段拿 `first_new_id + 1`，空段不插入。已有固定对象 Region 时幂等
+/// 返回它。
 pub fn carve_object_region(
     regions: &mut Vec<RegionMeta>,
     first_new_id: RegionId,

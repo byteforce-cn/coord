@@ -190,10 +190,10 @@ fn test_merge_checker_skips_object_region() {
     let left = small(b"", b"/obj/");
     let object = small(b"/obj/", b"/obj0");
     assert!(checker.check(&left, &object).is_none());
-    // 遗留跨越区间的相邻对也不合并
+    // 遗留跨越区间的相邻对**仍可合并**：对象存储关闭时那是普通前缀（Ruling 4）
     let straddle = small(b"", b"/obj/x");
     let right = small(b"/obj/x", b"");
-    assert!(checker.check(&straddle, &right).is_none());
+    assert!(checker.check(&straddle, &right).is_some());
 }
 ```
 
@@ -206,7 +206,7 @@ Expected: FAIL —— 对象 Region 仍产生 `SplitRegion`（`check` 返回 `So
 
 - `SplitChecker::check`：`if is_object_region(region) || key_in_object_space(&split_key) { return None; }`（在阈值判断之前；跳过原因是保留空间，与阈值无关）。
 - `SplitChecker::schedule`：算出 `split_key` 后同样判定，命中则 `continue`（不产生 operator，也不退化成别的 key——换 key 是静默改计划）。
-- `MergeChecker::check`：`if is_object_region(left) || is_object_region(right) || range_touches_object_space(&left.start_key, &right.end_key) { return None; }`。
+- `MergeChecker::check`：`if is_object_region(left) || is_object_region(right) { return None; }`——按表形态判定（Ruling 4）：吸收固定对象 Region 已由形态拦住，跨 `/obj/` 的普通区间在对象存储关闭时仍必须可合并（既有用例锁定）。
 - 注释写「为什么」：对象 manifest/chunk 不随 KV split/merge 迁移（D6/D11.9）；调度器不产生 operator 是为了不让 executor 反复 Failed。
 
 - [ ] **Step 4: 跑测试确认通过**

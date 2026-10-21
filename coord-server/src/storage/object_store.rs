@@ -40,6 +40,11 @@ use crate::raft::type_config::ObjectStoreOp;
 
 /// 对象保留用户前缀（KV/Txn/Watch 对其拒绝；对象 manifest 存于其下）
 pub const OBJECT_PREFIX: &[u8] = b"/obj/";
+/// 保留空间的字典序上界（半开区间 `[/obj/, /obj0)`）。
+///
+/// 前缀的字典序上界不是「前缀 + 0xFF」而是下一个合法前缀：`/obj0` 是
+/// 字节序上第一个不以 `/obj/` 开头的 key。固定对象 Region 与区间守卫共用它。
+pub const OBJECT_SPACE_END: &[u8] = b"/obj0";
 /// manifest 用户前缀
 pub const MANIFEST_PREFIX: &[u8] = b"/obj/m/";
 /// 对象根子目录名（位于 raft 数据目录下，如 `<data_dir>/objects/`）
@@ -186,8 +191,8 @@ pub fn range_touches_object_space(start: &[u8], end: &[u8]) -> bool {
     if end.is_empty() || end == start {
         return key_in_object_space(start);
     }
-    // 对象空间 = [/obj/, "/obj0")（前缀的字典序上界）
-    let upper = b"/obj0".as_slice();
+    // 对象空间 = [/obj/, OBJECT_SPACE_END)（前缀的字典序上界）
+    let upper = OBJECT_SPACE_END;
     let below_start = end <= OBJECT_PREFIX; // 区间整体结束于空间起点之前
     let above_end = start >= upper; // 区间整体起始于空间终点之后
     !below_start && !above_end

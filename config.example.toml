@@ -40,6 +40,8 @@ data_dir = "/var/lib/coord"
 #     配置必须一致；本节点必须在 initial_nodes 中，且不支持 join 流程）；
 #   - 各 Region key range 必须平铺整个 keyspace：首个 start_key 为空、相邻
 #     首尾相接（无空洞/重叠）、最后一个 end_key 为空（无上界）；
+#   - [kv_t].enabled=true 后权威 Region 表在首次启动时由本段种子写入；此后
+#     本段不得再改（固定 /obj/ Region 的 id 由最大 id + 1 派生，改动会被拒绝）；
 #   - 仅首节点 bootstrap=true（负责初始化各 Region 成员），其余节点置
 #     bootstrap=false 等待 leader 复制；
 #   - v1 语义边界：
