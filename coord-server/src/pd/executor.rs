@@ -514,7 +514,7 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::raft::system_raft::SystemRaftHandle;
-    use crate::raft::type_config::{PdOp, PdQueueEntry};
+    use crate::raft::type_config::{IntentPhase, PdIntent, PdOp, PdQueueEntry};
 
     /// 可控 raft 替身：记录成员变更调用、可切换 leader 视图、维护成员表
     struct FakeRaft {
@@ -999,6 +999,8 @@ mod tests {
         leader: Mutex<Option<NodeID>>,
         queue: Mutex<Vec<PdQueueEntry>>,
         proposed: Mutex<Vec<PdOp>>,
+        table: Mutex<crate::storage::region_table::RegionTable>,
+        intents: Mutex<Vec<PdIntent>>,
         next_op_id: std::sync::atomic::AtomicU64,
     }
 
@@ -1008,6 +1010,8 @@ mod tests {
                 leader: Mutex::new(leader),
                 queue: Mutex::new(Vec::new()),
                 proposed: Mutex::new(Vec::new()),
+                table: Mutex::new(crate::storage::region_table::RegionTable::default()),
+                intents: Mutex::new(Vec::new()),
                 next_op_id: std::sync::atomic::AtomicU64::new(1),
             }
         }
@@ -1094,7 +1098,41 @@ mod tests {
                     }
                     Ok(1)
                 }
-                PdOp::RecordIntent { .. } | PdOp::Cutover { .. } | PdOp::ClearIntent { .. } => {
+                PdOp::RecordIntent { intent } => {
+                    let mut intents = self.intents.lock().unwrap();
+                    if !intents.iter().any(|i| i.op_id == intent.op_id) {
+                        intents.push(intent.clone());
+                    }
+                    Ok(1)
+                }
+                PdOp::Cutover { op_id } => {
+                    let mut intents = self.intents.lock().unwrap();
+                    if let Some(intent) = intents.iter_mut().find(|i| i.op_id == *op_id) {
+                        if intent.phase == IntentPhase::Prepared {
+                            let mut table = self.table.lock().unwrap();
+                            intent.phase = if table.version != intent.plan.expected_table_version {
+                                IntentPhase::Rejected {
+                                    reason: format!(
+                                        "region table moved to version {} (plan expected {})",
+                                        table.version, intent.plan.expected_table_version
+                                    ),
+                                }
+                            } else {
+                                match table.apply(&intent.plan.changes) {
+                                    Ok(_) => IntentPhase::Applied {
+                                        table_version: table.version,
+                                    },
+                                    Err(err) => IntentPhase::Rejected {
+                                        reason: err.to_string(),
+                                    },
+                                }
+                            };
+                        }
+                    }
+                    Ok(1)
+                }
+                PdOp::ClearIntent { op_id } => {
+                    self.intents.lock().unwrap().retain(|i| i.op_id != *op_id);
                     Ok(1)
                 }
             }
@@ -1102,6 +1140,26 @@ mod tests {
 
         fn pd_queue(&self) -> coord_core::error::Result<Vec<PdQueueEntry>> {
             Ok(self.queue.lock().unwrap().clone())
+        }
+
+        fn region_table(
+            &self,
+        ) -> coord_core::error::Result<crate::storage::region_table::RegionTable> {
+            Ok(self.table.lock().unwrap().clone())
+        }
+
+        fn pd_intents(&self) -> coord_core::error::Result<Vec<PdIntent>> {
+            Ok(self.intents.lock().unwrap().clone())
+        }
+
+        fn pd_intent(&self, op_id: u64) -> coord_core::error::Result<Option<PdIntent>> {
+            Ok(self
+                .intents
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.op_id == op_id)
+                .cloned())
         }
     }
 

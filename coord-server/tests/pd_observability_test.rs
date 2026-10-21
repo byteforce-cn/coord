@@ -162,6 +162,25 @@ impl SystemRaftHandle for FakeSystemRaft {
     fn pd_queue(&self) -> coord_core::error::Result<Vec<PdQueueEntry>> {
         Ok(self.queue.lock().unwrap().clone())
     }
+
+    fn region_table(
+        &self,
+    ) -> coord_core::error::Result<coord_server::storage::region_table::RegionTable> {
+        Ok(coord_server::storage::region_table::RegionTable::default())
+    }
+
+    fn pd_intents(
+        &self,
+    ) -> coord_core::error::Result<Vec<coord_server::raft::type_config::PdIntent>> {
+        Ok(Vec::new())
+    }
+
+    fn pd_intent(
+        &self,
+        _op_id: u64,
+    ) -> coord_core::error::Result<Option<coord_server::raft::type_config::PdIntent>> {
+        Ok(None)
+    }
 }
 
 /// Region raft 替身：leader = 本节点（1）；记录成员变更调用。

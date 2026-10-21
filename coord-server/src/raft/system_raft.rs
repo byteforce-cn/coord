@@ -24,7 +24,7 @@ use coord_core::error::{Error, Result};
 use coord_core::types::NodeID;
 
 use crate::raft::network::RaftNetworkFactoryImpl;
-use crate::raft::type_config::{Command, PdOp, PdQueueEntry, Response};
+use crate::raft::type_config::{Command, PdIntent, PdOp, PdQueueEntry, Response};
 use crate::raft::CoordRaft;
 use crate::storage::mvcc::MvccStorage;
 use crate::storage::redb_backend::RedbBackend;
@@ -50,6 +50,15 @@ pub trait SystemRaftHandle: Send + Sync {
 
     /// 读取 region 0 全局 PD 队列快照（op_id 升序）。
     fn pd_queue(&self) -> Result<Vec<PdQueueEntry>>;
+
+    /// 读取权威 Region 表（region 0 MVCC；缺失 = 未初始化的空表）。
+    fn region_table(&self) -> Result<crate::storage::region_table::RegionTable>;
+
+    /// 全部 split/merge intent（`op_id` 升序）。
+    fn pd_intents(&self) -> Result<Vec<PdIntent>>;
+
+    /// 单个 split/merge intent（缺失 = None）。
+    fn pd_intent(&self, op_id: u64) -> Result<Option<PdIntent>>;
 }
 
 /// 真实 region 0 raft 的 PD 治理句柄
@@ -143,6 +152,24 @@ impl SystemRaftHandle for CoordSystemRaftHandle {
         self.mvcc
             .pd_queue_entries()
             .map_err(|e| Error::Internal(format!("read region0 pd queue: {e}")))
+    }
+
+    fn region_table(&self) -> Result<crate::storage::region_table::RegionTable> {
+        self.mvcc
+            .region_table()
+            .map_err(|e| Error::Internal(format!("read region0 region table: {e}")))
+    }
+
+    fn pd_intents(&self) -> Result<Vec<PdIntent>> {
+        self.mvcc
+            .pd_intents()
+            .map_err(|e| Error::Internal(format!("read region0 pd intents: {e}")))
+    }
+
+    fn pd_intent(&self, op_id: u64) -> Result<Option<PdIntent>> {
+        self.mvcc
+            .pd_intent(op_id)
+            .map_err(|e| Error::Internal(format!("read region0 pd intent {op_id}: {e}")))
     }
 }
 
