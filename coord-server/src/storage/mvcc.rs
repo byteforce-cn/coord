@@ -113,6 +113,8 @@ pub(crate) fn encode_kv_meta_key(user_key: &[u8]) -> Vec<u8> {
 /// 快照覆盖已落地（SnapshotData v4 导出 `/_pd/` 域——见
 /// docs 与 `storage/snapshot.rs`）。
 pub const PD_QUEUE_PREFIX: &[u8] = b"/_pd/ops/";
+/// split/merge 执行意图（`/_pd/intents/{op_id:u64be}`）；与队列表同域持久化。
+pub const PD_INTENT_PREFIX: &[u8] = b"/_pd/intents/";
 
 /// 终态条目保留上限（超出删最旧终态；apply 期确定性裁剪，只依赖持久状态）
 const PD_QUEUE_MAX_TERMINAL: usize = 512;
@@ -384,6 +386,13 @@ struct TsoBatchRecord {
 }
 
 /// 队列键：`/_pd/ops/{op_id:u64be}`（定宽，前缀迭代即 op_id 升序）
+pub(crate) fn encode_pd_intent_key(op_id: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(PD_INTENT_PREFIX.len() + 8);
+    key.extend_from_slice(PD_INTENT_PREFIX);
+    key.extend_from_slice(&op_id.to_be_bytes());
+    key
+}
+
 pub(crate) fn encode_pd_op_key(op_id: u64) -> Vec<u8> {
     let mut key = Vec::with_capacity(PD_QUEUE_PREFIX.len() + 8);
     key.extend_from_slice(PD_QUEUE_PREFIX);
@@ -3107,8 +3116,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         revision: Revision,
         applied: AppliedLogId,
     ) -> Result<ApplyOutcome> {
-        use crate::raft::type_config::PdOp;
-        use crate::raft::type_config::PdQueueEntry;
+        use crate::raft::type_config::{IntentPhase, PdIntent, PdOp, PdQueueEntry};
 
         if self.changelog_contains_revision(revision)? {
             return Ok(ApplyOutcome::replayed());
@@ -3184,6 +3192,55 @@ impl<B: StorageBackend> MvccStorage<B> {
                         }
                     }
                 }
+                // split/merge journal（#162）：intent 写入 / 原子 cutover / 清理。
+                PdOp::RecordIntent { intent } => {
+                    // 首次写入生效：同一 op_id 的计划只算一次（重启/重复 propose
+                    // 不得覆盖已有阶段）。
+                    let key = encode_pd_intent_key(intent.op_id);
+                    if tx.get(TABLE_KV, &key)?.is_none() {
+                        tx.insert(TABLE_KV, &key, &intent.to_bytes()?)?;
+                    }
+                }
+                PdOp::Cutover { op_id } => {
+                    let key = encode_pd_intent_key(*op_id);
+                    if let Some(mut intent) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|v| PdIntent::from_bytes(&v))
+                    {
+                        if intent.phase == IntentPhase::Prepared {
+                            // 表写入与阶段推进必须同事务：否则崩溃后可能「表已改、
+                            // 日志仍 Prepared」，或反之。
+                            let mut table = match tx.get(TABLE_KV, REGION_TABLE_KEY)? {
+                                Some(bytes) => RegionTable::decode(&bytes)?,
+                                None => RegionTable::default(),
+                            };
+                            intent.phase = if table.version != intent.plan.expected_table_version {
+                                IntentPhase::Rejected {
+                                    reason: format!(
+                                        "region table moved to version {} (plan expected {})",
+                                        table.version, intent.plan.expected_table_version
+                                    ),
+                                }
+                            } else {
+                                match table.apply(&intent.plan.changes) {
+                                    Ok(_) => {
+                                        tx.insert(TABLE_KV, REGION_TABLE_KEY, &table.encode()?)?;
+                                        IntentPhase::Applied {
+                                            table_version: table.version,
+                                        }
+                                    }
+                                    Err(err) => IntentPhase::Rejected {
+                                        reason: err.to_string(),
+                                    },
+                                }
+                            };
+                            tx.insert(TABLE_KV, &key, &intent.to_bytes()?)?;
+                        }
+                    }
+                }
+                PdOp::ClearIntent { op_id } => {
+                    tx.remove(TABLE_KV, &encode_pd_intent_key(*op_id))?;
+                }
             }
 
             // 终态裁剪（确定性：键序 = op_id 升序 = 入队序，删最旧终态）
@@ -3215,6 +3272,39 @@ impl<B: StorageBackend> MvccStorage<B> {
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
 
             Ok(ApplyOutcome::applied())
+        })
+    }
+
+    // ──── split/merge intent journal（#162）────
+
+    /// 全部 split/merge intent（`op_id` 升序；损坏记录跳过并告警）。
+    pub fn pd_intents(&self) -> Result<Vec<crate::raft::type_config::PdIntent>> {
+        use crate::raft::type_config::PdIntent;
+
+        self.backend.read(|tx| {
+            let mut intents = Vec::new();
+            for (_, value) in tx.iter_prefix(TABLE_KV, PD_INTENT_PREFIX)? {
+                match PdIntent::from_bytes(&value) {
+                    Some(intent) => intents.push(intent),
+                    None => tracing::warn!(
+                        "pd intent journal: skipping undecodable intent record ({} bytes)",
+                        value.len()
+                    ),
+                }
+            }
+            intents.sort_by_key(|intent| intent.op_id);
+            Ok(intents)
+        })
+    }
+
+    /// 单个 intent（缺失 = None）。
+    pub fn pd_intent(&self, op_id: u64) -> Result<Option<crate::raft::type_config::PdIntent>> {
+        use crate::raft::type_config::PdIntent;
+
+        self.backend.read(|tx| {
+            Ok(tx
+                .get(TABLE_KV, &encode_pd_intent_key(op_id))?
+                .and_then(|v| PdIntent::from_bytes(&v)))
         })
     }
 
@@ -7378,6 +7468,34 @@ mod tests {
 
     // ──── TSO（#136）────
 
+    /// 种子一张单 Region 权烇表（region 1 = 全 keyspace），split/merge 用例共用。
+    fn init_single_region_table(storage: &MvccStorage<RedbBackend>) {
+        use crate::raft::type_config::RegionMetaOp;
+        use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta};
+
+        storage
+            .apply_region_meta_op(
+                &RegionMetaOp::Init {
+                    regions: vec![RegionMeta {
+                        region_id: 1,
+                        start_key: Vec::new(),
+                        end_key: Vec::new(),
+                        epoch: RegionEpoch::initial(),
+                        peers: vec![Peer {
+                            node_id: 1,
+                            raft_addr: "127.0.0.1:1".to_string(),
+                            role: PeerRole::Voter,
+                        }],
+                        approximate_size: 0,
+                        approximate_keys: 0,
+                    }],
+                },
+                1,
+                applied_for(1),
+            )
+            .unwrap();
+    }
+
     fn applied_for(index: u64) -> AppliedLogId {
         AppliedLogId {
             term: 1,
@@ -9780,6 +9898,176 @@ mod tests {
             MvccStorage::new(RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap())
                 .unwrap();
         assert_eq!(reopened.region_table().unwrap().version, 1);
+    }
+
+    #[test]
+    fn test_pd_cutover_applies_table_and_marks_intent_once() {
+        use crate::raft::type_config::{IntentPhase, PdIntent, PdOp};
+        use crate::storage::region_table::plan_split;
+
+        let (_dir, storage) = create_storage();
+        init_single_region_table(&storage);
+        let plan = plan_split(&storage.region_table().unwrap(), 1, b"m", 2).unwrap();
+        let intent = PdIntent {
+            op_id: 7,
+            owner: 1,
+            plan: plan.clone(),
+            phase: IntentPhase::Prepared,
+        };
+        storage
+            .apply_pd_op(
+                &PdOp::RecordIntent {
+                    intent: intent.clone(),
+                },
+                10,
+                applied_for(10),
+            )
+            .unwrap();
+        assert_eq!(storage.pd_intent(7).unwrap(), Some(intent.clone()));
+        assert_eq!(storage.pd_intents().unwrap().len(), 1);
+
+        storage
+            .apply_pd_op(&PdOp::Cutover { op_id: 7 }, 11, applied_for(11))
+            .unwrap();
+        let table = storage.region_table().unwrap();
+        assert_eq!(table.version, 2);
+        assert_eq!(table.get(1).unwrap().end_key, b"m");
+        assert_eq!(table.get(2).unwrap().start_key, b"m");
+        assert_eq!(
+            storage.pd_intent(7).unwrap().unwrap().phase,
+            IntentPhase::Applied { table_version: 2 }
+        );
+
+        // 重复 cutover：阶段已是 Applied，表不再前进（无重复副作用）。
+        storage
+            .apply_pd_op(&PdOp::Cutover { op_id: 7 }, 12, applied_for(12))
+            .unwrap();
+        assert_eq!(storage.region_table().unwrap(), table);
+        assert_eq!(
+            storage.pd_intent(7).unwrap().unwrap().phase,
+            IntentPhase::Applied { table_version: 2 }
+        );
+    }
+
+    #[test]
+    fn test_pd_cutover_rejects_stale_table_version() {
+        use crate::raft::type_config::{IntentPhase, PdIntent, PdOp};
+        use crate::storage::region_table::{plan_split, RegionChange};
+        use coord_core::types::RegionEpoch;
+
+        let (_dir, storage) = create_storage();
+        init_single_region_table(&storage);
+        let plan = plan_split(&storage.region_table().unwrap(), 1, b"z", 9).unwrap();
+        storage
+            .apply_pd_op(
+                &PdOp::RecordIntent {
+                    intent: PdIntent {
+                        op_id: 3,
+                        owner: 1,
+                        plan,
+                        phase: IntentPhase::Prepared,
+                    },
+                },
+                10,
+                applied_for(10),
+            )
+            .unwrap();
+
+        // 另一批合法变更把表推离计划视图（version 1 → 2）。
+        let mut moved = storage.region_table().unwrap().get(1).unwrap().clone();
+        moved.epoch = RegionEpoch {
+            conf_ver: 1,
+            version: 2,
+        };
+        storage
+            .apply_region_meta_op(
+                &crate::raft::type_config::RegionMetaOp::Apply {
+                    changes: vec![RegionChange::Update { meta: moved }],
+                },
+                11,
+                applied_for(11),
+            )
+            .unwrap();
+        assert_eq!(storage.region_table().unwrap().version, 2);
+
+        storage
+            .apply_pd_op(&PdOp::Cutover { op_id: 3 }, 12, applied_for(12))
+            .unwrap();
+        assert!(matches!(
+            storage.pd_intent(3).unwrap().unwrap().phase,
+            IntentPhase::Rejected { .. }
+        ));
+        let table = storage.region_table().unwrap();
+        assert_eq!(
+            table.version, 2,
+            "rejected cutover must not touch the table"
+        );
+        assert!(table.get(9).is_none(), "no child region on rejection");
+    }
+
+    #[test]
+    fn test_pd_clear_intent_is_idempotent() {
+        use crate::raft::type_config::{IntentPhase, PdIntent, PdOp};
+        use crate::storage::region_table::plan_split;
+
+        let (_dir, storage) = create_storage();
+        init_single_region_table(&storage);
+        let plan = plan_split(&storage.region_table().unwrap(), 1, b"m", 2).unwrap();
+        storage
+            .apply_pd_op(
+                &PdOp::RecordIntent {
+                    intent: PdIntent {
+                        op_id: 4,
+                        owner: 1,
+                        plan,
+                        phase: IntentPhase::Prepared,
+                    },
+                },
+                10,
+                applied_for(10),
+            )
+            .unwrap();
+        storage
+            .apply_pd_op(&PdOp::ClearIntent { op_id: 4 }, 11, applied_for(11))
+            .unwrap();
+        assert!(storage.pd_intent(4).unwrap().is_none());
+        storage
+            .apply_pd_op(&PdOp::ClearIntent { op_id: 4 }, 12, applied_for(12))
+            .unwrap();
+        assert!(storage.pd_intents().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_pd_intent_survives_reopen() {
+        use crate::raft::type_config::{IntentPhase, PdIntent, PdOp};
+        use crate::storage::region_table::plan_split;
+        use coord_core::types::StorageConfig;
+
+        let (dir, storage) = create_storage();
+        init_single_region_table(&storage);
+        let plan = plan_split(&storage.region_table().unwrap(), 1, b"m", 2).unwrap();
+        storage
+            .apply_pd_op(
+                &PdOp::RecordIntent {
+                    intent: PdIntent {
+                        op_id: 12,
+                        owner: 1,
+                        plan,
+                        phase: IntentPhase::Prepared,
+                    },
+                },
+                10,
+                applied_for(10),
+            )
+            .unwrap();
+        drop(storage);
+
+        let reopened =
+            MvccStorage::new(RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap())
+                .unwrap();
+        let intent = reopened.pd_intent(12).unwrap().expect("intent recovered");
+        assert_eq!(intent.phase, IntentPhase::Prepared);
+        assert_eq!(intent.plan.expected_table_version, 1);
     }
 
     #[test]

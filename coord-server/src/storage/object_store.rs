@@ -1532,6 +1532,9 @@ mod tests {
     }
 
     /// 到期自动轮换：写路径在间隔到期后推进 key_id
+    ///
+    /// 轮换判断用秒级墙钟：重载下相邻写之间也可能跨过 1s 先轮换一次。断言只钉
+    /// 「sleep 过间隔后的写一定推进 key_id」，不假设轮换恰好发生在哪一次写。
     #[test]
     fn test_chunk_auto_rotate_by_age() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1540,11 +1543,17 @@ mod tests {
         limits.dek_rotation_secs = 1;
         let store = ChunkStore::new(dir.path(), Arc::new(limits), Some(&key)).unwrap();
         store.write_chunk(b"b", b"o", 0, b"a").unwrap();
-        assert_eq!(store.active_key_id(), 1);
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         store.write_chunk(b"b", b"o", 1, b"b").unwrap();
-        assert_eq!(store.active_key_id(), 2);
+        // 首两次写可能已因重载跨过间隔而轮换；只要求 sleep 过间隔后的写继续推进。
+        let before_sleep = store.active_key_id();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store.write_chunk(b"b", b"o", 2, b"c").unwrap();
+        assert!(
+            store.active_key_id() > before_sleep,
+            "write after the rotation interval must advance the key id"
+        );
         assert_eq!(store.read_chunk(b"b", b"o", 0).unwrap(), b"a");
         assert_eq!(store.read_chunk(b"b", b"o", 1).unwrap(), b"b");
+        assert_eq!(store.read_chunk(b"b", b"o", 2).unwrap(), b"c");
     }
 }

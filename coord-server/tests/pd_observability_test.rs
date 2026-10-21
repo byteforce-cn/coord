@@ -155,11 +155,31 @@ impl SystemRaftHandle for FakeSystemRaft {
                 }
                 Ok(1)
             }
+            PdOp::RecordIntent { .. } | PdOp::Cutover { .. } | PdOp::ClearIntent { .. } => Ok(1),
         }
     }
 
     fn pd_queue(&self) -> coord_core::error::Result<Vec<PdQueueEntry>> {
         Ok(self.queue.lock().unwrap().clone())
+    }
+
+    fn region_table(
+        &self,
+    ) -> coord_core::error::Result<coord_server::storage::region_table::RegionTable> {
+        Ok(coord_server::storage::region_table::RegionTable::default())
+    }
+
+    fn pd_intents(
+        &self,
+    ) -> coord_core::error::Result<Vec<coord_server::raft::type_config::PdIntent>> {
+        Ok(Vec::new())
+    }
+
+    fn pd_intent(
+        &self,
+        _op_id: u64,
+    ) -> coord_core::error::Result<Option<coord_server::raft::type_config::PdIntent>> {
+        Ok(None)
     }
 }
 
@@ -433,7 +453,8 @@ fn test_operator_audit_events_recorded_global_queue_mode() {
         let ran = ex.execute_one(&*resolve).await;
         assert!(ran.is_some(), "executor should run leader-owned add-peer");
 
-        // 2) 失败路径：SplitRegion（v1 不支持）→ audit: failed（含原因）
+        // 2) 失败路径：SplitRegion（v1 静态拓扑 / 权威表未初始化 → fail-closed）
+        //    → audit: failed（含原因）
         system.seed_pending(
             Operator::SplitRegion {
                 region_id: 7,
@@ -500,8 +521,8 @@ fn test_operator_audit_events_recorded_global_queue_mode() {
         .collect();
     assert_eq!(failed.len(), 1, "expected one failed audit: {events:?}");
     assert!(
-        failed[0].detail.contains("not supported"),
-        "failed audit must carry reason: {}",
+        failed[0].detail.contains("split/merge is disabled"),
+        "failed audit must carry the fail-closed reason: {}",
         failed[0].detail
     );
     assert_eq!(failed[0].resource, "region/7", "resource = region/{{id}}");

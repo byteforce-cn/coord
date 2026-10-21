@@ -45,13 +45,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use coord_core::types::{NodeID, Peer, PeerRole, RegionId, RegionMeta};
+use coord_core::types::{NodeID, Peer, PeerRole, RegionEpoch, RegionId, RegionMeta};
 use tokio::time::MissedTickBehavior;
 
 use super::{now_unix_secs, op_summary, Operator, PlacementDriver};
 use crate::raft::region_runtime::RegionRaftHandle;
 use crate::raft::system_raft::SystemRaftHandle;
-use crate::raft::type_config::PdOp;
+use crate::raft::type_config::{IntentPhase, PdIntent, PdOp, PdQueueEntry};
+use crate::storage::region_table::{plan_merge, plan_split, RegionTable, SplitMergePlan};
 
 /// Region raft 解析器：region_id → 本节点上该 Region 的 raft 句柄
 ///
@@ -66,6 +67,40 @@ pub type RegionRaftResolver = dyn Fn(RegionId) -> Option<Arc<dyn RegionRaftHandl
 /// 稍后重试）。
 pub type AddPeerTargetResolver = dyn Fn(RegionId) -> Option<(NodeID, String)> + Send + Sync;
 
+/// Split/Merge 的数据搬迁钩子（#163/#164 提供真实实现）。
+///
+/// 契约：**幂等、可重入**。执行器在 cutover 前调用一次；进程重启后按 intent
+/// 重新进入时会再次调用同一计划。未装配钩子时执行器拒绝切表（fail-closed），
+/// 绝不在数据未搬迁时改写权威表。
+#[async_trait::async_trait]
+pub trait SplitMergeMigrator: Send + Sync {
+    async fn migrate(&self, plan: &SplitMergePlan) -> std::result::Result<(), String>;
+}
+
+/// 表拥有路由与 split version；PD 拥有成员（`peers`/`conf_ver`）与心跳统计。
+///
+/// 成员变更目前不经 Region 表提案，所以对账必须保留 meta store 的这两类字段，
+/// 否则 AddPeer 的结果会在下一拍被表里的种子值覆盖。
+fn merge_pd_meta(existing: RegionMeta, table: &RegionMeta) -> RegionMeta {
+    let peers = if existing.peers.is_empty() {
+        table.peers.clone()
+    } else {
+        existing.peers
+    };
+    RegionMeta {
+        region_id: table.region_id,
+        start_key: table.start_key.clone(),
+        end_key: table.end_key.clone(),
+        epoch: RegionEpoch {
+            conf_ver: existing.epoch.conf_ver.max(table.epoch.conf_ver),
+            version: table.epoch.version,
+        },
+        peers,
+        approximate_size: existing.approximate_size,
+        approximate_keys: existing.approximate_keys,
+    }
+}
+
 /// Operator 执行器：消费 `PlacementDriver` 队列中的 operator 并应用到
 /// 本节点可执行的 Region raft。
 pub struct OperatorExecutor {
@@ -77,6 +112,10 @@ pub struct OperatorExecutor {
     transfer_timeout: Duration,
     /// AddPeer 占位目标解析器（None = 不解析：node_id=0 的 AddPeer 直接失败）
     add_peer_resolver: Option<Arc<AddPeerTargetResolver>>,
+    /// Split/Merge 数据搬迁钩子（None = 未装配，split/merge fail-closed）
+    migrator: Option<Arc<dyn SplitMergeMigrator>>,
+    /// cutover 提出后等待本节点 region 0 视图可见的时长
+    cutover_timeout: Duration,
 }
 
 impl OperatorExecutor {
@@ -88,7 +127,21 @@ impl OperatorExecutor {
             node_id,
             transfer_timeout: Duration::from_secs(30),
             add_peer_resolver: None,
+            migrator: None,
+            cutover_timeout: Duration::from_secs(5),
         }
+    }
+
+    /// 装配 Split/Merge 数据搬迁钩子（未装配时 split/merge fail-closed）。
+    pub fn with_migrator(mut self, migrator: Arc<dyn SplitMergeMigrator>) -> Self {
+        self.migrator = Some(migrator);
+        self
+    }
+
+    /// 配置 cutover 结果等待超时（测试用）
+    pub fn with_cutover_timeout(mut self, timeout: Duration) -> Self {
+        self.cutover_timeout = timeout;
+        self
     }
 
     /// 配置 TransferLeader 等待超时（测试用）
@@ -145,7 +198,21 @@ impl OperatorExecutor {
             }
         };
 
-        // 2. 扫描 Pending 条目
+        // 2. 恢复/对账：先按已落地的 intent 收尾，再认领新 operator。
+        //
+        // 表是调度视图的唯一真源：每拍单向对账一次（空表 = v1，no-op）。
+        if let Ok(table) = system.region_table() {
+            if table.version > 0 {
+                if let Err(e) = self.reconcile_meta_store(&table) {
+                    tracing::warn!("PD executor: reconcile meta store from region table: {e}");
+                }
+            }
+        }
+        if let Some(op) = self.recover_intents(system, &queue).await {
+            return Some(op);
+        }
+
+        // 3. 扫描 Pending 条目
         for entry in &queue {
             if !entry.is_pending() {
                 continue;
@@ -218,13 +285,18 @@ impl OperatorExecutor {
                 .record_operator_event(&original, "claimed", &op_summary(&original));
 
             // 4. 执行 + 5. Complete
-            let outcome = match resolve(op.region_id()) {
-                Some(raft) => self.execute(&op, raft).await,
-                None => Err(format!(
-                    "region {} runtime not present on node {}",
-                    op.region_id(),
-                    self.node_id
-                )),
+            let outcome = match &op {
+                Operator::SplitRegion { .. } | Operator::MergeRegion { .. } => {
+                    self.execute_split_merge(op_id, &op).await
+                }
+                _ => match resolve(op.region_id()) {
+                    Some(raft) => self.execute(&op, raft).await,
+                    None => Err(format!(
+                        "region {} runtime not present on node {}",
+                        op.region_id(),
+                        self.node_id
+                    )),
+                },
             };
             let (success, msg) = match outcome {
                 Ok(()) => (true, String::new()),
@@ -320,24 +392,318 @@ impl OperatorExecutor {
                 region_id,
                 node_id,
                 raft_addr,
-            } => self
-                .exec_add_peer(*region_id, *node_id, raft_addr, raft.as_ref())
-                .await,
-            Operator::RemovePeer {
-                region_id,
-                node_id,
-            } => self.exec_remove_peer(*region_id, *node_id, raft.as_ref()).await,
-            Operator::TransferLeader {
-                region_id,
-                to_node,
-            } => self
-                .exec_transfer_leader(*region_id, *to_node, raft.as_ref())
-                .await,
+            } => {
+                self.exec_add_peer(*region_id, *node_id, raft_addr, raft.as_ref())
+                    .await
+            }
+            Operator::RemovePeer { region_id, node_id } => {
+                self.exec_remove_peer(*region_id, *node_id, raft.as_ref())
+                    .await
+            }
+            Operator::TransferLeader { region_id, to_node } => {
+                self.exec_transfer_leader(*region_id, *to_node, raft.as_ref())
+                    .await
+            }
             Operator::SplitRegion { .. } | Operator::MergeRegion { .. } => Err(format!(
-                "operator {} not supported in v1 (split/merge deferred to write-path consistency work)",
+                "{} requires a claimed queue operator (journal op id)",
                 op.name()
             )),
         }
+    }
+
+    // ──── Split / Merge（#162）────
+
+    /// 执行一个已认领的 split/merge operator。
+    ///
+    /// 顺序：读权威表 → （无 intent 时）计划 + 落 intent → 数据搬迁钩子 →
+    /// `PdOp::Cutover`（region 0 同事务原子改表 + 推进 intent 阶段）→ 等本节点
+    /// 视图看到结果 → 对账 `PdMetaStore` → 清 intent。
+    ///
+    /// 任何一步失败都返回 `Err`（调用方 `Complete{success=false}`）；表只在
+    /// cutover 里前进，失败路径不会留下半套拓扑。重启恢复复用同一入口：
+    /// intent 已在则沿用原计划，不重算边界。
+    async fn execute_split_merge(
+        &self,
+        op_id: u64,
+        op: &Operator,
+    ) -> std::result::Result<(), String> {
+        let system = self.pd.system_raft().ok_or_else(|| {
+            "split/merge requires the region 0 system raft (v1 static topology)".to_string()
+        })?;
+        let table = system
+            .region_table()
+            .map_err(|e| format!("read authoritative region table: {e}"))?;
+        if table.version == 0 {
+            return Err(
+                "region table is not initialized; split/merge is disabled (v1 static topology)"
+                    .to_string(),
+            );
+        }
+
+        let mut intent = match system
+            .pd_intent(op_id)
+            .map_err(|e| format!("read split/merge intent {op_id}: {e}"))?
+        {
+            Some(intent) => intent,
+            None => {
+                // 先确认搬迁钩子已装配，再产生任何副作用。
+                if self.migrator.is_none() {
+                    return Err(
+                        "split/merge data migration not wired (#163); refusing to cut over"
+                            .to_string(),
+                    );
+                }
+                let plan = match op {
+                    Operator::SplitRegion {
+                        region_id,
+                        split_key,
+                        new_region_id,
+                    } => plan_split(&table, *region_id, split_key, *new_region_id),
+                    Operator::MergeRegion { left, right } => plan_merge(&table, *left, *right),
+                    other => return Err(format!("{} is not a split/merge operator", other.name())),
+                }
+                .map_err(|e| format!("split/merge plan rejected: {e}"))?;
+                let intent = PdIntent {
+                    op_id,
+                    owner: self.node_id,
+                    plan,
+                    phase: IntentPhase::Prepared,
+                };
+                system
+                    .propose_pd(PdOp::RecordIntent {
+                        intent: intent.clone(),
+                    })
+                    .await
+                    .map_err(|e| format!("record split/merge intent {op_id}: {e}"))?;
+                intent
+            }
+        };
+
+        loop {
+            match intent.phase.clone() {
+                IntentPhase::Applied { .. } => {
+                    self.finalize_split_merge(system.as_ref(), op_id).await?;
+                    return Ok(());
+                }
+                IntentPhase::Rejected { reason } => {
+                    if let Err(e) = system.propose_pd(PdOp::ClearIntent { op_id }).await {
+                        tracing::warn!("PD split/merge: clear rejected intent {op_id}: {e}");
+                    }
+                    return Err(format!("split/merge cutover rejected: {reason}"));
+                }
+                IntentPhase::Prepared => {
+                    let migrator = self.migrator.as_ref().ok_or_else(|| {
+                        "split/merge data migration not wired (#163); refusing to cut over"
+                            .to_string()
+                    })?;
+                    migrator.migrate(&intent.plan).await?;
+                    system
+                        .propose_pd(PdOp::Cutover { op_id })
+                        .await
+                        .map_err(|e| format!("propose split/merge cutover {op_id}: {e}"))?;
+                    intent = self.wait_cutover(system.as_ref(), op_id).await?;
+                }
+            }
+        }
+    }
+
+    /// 轮询本节点 region 0 视图，直到 intent 离开 `Prepared`。
+    ///
+    /// `propose_pd` 在 region 0 leader 上 apply 后才返回；本节点是 follower 时
+    /// 本地视图可能滞后。超时返回错误但**保留 intent**：下一次恢复/GC 会按
+    /// 已落地的阶段继续，不会重复切表。
+    async fn wait_cutover(
+        &self,
+        system: &dyn SystemRaftHandle,
+        op_id: u64,
+    ) -> std::result::Result<PdIntent, String> {
+        let deadline = tokio::time::Instant::now() + self.cutover_timeout;
+        loop {
+            match system.pd_intent(op_id) {
+                Ok(Some(intent)) if intent.phase != IntentPhase::Prepared => return Ok(intent),
+                Ok(_) => {}
+                Err(e) => return Err(format!("read split/merge intent {op_id}: {e}")),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "split/merge cutover {op_id} outcome not visible on this node; intent retained"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// cutover 已生效后的收尾：单向对账 `PdMetaStore` + 清理 intent。
+    async fn finalize_split_merge(
+        &self,
+        system: &dyn SystemRaftHandle,
+        op_id: u64,
+    ) -> std::result::Result<(), String> {
+        let table = system
+            .region_table()
+            .map_err(|e| format!("read authoritative region table: {e}"))?;
+        self.reconcile_meta_store(&table)?;
+        system
+            .propose_pd(PdOp::ClearIntent { op_id })
+            .await
+            .map_err(|e| format!("clear split/merge intent {op_id}: {e}"))?;
+        Ok(())
+    }
+
+    /// 重启恢复与终态回收：**本节点认领中的** intent 继续执行，其余已终结
+    /// operator 的 intent 收尾清理。
+    ///
+    /// 只驱动 `claimed_by == 本节点` 的 Running 条目：单 owner 避免多节点并发
+    /// 迁移；崩溃后由 Running 超时 `Requeue` 让新 leader 重新认领并接手同一
+    /// intent（计划不重算）。
+    async fn recover_intents(
+        &self,
+        system: &dyn SystemRaftHandle,
+        queue: &[PdQueueEntry],
+    ) -> Option<Operator> {
+        let intents = match system.pd_intents() {
+            Ok(intents) => intents,
+            Err(e) => {
+                tracing::warn!("PD executor: read split/merge intents failed: {e}");
+                return None;
+            }
+        };
+        for intent in intents {
+            let entry = queue.iter().find(|e| e.op_id == intent.op_id);
+            if let Some(entry) = entry {
+                if entry.is_running() && entry.claimed_by == self.node_id {
+                    if intent.owner != self.node_id {
+                        tracing::info!(
+                            "PD executor: adopting split/merge intent {} written by node {}",
+                            intent.op_id,
+                            intent.owner
+                        );
+                    }
+                    let op = entry.op.clone();
+                    let outcome = self.execute_split_merge(intent.op_id, &op).await;
+                    let (success, msg) = match outcome {
+                        Ok(()) => (true, String::new()),
+                        Err(m) => (false, m),
+                    };
+                    if let Err(e) = system
+                        .propose_pd(PdOp::Complete {
+                            op_id: intent.op_id,
+                            node_id: self.node_id,
+                            success,
+                            error: msg.clone(),
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            "PD executor: complete resumed op {} failed: {e}",
+                            intent.op_id
+                        );
+                    }
+                    if success {
+                        self.pd
+                            .record_operator_event(&op, "success", &op_summary(&op));
+                    } else {
+                        self.pd.record_operator_event(
+                            &op,
+                            "failed",
+                            &format!("{}; error: {msg}", op_summary(&op)),
+                        );
+                    }
+                    return Some(op);
+                }
+                // 他节点在跑（或仍 Pending）：别抢。
+                if !entry.is_terminal() {
+                    continue;
+                }
+            }
+            // operator 已终结或已从队列裁掉：intent 不会再有执行者。
+            //
+            // `Applied` 补一次对账再清；`Prepared` 直接清（表未动，数据搬迁
+            // 可能已复制，目录回收归 #163）。失败原因已经在队列条目里审计过，
+            // 这里不再写第二份记录。
+            if matches!(intent.phase, IntentPhase::Applied { .. }) {
+                match system.region_table() {
+                    Ok(table) if table.version > 0 => {
+                        if let Err(e) = self.reconcile_meta_store(&table) {
+                            tracing::warn!(
+                                "PD executor: reconcile after applied intent {}: {e}",
+                                intent.op_id
+                            );
+                            continue;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "PD executor: read region table for intent {}: {e}",
+                            intent.op_id
+                        );
+                        continue;
+                    }
+                }
+            }
+            if let Err(e) = system
+                .propose_pd(PdOp::ClearIntent {
+                    op_id: intent.op_id,
+                })
+                .await
+            {
+                tracing::warn!(
+                    "PD executor: clear orphan intent {} via region 0 failed: {e}",
+                    intent.op_id
+                );
+            }
+        }
+        None
+    }
+
+    /// 把权威 Region 表单向同步到 `PdMetaStore`（调度器的读视图）。
+    ///
+    /// **只同步表拥有的字段**：路由区间（start/end）与 split version。`peers` /
+    /// `conf_ver` 仍由 PD 的 AddPeer/RemovePeer 写 meta store（成员变更尚未提案
+    /// 进表），心跳统计只存在于内存；若整条 `RegionMeta` 覆盖，每拍都会把这些
+    /// PD-only 写入回滚（AddPeer 被反复重新生成、size 驱动调度读到 0），还会
+    /// 每 Region 每拍多一次 durable 写。表里没有的 Region 删除；空表 = v1，no-op。
+    fn reconcile_meta_store(&self, table: &RegionTable) -> std::result::Result<(), String> {
+        if table.version == 0 {
+            return Ok(());
+        }
+        let store = self.pd.meta_store();
+        // 1) 更新表内已有 Region（表拥有路由与 split version）。
+        for meta in &table.regions {
+            if let Some(existing) = store.get_region(meta.region_id) {
+                let desired = merge_pd_meta(existing, meta);
+                if store.get_region(meta.region_id) != Some(desired.clone()) {
+                    store.update_region(desired).map_err(|e| {
+                        format!("pd meta store update region {}: {e}", meta.region_id)
+                    })?;
+                }
+            }
+        }
+        // 2) 先删表里已不存在的 Region（避免残留条目占用 start_key 索引）。
+        for existing in store.list_regions() {
+            if table.get(existing.region_id).is_none() {
+                match store.delete_region(existing.region_id) {
+                    Ok(()) => {}
+                    Err(coord_core::error::Error::RegionNotFound { .. }) => {}
+                    Err(e) => {
+                        return Err(format!(
+                            "pd meta store delete region {}: {e}",
+                            existing.region_id
+                        ))
+                    }
+                }
+            }
+        }
+        // 3) 再创建新 Region（split 子 Region / 表里新增的区间）。
+        for meta in &table.regions {
+            if store.get_region(meta.region_id).is_none() {
+                store
+                    .create_region(meta.clone())
+                    .map_err(|e| format!("pd meta store create region {}: {e}", meta.region_id))?;
+            }
+        }
+        Ok(())
     }
 
     // ──── 各 operator 的具体执行 ────
@@ -513,8 +879,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::watch;
 
+    use crate::pd::operator::OperatorStatus;
     use crate::raft::system_raft::SystemRaftHandle;
-    use crate::raft::type_config::{PdOp, PdQueueEntry};
+    use crate::raft::type_config::{IntentPhase, PdIntent, PdOp, PdQueueEntry};
 
     /// 可控 raft 替身：记录成员变更调用、可切换 leader 视图、维护成员表
     struct FakeRaft {
@@ -863,7 +1230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_split_region_not_supported() {
+    async fn test_direct_execute_rejects_split_without_queue_op_id() {
         let (_pd, ex, fake) = leader_fake(vec![voter(1)]);
         let op = Operator::SplitRegion {
             region_id: 1,
@@ -871,8 +1238,11 @@ mod tests {
             new_region_id: 2,
         };
         let raft: Arc<dyn RegionRaftHandle> = fake.clone();
-        let err = ex.execute(&op, raft).await.expect_err("split unsupported");
-        assert!(err.contains("not supported"), "err: {err}");
+        let err = ex.execute(&op, raft).await.expect_err("split needs op id");
+        assert!(
+            err.contains("requires a claimed queue operator"),
+            "err: {err}"
+        );
     }
 
     // ──── 队列驱动（execute_one / 执行循环）────
@@ -999,6 +1369,10 @@ mod tests {
         leader: Mutex<Option<NodeID>>,
         queue: Mutex<Vec<PdQueueEntry>>,
         proposed: Mutex<Vec<PdOp>>,
+        table: Mutex<crate::storage::region_table::RegionTable>,
+        intents: Mutex<Vec<PdIntent>>,
+        /// false = 模拟「cutover 已在 leader 落地，但本节点 region 0 视图尚未可见」
+        apply_cutover: AtomicBool,
         next_op_id: std::sync::atomic::AtomicU64,
     }
 
@@ -1008,6 +1382,9 @@ mod tests {
                 leader: Mutex::new(leader),
                 queue: Mutex::new(Vec::new()),
                 proposed: Mutex::new(Vec::new()),
+                table: Mutex::new(crate::storage::region_table::RegionTable::default()),
+                intents: Mutex::new(Vec::new()),
+                apply_cutover: AtomicBool::new(true),
                 next_op_id: std::sync::atomic::AtomicU64::new(1),
             }
         }
@@ -1020,6 +1397,56 @@ mod tests {
                 requester,
                 1_700_000_000,
             ));
+        }
+
+        /// 预置权威表（executor 的单测不需要真实 raft）。
+        fn seed_table(&self, table: crate::storage::region_table::RegionTable) {
+            *self.table.lock().unwrap() = table;
+        }
+
+        fn table(&self) -> crate::storage::region_table::RegionTable {
+            self.table.lock().unwrap().clone()
+        }
+
+        fn intents(&self) -> Vec<PdIntent> {
+            self.intents.lock().unwrap().clone()
+        }
+
+        /// 模拟本节点 region 0 视图滞后：Cutover 已提出但本地看不到结果。
+        fn set_apply_cutover(&self, apply: bool) {
+            self.apply_cutover.store(apply, Ordering::SeqCst);
+        }
+
+        /// 预置一条 Running 条目（模拟重启前已认领的 operator）。
+        fn seed_running(&self, op_id: u64, op: Operator, requester: NodeID, claimed_by: NodeID) {
+            self.queue.lock().unwrap().push(PdQueueEntry {
+                op_id,
+                op,
+                status: OperatorStatus::Running,
+                requester,
+                claimed_by,
+                proposed_at_unix: 1_700_000_000,
+                claimed_at_unix: 1_700_000_000,
+                error: String::new(),
+            });
+        }
+
+        /// 预置一条终态条目（成功/失败）。
+        fn seed_terminal(&self, op_id: u64, op: Operator, success: bool, error: &str) {
+            self.queue.lock().unwrap().push(PdQueueEntry {
+                op_id,
+                op,
+                status: if success {
+                    OperatorStatus::Success
+                } else {
+                    OperatorStatus::Failed(error.to_string())
+                },
+                requester: 1,
+                claimed_by: 1,
+                proposed_at_unix: 1_700_000_000,
+                claimed_at_unix: 1_700_000_000,
+                error: error.to_string(),
+            });
         }
 
         fn proposed_ops(&self) -> Vec<PdOp> {
@@ -1094,11 +1521,71 @@ mod tests {
                     }
                     Ok(1)
                 }
+                PdOp::RecordIntent { intent } => {
+                    let mut intents = self.intents.lock().unwrap();
+                    if !intents.iter().any(|i| i.op_id == intent.op_id) {
+                        intents.push(intent.clone());
+                    }
+                    Ok(1)
+                }
+                PdOp::Cutover { op_id } => {
+                    if !self.apply_cutover.load(Ordering::SeqCst) {
+                        return Ok(1);
+                    }
+                    let mut intents = self.intents.lock().unwrap();
+                    if let Some(intent) = intents.iter_mut().find(|i| i.op_id == *op_id) {
+                        if intent.phase == IntentPhase::Prepared {
+                            let mut table = self.table.lock().unwrap();
+                            intent.phase = if table.version != intent.plan.expected_table_version {
+                                IntentPhase::Rejected {
+                                    reason: format!(
+                                        "region table moved to version {} (plan expected {})",
+                                        table.version, intent.plan.expected_table_version
+                                    ),
+                                }
+                            } else {
+                                match table.apply(&intent.plan.changes) {
+                                    Ok(_) => IntentPhase::Applied {
+                                        table_version: table.version,
+                                    },
+                                    Err(err) => IntentPhase::Rejected {
+                                        reason: err.to_string(),
+                                    },
+                                }
+                            };
+                        }
+                    }
+                    Ok(1)
+                }
+                PdOp::ClearIntent { op_id } => {
+                    self.intents.lock().unwrap().retain(|i| i.op_id != *op_id);
+                    Ok(1)
+                }
             }
         }
 
         fn pd_queue(&self) -> coord_core::error::Result<Vec<PdQueueEntry>> {
             Ok(self.queue.lock().unwrap().clone())
+        }
+
+        fn region_table(
+            &self,
+        ) -> coord_core::error::Result<crate::storage::region_table::RegionTable> {
+            Ok(self.table.lock().unwrap().clone())
+        }
+
+        fn pd_intents(&self) -> coord_core::error::Result<Vec<PdIntent>> {
+            Ok(self.intents.lock().unwrap().clone())
+        }
+
+        fn pd_intent(&self, op_id: u64) -> coord_core::error::Result<Option<PdIntent>> {
+            Ok(self
+                .intents
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.op_id == op_id)
+                .cloned())
         }
     }
 
@@ -1278,5 +1765,485 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(3), handle)
             .await
             .expect("executor loop should exit on shutdown");
+    }
+
+    // ──── Split / Merge（#162）────
+
+    fn region_meta(id: RegionId, start: &[u8], end: &[u8]) -> RegionMeta {
+        RegionMeta {
+            region_id: id,
+            start_key: start.to_vec(),
+            end_key: end.to_vec(),
+            epoch: RegionEpoch::initial(),
+            peers: vec![voter(1)],
+            approximate_size: 0,
+            approximate_keys: 0,
+        }
+    }
+
+    fn single_region_table() -> crate::storage::region_table::RegionTable {
+        let mut table = crate::storage::region_table::RegionTable::default();
+        table.init(vec![region_meta(1, b"", b"")]).unwrap();
+        table
+    }
+
+    /// 迁移钩子替身：记录计划；可注入一次失败。
+    struct FakeMigrator {
+        calls: Mutex<Vec<crate::storage::region_table::SplitMergePlan>>,
+        fail: AtomicBool,
+    }
+
+    impl FakeMigrator {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                fail: AtomicBool::new(false),
+            })
+        }
+
+        fn calls(&self) -> Vec<crate::storage::region_table::SplitMergePlan> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn fail_next(&self) {
+            self.fail.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SplitMergeMigrator for FakeMigrator {
+        async fn migrate(
+            &self,
+            plan: &crate::storage::region_table::SplitMergePlan,
+        ) -> std::result::Result<(), String> {
+            self.calls.lock().unwrap().push(plan.clone());
+            if self.fail.load(Ordering::SeqCst) {
+                Err("migration failed".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn split_executor(
+        table: crate::storage::region_table::RegionTable,
+        migrator: Option<Arc<FakeMigrator>>,
+    ) -> (
+        Arc<PlacementDriver>,
+        OperatorExecutor,
+        Arc<FakeSystemRaft>,
+        Arc<FakeRaft>,
+    ) {
+        let (pd, ex, fake) = leader_fake(vec![voter(1)]);
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        system.seed_table(table);
+        pd.attach_system_raft(system.clone());
+        let ex = match migrator {
+            Some(m) => ex.with_migrator(m),
+            None => ex,
+        };
+        (pd, ex, system, fake)
+    }
+
+    fn resolver_for(fake: &Arc<FakeRaft>) -> Arc<RegionRaftResolver> {
+        let raft: Arc<dyn RegionRaftHandle> = fake.clone();
+        Arc::new(move |_rid| Some(raft.clone()))
+    }
+
+    #[tokio::test]
+    async fn test_split_operator_plans_intent_migrates_and_cuts_over() {
+        let migrator = FakeMigrator::new();
+        let (pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        system.seed_pending(
+            5,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            1,
+        );
+        let resolve = resolver_for(&fake);
+
+        let op = ex.execute_one(&*resolve).await.expect("operator executed");
+        assert_eq!(op.name(), "split-region");
+
+        let calls = migrator.calls();
+        assert_eq!(calls.len(), 1, "migration runs once before cutover");
+        assert_eq!(calls[0].expected_table_version, 1);
+        assert_eq!(calls[0].changes.len(), 2);
+
+        let table = system.table();
+        assert_eq!(table.version, 2);
+        assert_eq!(table.get(1).unwrap().end_key, b"m");
+        assert_eq!(table.get(2).unwrap().start_key, b"m");
+        assert!(system.intents().is_empty(), "intent cleared after success");
+
+        let entry = system.queue_entry(5).expect("entry present");
+        assert_eq!(entry.status, OperatorStatus::Success);
+
+        let parent = pd.meta_store().get_region(1).expect("parent");
+        assert_eq!(parent.end_key, b"m");
+        let child = pd.meta_store().get_region(2).expect("child reconciled");
+        assert_eq!(child.start_key, b"m");
+
+        // 重复执行：队列里没有 Pending 条目，不得再触发迁移。
+        assert!(ex.execute_one(&*resolve).await.is_none());
+        assert_eq!(migrator.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_split_without_migrator_fails_closed_before_side_effects() {
+        let (pd, ex, system, fake) = split_executor(single_region_table(), None);
+        system.seed_pending(
+            6,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            1,
+        );
+        let resolve = resolver_for(&fake);
+
+        ex.execute_one(&*resolve).await.expect("operator processed");
+        assert_eq!(system.table().version, 1, "table untouched");
+        assert!(system.intents().is_empty(), "no intent written");
+        assert!(pd.meta_store().get_region(2).is_none());
+        let entry = system.queue_entry(6).expect("entry present");
+        match entry.status {
+            OperatorStatus::Failed(reason) => {
+                assert!(reason.contains("not wired"), "reason: {reason}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_merge_operator_cuts_over_and_reconciles_meta_store() {
+        let mut table = crate::storage::region_table::RegionTable::default();
+        table
+            .init(vec![region_meta(1, b"", b"m"), region_meta(2, b"m", b"")])
+            .unwrap();
+        let migrator = FakeMigrator::new();
+        let (pd, ex, system, fake) = split_executor(table, Some(migrator.clone()));
+        pd.meta_store()
+            .create_region(region_meta(2, b"m", b""))
+            .unwrap();
+        system.seed_pending(7, Operator::MergeRegion { left: 1, right: 2 }, 1);
+        let resolve = resolver_for(&fake);
+
+        ex.execute_one(&*resolve).await.expect("operator executed");
+        assert_eq!(migrator.calls().len(), 1);
+        let table = system.table();
+        assert_eq!(table.version, 2);
+        assert_eq!(table.get(1).unwrap().end_key, b"");
+        assert!(table.get(2).is_none());
+        let parent = pd.meta_store().get_region(1).unwrap();
+        assert_eq!(parent.end_key, b"");
+        assert!(
+            pd.meta_store().get_region(2).is_none(),
+            "retired region removed from the meta store"
+        );
+        assert!(system.intents().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_split_migration_failure_keeps_table_and_intent_prepared() {
+        let migrator = FakeMigrator::new();
+        migrator.fail_next();
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        system.seed_pending(
+            9,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            1,
+        );
+        let resolve = resolver_for(&fake);
+        ex.execute_one(&*resolve).await.expect("operator processed");
+
+        assert_eq!(system.table().version, 1, "no cutover on migration failure");
+        let intents = system.intents();
+        assert_eq!(intents.len(), 1, "intent retained for recovery/GC");
+        assert_eq!(intents[0].phase, IntentPhase::Prepared);
+        match system.queue_entry(9).expect("entry").status {
+            OperatorStatus::Failed(reason) => {
+                assert!(reason.contains("migration failed"), "reason: {reason}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_split_cutover_rejected_when_table_version_moves() {
+        use crate::storage::region_table::{plan_split, RegionChange};
+        use coord_core::types::RegionEpoch;
+
+        let migrator = FakeMigrator::new();
+        let (pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        let plan = plan_split(&system.table(), 1, b"m", 2).unwrap();
+        system
+            .propose_pd(PdOp::RecordIntent {
+                intent: PdIntent {
+                    op_id: 8,
+                    owner: 1,
+                    plan,
+                    phase: IntentPhase::Prepared,
+                },
+            })
+            .await
+            .unwrap();
+        // 表在计划后前进：cutover 必须整批拒绝。
+        let mut bumped = region_meta(1, b"", b"");
+        bumped.epoch = RegionEpoch {
+            conf_ver: 1,
+            version: 2,
+        };
+        let mut table = system.table();
+        table
+            .apply(&[RegionChange::Update { meta: bumped }])
+            .unwrap();
+        system.seed_table(table);
+        system.seed_pending(
+            8,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            1,
+        );
+        let resolve = resolver_for(&fake);
+        ex.execute_one(&*resolve).await.expect("operator processed");
+
+        let entry = system.queue_entry(8).expect("entry present");
+        match entry.status {
+            OperatorStatus::Failed(reason) => {
+                assert!(reason.contains("rejected"), "reason: {reason}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(system.table().version, 2, "rejected cutover keeps table");
+        assert!(system.table().get(2).is_none());
+        assert!(system.intents().is_empty(), "rejected intent is cleared");
+        assert_eq!(migrator.calls().len(), 1);
+        assert!(pd.meta_store().get_region(2).is_none());
+    }
+
+    // ──── 重启恢复 / 终态 GC（#162）────
+
+    #[tokio::test]
+    async fn test_executor_resumes_prepared_intent_for_running_operator() {
+        use crate::storage::region_table::plan_split;
+
+        let migrator = FakeMigrator::new();
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        let plan = plan_split(&system.table(), 1, b"m", 2).unwrap();
+        system
+            .propose_pd(PdOp::RecordIntent {
+                intent: PdIntent {
+                    op_id: 5,
+                    owner: 1,
+                    plan,
+                    phase: IntentPhase::Prepared,
+                },
+            })
+            .await
+            .unwrap();
+        let op = Operator::SplitRegion {
+            region_id: 1,
+            split_key: b"m".to_vec(),
+            new_region_id: 2,
+        };
+        system.seed_running(5, op, 1, 1);
+        let resolve = resolver_for(&fake);
+
+        let done = ex.execute_one(&*resolve).await.expect("resumed operator");
+        assert_eq!(done.name(), "split-region");
+        assert_eq!(migrator.calls().len(), 1, "migration resumed once");
+        assert_eq!(system.table().version, 2);
+        assert!(system.intents().is_empty());
+        assert_eq!(
+            system.queue_entry(5).expect("entry").status,
+            OperatorStatus::Success
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_finalizes_applied_intent_then_cleans_it() {
+        use crate::storage::region_table::plan_split;
+
+        let migrator = FakeMigrator::new();
+        let (pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        let plan = plan_split(&system.table(), 1, b"m", 2).unwrap();
+        // 模拟「表已 cutover、Complete 未提出」：intent 已 Applied，表已 split。
+        system
+            .propose_pd(PdOp::RecordIntent {
+                intent: PdIntent {
+                    op_id: 6,
+                    owner: 1,
+                    plan,
+                    phase: IntentPhase::Prepared,
+                },
+            })
+            .await
+            .unwrap();
+        system.propose_pd(PdOp::Cutover { op_id: 6 }).await.unwrap();
+        let op = Operator::SplitRegion {
+            region_id: 1,
+            split_key: b"m".to_vec(),
+            new_region_id: 2,
+        };
+        system.seed_running(6, op, 1, 1);
+        let resolve = resolver_for(&fake);
+
+        ex.execute_one(&*resolve).await.expect("finalized operator");
+        assert!(
+            migrator.calls().is_empty(),
+            "applied cutover must not migrate again"
+        );
+        assert!(system.intents().is_empty());
+        assert_eq!(
+            system.queue_entry(6).expect("entry").status,
+            OperatorStatus::Success
+        );
+        assert!(
+            pd.meta_store().get_region(2).is_some(),
+            "meta store reconciled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_gc_rejects_prepared_intent_of_terminal_operator() {
+        use crate::storage::region_table::plan_split;
+
+        let migrator = FakeMigrator::new();
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        let plan = plan_split(&system.table(), 1, b"m", 2).unwrap();
+        system
+            .propose_pd(PdOp::RecordIntent {
+                intent: PdIntent {
+                    op_id: 7,
+                    owner: 1,
+                    plan,
+                    phase: IntentPhase::Prepared,
+                },
+            })
+            .await
+            .unwrap();
+        system.seed_terminal(
+            7,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            false,
+            "boom",
+        );
+        let resolve = resolver_for(&fake);
+
+        assert!(ex.execute_one(&*resolve).await.is_none());
+        assert!(system.intents().is_empty(), "orphan intent collected");
+        assert_eq!(system.table().version, 1, "no cutover for a dead operator");
+        assert!(migrator.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_executor_reconciles_meta_store_every_tick() {
+        use crate::storage::region_table::plan_split;
+
+        let migrator = FakeMigrator::new();
+        let (pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator));
+        let plan = plan_split(&system.table(), 1, b"m", 2).unwrap();
+        system
+            .propose_pd(PdOp::RecordIntent {
+                intent: PdIntent {
+                    op_id: 8,
+                    owner: 1,
+                    plan,
+                    phase: IntentPhase::Prepared,
+                },
+            })
+            .await
+            .unwrap();
+        system.propose_pd(PdOp::Cutover { op_id: 8 }).await.unwrap();
+        system
+            .propose_pd(PdOp::ClearIntent { op_id: 8 })
+            .await
+            .unwrap();
+        // 表已 split，但没有 operator；meta store 仍是旧拓扑。
+        assert!(pd.meta_store().get_region(2).is_none());
+        let resolve = resolver_for(&fake);
+
+        assert!(ex.execute_one(&*resolve).await.is_none());
+        assert_eq!(pd.meta_store().get_region(1).expect("parent").end_key, b"m");
+        assert!(pd.meta_store().get_region(2).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_tick_reconcile_preserves_pd_owned_heartbeat_and_membership() {
+        let migrator = FakeMigrator::new();
+        let (pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator));
+        // PD 侧写入的字段（心跳统计、成员变更）不是表拥有的：对账不得回滚。
+        pd.meta_store().update_region_stats(1, 4096, 32).unwrap();
+        let mut meta = pd.meta_store().get_region(1).unwrap();
+        meta.peers.push(voter(2));
+        meta.epoch.conf_ver += 1;
+        pd.meta_store().update_region(meta).unwrap();
+
+        assert!(ex.execute_one(&*resolver_for(&fake)).await.is_none());
+
+        let after = pd.meta_store().get_region(1).unwrap();
+        assert_eq!(after.approximate_size, 4096, "heartbeat size survives");
+        assert_eq!(after.approximate_keys, 32, "heartbeat keys survive");
+        assert_eq!(after.epoch.conf_ver, 2, "AddPeer conf_ver survives");
+        assert!(
+            after.peers.iter().any(|p| p.node_id == 2),
+            "AddPeer membership survives reconcile"
+        );
+        let _ = system;
+    }
+
+    #[tokio::test]
+    async fn test_cutover_timeout_retains_intent_and_gc_clears_it() {
+        let migrator = FakeMigrator::new();
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        let ex = ex.with_cutover_timeout(Duration::ZERO);
+        // 本节点视图滞后：Cutover 提出后 intent 仍停在 Prepared。
+        system.set_apply_cutover(false);
+        system.seed_pending(
+            11,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            1,
+        );
+        let resolve = resolver_for(&fake);
+        ex.execute_one(&*resolve).await.expect("operator processed");
+
+        match system.queue_entry(11).expect("entry").status {
+            OperatorStatus::Failed(reason) => {
+                assert!(reason.contains("not visible"), "reason: {reason}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            system.table().version,
+            1,
+            "table not cut over in the stale view"
+        );
+        assert_eq!(system.intents().len(), 1, "intent retained on timeout");
+
+        // 视图恢复后：终态 operator 的 Prepared intent 被 GC，不重试迁移。
+        system.set_apply_cutover(true);
+        ex.execute_one(&*resolve).await;
+        assert!(system.intents().is_empty(), "orphan intent collected");
+        assert_eq!(system.table().version, 1);
     }
 }

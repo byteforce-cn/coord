@@ -1155,11 +1155,31 @@ mod tests {
                     }
                     Ok(1)
                 }
+                PdOp::RecordIntent { .. } | PdOp::Cutover { .. } | PdOp::ClearIntent { .. } => {
+                    Ok(1)
+                }
             }
         }
 
         fn pd_queue(&self) -> coord_core::error::Result<Vec<PdQueueEntry>> {
             Ok(self.queue.lock().unwrap().clone())
+        }
+
+        fn region_table(
+            &self,
+        ) -> coord_core::error::Result<crate::storage::region_table::RegionTable> {
+            Ok(crate::storage::region_table::RegionTable::default())
+        }
+
+        fn pd_intents(&self) -> coord_core::error::Result<Vec<crate::raft::type_config::PdIntent>> {
+            Ok(Vec::new())
+        }
+
+        fn pd_intent(
+            &self,
+            _op_id: u64,
+        ) -> coord_core::error::Result<Option<crate::raft::type_config::PdIntent>> {
+            Ok(None)
         }
     }
 
