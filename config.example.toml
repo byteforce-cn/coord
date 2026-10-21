@@ -40,6 +40,8 @@ data_dir = "/var/lib/coord"
 #     配置必须一致；本节点必须在 initial_nodes 中，且不支持 join 流程）；
 #   - 各 Region key range 必须平铺整个 keyspace：首个 start_key 为空、相邻
 #     首尾相接（无空洞/重叠）、最后一个 end_key 为空（无上界）；
+#   - [kv_t].enabled=true 后权威 Region 表在首次启动时由本段种子写入；此后
+#     本段不得再改（固定 /obj/ Region 的 id 由最大 id + 1 派生，改动会被拒绝）；
 #   - 仅首节点 bootstrap=true（负责初始化各 Region 成员），其余节点置
 #     bootstrap=false 等待 leader 复制；
 #   - v1 语义边界：
@@ -133,7 +135,10 @@ idempotency_max_entries = 4096  # 幂等缓存容量（FIFO 淘汰）
 #   - 约束：全集群各节点配置必须一致；启用后不可热关（数据保留，服务消失）；
 #     enabled 与 multi_raft.legacy_migration 互斥（配置校验拒绝）；
 #     快照恢复的落后节点本地 chunk 被清空标记 rebuild（Get 返 UNAVAILABLE，
-#     客户端换节点重试——v1 已知边界）。
+#     客户端换节点重试——v1 已知边界）；
+#   - 与 [kv_t].enabled=true 同时启用时，启动期把 [/obj/, /obj0) 从
+#     multi_raft.initial_regions 切成独立固定 Region（manifest 与 chunk 不参与
+#     任意 KV split/merge）；已初始化的 Region 表缺该区间 → 拒绝启动。
 [object_storage]
 enabled = false
 # chunk_size_bytes = 4194304        # 单 chunk ≤ 4MiB（RPC 解码上限）
@@ -157,6 +162,8 @@ enabled = false
 # 前置：multi_raft.enabled = true 且 multi_raft.pd.enabled = true；
 # 与 multi_raft.legacy_migration / allow_unmigrated 互斥（v2 是 greenfield，
 # 不做 v1→v2 迁移，ADR-0015 D13）。
+# 与 [object_storage].enabled=true 同时启用时，[/obj/, /obj0) 在表种子期切成
+# 独立固定 Region（SplitChecker/MergeChecker 跳过，不参与任意 KV split/merge）。
 # 默认值逐字等于 ADR-0015 D9；改数值可以，改语义必须新增 ADR。
 [kv_t]
 enabled = false

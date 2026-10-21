@@ -56,6 +56,7 @@ use coord_server::storage::compaction::{CompactionConfig, CompactionManager};
 use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::object_store::{ChunkStore, ObjectLimits, ObjectStoreCtx};
 use coord_server::storage::redb_backend::RedbBackend;
+use coord_server::storage::region_table::RegionTable;
 use coord_server::timer::TimerWheel;
 use coord_server::tls::{self, TlsConfig};
 use coord_server::watch::WatchDispatcher;
@@ -2002,6 +2003,73 @@ async fn seed_region_table(
     }
 }
 
+/// 从 `[multi_raft].initial_regions` 派生启动 Region 种子。
+///
+/// `[kv_t]` 与对象存储同时启用时，把 `[/obj/, /obj0)` 切成独立固定 Region
+/// （ADR-0015 D6/D11.9），切出的种子同时喂给运行时装配、PD meta store 与 region 0
+/// 权威表。已有权威表（`table.version != 0`）时只校验、不重新切分：
+/// `RegionTable::init` 对已初始化的表是 no-op，而拒绝路径不能留下新建目录/PD 元数据
+/// 等副作用，所以配置漂移必须在这里 fail-closed。
+fn derive_region_seeds(
+    kv_t_enabled: bool,
+    object_storage_enabled: bool,
+    seeds: Vec<RegionSeed>,
+    peers: &[Peer],
+    table: &RegionTable,
+) -> Result<Vec<RegionSeed>, String> {
+    if !(kv_t_enabled && object_storage_enabled) {
+        return Ok(seeds);
+    }
+    let mut metas: Vec<RegionMeta> = seeds
+        .iter()
+        .map(|seed| RegionMeta {
+            region_id: seed.region_id,
+            start_key: seed.start_key.clone(),
+            end_key: seed.end_key.clone(),
+            epoch: RegionEpoch::initial(),
+            peers: peers.to_vec(),
+            approximate_size: 0,
+            approximate_keys: 0,
+        })
+        .collect();
+    let first_new_id = metas.iter().map(|m| m.region_id).max().unwrap_or(0) + 1;
+    if table.version != 0 {
+        let fixed = table
+            .regions
+            .iter()
+            .find(|m| coord_server::storage::region_table::is_object_region(m))
+            .ok_or_else(|| {
+                "region table is already initialized without the fixed /obj/ region; \
+                 enabling [object_storage] on an existing [kv_t] cluster is not supported \
+                 (no silent topology rewrite)"
+                    .to_string()
+            })?;
+        if fixed.region_id != first_new_id {
+            return Err(format!(
+                "fixed /obj/ region id drifted: the table has region {}, but \
+                 multi_raft.initial_regions implies {first_new_id}; initial_regions must not \
+                 change after the region table is seeded",
+                fixed.region_id
+            ));
+        }
+    }
+    let object_region =
+        coord_server::storage::region_table::carve_object_region(&mut metas, first_new_id)
+            .map_err(|e| format!("carve [/obj/, /obj0) out of multi_raft.initial_regions: {e}"))?;
+    tracing::info!(
+        object_region,
+        "fixed /obj/ region carved out of multi_raft.initial_regions"
+    );
+    Ok(metas
+        .into_iter()
+        .map(|m| RegionSeed {
+            region_id: m.region_id,
+            start_key: m.start_key,
+            end_key: m.end_key,
+        })
+        .collect())
+}
+
 // ──── Server 启动逻辑 ────
 
 async fn run_server(
@@ -2611,7 +2679,7 @@ async fn run_server(
     //   不在 region 表内）；
     // - region 表合法性（平铺/成员）由 Config::validate先行校验，
     //   装配函数再做防御性校验。
-    let region_seeds: Vec<RegionSeed> = cfg
+    let mut region_seeds: Vec<RegionSeed> = cfg
         .multi_raft
         .initial_regions
         .iter()
@@ -2632,6 +2700,27 @@ async fn run_server(
         })
         .collect();
 
+    // 6.5 固定 `/obj/` Region（#165）：对象 manifest 与 chunk 不参与任意 KV
+    //     split/merge（ADR-0015 D6/D11.9）。保留区间必须在拓扑里自带边界，所以在
+    //     派生运行期种子时把它从 `initial_regions` 切出来——同一份种子同时喂给
+    //     运行时装配、PD meta store 与 region 0 权威表，三处天然一致。
+    //
+    //     已有权威表时只校验、不重新切分：拒绝路径不能先建目录/写 PD 元数据，
+    //     所以读本地 region 0 store（启动前已打开）在这里做前置判定。
+    let region_table_at_boot = if cfg.kv_t.enabled && cfg.object_storage.enabled {
+        mvcc.region_table()
+            .map_err(|e| format!("read region table: {e}"))?
+    } else {
+        RegionTable::default()
+    };
+    region_seeds = derive_region_seeds(
+        cfg.kv_t.enabled,
+        cfg.object_storage.enabled,
+        region_seeds,
+        &region_peers,
+        &region_table_at_boot,
+    )?;
+
     let region_manager: Option<Arc<RegionManager>> = if cfg.multi_raft.enabled {
         let manager = spawn_configured_regions(
             node_id,
@@ -2650,7 +2739,7 @@ async fn run_server(
 
         tracing::info!(
             "Multi-Raft enabled: {} region(s) assembled on node {node_id} ({} peers)",
-            cfg.multi_raft.initial_regions.len(),
+            region_seeds.len(),
             region_peers.len()
         );
         Some(manager)
@@ -2935,6 +3024,35 @@ async fn run_server(
         }
         if let Err(err) = node.refresh_region_table() {
             tracing::warn!(error = %err, "initial region table refresh failed");
+        }
+        // 表种子对已初始化的表是幂等 no-op（`RegionTable::init`）：启用对象存储的
+        // 既有 v2 集群不会得到固定对象 Region。此时拒绝启动，绝不静默改写权威
+        // 拓扑（greenfield v2 无迁移，B-KVT-2）。种子响应可能来自转发的 leader，
+        // 本节点 apply 稍晚——先等本地表可见，再判定它是否含固定区间。
+        if cfg.object_storage.enabled {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let table = node
+                    .storage
+                    .region_table()
+                    .map_err(|e| format!("read region table: {e}"))?;
+                if table.version == 0 {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("region table never became visible on this node; \
+                                    cannot verify the fixed /obj/ region"
+                            .into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                if !table.has_object_region() {
+                    return Err("region table is already initialized without the fixed \
+                                /obj/ region; enabling [object_storage] on an existing \
+                                [kv_t] cluster is not supported (no silent topology rewrite)"
+                        .into());
+                }
+                break;
+            }
         }
     }
 
@@ -4706,5 +4824,129 @@ mod tests {
         let key = hex::encode([0x42u8; 32]);
         let loaded = load_or_create_root_key(dir.path(), Some(&key), true).unwrap();
         assert_eq!(loaded, vec![0x42u8; 32]);
+    }
+}
+
+#[cfg(test)]
+mod startup_region_tests {
+    use super::*;
+    use coord_core::types::{RegionEpoch, RegionMeta};
+    use coord_server::storage::region_table::RegionTable;
+
+    fn seed(region_id: u64, start: &[u8], end: &[u8]) -> RegionSeed {
+        RegionSeed {
+            region_id,
+            start_key: start.to_vec(),
+            end_key: end.to_vec(),
+        }
+    }
+
+    fn meta(region_id: u64, start: &[u8], end: &[u8]) -> RegionMeta {
+        RegionMeta {
+            region_id,
+            start_key: start.to_vec(),
+            end_key: end.to_vec(),
+            epoch: RegionEpoch::initial(),
+            peers: peers(),
+            approximate_size: 0,
+            approximate_keys: 0,
+        }
+    }
+
+    fn peers() -> Vec<Peer> {
+        vec![Peer {
+            node_id: 1,
+            raft_addr: "127.0.0.1:50052".to_string(),
+            role: PeerRole::Voter,
+        }]
+    }
+
+    fn table_of(regions: Vec<RegionMeta>) -> RegionTable {
+        let mut table = RegionTable::default();
+        table.init(regions).expect("init table");
+        table
+    }
+
+    fn ranges(seeds: &[RegionSeed]) -> Vec<(u64, Vec<u8>, Vec<u8>)> {
+        seeds
+            .iter()
+            .map(|s| (s.region_id, s.start_key.clone(), s.end_key.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn derive_keeps_v1_and_object_only_topologies_untouched() {
+        let seeds = vec![seed(1, b"", b"")];
+        for (kv_t, object) in [(false, false), (false, true), (true, false)] {
+            let derived = derive_region_seeds(
+                kv_t,
+                object,
+                seeds.clone(),
+                &peers(),
+                &RegionTable::default(),
+            )
+            .expect("no carve outside kv_t + object storage");
+            assert_eq!(derived, seeds, "kv_t={kv_t} object={object}");
+        }
+    }
+
+    #[test]
+    fn derive_carves_the_fixed_object_region_for_a_fresh_cluster() {
+        let derived = derive_region_seeds(
+            true,
+            true,
+            vec![seed(1, b"", b"")],
+            &peers(),
+            &RegionTable::default(),
+        )
+        .expect("carve");
+        assert_eq!(
+            ranges(&derived),
+            vec![
+                (1, b"".to_vec(), b"/obj/".to_vec()),
+                (2, b"/obj/".to_vec(), b"/obj0".to_vec()),
+                (3, b"/obj0".to_vec(), b"".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn derive_reuses_a_seeded_table_with_the_same_object_region() {
+        let table = table_of(vec![
+            meta(1, b"", b"/obj/"),
+            meta(2, b"/obj/", b"/obj0"),
+            meta(3, b"/obj0", b""),
+        ]);
+        let derived = derive_region_seeds(true, true, vec![seed(1, b"", b"")], &peers(), &table)
+            .expect("same ids on restart");
+        assert_eq!(
+            ranges(&derived)[1],
+            (2, b"/obj/".to_vec(), b"/obj0".to_vec())
+        );
+    }
+
+    #[test]
+    fn derive_rejects_an_initialized_table_without_the_fixed_region() {
+        let table = table_of(vec![meta(1, b"", b"")]);
+        let err =
+            derive_region_seeds(true, true, vec![seed(1, b"", b"")], &peers(), &table).unwrap_err();
+        assert!(err.contains("/obj/"), "err: {err}");
+        assert!(err.contains("not supported"), "err: {err}");
+    }
+
+    #[test]
+    fn derive_rejects_config_drift_after_the_table_was_seeded() {
+        // 表里固定区间 id = 5（种子当时最大 id 为 4）；配置现在最大 id = 1 → 推导出 2
+        let table = table_of(vec![
+            meta(1, b"", b"/obj/"),
+            meta(5, b"/obj/", b"/obj0"),
+            meta(6, b"/obj0", b""),
+        ]);
+        let err =
+            derive_region_seeds(true, true, vec![seed(1, b"", b"")], &peers(), &table).unwrap_err();
+        assert!(
+            err.contains("initial_regions must not change"),
+            "err: {err}"
+        );
     }
 }
