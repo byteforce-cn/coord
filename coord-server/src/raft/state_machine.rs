@@ -788,6 +788,14 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::RegionMeta(op) => {
+                // 表级拒绝随 outcome 返回（不失败 apply）；region 0 元数据记录，
+                // 不上 Watch、不推进业务 revision。
+                let outcome = sm
+                    .apply_region_meta_op(op, revision, applied)
+                    .map_err(io_err)?;
+                Ok((Response::RegionMeta { outcome }, None))
+            }
             Command::Lease(op) => {
                 let (outcome, changes) =
                     sm.apply_lease_op(op, revision, applied).map_err(io_err)?;

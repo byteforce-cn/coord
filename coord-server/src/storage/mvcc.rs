@@ -28,6 +28,7 @@ use crate::storage::commit_log::{
 use crate::storage::commit_log_shard::{
     CommitLogShardMeta, CommitLogShardTable, COMMIT_LOG_SHARD_TABLE_KEY,
 };
+use crate::storage::region_table::{RegionTable, REGION_TABLE_KEY};
 
 // ──── Key 空间常量 ────
 
@@ -3412,6 +3413,66 @@ impl<B: StorageBackend> MvccStorage<B> {
             .read(|tx| match tx.get(TABLE_KV, COMMIT_LOG_SHARD_TABLE_KEY)? {
                 Some(bytes) => CommitLogShardTable::decode(&bytes),
                 None => Ok(CommitLogShardTable::default()),
+            })
+    }
+
+    // ──── Region 元数据表（#159）────
+
+    /// 应用一条 Region 表命令（region 0 system raft）。
+    ///
+    /// 表级非法变更（区间不连续/epoch 回退/CAS 不符）只降级为 `Rejected` 并保持
+    /// 原表：元数据级拒绝不得让 raft apply 返回 `Err`（D11.5）。无论 applied 还是
+    /// rejected 都推进 `META_LAST_APPLIED`，避免重启后同一条命令被无限重放。
+    /// 不写 changelog、不上 Watch：表是内部控制面记录。
+    pub fn apply_region_meta_op(
+        &self,
+        op: &crate::raft::type_config::RegionMetaOp,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<crate::raft::type_config::RegionMetaOutcome> {
+        use crate::raft::type_config::{RegionMetaOp, RegionMetaOutcome};
+
+        self.backend.write(|tx| {
+            let mut table = match tx.get(TABLE_KV, REGION_TABLE_KEY)? {
+                Some(bytes) => RegionTable::decode(&bytes)?,
+                None => RegionTable::default(),
+            };
+            let result = match op {
+                RegionMetaOp::Init { regions } => table.init(regions.clone()),
+                RegionMetaOp::Apply { changes } => table.apply(changes),
+            };
+            let outcome = match result {
+                Ok(changed) => {
+                    if changed {
+                        tx.insert(TABLE_KV, REGION_TABLE_KEY, &table.encode()?)?;
+                    }
+                    RegionMetaOutcome::Applied {
+                        version: table.version,
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        revision,
+                        region_table_version = table.version,
+                        error = %err,
+                        "region table op rejected; table unchanged"
+                    );
+                    RegionMetaOutcome::Rejected {
+                        reason: err.to_string(),
+                    }
+                }
+            };
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(outcome)
+        })
+    }
+
+    /// 读取 region 0 的权威 Region 表（缺失 = 未初始化的空表）。
+    pub fn region_table(&self) -> Result<RegionTable> {
+        self.backend
+            .read(|tx| match tx.get(TABLE_KV, REGION_TABLE_KEY)? {
+                Some(bytes) => RegionTable::decode(&bytes),
+                None => Ok(RegionTable::default()),
             })
     }
 
@@ -9661,6 +9722,64 @@ mod tests {
             shards,
             "the same table is readable through the public accessor"
         );
+    }
+
+    #[test]
+    fn test_region_meta_ops_persist_and_reject_without_failing_apply() {
+        use crate::raft::type_config::{RegionMetaOp, RegionMetaOutcome};
+        use crate::storage::region_table::RegionChange;
+        use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta};
+
+        fn region(id: u64, start: &[u8], end: &[u8]) -> RegionMeta {
+            RegionMeta {
+                region_id: id,
+                start_key: start.to_vec(),
+                end_key: end.to_vec(),
+                epoch: RegionEpoch::initial(),
+                peers: vec![Peer {
+                    node_id: 1,
+                    raft_addr: "127.0.0.1:50052".to_string(),
+                    role: PeerRole::Voter,
+                }],
+                approximate_size: 0,
+                approximate_keys: 0,
+            }
+        }
+
+        let (dir, storage) = create_storage();
+        let init = RegionMetaOp::Init {
+            regions: vec![region(1, b"", b"")],
+        };
+        let out = storage
+            .apply_region_meta_op(&init, 1, applied_for(1))
+            .unwrap();
+        assert_eq!(out, RegionMetaOutcome::Applied { version: 1 });
+        assert_eq!(storage.region_table().unwrap().regions.len(), 1);
+
+        // 非法区间：整批拒绝、表与版本不变，apply 仍返回 Ok。
+        let bad = RegionMetaOp::Apply {
+            changes: vec![RegionChange::Add {
+                meta: region(2, b"zz", b""),
+            }],
+        };
+        let out = storage
+            .apply_region_meta_op(&bad, 2, applied_for(2))
+            .unwrap();
+        assert!(matches!(out, RegionMetaOutcome::Rejected { .. }));
+        assert_eq!(storage.region_table().unwrap().version, 1);
+
+        // 同一条 Init 重放：no-op，不 bump 版本。
+        let out = storage
+            .apply_region_meta_op(&init, 1, applied_for(1))
+            .unwrap();
+        assert_eq!(out, RegionMetaOutcome::Applied { version: 1 });
+
+        // 重启恢复：表从 TABLE_KV 读回。
+        drop(storage);
+        let reopened =
+            MvccStorage::new(RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap())
+                .unwrap();
+        assert_eq!(reopened.region_table().unwrap().version, 1);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # 能力边界清单（Scope & non-goals）
 
-> Owner: maintainers ｜ Last verified: 2026-10-18
+> Owner: maintainers ｜ Last verified: 2026-10-20
 
 本清单逐条列出各能力**明确不承诺**的边界，与承诺同等重要（见
 `apis/contracts/WHITEPAPER.md`）。每条都带可核对的实现锚点；凡「不承诺」，
@@ -88,6 +88,7 @@ v2 数据面**默认关闭**；以下边界在 GA 前一直有效。语义单一
 | B-KVT-7 | **TSO 批次允许空洞**：`commit_ts`/`read_ts` 不连续；客户端批次是进程内内存态，重启丢弃；服务端保证绝不复用，但**不承诺**时间戳可比较外部实时时间 | ADR-0015 D2/D12；`coord-proto/src/proto/coord/tso/v2/tso.proto` 头注 | 无（这是 TSO 的语义，不是缺陷）；若需要外部时间语义，另立时间源 |
 | B-KVT-8 | **v2 事务会话是节点本地的**：协调节点崩溃/重启或 TTL 到期 ⇒ `ABORTED` + `TXN_NOT_FOUND`，客户端重跑整个事务；commit 是 Sequencer 单次决策，不会部分提交 | ADR-0015 D12.2；`coord-proto/src/proto/coord/txn/v2/txn.proto` 头注 | 复制事务会话（成本高且不改变原子性证明）；当前不计划 |
 | B-KVT-9 | **事务 TTL 不续期；split drain 只覆盖读集**：TTL 从 `Begin` 起算，`Read` 不延长；到期回收后迟到请求 `ABORTED` + `TXN_NOT_FOUND`。drain 是协调节点本地原语：标记区间后拒绝与该区间相交的新读（`UNAVAILABLE`，退避重试），等待已有会话 commit/abort/TTL，等待有超时上限；OCC 读阶段没有 intent，abort 只丢弃会话。drain 只等待读集相交的会话；提交路径不因 drain 拒绝写（写侧路由由 #163 的 cutover/epoch 收口），盲写按 OCC 语义允许（不产生读集冲突） | ADR-0015 D4/D6/D12.2；`coord-server/src/kvt/txn.rs`（`DrainGuard`/`SessionError::Draining`）、`coord-server/src/kvt/services.rs`（`txn_session_status`） | 复制会话/跨节点 drain（成本高且不改变原子性证明）；drain 不阻塞写、不阻止 blind write |
+| B-KVT-10 | **动态 Region 表是 v2 元数据基座，不含运行时 spawn/PD 对账**：region 0 以单键 `/_sys/pd/regions` 存整表；add/update/remove 必须成批原子应用且满足区间平铺 / epoch 单调，非法批整批拒绝（apply 不返回 `Err`）；KV 入口按表版本刷新 `RegionManager`，`[kv_t].enabled=false` 时无表、无刷新。运行时 spawn/remove（#160）、split/merge 执行与 PD 对账（#162–#164）未交付前，在线 split/merge 仍不可用 | ADR-0015 D6；`coord-server/src/storage/region_table.rs`、`coord-server/src/raft/type_config.rs`（`RegionMetaOp`）、`coord-server/src/raft/region.rs`（`apply_region_table`）、`coord-server/src/server/mod.rs`（`refresh_region_table`）；判据：`coord-server/tests/kv_t_g5_region_table_test.rs`、`region_manager_test::test_apply_region_table_adds_updates_and_removes` | 运行时 spawn/生命周期（#160）；split/merge executor 与 PD 单向对账（#162–#164） |
 
 ---
 
