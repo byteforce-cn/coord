@@ -17,6 +17,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use common::bind_listener;
 
 use coord_core::error::Error;
@@ -36,7 +37,7 @@ use coord_server::raft::type_config::{
 use coord_server::raft::{
     new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, RegionRuntime,
 };
-use coord_server::split_merge::RangeImportTarget;
+use coord_server::split_merge::{RangeImportTarget, SplitDrain};
 use coord_server::storage::compaction::CompactionConfig;
 use coord_server::storage::mvcc::{KvMetadata, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
@@ -540,6 +541,76 @@ async fn test_lifecycle_precreates_split_target_and_promotes_after_cutover() {
         region_data_dir(harness._dir.path(), 2).exists(),
         "promoted region dir must never be reclaimed"
     );
+}
+
+struct NoopDrain;
+
+#[async_trait]
+impl SplitDrain for NoopDrain {
+    async fn drain(&self, _start: &[u8], _end: &[u8], _timeout: Duration) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// 生产接线路径（`main.rs` 调用的工厂）：源 Region 的 MVCC 从 `RegionManager`
+/// 解析，目标 Region 从 `RegionLifecycle` 的 pending 运行时解析——导入经目标
+/// raft，cutover 前目标仍不路由。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_production_migrator_wires_manager_source_and_pending_target() {
+    let harness = Harness::boot().await;
+    assert_eq!(
+        harness
+            .propose(RegionMetaOp::Init {
+                regions: vec![region(1, b"", b"", 1, 1)],
+            })
+            .await,
+        RegionMetaOutcome::Applied { version: 1 }
+    );
+    harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile table v1");
+
+    let parent = harness.wait_region_leader(1).await;
+    harness.put_v2(&parent, b"a", b"1", 10).await;
+    harness.put_v2(&parent, b"m", b"1", 11).await;
+    harness.put_v2(&parent, b"z", b"3", 12).await;
+
+    let intent = harness.split_intent(11, 1, b"m", 2);
+    harness
+        .propose_pd(PdOp::RecordIntent {
+            intent: intent.clone(),
+        })
+        .await;
+    let outcome = harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("pre-create target");
+    assert_eq!(outcome.pending_spawned, 1);
+
+    // 不手工等 leader：生产接线（factory 的目标端口）必须自己等过选举窗口。
+    let target = harness
+        .lifecycle
+        .migration_target(2)
+        .expect("pending target runtime");
+
+    let migrator = coord_server::split_merge::range_import_migrator(
+        &harness.manager,
+        &harness.lifecycle,
+        Arc::new(NoopDrain),
+    );
+    migrator
+        .migrate(&intent.plan)
+        .await
+        .expect("migration through production resolvers");
+
+    assert_eq!(target.mvcc.get(b"m").unwrap().as_deref(), Some(&b"1"[..]));
+    assert_eq!(target.mvcc.get(b"z").unwrap().as_deref(), Some(&b"3"[..]));
+    assert!(target.mvcc.get(b"a").unwrap().is_none(), "父区间左半不搬迁");
+    assert!(harness.manager.runtime(2).is_none(), "导入期间目标仍不路由");
+    assert_eq!(harness.manager.route(b"z").unwrap().region_id(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -45,7 +45,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
-use super::executor::{AddPeerTargetResolver, RegionRaftResolver};
+use super::executor::{AddPeerTargetResolver, RegionRaftResolver, SplitMergeMigrator};
 use super::meta_store::PdMetaStore;
 use super::types::NodeState;
 use super::{OperatorExecutor, PdConfig, PlacementDriver};
@@ -74,6 +74,8 @@ pub struct EmbeddedPd {
     pub meta_store: Arc<PdMetaStore>,
     /// 优雅关闭信号发送端
     shutdown_tx: watch::Sender<bool>,
+    /// operator 执行器（与执行循环共享；搬迁钩子可在 lifecycle 就绪后晚装）
+    executor: Arc<OperatorExecutor>,
     /// 后台循环句柄（scheduler / executor / heartbeat）
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -176,12 +178,12 @@ impl EmbeddedPd {
             driver: Arc::clone(&driver),
             meta_store,
             shutdown_tx,
+            executor: Arc::clone(&executor),
             handles: Mutex::new(vec![scheduler_handle, executor_handle, hb_handle]),
         });
 
         // executor / region_manager / nodes / region_ids / heartbeat_interval
-        // 已由各循环任务持 Arc 克隆；这里不再存储（避免冗余字段）。
-        drop(executor);
+        // 已由各循环任务持 Arc 克隆；这里保留 executor（供晚装迁移钩子）。
         drop(region_manager);
 
         tracing::info!(
@@ -192,6 +194,20 @@ impl EmbeddedPd {
             heartbeat_interval
         );
         Ok(embedded)
+    }
+
+    /// 安装 split/merge 数据搬迁钩子。
+    ///
+    /// `EmbeddedPd::start` 时 lifecycle 与节点会话表尚未装配，因此生产接线在
+    /// `main.rs` 的 Region lifecycle 就绪后调用本方法；安装前 split/merge
+    /// 一律 fail-closed（不写 intent、不切表）。
+    pub fn install_split_migrator(&self, migrator: Arc<dyn SplitMergeMigrator>) {
+        self.executor.set_migrator(migrator);
+    }
+
+    /// 当前安装的搬迁钩子（接线/测试断言用）。
+    pub fn split_migrator(&self) -> Option<Arc<dyn SplitMergeMigrator>> {
+        self.executor.migrator()
     }
 
     /// 本节点 ID
