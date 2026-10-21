@@ -2977,21 +2977,35 @@ async fn run_server(
         }
         // 表种子对已初始化的表是幂等 no-op（`RegionTable::init`）：启用对象存储的
         // 既有 v2 集群不会得到固定对象 Region。此时拒绝启动，绝不静默改写权威
-        // 拓扑（greenfield v2 无迁移，B-KVT-2）。
+        // 拓扑（greenfield v2 无迁移，B-KVT-2）。种子响应可能来自转发的 leader，
+        // 本节点 apply 稍晚——先等本地表可见，再判定它是否含固定区间。
         if cfg.object_storage.enabled {
-            let table = node
-                .storage
-                .region_table()
-                .map_err(|e| format!("read region table: {e}"))?;
-            if !table
-                .regions
-                .iter()
-                .any(coord_server::storage::region_table::is_object_region)
-            {
-                return Err("region table is already initialized without the fixed \
-                            /obj/ region; enabling [object_storage] on an existing \
-                            [kv_t] cluster is not supported (no silent topology rewrite)"
-                    .into());
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let table = node
+                    .storage
+                    .region_table()
+                    .map_err(|e| format!("read region table: {e}"))?;
+                if table.version == 0 {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("region table never became visible on this node; \
+                                    cannot verify the fixed /obj/ region"
+                            .into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                if !table
+                    .regions
+                    .iter()
+                    .any(coord_server::storage::region_table::is_object_region)
+                {
+                    return Err("region table is already initialized without the fixed \
+                                /obj/ region; enabling [object_storage] on an existing \
+                                [kv_t] cluster is not supported (no silent topology rewrite)"
+                        .into());
+                }
+                break;
             }
         }
     }
