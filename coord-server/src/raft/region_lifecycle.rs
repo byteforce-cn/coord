@@ -16,7 +16,7 @@
 // 成员变更（`meta.peers` 与 raft 成员集不一致）与 leader 转移不在本模块：v1 静态
 // 复制下每个 Region 的 peers 相同，按 Region 差异化分布归 #161/#162。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,15 +26,17 @@ use parking_lot::RwLock;
 
 use crate::metrics::Metrics;
 use crate::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
-use crate::raft::region::RegionManager;
+use crate::raft::region::{RegionHandle, RegionManager};
 use crate::raft::region_runtime::{
-    region_data_dir, RegionCompactProposer, RegionRuntime, RegionRuntimeSpec,
+    region_data_dir, spawn_region_runtime, RegionCompactProposer, RegionRuntime, RegionRuntimeSpec,
 };
+use crate::raft::type_config::IntentPhase;
 use crate::raft::{CoordRaft, RaftConfig};
 use crate::storage::compaction::{CompactProposer, CompactionConfig, CompactionManager};
 use crate::storage::mvcc::{MvccStorage, RevisionMode};
 use crate::storage::object_store::ObjectStoreCtx;
 use crate::storage::redb_backend::RedbBackend;
+use crate::storage::region_table::{RegionChange, RegionTable};
 
 /// 后台 reconcile 的默认间隔。
 ///
@@ -81,6 +83,12 @@ pub struct ReconcileOutcome {
     pub spawned: u64,
     /// 停机并摘除的运行时数量
     pub retired: u64,
+    /// 新预创建的 split 目标数量（cutover 前，未路由）
+    pub pending_spawned: u64,
+    /// cutover 后提升为正式 Region 的 split 目标数量
+    pub pending_promoted: u64,
+    /// 未 cutover 就被回收（停机）的 split 目标数量
+    pub pending_retired: u64,
 }
 
 struct RegionMember {
@@ -103,7 +111,11 @@ pub struct RegionLifecycle {
     metrics: Option<Arc<Metrics>>,
     safe_ts: Option<Arc<dyn crate::storage::compaction::SafeTsSource>>,
     compaction: CompactionConfig,
-    members: RwLock<std::collections::BTreeMap<RegionId, RegionMember>>,
+    members: RwLock<BTreeMap<RegionId, RegionMember>>,
+    /// cutover 前的 split 目标：raft 组已装配但**未注册路由**，也不参与
+    /// `RegionManager::list_runtimes`（safe_ts / watermark / decision apply 的
+    /// 聚合只看已 cutover 的 Region）。
+    pending: RwLock<BTreeMap<RegionId, Arc<RegionRuntime>>>,
     /// 串行化装配/停机：同一时刻只允许一个 Region 进出，避免「刚 spawn 就被
     /// 另一个 tick retire」的交错。
     transition: tokio::sync::Mutex<()>,
@@ -125,7 +137,8 @@ impl RegionLifecycle {
             metrics: spec.metrics,
             safe_ts: spec.safe_ts,
             compaction: spec.compaction,
-            members: RwLock::new(std::collections::BTreeMap::new()),
+            members: RwLock::new(BTreeMap::new()),
+            pending: RwLock::new(BTreeMap::new()),
             transition: tokio::sync::Mutex::new(()),
         }
     }
@@ -137,6 +150,25 @@ impl RegionLifecycle {
     /// 本节点已接管的 Region 数（= 有 CompactionManager 的 Region 数）。
     pub fn member_count(&self) -> usize {
         self.members.read().len()
+    }
+
+    /// cutover 前预创建的目标 Region 数（未路由）。
+    pub fn pending_count(&self) -> usize {
+        self.pending.read().len()
+    }
+
+    /// 预创建中的目标 Region 运行时（缺失 = None）。
+    pub fn pending_runtime(&self, region_id: RegionId) -> Option<Arc<RegionRuntime>> {
+        self.pending.read().get(&region_id).cloned()
+    }
+
+    /// 搬迁目标运行时：已接管的 Region 或 cutover 前的 pending 目标。
+    ///
+    /// 数据搬迁只经目标 Region 自己的 raft 写入；resolver 用它取目标，pending
+    /// 阶段不对外路由，因此不会提前服务读写。
+    pub fn migration_target(&self, region_id: RegionId) -> Option<Arc<RegionRuntime>> {
+        self.runtime(region_id)
+            .or_else(|| self.pending_runtime(region_id))
     }
 
     /// 该 Region 是否已有 CompactionManager（B-RG-1 的验收点）。
@@ -241,11 +273,130 @@ impl RegionLifecycle {
         Ok(true)
     }
 
-    /// 让运行时跟随本节点已 apply 的权威 Region 表。
+    /// 本节点需要预创建的 split 目标（intent journal 里尚未 cutover 的 Add）。
+    ///
+    /// 只认 `Prepared`/`Applied`：`Rejected` 计划不改表，目标不该继续占用 raft
+    /// 组。`Applied` 但表中尚无目标只出现在本节点视图滞后的窗口，按 pending 处理
+    /// 下一 tick 就会提升。
+    fn desired_pending_targets(
+        &self,
+        table: &RegionTable,
+    ) -> std::result::Result<Vec<RegionMeta>, String> {
+        let intents = self
+            .table
+            .pd_intents()
+            .map_err(|err| format!("read split/merge intents: {err}"))?;
+        let mut targets: BTreeMap<RegionId, RegionMeta> = BTreeMap::new();
+        for intent in intents {
+            if matches!(intent.phase, IntentPhase::Rejected { .. }) {
+                continue;
+            }
+            for change in &intent.plan.changes {
+                let RegionChange::Add { meta } = change else {
+                    continue;
+                };
+                if table.get(meta.region_id).is_none() && self.is_local_replica(meta) {
+                    targets.insert(meta.region_id, meta.clone());
+                }
+            }
+        }
+        Ok(targets.into_values().collect())
+    }
+
+    /// 装配一个未注册路由的目标 Region 运行时（cutover 前）。
+    ///
+    /// 数据搬迁必须经目标 Region 的 raft 日志，而 append 需要多数派副本都有该
+    /// 组；这里按 intent 的计划元数据先建组。路由仍由权威表驱动，因此 pending
+    /// 阶段不会提前服务读写。
+    async fn ensure_pending(&self, meta: &RegionMeta) -> std::result::Result<bool, String> {
+        let region_id = meta.region_id;
+        if !self.is_local_replica(meta) {
+            return Ok(false);
+        }
+        if self.pending.read().contains_key(&region_id) || self.manager.runtime(region_id).is_some()
+        {
+            return Ok(false);
+        }
+        let _guard = self.transition.lock().await;
+        if self.pending.read().contains_key(&region_id) || self.manager.runtime(region_id).is_some()
+        {
+            return Ok(false);
+        }
+        let spec = RegionRuntimeSpec {
+            meta: meta.clone(),
+            data_dir: region_data_dir(&self.base_dir, region_id),
+            raft_config: Arc::clone(&self.raft_config),
+            object_store: self.object_store.clone(),
+            revision_mode: self.revision_mode,
+        };
+        // 成员初始化只由 region 0 leader 提交（与数据 Region / Commit Log shard
+        // 组同约定）：其余节点用空成员集启动，从 leader 复制的日志里学会配置。
+        let initialize = self.region0_raft.current_leader().await == Some(self.node_id);
+        let handle = Arc::new(RegionHandle::new(meta.clone()));
+        let runtime = match spawn_region_runtime(
+            self.node_id,
+            &self.factory,
+            &self.rpc,
+            spec.clone(),
+            Arc::clone(&handle),
+            initialize,
+        )
+        .await
+        {
+            Ok(runtime) => runtime,
+            Err(err) if initialize => {
+                tracing::info!(
+                    region_id,
+                    error = %err,
+                    "pending region initialize failed (likely a concurrent initializer); retrying as follower"
+                );
+                spawn_region_runtime(self.node_id, &self.factory, &self.rpc, spec, handle, false)
+                    .await
+                    .map_err(|err| format!("pre-create split target region {region_id}: {err}"))?
+            }
+            Err(err) => return Err(format!("pre-create split target region {region_id}: {err}")),
+        };
+        self.pending.write().insert(region_id, runtime);
+        tracing::info!(
+            region_id,
+            node = self.node_id,
+            "split target runtime pre-created (unrouted)"
+        );
+        Ok(true)
+    }
+
+    /// 停机一个未 cutover 的目标 Region。
+    ///
+    /// shutdown 失败时保留 pending 待下一 tick 重试；数据目录保留（回收归
+    /// #163 后续切片）。`Ok(false)` = 本来就不在 pending。
+    async fn retire_pending(&self, region_id: RegionId) -> std::result::Result<bool, String> {
+        let _guard = self.transition.lock().await;
+        let Some(runtime) = self.pending.read().get(&region_id).cloned() else {
+            return Ok(false);
+        };
+        runtime
+            .raft
+            .shutdown()
+            .await
+            .map_err(|err| format!("pending region {region_id} raft shutdown failed: {err}"))?;
+        self.pending.write().remove(&region_id);
+        tracing::info!(
+            region_id,
+            node = self.node_id,
+            "split target runtime retired without cutover (data dir kept)"
+        );
+        Ok(true)
+    }
+
+    /// 让运行时跟随本节点已 apply 的权威 Region 表与 split/merge intent。
     ///
     /// 表未初始化（`version == 0`）→ no-op：`[kv_t]` 关闭的 v1 静态装配不受影响。
     /// 单个 Region 装配/停机失败只记日志（下一次 tick 重试），不阻断其它 Region，
     /// 也不回滚路由表——表是权威，运行时是它的派生状态。
+    ///
+    /// 顺序契约：先提升已 cutover 的 pending 目标（装入 runtimes），再让路由表
+    /// 收敛（复用同一 handle），然后装配/接管表内 Region，最后预创建尚未 cutover
+    /// 的 split 目标并回收表外运行时。
     pub async fn reconcile(&self) -> std::result::Result<ReconcileOutcome, String> {
         let table = self
             .table
@@ -254,10 +405,54 @@ impl RegionLifecycle {
         if table.version == 0 {
             return Ok(ReconcileOutcome::default());
         }
+
+        let desired_pending = self.desired_pending_targets(&table)?;
+        let desired_pending_ids: BTreeSet<RegionId> =
+            desired_pending.iter().map(|meta| meta.region_id).collect();
+        let mut outcome = ReconcileOutcome::default();
+
+        // cutover 生效：把预创建的运行时装入 runtimes（尚未注册路由），让
+        // `apply_region_table` 复用同一个 RegionHandle；intent 已消失且表里没有
+        // 的目标停机回收（目录保留）。
+        let pending_snapshot: Vec<(RegionId, Arc<RegionRuntime>)> = self
+            .pending
+            .read()
+            .iter()
+            .map(|(region_id, runtime)| (*region_id, Arc::clone(runtime)))
+            .collect();
+        for (region_id, runtime) in pending_snapshot {
+            match table.get(region_id) {
+                Some(meta) if self.is_local_replica(meta) => {
+                    if self.manager.attach_runtime(Arc::clone(&runtime)) {
+                        outcome.pending_promoted += 1;
+                    }
+                    self.pending.write().remove(&region_id);
+                }
+                Some(_) => {
+                    if let Err(err) = self.retire_pending(region_id).await {
+                        tracing::warn!(region_id, error = %err, "retire pending region failed; retrying on the next reconcile tick");
+                        continue;
+                    }
+                    outcome.pending_retired += 1;
+                }
+                None if !desired_pending_ids.contains(&region_id) => {
+                    match self.retire_pending(region_id).await {
+                        Ok(true) => outcome.pending_retired += 1,
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::warn!(region_id, error = %err, "retire pending region failed; retrying on the next reconcile tick")
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+
         let applied = self
             .manager
             .apply_region_table(&table)
             .map_err(|err| format!("apply authoritative region table v{}: {err}", table.version))?;
+        outcome.applied = applied;
 
         let desired: BTreeSet<RegionId> = table
             .regions
@@ -265,10 +460,6 @@ impl RegionLifecycle {
             .filter(|meta| self.is_local_replica(meta))
             .map(|meta| meta.region_id)
             .collect();
-        let mut outcome = ReconcileOutcome {
-            applied,
-            ..ReconcileOutcome::default()
-        };
 
         for meta in table
             .regions
@@ -291,6 +482,20 @@ impl RegionLifecycle {
                     region_id = meta.region_id,
                     error = %err,
                     "assemble region runtime failed; retrying on the next reconcile tick"
+                ),
+            }
+        }
+
+        // 尚未 cutover 的 split 目标：导入前每个副本都必须已有目标 raft 组，
+        // 否则目标 leader 的 append 打不到多数派。未路由、不参与数据面聚合。
+        for meta in &desired_pending {
+            match self.ensure_pending(meta).await {
+                Ok(true) => outcome.pending_spawned += 1,
+                Ok(false) => {}
+                Err(err) => tracing::warn!(
+                    region_id = meta.region_id,
+                    error = %err,
+                    "pre-create split target failed; retrying on the next reconcile tick"
                 ),
             }
         }
@@ -330,12 +535,20 @@ impl RegionLifecycle {
                 ticker.tick().await;
                 match this.reconcile().await {
                     Ok(outcome)
-                        if outcome.applied || outcome.spawned > 0 || outcome.retired > 0 =>
+                        if outcome.applied
+                            || outcome.spawned > 0
+                            || outcome.retired > 0
+                            || outcome.pending_spawned > 0
+                            || outcome.pending_promoted > 0
+                            || outcome.pending_retired > 0 =>
                     {
                         tracing::info!(
                             table_version = this.manager.table_version(),
                             spawned = outcome.spawned,
                             retired = outcome.retired,
+                            pending_spawned = outcome.pending_spawned,
+                            pending_promoted = outcome.pending_promoted,
+                            pending_retired = outcome.pending_retired,
                             "region lifecycle reconciled"
                         );
                     }
