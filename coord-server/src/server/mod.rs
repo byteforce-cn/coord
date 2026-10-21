@@ -703,8 +703,9 @@ impl CoordNode {
     ///
     /// region 模式经 `RegionManager::route_runtime` 路由，错误映射为既有 gRPC
     /// Status（RouteNotReady→unavailable / RegionNotFound→not_found /
-    /// KeyNotInRegion→invalid_argument）；legacy 模式返回 region 0 目标
-    /// （CoordNode 自有 storage/raft/raft_log_store，行为与现状一致）。
+    /// KeyNotInRegion→invalid_argument）；表已收敛但运行时未装配的 Region 按
+    /// RouteNotReady（可重试）返回，见 `route_runtime`。legacy 模式返回 region 0
+    /// 目标（CoordNode 自有 storage/raft/raft_log_store，行为与现状一致）。
     pub(crate) fn kv_target_for_key(&self, key: &[u8]) -> Result<KvTarget, tonic::Status> {
         if let Err(err) = self.refresh_region_table() {
             tracing::warn!(error = %err, "region table refresh failed; using current routing");
@@ -749,11 +750,11 @@ impl CoordNode {
             .map_err(map_err)?
             .into_iter()
             .map(|seg| {
-                let rt = manager.runtime(seg.region_id).ok_or_else(|| {
-                    map_err(coord_core::error::Error::RegionNotFound {
-                        region_id: seg.region_id,
-                    })
-                })?;
+                // 表已含该区间但运行时尚未装配（reconcile 窗口）→ 可重试，
+                // 不是 "region 不存在"。
+                let rt = manager
+                    .runtime(seg.region_id)
+                    .ok_or_else(|| map_err(coord_core::error::Error::RouteNotReady))?;
                 Ok(KvRangeSegment {
                     target: kv_target_from_runtime(&rt),
                     start: seg.start_key,

@@ -506,7 +506,7 @@
 | B-WF-8 | 无 UI 审批面、无 REST facade（`coord-ui` 仅影响评估） | 审批面仅 gRPC；Web 接入需另行立项建 facade |
 | B-WF-9 | `ReturnToNode` 重开席位不设 deadline | 重开后无自动提醒；靠 `AddSign`/`Terminate` 兜底 |
 | B-WF-10 | 审批命令不产生审批实例 `Faulted`；只收口 `Completed/Rejected/Cancelled/Terminated` | 版本/定义漂移故障落在工作流实例 `FAULTED`，不从命令返回 |
-| B-RG-1 / B-RG-2 | 不支持动态增删 region；region 模式 watch 拒绝跨 region | 静态拓扑规划；watch 前缀受限 |
+| B-RG-1 / B-RG-2 | v1 静态 Region 拓扑（`[kv_t]` 的表驱动生命周期已接线，但 split/merge 数据搬迁未交付）；region 模式 watch 拒绝跨 region | 静态拓扑规划；watch 前缀受限 |
 | B-CX-1 / B-CX-2 | 连接数上限但无寿命回收；客户端连接池机会式回收 | 容量规划考虑长连接占坑 |
 | B-SE-1..B-SE-8 | TLS fail-closed / KEK 注入 / dev 例外等安全边界 | 生产接入按 TLS+注入材料配置 |
 | B-PKI-1 | 非 HSM + 无吊销；`GetCertByCN`=私钥读取权 | 授权口径 + 轮换应急（§9） |
