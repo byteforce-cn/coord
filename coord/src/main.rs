@@ -2689,7 +2689,7 @@ async fn run_server(
 
         tracing::info!(
             "Multi-Raft enabled: {} region(s) assembled on node {node_id} ({} peers)",
-            cfg.multi_raft.initial_regions.len(),
+            region_seeds.len(),
             region_peers.len()
         );
         Some(manager)
