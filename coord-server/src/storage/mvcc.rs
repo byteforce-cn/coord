@@ -10038,6 +10038,39 @@ mod tests {
     }
 
     #[test]
+    fn test_pd_intent_survives_reopen() {
+        use crate::raft::type_config::{IntentPhase, PdIntent, PdOp};
+        use crate::storage::region_table::plan_split;
+        use coord_core::types::StorageConfig;
+
+        let (dir, storage) = create_storage();
+        init_single_region_table(&storage);
+        let plan = plan_split(&storage.region_table().unwrap(), 1, b"m", 2).unwrap();
+        storage
+            .apply_pd_op(
+                &PdOp::RecordIntent {
+                    intent: PdIntent {
+                        op_id: 12,
+                        owner: 1,
+                        plan,
+                        phase: IntentPhase::Prepared,
+                    },
+                },
+                10,
+                applied_for(10),
+            )
+            .unwrap();
+        drop(storage);
+
+        let reopened =
+            MvccStorage::new(RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap())
+                .unwrap();
+        let intent = reopened.pd_intent(12).unwrap().expect("intent recovered");
+        assert_eq!(intent.phase, IntentPhase::Prepared);
+        assert_eq!(intent.plan.expected_table_version, 1);
+    }
+
+    #[test]
     fn test_invalid_commit_log_shard_ops_do_not_fail_apply() {
         use crate::raft::type_config::CommitLogShardOp;
 

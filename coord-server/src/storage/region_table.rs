@@ -155,7 +155,9 @@ pub fn plan_merge(table: &RegionTable, left: RegionId, right: RegionId) -> Resul
 
     let mut merged = left_meta;
     merged.end_key = right_meta.end_key.clone();
-    merged.epoch.version += 1;
+    // 吸收更高 version 的右 Region 时，合并结果必须高于两者（否则 EPOCH_STALE
+    // 判据会在后续写入路径看到回退的版本）。
+    merged.epoch.version = merged.epoch.version.max(right_meta.epoch.version) + 1;
     Ok(SplitMergePlan {
         kind: SplitMergeKind::Merge,
         source_region: left,
@@ -710,6 +712,20 @@ mod tests {
         // 未固定对象区间时，普通区间跨过 /obj/ 仍可 merge（对象存储未启用）。
         let plain = table_with(vec![meta(1, b"", b"/obj0"), meta(2, b"/obj0", b"")]);
         assert!(plan_merge(&plain, 1, 2).is_ok(), "no fixed object region");
+
+        // 吸收更高 version 的右 Region 时，合并后的 version 不得回退。
+        let uneven = table_with(vec![
+            meta_epoch(1, b"", b"m", 1, 2),
+            meta_epoch(2, b"m", b"", 1, 5),
+        ]);
+        let plan = plan_merge(&uneven, 1, 2).expect("merge plan");
+        let mut next = uneven.clone();
+        next.apply(&plan.changes).expect("plan applies");
+        assert_eq!(
+            next.get(1).unwrap().epoch.version,
+            6,
+            "absorbed version must not regress"
+        );
     }
 
     #[test]

@@ -43,6 +43,12 @@
 - 数据搬迁实现（MVCC 行/lease/对象 manifest、drain）：`#163`/`#164`/`#165`；本切片只定义并调用钩子。
 - 多节点 leader 分布与 Region 差异化副本：仍按 v1「每 Region 复制到全部成员」。
 
+## 评审后追加（执行中）
+
+- 对账只同步表拥有的字段（路由 + split version），保留 PD-only 的 `peers`/`conf_ver` 与心跳统计；否则 AddPeer 每拍被回滚。
+- merge 的合并 version 取 `max(left, right) + 1`，避免吸收更高 version 时回退。
+- 补 cutover 超时与 intent 跨重启持久化用例。
+
 ## Review Focus
 
 - split_key 等于 Region 边界 / 落在 `/obj/` / 新 region id 已存在时，必须拒绝且表版本不变。
@@ -488,5 +494,5 @@ git commit -m "test(kv-t): prove split/merge cutover against a real region 0 raf
 git push -u origin fix/kv-t-g5-split-merge-executor
 gh pr create --base main --fill
 gh pr checks --watch
-gh pr merge --squash --delete-branch
+gh pr merge --merge --delete-branch
 ```

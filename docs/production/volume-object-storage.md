@@ -41,7 +41,7 @@ KV/Txn/Watch/Lease 等协调原语，高级能力全部由 Agent 落地。Server
 | Watch / Lease | per-Region 路由（跨 Region 显式拒绝）；lease 全局唯一（元数据存 region 0 全局租约表） | `coord-server/src/raft/` |
 | 快照 / 压缩 | per-Region 导出/恢复（`coord snapshot --region`）；各 Region 独立 compact 水位 | `coord-server/src/storage/snapshot*.rs`、`compaction.rs` |
 | 内嵌 PD | meta store 落盘 `<data_dir>/pd/pd-meta.db`；节点/Region 心跳（leader/size/keys）；operator 全局队列经 region 0 system raft，Running 超时重认领（failover）；调度暂停开关 + 审计 | `coord-server/src/pd/embedded.rs` |
-| Operator 种类 | AddPeer / RemovePeer / TransferLeader **可用**；SplitRegion / MergeRegion 操作符已定义但执行器返回 unsupported（v1 无在线 Split/Merge） | `coord-server/src/pd/operator.rs`、`executor.rs` |
+| Operator 种类 | AddPeer / RemovePeer / TransferLeader **可用**；SplitRegion / MergeRegion 由 G5 executor 真实执行表 cutover（region 0 intent/journal + CAS + `PdMetaStore` 对账），**数据搬迁钩子未接线时 fail-closed**（#163/#164），v1 静态拓扑不执行 | `coord-server/src/pd/operator.rs`、`coord-server/src/pd/executor.rs`、`coord-server/src/storage/region_table.rs` |
 | Region 指标 | `coord_region_size_bytes{region_id=…}` gauge + Region 面板 | `coord-server/src/metrics.rs`、`coord-ui` |
 
 ### 2.2 存储基座（直接约束对象存储形态）
@@ -81,8 +81,10 @@ KV/Txn/Watch/Lease 等协调原语，高级能力全部由 Agent 落地。Server
    总量线性膨胀——不可接受。
 3. **快照语义冲突**：现有快照是「单事务全量导出」，对象数据入快照会使恢复时间与
    备份体积不可控。
-4. **无在线 Split**：v1 静态 Region 表，executor 对 Split/Merge 返回 unsupported。
-   单 region 写热时无法自动拆分，只能靠运维扩 region 表。
+4. **无在线 Split（v1）/ 数据搬迁未接线（v2）**：v1 是静态 Region 表；v2 的
+   `SplitRegion`/`MergeRegion` executor 已能按 intent/journal 原子改写权威表，但在
+   `#163/#164` 提供搬迁钩子前一律 fail-closed（不切表），因此仍不能靠自动拆分
+   消化写热 Region。
 5. **生命周期缺失**：无 bucket/配额/过期/GC 语义；删除若只是 KV Delete，旧版本仍
    滞留 MVCC 至 compact，磁盘释放不可预期。
 6. **加密边界**：静态加密只覆盖 `/kv/`，对象 chunk 文件若明文落盘，与已有加密承诺
@@ -208,7 +210,7 @@ tombstone + 后台 GC。
 
 - `config.example.toml`：`[multi_raft]` / `[multi_raft.pd]` / `[storage]` / `[limits]` / `[security]` / `[object_storage]`
 - `coord-server/src/raft/region_runtime.rs`：`region_data_dir` 目录约定
-- `coord-server/src/pd/`：embedded / operator / executor（split unsupported 证据）
+- `coord-server/src/pd/`：embedded / operator / executor（split/merge intent journal、CAS cutover、PD 对账）
 - `coord-server/src/storage/`：mvcc / redb_backend / snapshot / compaction / write_batcher / disk_watermark / **object_store**
 - `coord-server/src/raft/type_config.rs`：`Command::ObjectStore` / `ObjectStoreOp`（末尾追加）
 - `coord-server/src/raft/state_machine.rs`：apply 臂 + `object_chunk_store` + 快照安装清 chunk
@@ -253,7 +255,7 @@ tombstone + 后台 GC。
 
 | 项 | 状态 |
 |:---|:---|
-| 在线 Split/Merge 启用后按存储字节自动拆热点 region | ⬜ 前置 = v1 无在线 split（executor unsupported） |
+| 在线 Split/Merge 启用后按存储字节自动拆热点 region | ⬜ 前置 = 数据搬迁与 drain 接线（#163/#164）；executor 表 cutover 已就绪 |
 | 复制因子可选 / 纠删码（缓解容量 1/3） | ⬜ 远期 |
 | chunk 加密根密钥轮换 / DEK 化（对齐 /kv/ key_management） | ✅ 已落地（2026-09-06）：KEK(HKDF) 包裹随机 DEK、key_id 版本化、`encryption_rotation_days` 自动轮换、v1 兼容读；单测含轮换/重启恢复/到期自动轮换 |
 
