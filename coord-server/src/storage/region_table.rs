@@ -175,10 +175,87 @@ pub fn plan_merge(table: &RegionTable, left: RegionId, right: RegionId) -> Resul
 
 /// 是否是对象存储的固定 Region 区间（`[/obj/, /obj0)`）。
 ///
-/// 只保护「已按 ADR 固定出来的对象 Region」：还没有对象区间时，普通 KV 区间
-/// 跨过 `/obj/` 是合法形态（对象存储未启用），不能被 merge 守卫无故锁死。
-fn is_object_region(meta: &RegionMeta) -> bool {
+/// 调度器用它跳过对象 Region；只保护「已按 ADR 固定出来的对象 Region」：还没有
+/// 对象区间时，普通 KV 区间跨过 `/obj/` 是合法形态（对象存储未启用），不能被
+/// merge 守卫无故锁死。
+pub fn is_object_region(meta: &RegionMeta) -> bool {
     meta.start_key == OBJECT_PREFIX && meta.end_key == OBJECT_SPACE_END
+}
+
+/// 把 `[/obj/, /obj0)` 从启动种子区间里切成独立固定 Region。
+///
+/// 对象 manifest 与 chunk 不参与任意 KV split/merge，而运行时与 PD 都以 Region
+/// 区间为单位工作——保留空间必须在拓扑里自带边界（ADR-0015 D6/D11.9）。纯计算：
+/// `first_new_id` 由调用方给（种子最大 id + 1，所有节点算出的值相同）；父 Region 收缩
+/// 为左段并保留自身 id/epoch/peers（父本身就是保留区间的左端点时不留左段，父 id
+/// 随之退役），空段不插入。已有固定对象 Region 时幂等返回它。
+pub fn carve_object_region(
+    regions: &mut Vec<RegionMeta>,
+    first_new_id: RegionId,
+) -> Result<RegionId> {
+    if first_new_id == 0 {
+        return Err(Error::InvalidArgument(
+            "region id 0 is reserved for the system raft".to_string(),
+        ));
+    }
+    if let Some(existing) = regions.iter().find(|m| is_object_region(m)) {
+        return Ok(existing.region_id);
+    }
+    if regions.iter().any(|m| m.region_id >= first_new_id) {
+        return Err(Error::InvalidArgument(format!(
+            "object region id {first_new_id} must be greater than every seeded region id"
+        )));
+    }
+    let parent_index = regions
+        .iter()
+        .position(|m| {
+            m.start_key.as_slice() <= OBJECT_PREFIX
+                && (m.end_key.is_empty() || m.end_key.as_slice() >= OBJECT_SPACE_END)
+        })
+        .ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "region seeds do not cover the fixed object interval [{}, {})",
+                String::from_utf8_lossy(OBJECT_PREFIX),
+                String::from_utf8_lossy(OBJECT_SPACE_END)
+            ))
+        })?;
+
+    let parent = regions[parent_index].clone();
+    let mut carved = Vec::with_capacity(regions.len() + 2);
+    for (index, meta) in regions.iter().enumerate() {
+        if index != parent_index {
+            carved.push(meta.clone());
+            continue;
+        }
+        if parent.start_key.as_slice() < OBJECT_PREFIX {
+            let mut left = meta.clone();
+            left.end_key = OBJECT_PREFIX.to_vec();
+            carved.push(left);
+        }
+        carved.push(RegionMeta {
+            region_id: first_new_id,
+            start_key: OBJECT_PREFIX.to_vec(),
+            end_key: OBJECT_SPACE_END.to_vec(),
+            epoch: parent.epoch,
+            peers: parent.peers.clone(),
+            approximate_size: 0,
+            approximate_keys: 0,
+        });
+        if parent.end_key.as_slice() != OBJECT_SPACE_END {
+            carved.push(RegionMeta {
+                region_id: first_new_id + 1,
+                start_key: OBJECT_SPACE_END.to_vec(),
+                end_key: parent.end_key.clone(),
+                epoch: parent.epoch,
+                peers: parent.peers.clone(),
+                approximate_size: 0,
+                approximate_keys: 0,
+            });
+        }
+    }
+    carved.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+    *regions = carved;
+    Ok(first_new_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +560,85 @@ mod tests {
         let mut meta = meta(region_id, start, end);
         meta.epoch = RegionEpoch { conf_ver, version };
         meta
+    }
+
+    fn ranges(regions: &[RegionMeta]) -> Vec<(RegionId, Vec<u8>, Vec<u8>)> {
+        regions
+            .iter()
+            .map(|m| (m.region_id, m.start_key.clone(), m.end_key.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn carve_splits_the_seed_at_the_object_space() {
+        let mut regions = vec![meta(1, b"", b"")];
+        assert_eq!(carve_object_region(&mut regions, 2).unwrap(), 2);
+        assert_eq!(
+            ranges(&regions),
+            vec![
+                (1, b"".to_vec(), b"/obj/".to_vec()),
+                (2, b"/obj/".to_vec(), b"/obj0".to_vec()),
+                (3, b"/obj0".to_vec(), b"".to_vec()),
+            ]
+        );
+        assert!(
+            is_object_region(&regions[1]),
+            "middle slice is the fixed region"
+        );
+        let table = RegionTable {
+            version: 1,
+            regions: regions.clone(),
+        };
+        table.validate().expect("carved table still tiles");
+    }
+
+    #[test]
+    fn carve_keeps_the_object_region_when_it_is_already_fixed() {
+        let mut regions = vec![
+            meta(1, b"", b"/obj/"),
+            meta(2, b"/obj/", b"/obj0"),
+            meta(3, b"/obj0", b""),
+        ];
+        let before = regions.clone();
+        assert_eq!(carve_object_region(&mut regions, 9).unwrap(), 2);
+        assert_eq!(regions, before, "fixed region keeps its id and epoch");
+    }
+
+    #[test]
+    fn carve_handles_a_seed_that_starts_at_the_object_space() {
+        let mut regions = vec![meta(1, b"", b"/obj/"), meta(2, b"/obj/", b"")];
+        assert_eq!(carve_object_region(&mut regions, 3).unwrap(), 3);
+        assert_eq!(
+            ranges(&regions),
+            vec![
+                (1, b"".to_vec(), b"/obj/".to_vec()),
+                (3, b"/obj/".to_vec(), b"/obj0".to_vec()),
+                (4, b"/obj0".to_vec(), b"".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn carve_rejects_seeds_that_do_not_cover_the_object_space() {
+        let mut regions = vec![meta(1, b"", b"/obj/m"), meta(2, b"/obj/m", b"")];
+        let before = regions.clone();
+        let err = carve_object_region(&mut regions, 3).unwrap_err();
+        assert!(err.to_string().contains("/obj/"), "err: {err}");
+        assert_eq!(regions, before, "rejected carve changes nothing");
+    }
+
+    #[test]
+    fn carve_rejects_zero_or_reused_ids() {
+        let mut regions = vec![meta(1, b"", b"")];
+        assert!(
+            carve_object_region(&mut regions, 0).is_err(),
+            "0 is reserved"
+        );
+        assert!(
+            carve_object_region(&mut regions, 1).is_err(),
+            "id already used"
+        );
+        assert_eq!(ranges(&regions), vec![(1, b"".to_vec(), b"".to_vec())]);
     }
 
     #[test]
