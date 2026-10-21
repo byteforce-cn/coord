@@ -307,7 +307,7 @@ v2 数据面（`coord.kv.v2` / `coord.txn.v2` / `coord.watch.v2` / `coord.lease.
 | `TXN_TOO_LARGE` | `INVALID_ARGUMENT` | 写集超过 `max_txn_bytes`（默认 4MiB） | 拆事务，不可重试 |
 | `READ_SET_TOO_LARGE` | `INVALID_ARGUMENT` | 读集条目/单次 range 读超过上限 | 拆事务，不可重试 |
 | `COMMIT_REJECTED` | `FAILED_PRECONDITION` | v2 写命令 `commit_ts` 不合法（<= current_revision 且未命中已有写入） | 不可重试（不变量违规） |
-| `EPOCH_STALE` | `ABORTED` | Region 路由 epoch 已过期（split/merge 已 cutover） | 刷新路由/epoch 后重试 |
+| `EPOCH_STALE` | `ABORTED` | 请求 metadata `coord-routing-epoch` 与本节点已应用的 Region 表 `version` 不一致（客户端过旧，或本节点尚未 apply）；错误 trailing metadata 回传当前 `version` | 刷新路由/epoch 后重试 |
 | `HISTORY_UNAVAILABLE` | `OUT_OF_RANGE` | Watch 起始位点超出保留窗口 | 全量重同步 |
 | `SAFE_TS_LAG` | `UNAVAILABLE` | `read_ts` 等待 safe_ts 超时（Region apply 落后） | 退避重试 |
 

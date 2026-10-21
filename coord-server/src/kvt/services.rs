@@ -8,6 +8,7 @@
 //! reflection 仍然可见，便于客户端在连接阶段就发现"这个集群没有 KV-T"，而不是
 //! 拿到 `UNAVAILABLE` 后误判为网络故障。
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
@@ -142,6 +143,66 @@ fn v2_status(err: Error) -> Status {
         Some(code) => attach(status, code),
         None => status,
     }
+}
+
+/// 路由版本 metadata key（ADR-0015 D12.5）：十进制 u64。
+pub const ROUTING_EPOCH_METADATA_KEY: &str = "coord-routing-epoch";
+
+/// 校验请求携带的 `coord-routing-epoch`（#161）。
+///
+/// 取值是**权威 Region 表的 `version`**（全局路由版本）。不能用 per-Region 的
+/// `RegionEpoch{conf_ver, version}`：一个 u64 表达不了一对分量，而 Range/Txn 的
+/// 一次请求在 split 后可能横跨 version 不同的两个 Region。
+///
+/// - 未携带：不校验（proto 头注允许；单 Region / 尚未学到版本的客户端）；
+/// - 与本地已应用版本一致：放行；
+/// - 不一致（客户端过旧，或本节点还没 apply 到该版本）：`ABORTED` +
+///   `EPOCH_STALE`，并在 trailing metadata 回传本节点当前版本；
+/// - 非法值：`INVALID_ARGUMENT`（静默忽略会让调用方以为 epoch 生效了）。
+///
+/// `[kv_t]` 关闭 / 无 RegionManager 时直接放行，v1 行为不变（ADR-0001）。
+pub(crate) fn guard_routing_epoch(
+    node: &CoordNode,
+    metadata: &tonic::metadata::MetadataMap,
+) -> Result<(), Status> {
+    let Some(manager) = node.region_manager.as_ref() else {
+        return Ok(());
+    };
+    let Some(raw) = metadata.get(ROUTING_EPOCH_METADATA_KEY) else {
+        return Ok(());
+    };
+    let client = raw
+        .to_str()
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .ok_or_else(|| {
+            attach(
+                Status::invalid_argument("coord-routing-epoch must be a decimal u64"),
+                CoordErrorCode::InvalidArgument,
+            )
+        })?;
+    // 请求路径也是表收敛点（与 `kv_target_for_key` 同一口径）：先按本地已 apply
+    // 的表刷新，避免把“本节点还没刷新”误报成客户端的 epoch 过期。
+    if let Err(err) = node.refresh_region_table() {
+        tracing::warn!(error = %err, "region table refresh failed; checking routing epoch against the current route table");
+    }
+    let current = manager.table_version();
+    if client == current {
+        return Ok(());
+    }
+    let mut status = attach(
+        Status::new(
+            tonic::Code::Aborted,
+            format!("stale routing epoch {client}; server has {current} (refresh route and retry)"),
+        ),
+        CoordErrorCode::EpochStale,
+    );
+    if let Ok(value) = tonic::metadata::MetadataValue::from_str(&current.to_string()) {
+        status
+            .metadata_mut()
+            .insert(ROUTING_EPOCH_METADATA_KEY, value);
+    }
+    Err(status)
 }
 
 fn require_positive_ts(name: &str, ts: i64) -> Result<u64, Status> {
@@ -317,6 +378,7 @@ impl kv_v2::kv_server::Kv for CoordNode {
         request: Request<kv_v2::PutRequest>,
     ) -> Result<Response<kv_v2::PutResponse>, Status> {
         self.kvt().gate(KvTCapability::Kv)?;
+        guard_routing_epoch(self, request.metadata())?;
         self.ensure_writable()?;
 
         let metadata = request.metadata().clone();
@@ -438,6 +500,7 @@ impl kv_v2::kv_server::Kv for CoordNode {
         request: Request<kv_v2::RangeRequest>,
     ) -> Result<Response<kv_v2::RangeResponse>, Status> {
         self.kvt().gate(KvTCapability::Kv)?;
+        guard_routing_epoch(self, request.metadata())?;
         let req = request.into_inner();
         if req.read_ts < 0 {
             return Err(attach(
@@ -564,6 +627,7 @@ impl kv_v2::kv_server::Kv for CoordNode {
         request: Request<kv_v2::DeleteRequest>,
     ) -> Result<Response<kv_v2::DeleteResponse>, Status> {
         self.kvt().gate(KvTCapability::Kv)?;
+        guard_routing_epoch(self, request.metadata())?;
         self.ensure_writable()?;
 
         let metadata = request.metadata().clone();
@@ -841,6 +905,7 @@ impl txn_v2::txn_server::Txn for CoordNode {
         request: Request<txn_v2::BeginRequest>,
     ) -> Result<Response<txn_v2::BeginResponse>, Status> {
         self.kvt().gate(KvTCapability::Txn)?;
+        guard_routing_epoch(self, request.metadata())?;
         let req = request.into_inner();
         if req.start_ts < 0 {
             return Err(attach(
@@ -893,6 +958,7 @@ impl txn_v2::txn_server::Txn for CoordNode {
         request: Request<txn_v2::ReadRequest>,
     ) -> Result<Response<txn_v2::ReadResponse>, Status> {
         self.kvt().gate(KvTCapability::Txn)?;
+        guard_routing_epoch(self, request.metadata())?;
         let req = request.into_inner();
         if req.limit < 0 {
             return Err(attach(
@@ -992,6 +1058,7 @@ impl txn_v2::txn_server::Txn for CoordNode {
         request: Request<txn_v2::CommitRequest>,
     ) -> Result<Response<txn_v2::CommitResponse>, Status> {
         self.kvt().gate(KvTCapability::Txn)?;
+        guard_routing_epoch(self, request.metadata())?;
         let req = request.into_inner();
         if req.txn_id.is_empty() {
             return Err(attach(
@@ -1116,6 +1183,7 @@ impl txn_v2::txn_server::Txn for CoordNode {
         request: Request<txn_v2::AbortRequest>,
     ) -> Result<Response<txn_v2::AbortResponse>, Status> {
         self.kvt().gate(KvTCapability::Txn)?;
+        guard_routing_epoch(self, request.metadata())?;
         self.txn_sessions().abort(&request.into_inner().txn_id);
         Ok(Response::new(txn_v2::AbortResponse {}))
     }
@@ -1133,6 +1201,7 @@ impl lease_v2::lease_server::Lease for CoordNode {
         request: Request<lease_v2::LeaseGrantRequest>,
     ) -> Result<Response<lease_v2::LeaseGrantResponse>, Status> {
         self.kvt().gate(KvTCapability::Lease)?;
+        guard_routing_epoch(self, request.metadata())?;
         lease_rpc::grant(self, request.into_inner()).await
     }
 
@@ -1141,6 +1210,7 @@ impl lease_v2::lease_server::Lease for CoordNode {
         request: Request<lease_v2::LeaseRevokeRequest>,
     ) -> Result<Response<lease_v2::LeaseRevokeResponse>, Status> {
         self.kvt().gate(KvTCapability::Lease)?;
+        guard_routing_epoch(self, request.metadata())?;
         lease_rpc::revoke(self, request.into_inner()).await
     }
 
@@ -1149,6 +1219,7 @@ impl lease_v2::lease_server::Lease for CoordNode {
         request: Request<Streaming<lease_v2::LeaseKeepAliveRequest>>,
     ) -> Result<Response<Self::LeaseKeepAliveStream>, Status> {
         self.kvt().gate(KvTCapability::Lease)?;
+        guard_routing_epoch(self, request.metadata())?;
         lease_rpc::keep_alive(self, request)
     }
 
@@ -1157,6 +1228,7 @@ impl lease_v2::lease_server::Lease for CoordNode {
         request: Request<lease_v2::LeaseTimeToLiveRequest>,
     ) -> Result<Response<lease_v2::LeaseTimeToLiveResponse>, Status> {
         self.kvt().gate(KvTCapability::Lease)?;
+        guard_routing_epoch(self, request.metadata())?;
         lease_rpc::time_to_live(self, request.into_inner()).await
     }
 }

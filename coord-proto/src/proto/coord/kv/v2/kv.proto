@@ -28,9 +28,13 @@ package coord.kv.v2;
 //     `read_ts=0` 不保证线性一致（需要最新/跨节点同一快照请用显式 `read_ts`）；
 //   - `read_ts` 早于 compact 水位 ⇒ `OUT_OF_RANGE`。
 //
-// 路由：请求可选携带 gRPC metadata `coord-routing-epoch`（十进制 u64）。与
-// 服务端缓存的 Region epoch 不一致时返回 `ABORTED` + `EPOCH_STALE`，调用方
-// 刷新路由后重试；不带该 metadata 时不校验 epoch（单 Region/boot 期路径）。
+// 路由：请求可选携带 gRPC metadata `coord-routing-epoch`（十进制 u64），值为
+// 调用方看到的路由版本 = 权威 Region 表的 `version`（不是 per-Region 的
+// conf_ver/version 对）。与服务端已应用版本不一致（调用方过旧，或服务端尚未
+// apply 到该版本）时返回 `ABORTED` + `EPOCH_STALE`，trailing metadata 回传
+// 服务端当前版本；调用方刷新路由后重试。不带该 metadata 时不校验 epoch
+// （单 Region/boot 期路径）。同一 header 的语义见 ADR-0015 D12.5，适用于全部
+// v2 数据面服务（KV/Txn/Watch/Lease）。
 
 option java_package = "cn.byteforce.coord.contracts.kv.v2";
 option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/kv/v2;kvv2";
