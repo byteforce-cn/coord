@@ -2611,7 +2611,7 @@ async fn run_server(
     //   不在 region 表内）；
     // - region 表合法性（平铺/成员）由 Config::validate先行校验，
     //   装配函数再做防御性校验。
-    let region_seeds: Vec<RegionSeed> = cfg
+    let mut region_seeds: Vec<RegionSeed> = cfg
         .multi_raft
         .initial_regions
         .iter()
@@ -2631,6 +2631,47 @@ async fn run_server(
             role: PeerRole::Voter,
         })
         .collect();
+
+    // 6.5 固定 `/obj/` Region（#165）：对象 manifest 与 chunk 不参与任意 KV
+    //     split/merge（ADR-0015 D6/D11.9）。保留区间必须在拓扑里自带边界，所以在
+    //     派生运行期种子时把它从 `initial_regions` 切出来——同一份种子同时喂给
+    //     运行时装配、PD meta store 与 region 0 权威表，三处天然一致。
+    //     仅在 `[kv_t].enabled && [object_storage].enabled` 时切分：v1（`[kv_t]`
+    //     关闭）保持静态拓扑，对象存储关闭时 `/obj/` 只是普通前缀（ADR-0001）。
+    if cfg.kv_t.enabled && cfg.object_storage.enabled {
+        let mut metas: Vec<RegionMeta> = region_seeds
+            .iter()
+            .map(|seed| RegionMeta {
+                region_id: seed.region_id,
+                start_key: seed.start_key.clone(),
+                end_key: seed.end_key.clone(),
+                epoch: RegionEpoch::initial(),
+                peers: region_peers.clone(),
+                approximate_size: 0,
+                approximate_keys: 0,
+            })
+            .collect();
+        let first_new_id = metas.iter().map(|m| m.region_id).max().unwrap_or(0) + 1;
+        let object_region = coord_server::storage::region_table::carve_object_region(
+            &mut metas,
+            first_new_id,
+        )
+        .map_err(|e| {
+            format!("carve [/obj/, /obj0) out of multi_raft.initial_regions: {e}")
+        })?;
+        tracing::info!(
+            object_region,
+            "fixed /obj/ region carved out of multi_raft.initial_regions"
+        );
+        region_seeds = metas
+            .into_iter()
+            .map(|m| RegionSeed {
+                region_id: m.region_id,
+                start_key: m.start_key,
+                end_key: m.end_key,
+            })
+            .collect();
+    }
 
     let region_manager: Option<Arc<RegionManager>> = if cfg.multi_raft.enabled {
         let manager = spawn_configured_regions(
@@ -2935,6 +2976,25 @@ async fn run_server(
         }
         if let Err(err) = node.refresh_region_table() {
             tracing::warn!(error = %err, "initial region table refresh failed");
+        }
+        // 表种子对已初始化的表是幂等 no-op（`RegionTable::init`）：启用对象存储的
+        // 既有 v2 集群不会得到固定对象 Region。此时拒绝启动，绝不静默改写权威
+        // 拓扑（greenfield v2 无迁移，B-KVT-2）。
+        if cfg.object_storage.enabled {
+            let table = node
+                .storage
+                .region_table()
+                .map_err(|e| format!("read region table: {e}"))?;
+            if !table
+                .regions
+                .iter()
+                .any(coord_server::storage::region_table::is_object_region)
+            {
+                return Err("region table is already initialized without the fixed \
+                            /obj/ region; enabling [object_storage] on an existing \
+                            [kv_t] cluster is not supported (no silent topology rewrite)"
+                    .into());
+            }
         }
     }
 
