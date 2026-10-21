@@ -20,6 +20,8 @@ use coord_core::types::{NodeID, RegionId, RegionMeta};
 
 use super::operator::Operator;
 use super::types::{NodeState, PdConfig};
+use crate::storage::object_store::key_in_object_space;
+use crate::storage::region_table::is_object_region;
 
 // ============================================================================
 // Split Checker
@@ -53,7 +55,14 @@ impl SplitChecker {
     ///
     /// 返回 `Some(Operator)` 如果 Region 需要分裂，否则 `None`。
     /// `split_key` 由外部（PD 采样）提供，此方法仅做阈值判断。
+    ///
+    /// 保留空间（`/obj/`）不参与任意 KV split（ADR-0015 D6/D11.9）：固定对象
+    /// Region 无论多热都不 split，采样点落进保留空间的计划也不产生——换一个
+    /// split_key 是静默改计划，交给运维按容量另行设计。
     pub fn check(&self, region: &RegionMeta, split_key: Vec<u8>) -> Option<Operator> {
+        if is_object_region(region) || key_in_object_space(&split_key) {
+            return None;
+        }
         let exceeds_size = region.approximate_size >= self.size_threshold;
         let exceeds_keys = region.approximate_keys >= self.keys_threshold;
 
@@ -92,6 +101,11 @@ impl Scheduler for SplitChecker {
                 } else {
                     mid_key(&region.start_key, &region.end_key)
                 };
+                // 固定对象 Region 与保留空间内的 split_key 不产生 operator
+                // （executor 也会拒绝；这里提前避免 Failed 噪音与调度 churn）。
+                if is_object_region(region) || key_in_object_space(&split_key) {
+                    continue;
+                }
 
                 ops.push(Operator::SplitRegion {
                     region_id: region.region_id,
@@ -136,6 +150,11 @@ impl MergeChecker {
     pub fn check(&self, left: &RegionMeta, right: &RegionMeta) -> Option<Operator> {
         // 检查相邻性
         if left.end_key != right.start_key {
+            return None;
+        }
+        // 固定对象 Region 不参与任意 KV merge（对象 manifest/chunk 不随 split/merge
+        // 迁移，ADR-0015 D6/D11.9）；executor 的 `plan_merge` 同样拒绝。
+        if is_object_region(left) || is_object_region(right) {
             return None;
         }
 
@@ -946,7 +965,83 @@ mod tests {
         assert!(checker.check(&region, vec![0x30]).is_some());
     }
 
+    // ──── 保留空间 / 固定对象 Region ────
+
+    #[test]
+    fn test_obj_region_not_split() {
+        let config = PdConfig::default();
+        let checker = SplitChecker::new(&config);
+        let object = make_region(
+            2,
+            u64::MAX / 2,
+            u64::MAX,
+            b"/obj/".to_vec(),
+            b"/obj0".to_vec(),
+            vec![],
+        );
+        assert!(
+            checker.check(&object, b"/obj/m".to_vec()).is_none(),
+            "fixed /obj/ region never splits, whatever the thresholds"
+        );
+        let ctx = ScheduleContext::new(vec![object], vec![]);
+        assert!(checker.schedule(&ctx).is_empty());
+    }
+
+    #[test]
+    fn test_split_checker_skips_object_space_split_key() {
+        let config = PdConfig::default();
+        let checker = SplitChecker::new(&config);
+        // 遗留表：普通 Region 跨越保留空间（对象存储刚启用、尚未切出固定 Region）
+        let region = make_region(1, u64::MAX / 2, 0, b"".to_vec(), b"".to_vec(), vec![]);
+        assert!(
+            checker.check(&region, b"/obj/m/k".to_vec()).is_none(),
+            "split key inside the reserved namespace is never proposed"
+        );
+        assert!(
+            matches!(
+                checker.check(&region, b"k".to_vec()),
+                Some(Operator::SplitRegion { .. })
+            ),
+            "a split key outside the reserved namespace is still allowed"
+        );
+    }
+
     // ──── Merge Checker 测试 ────
+
+    #[test]
+    fn test_merge_checker_skips_object_region() {
+        let config = PdConfig::default();
+        let checker = MergeChecker::new(&config);
+        let left = make_region(
+            1,
+            5 * 1024 * 1024,
+            0,
+            b"".to_vec(),
+            b"/obj/".to_vec(),
+            vec![],
+        );
+        let object = make_region(
+            2,
+            5 * 1024 * 1024,
+            0,
+            b"/obj/".to_vec(),
+            b"/obj0".to_vec(),
+            vec![],
+        );
+        let right = make_region(
+            3,
+            5 * 1024 * 1024,
+            0,
+            b"/obj0".to_vec(),
+            b"".to_vec(),
+            vec![],
+        );
+        assert!(checker.check(&left, &object).is_none());
+        assert!(checker.check(&object, &right).is_none());
+        assert!(checker.check(&left, &right).is_none(), "not adjacent");
+        let ctx = ScheduleContext::new(vec![left, object, right], vec![]);
+        assert!(checker.schedule(&ctx).is_empty());
+    }
 
     #[test]
     fn test_merge_checker_eligible() {
