@@ -796,6 +796,26 @@ impl StateMachineStore {
                     .map_err(io_err)?;
                 Ok((Response::RegionMeta { outcome }, None))
             }
+            Command::ImportRange {
+                start_key,
+                end_key,
+                rows,
+                watermark,
+                done,
+            } => {
+                // split 搬迁的变更已经在全局 Commit Log 里；这里再发 Watch
+                // 事件会让订阅者收到重复变更。
+                let imported = sm
+                    .apply_range_import(start_key, end_key, rows, *watermark, *done, applied)
+                    .map_err(io_err)?;
+                Ok((
+                    Response::ImportRange {
+                        imported,
+                        watermark: *watermark,
+                    },
+                    None,
+                ))
+            }
             Command::Lease(op) => {
                 let (outcome, changes) =
                     sm.apply_lease_op(op, revision, applied).map_err(io_err)?;
@@ -1633,6 +1653,60 @@ mod tests {
         );
         assert_eq!(store.state_machine.current_revision(), 200);
         assert_eq!(store.state_machine.get(b"a").unwrap(), None);
+    }
+
+    #[test]
+    fn test_apply_import_range_command_is_idempotent_and_preserves_commit_ts() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        let rows = vec![(
+            b"k".to_vec(),
+            b"v".to_vec(),
+            crate::storage::mvcc::KvMetadata {
+                version: 3,
+                create_revision: 7,
+                mod_revision: 42,
+                lease_id: 0,
+                deleted: false,
+            },
+        )];
+        let cmd = Command::ImportRange {
+            start_key: b"a".to_vec(),
+            end_key: b"z".to_vec(),
+            rows: rows.clone(),
+            watermark: 42,
+            done: true,
+        };
+        let (resp, event) = store
+            .execute_command(store.state_machine.as_ref(), &cmd, 5, applied_at(5))
+            .expect("import apply");
+        assert!(event.is_none(), "import 不得重复发 watch 事件");
+        match resp {
+            Response::ImportRange {
+                imported,
+                watermark,
+            } => {
+                assert_eq!((imported, watermark), (1, 42));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(
+            store.state_machine.get(b"k").unwrap().as_deref(),
+            Some(&b"v"[..])
+        );
+        assert_eq!(store.state_machine.current_revision(), 42);
+        let meta = store.state_machine.get_kv_metadata(b"k").unwrap().unwrap();
+        assert_eq!(
+            (meta.create_revision, meta.mod_revision, meta.version),
+            (7, 42, 3)
+        );
+
+        let (replay, _) = store
+            .execute_command(store.state_machine.as_ref(), &cmd, 6, applied_at(6))
+            .expect("replay import");
+        match replay {
+            Response::ImportRange { imported, .. } => assert_eq!(imported, 0),
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     /// #139：Compact 响应取 current revision，不是 log index。

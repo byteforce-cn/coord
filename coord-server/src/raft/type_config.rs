@@ -749,6 +749,17 @@ pub enum Command {
     /// **末尾追加**；表写 `/_sys/pd/regions`，不产生 Watch 事件、不推进业务
     /// revision。
     RegionMeta(RegionMetaOp),
+    /// Split 数据搬迁：把源 Region 的一页 live range 快照应用到本 Region。
+    ///
+    /// **末尾追加**；只在目标 Region 自己的 raft 提出，`rows` 保留每行的
+    /// `KvMetadata`。`done` 为最后一页时把 Region revision 抬到 `watermark`。
+    ImportRange {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        rows: Vec<(Vec<u8>, Vec<u8>, crate::storage::mvcc::KvMetadata)>,
+        watermark: u64,
+        done: bool,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -836,6 +847,16 @@ impl std::fmt::Display for Command {
             Command::PublishCommitWatermark { watermark } => {
                 write!(f, "PublishCommitWatermark(watermark={watermark})")
             }
+            Command::ImportRange {
+                rows,
+                watermark,
+                done,
+                ..
+            } => write!(
+                f,
+                "ImportRange(rows={}, watermark={watermark}, done={done})",
+                rows.len()
+            ),
         }
     }
 }
@@ -949,6 +970,11 @@ pub enum Response {
     RegionMeta {
         outcome: RegionMetaOutcome,
     },
+    /// Split 数据搬迁导入结果：本次新写入的行数 + 生效的 revision 水位。
+    ImportRange {
+        imported: u64,
+        watermark: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -1027,6 +1053,9 @@ impl std::fmt::Display for Response {
                 write!(f, "CommitWatermarkPublished(watermark={watermark})")
             }
             Response::RegionMeta { outcome } => write!(f, "RegionMeta({outcome:?})"),
+            Response::ImportRange { imported, watermark } => {
+                write!(f, "ImportRange(imported={imported}, watermark={watermark})")
+            }
         }
     }
 }
