@@ -35,7 +35,7 @@
 
 | # | 不承诺 | 事实锚点 | 若要变成承诺 |
 |:--|:--|:--|:--|
-| B-RG-1 | **v1 模式不支持动态增删 region**（`[multi_raft]` 静态 Region 表）。`remove_region_raft` / `remove_region_runtime` 零调用点（含测试）；启动后新建的 region 也**拿不到 `CompactionManager`**（启动期一次性从 `list_regions()` 构建），其 changelog/tombstone 永不压缩、raft 日志永不回收。**v2 的动态 Region 表/在线 split/merge 由 KV-T G5 交付；在 G5 完成前 `[kv_t]` 不宣称支持在线 split/merge** | `coord-server/src/raft/network.rs:1085`、`coord-server/src/raft/region.rs:458`、`coord/src/main.rs`（Region 装配）；v2 计划见 ADR-0015 D6/D10 | v2：接线 `remove_region_*` + 让 `_region_compaction_mgrs` 随 region 生命周期增删（G5）；v1 保持静态 |
+| B-RG-1 | **[kv_t] 关闭时（v1）Region 拓扑静态**：`[multi_raft].initial_regions` 装配后不增删，`remove_region_*` 无生产调用方。`[kv_t].enabled=true` 时权威 Region 表（#159）驱动运行时生命周期（#160）：`RegionLifecycle` 按表 spawn/retire raft 组（停机先 `raft.shutdown()`，数据目录保留），**每个数据 Region（含启动后按表新增的）都有自己的 `CompactionManager`**（旧缺口：启动期一次性快照，新建 Region 永不压缩）。仍不承诺：split/merge 的**数据搬迁**与 `/obj/` 例外（#162/#163/#164/#165 未交付）、按 Region 差异化副本分布（v1 每 Region 复制到全部成员） | `coord-server/src/raft/region_lifecycle.rs`（`RegionLifecycle::reconcile/ensure_region/retire_region`）、`coord-server/src/raft/region.rs`（`apply_region_table` 不丢运行时、`route_runtime` 未装配 → `RouteNotReady`）、`coord/src/main.rs`（启动接管 + reconcile 任务）；判据：`coord-server/tests/kv_t_g5_region_lifecycle_test.rs`；ADR-0015 D6/D10 | v1 保持静态；动态表变更的数据搬迁见 #162/#163，`/obj/` 固定区间见 #165 |
 | B-RG-2 | **v1** region 模式下 watch **拒绝跨 region 与全键空间前缀**（`prefix_successor` 为 `None` → `INVALID_ARGUMENT`）。**v2** Watch 的跨 Region/全局序由 Commit Log + Coordinator 提供（G4）；在 G4 完成前 v2 Watch 一律 `FAILED_PRECONDITION` | `coord-server/src/server/mod.rs:553-581`；v2 计划见 ADR-0015 D5 | v1：增加跨 region watch 扇出；v2：G4 交付 Commit Log 分片与 Watch Coordinator |
 
 ## 4. 连接与并发
