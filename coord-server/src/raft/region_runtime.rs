@@ -430,6 +430,74 @@ impl CompactProposer for RegionCompactProposer {
     }
 }
 
+// ============================================================================
+// split/merge 分页导入端口
+// ============================================================================
+
+/// 经目标 Region raft 导入一页 split/merge 搬迁数据。
+///
+/// 只把 `Command::ImportRange` 提案给目标 Region 的 raft leader：导入必须
+/// 成为日志条目，副本/快照/压缩才对同一状态机收敛。非 leader 节点经
+/// openraft 的转发路径提出（与 `client_write` 的既有语义一致）。
+pub struct CoordRangeImportTarget {
+    raft: CoordRaft,
+}
+
+impl CoordRangeImportTarget {
+    /// 从 Region raft 实例构建
+    pub fn from_raft(raft: CoordRaft) -> Self {
+        Self { raft }
+    }
+
+    /// 从 Region 运行时构建（`CoordRaft` Clone 为 Arc bump，廉价）
+    pub fn from_runtime(rt: &RegionRuntime) -> Self {
+        Self {
+            raft: rt.raft.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
+    async fn import_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        rows: Vec<crate::storage::mvcc::VersionedKv>,
+        watermark: u64,
+        done: bool,
+    ) -> std::result::Result<u64, String> {
+        let command = Command::ImportRange {
+            start_key: start.to_vec(),
+            end_key: end.to_vec(),
+            rows,
+            watermark,
+            done,
+        };
+        let resp = self
+            .raft
+            .client_write(command)
+            .await
+            .map_err(|e| format!("target region raft import: {e}"))?;
+        match resp.response() {
+            // 回显的 watermark 必须与本页一致：不一致说明目标 apply 的实现
+            // 钉在了别的 revision 上，继续翻页会把两代快照拼进同一个 Region。
+            Response::ImportRange {
+                imported,
+                watermark: echoed,
+            } if *echoed == watermark => Ok(*imported),
+            Response::ImportRange {
+                watermark: echoed, ..
+            } => Err(format!(
+                "target region raft import echoed watermark {echoed}, expected {watermark}"
+            )),
+            other => Err(format!(
+                "target region raft returned unexpected response: {other:?}"
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
