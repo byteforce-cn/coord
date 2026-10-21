@@ -1388,8 +1388,21 @@ mod tests {
             .await
             .unwrap();
 
-        let tick = fx.manager.tick().await.unwrap();
-        assert_eq!(tick.sealed, 1, "watermark 11 seals shard [1, 11)");
+        // 单节点组在重负载下可能短暂丢 leader（选举窗口）：tick 是尽力而为，
+        // 该拍会跳过 ship/seal；下一拍继续。这里等到本拍确实 seal。
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let tick = fx.manager.tick().await.unwrap();
+            if tick.sealed == 1 {
+                assert_eq!(tick.watermark, 11, "watermark 11 seals shard [1, 11)");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shard did not seal after the watermark reached 11: {tick:?}"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
         let table = fx.manager.table().unwrap();
         assert_eq!(table.gc_before_ts, 0);
         let sealed_at = table.shards[0].sealed_at_ms;

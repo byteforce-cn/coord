@@ -21,6 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use coord_core::error::{Error, Result};
@@ -441,19 +442,53 @@ impl CompactProposer for RegionCompactProposer {
 /// openraft 的转发路径提出（与 `client_write` 的既有语义一致）。
 pub struct CoordRangeImportTarget {
     raft: CoordRaft,
+    /// 等待目标组选出 leader 的上界（0 = 不等待，直接提案）。
+    ///
+    /// split 目标由 lifecycle 异步预创建：组刚装配时还没有 leader，`client_write`
+    /// 会立刻失败。生产接线给出有界等待；建组失败/永不出 leader 仍会失败
+    /// （intent 保留重试）。
+    leader_wait: Duration,
 }
 
 impl CoordRangeImportTarget {
     /// 从 Region raft 实例构建
     pub fn from_raft(raft: CoordRaft) -> Self {
-        Self { raft }
+        Self {
+            raft,
+            leader_wait: Duration::ZERO,
+        }
     }
 
     /// 从 Region 运行时构建（`CoordRaft` Clone 为 Arc bump，廉价）
     pub fn from_runtime(rt: &RegionRuntime) -> Self {
         Self {
             raft: rt.raft.clone(),
+            leader_wait: Duration::ZERO,
         }
+    }
+
+    /// 提案前等待 leader 选举的上界。
+    pub fn with_leader_wait(mut self, wait: Duration) -> Self {
+        self.leader_wait = wait;
+        self
+    }
+
+    /// 等本组选出 leader（有界）。返回 `None` = 已就绪。
+    async fn wait_for_leader(&self) -> std::result::Result<(), String> {
+        if self.leader_wait.is_zero() {
+            return Ok(());
+        }
+        let started = tokio::time::Instant::now();
+        while self.raft.current_leader().await.is_none() {
+            if started.elapsed() >= self.leader_wait {
+                return Err(format!(
+                    "target region raft has no leader after {:?}",
+                    self.leader_wait
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(())
     }
 }
 
@@ -467,6 +502,7 @@ impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
         watermark: u64,
         done: bool,
     ) -> std::result::Result<u64, String> {
+        self.wait_for_leader().await?;
         let command = Command::ImportRange {
             start_key: start.to_vec(),
             end_key: end.to_vec(),

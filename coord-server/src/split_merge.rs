@@ -16,6 +16,9 @@ use std::time::Duration;
 use coord_core::types::RegionId;
 
 use crate::pd::executor::SplitMergeMigrator;
+use crate::raft::region::RegionManager;
+use crate::raft::region_lifecycle::RegionLifecycle;
+use crate::raft::region_runtime::CoordRangeImportTarget;
 use crate::storage::mvcc::{MvccStorage, VersionedKv};
 use crate::storage::redb_backend::RedbBackend;
 use crate::storage::region_table::{RegionChange, SplitMergeKind, SplitMergePlan};
@@ -67,6 +70,19 @@ const DEFAULT_PAGE_SIZE: usize = 1024;
 /// 等区间内活跃事务收尾的默认上界；超时整次迁移失败（intent 保留重试）。
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 等待 split 目标 Region 预创建装配上界的默认值。
+///
+/// executor 与 `RegionLifecycle` 各自跑循环：operator 可能先于 pending 目标
+/// 装配被认领。解析失败不能立即把 operator 判 `Failed`，而要等 lifecycle 的
+/// 下一拍；等待仍有界（装配始终不成功 → 失败，intent 保留重试）。
+const DEFAULT_TARGET_WAIT: Duration = Duration::from_secs(10);
+
+/// 目标解析重试间隔（`RegionLifecycle` 的 reconcile 周期为 1s）。
+const TARGET_RESOLVE_POLL: Duration = Duration::from_millis(50);
+
+/// 目标组刚预创建时等待 leader 选举的上界（与目标解析等待同一量级）。
+const TARGET_LEADER_WAIT: Duration = Duration::from_secs(10);
+
 /// Split 的真实数据搬迁器：drain → 固定 revision 分页导出 → 经目标 raft 导入。
 ///
 /// 幂等契约：每页导入按目标行的 `mod_revision` 去重，重放同一页返回 0；因此
@@ -79,6 +95,7 @@ pub struct RangeImportMigrator {
     drain: Arc<dyn SplitDrain>,
     page_size: usize,
     drain_timeout: Duration,
+    target_wait: Duration,
 }
 
 impl RangeImportMigrator {
@@ -93,6 +110,7 @@ impl RangeImportMigrator {
             drain,
             page_size: DEFAULT_PAGE_SIZE,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
+            target_wait: DEFAULT_TARGET_WAIT,
         }
     }
 
@@ -106,6 +124,32 @@ impl RangeImportMigrator {
     pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
         self.drain_timeout = timeout;
         self
+    }
+
+    /// 等待目标 Region 装配的上界（0 = 只解析一次）。
+    pub fn with_target_wait(mut self, timeout: Duration) -> Self {
+        self.target_wait = timeout;
+        self
+    }
+
+    /// 解析目标 Region，并在 `target_wait` 内重试（pending 预创建是异步的）。
+    async fn resolve_target(
+        &self,
+        target_id: RegionId,
+    ) -> std::result::Result<Arc<dyn RangeImportTarget>, String> {
+        let started = tokio::time::Instant::now();
+        loop {
+            if let Some(target) = (self.targets)(target_id) {
+                return Ok(target);
+            }
+            if started.elapsed() >= self.target_wait {
+                return Err(format!(
+                    "split target region {target_id} raft is not assembled on this node \
+                     (pending region pre-creation has not caught up)"
+                ));
+            }
+            tokio::time::sleep(TARGET_RESOLVE_POLL).await;
+        }
     }
 }
 
@@ -137,12 +181,7 @@ impl SplitMergeMigrator for RangeImportMigrator {
                 plan.source_region
             )
         })?;
-        let target = (self.targets)(target_id).ok_or_else(|| {
-            format!(
-                "split target region {target_id} raft is not assembled on this node \
-                 (pending region pre-creation is not wired)"
-            )
-        })?;
+        let target = self.resolve_target(target_id).await?;
 
         let start = child.start_key.as_slice();
         let end = child.end_key.as_slice();
@@ -176,4 +215,34 @@ impl SplitMergeMigrator for RangeImportMigrator {
         );
         Ok(())
     }
+}
+
+/// 生产接线：源 = `RegionManager` 本节点运行时 MVCC；目标 = `RegionLifecycle`
+/// 的 pending/已接管运行时（搬迁经目标 Region 自己的 raft）。
+///
+/// `drain` 由接线层传入（`main.rs` = 本节点 `TxnSessions` 句柄）。只覆盖本节点
+/// 协调的会话；跨协调节点会话的 drain 属 #167 连续性验收。
+pub fn range_import_migrator(
+    manager: &Arc<RegionManager>,
+    lifecycle: &Arc<RegionLifecycle>,
+    drain: Arc<dyn SplitDrain>,
+) -> Arc<dyn SplitMergeMigrator> {
+    let manager = Arc::clone(manager);
+    let source: Arc<RegionMvccResolver> = Arc::new(move |region_id| {
+        manager
+            .runtime(region_id)
+            .map(|runtime| Arc::clone(&runtime.mvcc))
+    });
+
+    let lifecycle = Arc::clone(lifecycle);
+    let targets: Arc<RegionImportTargetResolver> = Arc::new(move |region_id| {
+        lifecycle.migration_target(region_id).map(|runtime| {
+            let target: Arc<dyn RangeImportTarget> = Arc::new(
+                CoordRangeImportTarget::from_runtime(&runtime).with_leader_wait(TARGET_LEADER_WAIT),
+            );
+            target
+        })
+    });
+
+    Arc::new(RangeImportMigrator::new(source, targets, drain))
 }

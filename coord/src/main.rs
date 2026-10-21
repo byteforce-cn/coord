@@ -3715,6 +3715,22 @@ async fn run_server(
                 .map_err(|e| format!("attach region {} runtime: {e}", meta.region_id))?;
         }
         if node.kvt().is_enabled() {
+            // 生产装配（#163）：executor 在 PD 启动时已跑起来，搬迁器只能在
+            // Region lifecycle 与节点会话表就绪后晚装；未装前 split/merge
+            // 一律 fail-closed。源 = RegionManager 运行时 MVCC；目标 =
+            // lifecycle 的 pending/已接管运行时；drain = 本节点 TxnSessions
+            // （跨协调节点会话的 drain 属 #167）。
+            if let Some(pd) = embedded_pd.as_ref() {
+                pd.install_split_migrator(coord_server::split_merge::range_import_migrator(
+                    manager,
+                    &lifecycle,
+                    node.split_drain(),
+                ));
+                tracing::info!(
+                    "KV-T split data migration wired (source=RegionManager runtime, \
+                     target=RegionLifecycle pending/attached, drain=local TxnSessions)"
+                );
+            }
             lifecycle.start_reconcile_loop(
                 coord_server::raft::region_lifecycle::REGION_RECONCILE_INTERVAL,
             );

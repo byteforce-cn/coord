@@ -296,7 +296,9 @@ pub struct CoordNode {
     /// 进程级指标（`[kv_t]` v2 拒绝计数用；main 在 Arc::new 前注入）。
     metrics: Option<Arc<crate::metrics::Metrics>>,
     /// `coord.txn.v2` 服务端会话（ADR-0015 D12.2）：只在协调节点内存，不复制。
-    txn_sessions: crate::kvt::txn::TxnSessions,
+    ///
+    /// `Arc` 以便 split 数据搬迁器持有同一份会话表做区间 drain。
+    txn_sessions: Arc<crate::kvt::txn::TxnSessions>,
     /// Commit Log shard 协调器（#154；`[kv_t].enabled` + Multi-Raft 时注入）。
     ///
     /// `None` = 未启用：不建任何 shard raft 组、不启动协调任务（ADR-0001）。
@@ -385,7 +387,7 @@ impl CoordNode {
             tso_client: None,
             commit_sequencer: None,
             metrics: None,
-            txn_sessions: crate::kvt::txn::TxnSessions::new(),
+            txn_sessions: Arc::new(crate::kvt::txn::TxnSessions::new()),
             commit_log_shards: None,
         }
     }
@@ -540,6 +542,14 @@ impl CoordNode {
     /// `coord.txn.v2` 会话表（只在协调节点内存，不随节点复制）。
     pub(crate) fn txn_sessions(&self) -> &crate::kvt::txn::TxnSessions {
         &self.txn_sessions
+    }
+
+    /// split 数据搬迁的区间 drain 端口（本节点 `coord.txn.v2` 会话表）。
+    ///
+    /// 只覆盖本节点协调的会话；跨协调节点会话的 drain 属 #167 连续性验收。
+    pub fn split_drain(&self) -> Arc<dyn crate::split_merge::SplitDrain> {
+        let drain: Arc<dyn crate::split_merge::SplitDrain> = self.txn_sessions.clone();
+        drain
     }
 
     /// 启动 v2 事务会话 TTL 回收（仅 `[kv_t].enabled=true` 时由 main 调用）。

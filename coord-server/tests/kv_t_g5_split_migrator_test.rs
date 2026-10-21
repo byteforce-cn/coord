@@ -10,7 +10,7 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -49,12 +49,16 @@ fn raft_config() -> RaftConfig {
     }
 }
 
-/// 起一个单节点目标 Region raft（revision = commit_ts），返回其存储与导入端口。
-async fn boot_target_region() -> (
-    TempDir,
-    Arc<MvccStorage<RedbBackend>>,
-    Arc<CoordRangeImportTarget>,
-) {
+/// 未初始化的单节点目标 Region raft（新 split 目标预创建后的真实状态：
+/// raft 组已存在，leader 尚未选出）。
+struct TargetRaft {
+    dir: TempDir,
+    mvcc: Arc<MvccStorage<RedbBackend>>,
+    raft: coord_server::raft::CoordRaft,
+    members: BTreeMap<u64, RaftNode>,
+}
+
+async fn boot_target_raft() -> TargetRaft {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
 
@@ -78,12 +82,29 @@ async fn boot_target_region() -> (
     rpc.set_raft(raft.clone());
 
     let members: BTreeMap<u64, RaftNode> = BTreeMap::from([(NODE_ID, new_basic_node(&addr))]);
-    raft.initialize(members)
+    TargetRaft {
+        dir,
+        mvcc,
+        raft,
+        members,
+    }
+}
+
+/// 起一个单节点目标 Region raft（revision = commit_ts），返回其存储与导入端口。
+async fn boot_target_region() -> (
+    TempDir,
+    Arc<MvccStorage<RedbBackend>>,
+    Arc<CoordRangeImportTarget>,
+) {
+    let target = boot_target_raft().await;
+    target
+        .raft
+        .initialize(target.members.clone())
         .await
         .expect("initialize target region raft");
 
     let stop = tokio::time::Instant::now() + DEADLINE;
-    while raft.current_leader().await != Some(NODE_ID) {
+    while target.raft.current_leader().await != Some(NODE_ID) {
         assert!(
             tokio::time::Instant::now() < stop,
             "target region leader not elected"
@@ -91,8 +112,8 @@ async fn boot_target_region() -> (
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let target = Arc::new(CoordRangeImportTarget::from_raft(raft));
-    (dir, mvcc, target)
+    let port = Arc::new(CoordRangeImportTarget::from_raft(target.raft));
+    (target.dir, target.mvcc, port)
 }
 
 fn live(key: &[u8], value: &[u8], revision: i64, lease_id: i64) -> (Vec<u8>, Vec<u8>, KvMetadata) {
@@ -124,6 +145,31 @@ async fn test_import_range_crosses_the_target_region_raft() {
     assert_eq!((meta.mod_revision, meta.lease_id), (10, 7));
     assert_eq!(mvcc.current_revision(), 10);
     assert_eq!(mvcc.compacted_revision().unwrap(), 10);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_target_import_waits_for_leader_election() {
+    let target = boot_target_raft().await;
+    let raft = target.raft.clone();
+    let members = target.members.clone();
+    let election = tokio::spawn(async move {
+        // pending 目标刚建组，leader 选举在导入开始之后才完成。
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        raft.initialize(members)
+            .await
+            .expect("initialize target region raft");
+    });
+
+    let port = CoordRangeImportTarget::from_raft(target.raft.clone())
+        .with_leader_wait(Duration::from_secs(5));
+    let imported = port
+        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true)
+        .await
+        .expect("import waits through leader election");
+    election.await.expect("election task");
+
+    assert_eq!(imported, 1);
+    assert_eq!(target.mvcc.get(b"m").unwrap().as_deref(), Some(&b"1"[..]));
 }
 
 // ───────────────────────── Task 2: 真实搬迁器 ─────────────────────────
@@ -332,6 +378,70 @@ async fn test_split_migrator_fails_on_source_drift() {
     assert!(
         target_mvcc.get(b"z").unwrap().is_none(),
         "漂移之后不得继续导页"
+    );
+}
+
+/// 目标 Region 的 raft 组由 lifecycle 异步预创建：解析失败不是终局错误。
+/// 搬迁器在 `target_wait` 内重试解析，不能把「pending 尚未装配」直接判失败
+/// （executor 会把该 operator 标成 Failed）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_split_migrator_waits_for_the_target_region_to_be_assembled() {
+    let (_src_dir, source) = source_region_with_rows().await;
+    let (_dst_dir, target_mvcc, target) = boot_target_region().await;
+
+    let src = Arc::clone(&source);
+    let source_resolver: Arc<RegionMvccResolver> =
+        Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&src)));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let tries = Arc::clone(&attempts);
+    let target: Arc<dyn RangeImportTarget> = target;
+    let target_resolver: Arc<RegionImportTargetResolver> = Arc::new(move |region_id| {
+        if region_id != 2 {
+            return None;
+        }
+        // 前 3 次解析模拟 lifecycle 还没预创建出 pending 目标。
+        if tries.fetch_add(1, Ordering::SeqCst) < 3 {
+            None
+        } else {
+            Some(Arc::clone(&target))
+        }
+    });
+
+    RangeImportMigrator::new(source_resolver, target_resolver, RecordingDrain::new())
+        .with_page_size(1)
+        .with_target_wait(Duration::from_secs(2))
+        .migrate(&split_plan())
+        .await
+        .expect("migration waits for the pending target");
+
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 4,
+        "resolver must be retried"
+    );
+    assert_eq!(target_mvcc.get(b"m").unwrap().as_deref(), Some(&b"1"[..]));
+    assert_eq!(target_mvcc.get(b"z").unwrap().as_deref(), Some(&b"3"[..]));
+}
+
+/// 目标始终不出现 → 有界失败（intent 保留、可重试），错误信息指向装配缺口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_split_migrator_gives_up_when_the_target_never_appears() {
+    let (_src_dir, source) = source_region_with_rows().await;
+    let src = Arc::clone(&source);
+    let source_resolver: Arc<RegionMvccResolver> =
+        Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&src)));
+    let target_resolver: Arc<RegionImportTargetResolver> = Arc::new(|_| None);
+
+    let started = std::time::Instant::now();
+    let err = RangeImportMigrator::new(source_resolver, target_resolver, RecordingDrain::new())
+        .with_target_wait(Duration::from_millis(150))
+        .migrate(&split_plan())
+        .await
+        .expect_err("missing target must fail the migration");
+
+    assert!(err.contains("not assembled"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "target wait must stay bounded"
     );
 }
 

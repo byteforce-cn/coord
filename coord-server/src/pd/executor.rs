@@ -113,7 +113,11 @@ pub struct OperatorExecutor {
     /// AddPeer 占位目标解析器（None = 不解析：node_id=0 的 AddPeer 直接失败）
     add_peer_resolver: Option<Arc<AddPeerTargetResolver>>,
     /// Split/Merge 数据搬迁钩子（None = 未装配，split/merge fail-closed）
-    migrator: Option<Arc<dyn SplitMergeMigrator>>,
+    ///
+    /// 用 RwLock 而不是裸字段：生产接线在 region 0/lifecycle 就绪后才能把
+    /// 搬迁器交给已经跑起来的执行器（`EmbeddedPd::install_split_migrator`），
+    /// 而执行循环与 `execute_one` 共享同一个 `Arc<Self>`。
+    migrator: parking_lot::RwLock<Option<Arc<dyn SplitMergeMigrator>>>,
     /// cutover 提出后等待本节点 region 0 视图可见的时长
     cutover_timeout: Duration,
 }
@@ -127,15 +131,28 @@ impl OperatorExecutor {
             node_id,
             transfer_timeout: Duration::from_secs(30),
             add_peer_resolver: None,
-            migrator: None,
+            migrator: parking_lot::RwLock::new(None),
             cutover_timeout: Duration::from_secs(5),
         }
     }
 
     /// 装配 Split/Merge 数据搬迁钩子（未装配时 split/merge fail-closed）。
-    pub fn with_migrator(mut self, migrator: Arc<dyn SplitMergeMigrator>) -> Self {
-        self.migrator = Some(migrator);
+    pub fn with_migrator(self, migrator: Arc<dyn SplitMergeMigrator>) -> Self {
+        self.set_migrator(migrator);
         self
+    }
+
+    /// 运行期安装/替换搬迁钩子。
+    ///
+    /// 生产接线必须晚装（`main.rs` 的生命周期在 PD 启动之后才装配），装上
+    /// 之前 split/merge 一律 fail-closed。
+    pub fn set_migrator(&self, migrator: Arc<dyn SplitMergeMigrator>) {
+        *self.migrator.write() = Some(migrator);
+    }
+
+    /// 当前装配的搬迁钩子（测试/接线断言用）。
+    pub fn migrator(&self) -> Option<Arc<dyn SplitMergeMigrator>> {
+        self.migrator.read().clone()
     }
 
     /// 配置 cutover 结果等待超时（测试用）
@@ -447,7 +464,7 @@ impl OperatorExecutor {
             Some(intent) => intent,
             None => {
                 // 先确认搬迁钩子已装配，再产生任何副作用。
-                if self.migrator.is_none() {
+                if self.migrator().is_none() {
                     return Err(
                         "split/merge data migration not wired (#163); refusing to cut over"
                             .to_string(),
@@ -492,7 +509,7 @@ impl OperatorExecutor {
                     return Err(format!("split/merge cutover rejected: {reason}"));
                 }
                 IntentPhase::Prepared => {
-                    let migrator = self.migrator.as_ref().ok_or_else(|| {
+                    let migrator = self.migrator().ok_or_else(|| {
                         "split/merge data migration not wired (#163); refusing to cut over"
                             .to_string()
                     })?;
@@ -1917,6 +1934,33 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_migrator_installed_after_construction_is_used() {
+        let migrator = FakeMigrator::new();
+        // 生产接线在 region 0 / lifecycle 就绪之后才安装搬迁器（`EmbeddedPd`
+        // 晚装）：构造后再安装必须对执行路径生效，而不是留在未装配态。
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), None);
+        ex.set_migrator(migrator.clone());
+        system.seed_pending(
+            8,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            1,
+        );
+
+        let op = ex
+            .execute_one(&*resolver_for(&fake))
+            .await
+            .expect("operator executed");
+        assert_eq!(op.name(), "split-region");
+        assert_eq!(migrator.calls().len(), 1);
+        assert_eq!(system.table().version, 2);
+        assert!(system.intents().is_empty());
     }
 
     #[tokio::test]
