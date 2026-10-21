@@ -2652,13 +2652,11 @@ async fn run_server(
             })
             .collect();
         let first_new_id = metas.iter().map(|m| m.region_id).max().unwrap_or(0) + 1;
-        let object_region = coord_server::storage::region_table::carve_object_region(
-            &mut metas,
-            first_new_id,
-        )
-        .map_err(|e| {
-            format!("carve [/obj/, /obj0) out of multi_raft.initial_regions: {e}")
-        })?;
+        let object_region =
+            coord_server::storage::region_table::carve_object_region(&mut metas, first_new_id)
+                .map_err(|e| {
+                    format!("carve [/obj/, /obj0) out of multi_raft.initial_regions: {e}")
+                })?;
         tracing::info!(
             object_region,
             "fixed /obj/ region carved out of multi_raft.initial_regions"
