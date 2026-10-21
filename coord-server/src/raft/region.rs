@@ -370,6 +370,7 @@ impl RegionManager {
 
         let (next_regions, next_index) = {
             let current = self.regions.read();
+            let runtimes = self.runtimes.read();
             let mut next_regions = BTreeMap::new();
             let mut next_index = BTreeMap::new();
             for meta in &table.regions {
@@ -378,7 +379,16 @@ impl RegionManager {
                         existing.replace_meta(meta.clone());
                         Arc::clone(existing)
                     }
-                    None => Arc::new(RegionHandle::new(meta.clone())),
+                    // split 目标在 cutover 前已装配（pending，见
+                    // `RegionLifecycle`）：复用同一 handle，路由与运行时的角色/
+                    // 成员更新不能分叉。
+                    None => match runtimes.get(&meta.region_id) {
+                        Some(runtime) => {
+                            runtime.handle.replace_meta(meta.clone());
+                            Arc::clone(&runtime.handle)
+                        }
+                        None => Arc::new(RegionHandle::new(meta.clone())),
+                    },
                 };
                 next_index.insert(meta.start_key.clone(), meta.region_id);
                 next_regions.insert(meta.region_id, handle);
@@ -633,6 +643,20 @@ impl RegionManager {
             runtime.data_dir.display()
         );
         Ok(runtime)
+    }
+
+    /// 装入一个**尚未注册路由**的运行时（split 目标预创建）。
+    ///
+    /// 路由只在 cutover 后由 [`Self::apply_region_table`] 建立；重复装入返回
+    /// `false`（幂等）。调用方必须已经按该 Region 的元数据装配好 raft 组。
+    pub fn attach_runtime(&self, runtime: Arc<RegionRuntime>) -> bool {
+        let region_id = runtime.region_id();
+        let mut runtimes = self.runtimes.write();
+        if runtimes.contains_key(&region_id) {
+            return false;
+        }
+        runtimes.insert(region_id, runtime);
+        true
     }
 
     /// 摘除已装配的运行时（不触碰路由表）

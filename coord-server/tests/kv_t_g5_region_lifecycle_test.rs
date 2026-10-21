@@ -28,15 +28,19 @@ use coord_server::raft::region::{spawn_configured_regions, RegionManager, Region
 use coord_server::raft::region_lifecycle::{
     RegionLifecycle, RegionLifecycleSpec, REGION_RECONCILE_INTERVAL,
 };
+use coord_server::raft::region_runtime::CoordRangeImportTarget;
 use coord_server::raft::state_machine::StateMachineStore;
-use coord_server::raft::type_config::{Command, RegionMetaOp, RegionMetaOutcome, Response};
+use coord_server::raft::type_config::{
+    Command, IntentPhase, PdIntent, PdOp, RegionMetaOp, RegionMetaOutcome, Response,
+};
 use coord_server::raft::{
     new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, RegionRuntime,
 };
+use coord_server::split_merge::RangeImportTarget;
 use coord_server::storage::compaction::CompactionConfig;
-use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
+use coord_server::storage::mvcc::{KvMetadata, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
-use coord_server::storage::region_table::RegionChange;
+use coord_server::storage::region_table::{plan_split, RegionChange};
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
 
@@ -199,6 +203,24 @@ impl Harness {
         match response.response() {
             Response::RegionMeta { outcome } => outcome.clone(),
             other => panic!("unexpected response: {other}"),
+        }
+    }
+
+    /// 提出一条 PD 队列 / split-merge journal 命令（region 0 raft）。
+    async fn propose_pd(&self, op: PdOp) {
+        self.raft0
+            .client_write(Command::Pd(op))
+            .await
+            .expect("propose pd op");
+    }
+
+    fn split_intent(&self, op_id: u64, parent: u64, split_key: &[u8], new_id: u64) -> PdIntent {
+        let table = self.mvcc0.region_table().expect("read region table");
+        PdIntent {
+            op_id,
+            owner: NODE_ID,
+            plan: plan_split(&table, parent, split_key, new_id).expect("plan split"),
+            phase: IntentPhase::Prepared,
         }
     }
 
@@ -379,6 +401,227 @@ async fn test_lifecycle_spawns_compacts_and_retires_regions() {
             .is_err(),
         "retired region raft must reject writes"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lifecycle_precreates_split_target_and_promotes_after_cutover() {
+    let harness = Harness::boot().await;
+    assert_eq!(
+        harness
+            .propose(RegionMetaOp::Init {
+                regions: vec![region(1, b"", b"", 1, 1)],
+            })
+            .await,
+        RegionMetaOutcome::Applied { version: 1 }
+    );
+    harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile table v1");
+
+    // split 目标在 cutover 前就要有 raft 组：导入的数据必须经目标日志 apply，
+    // 而目标组需要覆盖多数派副本。
+    harness
+        .propose_pd(PdOp::RecordIntent {
+            intent: harness.split_intent(10, 1, b"m", 2),
+        })
+        .await;
+
+    let outcome = harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("pre-create target");
+    assert_eq!(outcome.pending_spawned, 1);
+    assert_eq!(harness.lifecycle.pending_count(), 1);
+    assert!(harness.lifecycle.migration_target(2).is_some());
+    assert!(
+        harness.manager.runtime(2).is_none(),
+        "pending target must not join data-plane runtimes"
+    );
+    assert!(
+        harness
+            .manager
+            .list_runtimes()
+            .iter()
+            .all(|runtime| runtime.region_id() != 2),
+        "pending target must stay out of safe_ts / watermark aggregation"
+    );
+    assert_eq!(
+        harness.manager.route(b"z").unwrap().region_id(),
+        1,
+        "cutover 前目标区间仍归父 Region"
+    );
+    assert_eq!(harness.lifecycle.member_count(), 1);
+
+    // 重复 tick 幂等：不重复装配、不重复计数。
+    let outcome = harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile again");
+    assert_eq!(outcome.pending_spawned, 0);
+    assert_eq!(harness.lifecycle.pending_count(), 1);
+
+    let target = harness
+        .lifecycle
+        .migration_target(2)
+        .expect("pending target runtime");
+    let stop = tokio::time::Instant::now() + DEADLINE;
+    while target.raft.current_leader().await != Some(NODE_ID) {
+        assert!(
+            tokio::time::Instant::now() < stop,
+            "pending target leader not elected"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let port = CoordRangeImportTarget::from_runtime(&target);
+    let rows = vec![(
+        b"m".to_vec(),
+        b"v".to_vec(),
+        KvMetadata {
+            version: 1,
+            create_revision: 10,
+            mod_revision: 10,
+            lease_id: 0,
+            deleted: false,
+        },
+    )];
+    assert_eq!(
+        port.import_range(b"m", b"", rows, 10, true)
+            .await
+            .expect("import through the pending target raft"),
+        1
+    );
+    assert_eq!(target.mvcc.get(b"m").unwrap().as_deref(), Some(&b"v"[..]));
+
+    // cutover：提升为正式 Region（路由复用同一个 handle + compaction 接管）。
+    harness.propose_pd(PdOp::Cutover { op_id: 10 }).await;
+    let outcome = harness.lifecycle.reconcile().await.expect("promote target");
+    assert_eq!(outcome.pending_promoted, 1);
+    assert_eq!(outcome.pending_spawned, 0);
+    assert_eq!(harness.lifecycle.pending_count(), 0);
+    assert_eq!(harness.lifecycle.member_count(), 2);
+    assert!(harness.lifecycle.has_compaction(2));
+    assert_eq!(harness.manager.route(b"z").unwrap().region_id(), 2);
+
+    let runtime2 = harness.wait_region_leader(2).await;
+    assert!(
+        Arc::ptr_eq(&runtime2, &target),
+        "promotion must reuse the pending runtime"
+    );
+    let route_handle = harness
+        .manager
+        .get_region(2)
+        .expect("region 2 route handle");
+    assert!(
+        Arc::ptr_eq(&route_handle, &runtime2.handle),
+        "route table and runtime must share one RegionHandle"
+    );
+    assert_eq!(
+        runtime2.mvcc.get(b"m").unwrap().as_deref(),
+        Some(&b"v"[..]),
+        "imported rows survive promotion"
+    );
+    harness.put_v2(&runtime2, b"n", b"v2", 11).await;
+    assert_eq!(
+        runtime2.mvcc.get(b"n").unwrap().as_deref(),
+        Some(&b"v2"[..])
+    );
+
+    // intent 清理后仍是正式 Region，不会被当成 pending 回收。
+    harness.propose_pd(PdOp::ClearIntent { op_id: 10 }).await;
+    let outcome = harness.lifecycle.reconcile().await.expect("clear intent");
+    assert_eq!(outcome.pending_retired, 0);
+    assert_eq!(harness.lifecycle.member_count(), 2);
+    assert!(harness.manager.runtime(2).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lifecycle_retires_split_target_that_never_cut_over() {
+    let harness = Harness::boot().await;
+    assert_eq!(
+        harness
+            .propose(RegionMetaOp::Init {
+                regions: vec![region(1, b"", b"", 1, 1)],
+            })
+            .await,
+        RegionMetaOutcome::Applied { version: 1 }
+    );
+    harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile table v1");
+
+    harness
+        .propose_pd(PdOp::RecordIntent {
+            intent: harness.split_intent(11, 1, b"m", 3),
+        })
+        .await;
+    let outcome = harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("pre-create target");
+    assert_eq!(outcome.pending_spawned, 1);
+    assert_eq!(harness.lifecycle.pending_count(), 1);
+
+    // 执行失败/被裁掉：intent 清除，表未改 → 预创建的目标必须停机回收。
+    harness.propose_pd(PdOp::ClearIntent { op_id: 11 }).await;
+    let outcome = harness.lifecycle.reconcile().await.expect("retire target");
+    assert_eq!(outcome.pending_retired, 1);
+    assert_eq!(harness.lifecycle.pending_count(), 0);
+    assert!(harness.manager.runtime(3).is_none());
+    assert_eq!(harness.manager.route(b"z").unwrap().region_id(), 1);
+    assert_eq!(
+        harness.mvcc0.region_table().unwrap().version,
+        1,
+        "表未改：回滚只停机"
+    );
+
+    let outcome = harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile again");
+    assert_eq!(outcome.pending_retired, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lifecycle_skips_pending_target_without_local_replica() {
+    let harness = Harness::boot().await;
+    assert_eq!(
+        harness
+            .propose(RegionMetaOp::Init {
+                regions: vec![region(1, b"", b"", 1, 1)],
+            })
+            .await,
+        RegionMetaOutcome::Applied { version: 1 }
+    );
+    harness
+        .lifecycle
+        .reconcile()
+        .await
+        .expect("reconcile table v1");
+
+    let mut intent = harness.split_intent(12, 1, b"m", 4);
+    for change in &mut intent.plan.changes {
+        if let RegionChange::Add { meta } = change {
+            meta.peers = vec![Peer {
+                node_id: 2,
+                raft_addr: "127.0.0.1:2".to_string(),
+                role: PeerRole::Voter,
+            }];
+        }
+    }
+    harness.propose_pd(PdOp::RecordIntent { intent }).await;
+
+    let outcome = harness.lifecycle.reconcile().await.expect("reconcile");
+    assert_eq!(outcome.pending_spawned, 0);
+    assert_eq!(harness.lifecycle.pending_count(), 0);
+    assert!(harness.lifecycle.migration_target(4).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
