@@ -116,6 +116,8 @@ pub struct RegionLifecycle {
     /// `RegionManager::list_runtimes`（safe_ts / watermark / decision apply 的
     /// 聚合只看已 cutover 的 Region）。
     pending: RwLock<BTreeMap<RegionId, Arc<RegionRuntime>>>,
+    /// 已停机、待删除数据目录的 split 目标（删除失败下轮重试）。
+    reclaim: RwLock<BTreeSet<RegionId>>,
     /// 串行化装配/停机：同一时刻只允许一个 Region 进出，避免「刚 spawn 就被
     /// 另一个 tick retire」的交错。
     transition: tokio::sync::Mutex<()>,
@@ -139,6 +141,7 @@ impl RegionLifecycle {
             compaction: spec.compaction,
             members: RwLock::new(BTreeMap::new()),
             pending: RwLock::new(BTreeMap::new()),
+            reclaim: RwLock::new(BTreeSet::new()),
             transition: tokio::sync::Mutex::new(()),
         }
     }
@@ -365,10 +368,10 @@ impl RegionLifecycle {
         Ok(true)
     }
 
-    /// 停机一个未 cutover 的目标 Region。
+    /// 停机一个未 cutover 的目标 Region，并登记其数据目录待回收。
     ///
-    /// shutdown 失败时保留 pending 待下一 tick 重试；数据目录保留（回收归
-    /// #163 后续切片）。`Ok(false)` = 本来就不在 pending。
+    /// shutdown 失败时保留 pending 待下一 tick 重试。`Ok(false)` = 本来就不在
+    /// pending。目录删除由 [`Self::reclaim_aborted_dirs`] 按最新视图复核后执行。
     async fn retire_pending(&self, region_id: RegionId) -> std::result::Result<bool, String> {
         let _guard = self.transition.lock().await;
         let Some(runtime) = self.pending.read().get(&region_id).cloned() else {
@@ -380,12 +383,71 @@ impl RegionLifecycle {
             .await
             .map_err(|err| format!("pending region {region_id} raft shutdown failed: {err}"))?;
         self.pending.write().remove(&region_id);
+        self.reclaim.write().insert(region_id);
         tracing::info!(
             region_id,
             node = self.node_id,
-            "split target runtime retired without cutover (data dir kept)"
+            "split target runtime retired without cutover (data dir queued for reclaim)"
         );
         Ok(true)
+    }
+
+    /// 删除未 cutover 目标的数据目录（已导入的页与 raft 日志）。
+    ///
+    /// 删除前用最新视图复核：表里有、pending 已重新装配、或 intent 再次引用
+    /// 同一 id（失败后 id 可能被新的 split 复用）——任一命中都不删。持
+    /// `transition` 让新的 pending 装配不能与删除交错；剩余窗口只有「删除系统
+    /// 调用期间表被并发 cutover」，而新 cutover 需要已装配的 pending 与完成搬迁。
+    async fn reclaim_aborted_dirs(&self) {
+        if self.reclaim.read().is_empty() {
+            return;
+        }
+        let _guard = self.transition.lock().await;
+        let table = match self.table.region_table() {
+            Ok(table) => table,
+            Err(err) => {
+                tracing::warn!("reclaim split target dirs: read region table failed: {err}");
+                return;
+            }
+        };
+        let desired: BTreeSet<RegionId> = match self.desired_pending_targets(&table) {
+            Ok(metas) => metas.into_iter().map(|meta| meta.region_id).collect(),
+            Err(err) => {
+                tracing::warn!("reclaim split target dirs: read intents failed: {err}");
+                return;
+            }
+        };
+        let candidates: Vec<RegionId> = self.reclaim.read().iter().copied().collect();
+        for region_id in candidates {
+            if table.get(region_id).is_some()
+                || self.pending.read().contains_key(&region_id)
+                || desired.contains(&region_id)
+            {
+                // 同一 id 已被新计划/表重新使用：目录现在是活的。
+                self.reclaim.write().remove(&region_id);
+                continue;
+            }
+            let dir = region_data_dir(&self.base_dir, region_id);
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {
+                    self.reclaim.write().remove(&region_id);
+                    tracing::info!(
+                        region_id,
+                        path = %dir.display(),
+                        "aborted split target dir reclaimed"
+                    );
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    self.reclaim.write().remove(&region_id);
+                }
+                Err(err) => tracing::warn!(
+                    region_id,
+                    path = %dir.display(),
+                    error = %err,
+                    "reclaim aborted split target dir failed; retrying on the next reconcile tick"
+                ),
+            }
+        }
     }
 
     /// 让运行时跟随本节点已 apply 的权威 Region 表与 split/merge intent。
@@ -519,6 +581,8 @@ impl RegionLifecycle {
                 ),
             }
         }
+
+        self.reclaim_aborted_dirs().await;
         Ok(outcome)
     }
 

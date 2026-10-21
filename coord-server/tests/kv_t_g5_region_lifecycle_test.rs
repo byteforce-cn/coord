@@ -28,7 +28,7 @@ use coord_server::raft::region::{spawn_configured_regions, RegionManager, Region
 use coord_server::raft::region_lifecycle::{
     RegionLifecycle, RegionLifecycleSpec, REGION_RECONCILE_INTERVAL,
 };
-use coord_server::raft::region_runtime::CoordRangeImportTarget;
+use coord_server::raft::region_runtime::{region_data_dir, CoordRangeImportTarget};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::type_config::{
     Command, IntentPhase, PdIntent, PdOp, RegionMetaOp, RegionMetaOutcome, Response,
@@ -536,6 +536,10 @@ async fn test_lifecycle_precreates_split_target_and_promotes_after_cutover() {
     assert_eq!(outcome.pending_retired, 0);
     assert_eq!(harness.lifecycle.member_count(), 2);
     assert!(harness.manager.runtime(2).is_some());
+    assert!(
+        region_data_dir(harness._dir.path(), 2).exists(),
+        "promoted region dir must never be reclaimed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -567,6 +571,8 @@ async fn test_lifecycle_retires_split_target_that_never_cut_over() {
         .expect("pre-create target");
     assert_eq!(outcome.pending_spawned, 1);
     assert_eq!(harness.lifecycle.pending_count(), 1);
+    let target_dir = region_data_dir(harness._dir.path(), 3);
+    assert!(target_dir.exists(), "pending target wrote its data dir");
 
     // 执行失败/被裁掉：intent 清除，表未改 → 预创建的目标必须停机回收。
     harness.propose_pd(PdOp::ClearIntent { op_id: 11 }).await;
@@ -579,6 +585,10 @@ async fn test_lifecycle_retires_split_target_that_never_cut_over() {
         harness.mvcc0.region_table().unwrap().version,
         1,
         "表未改：回滚只停机"
+    );
+    assert!(
+        !target_dir.exists(),
+        "aborted split target dir is reclaimed"
     );
 
     let outcome = harness
