@@ -32,7 +32,8 @@ use coord_server::raft::region_lifecycle::{
 use coord_server::raft::region_runtime::{region_data_dir, CoordRangeImportTarget};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::type_config::{
-    Command, IntentPhase, PdIntent, PdOp, RegionMetaOp, RegionMetaOutcome, Response,
+    Command, CommitDecisionApply, IntentPhase, PdIntent, PdOp, RegionMetaOp, RegionMetaOutcome,
+    Response, SequencerMutation,
 };
 use coord_server::raft::{
     new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, RegionRuntime,
@@ -269,6 +270,29 @@ impl Harness {
                 "region {region_id} leader not elected"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn apply_decisions(&self, runtime: &RegionRuntime, decisions: Vec<CommitDecisionApply>) {
+        let stop = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            let result = runtime
+                .raft
+                .client_write(Command::ApplyCommitDecisions {
+                    decisions: decisions.clone(),
+                })
+                .await;
+            match result {
+                Ok(_) => return,
+                Err(err) => {
+                    assert!(
+                        tokio::time::Instant::now() < stop,
+                        "region {} apply decisions failed: {err}",
+                        runtime.region_id()
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
         }
     }
 
@@ -612,9 +636,37 @@ async fn test_production_migrator_wires_manager_source_and_pending_target() {
         .expect("reconcile table v1");
 
     let parent = harness.wait_region_leader(1).await;
-    harness.put_v2(&parent, b"a", b"1", 10).await;
-    harness.put_v2(&parent, b"m", b"1", 11).await;
-    harness.put_v2(&parent, b"z", b"3", 12).await;
+    harness
+        .apply_decisions(
+            &parent,
+            vec![
+                CommitDecisionApply {
+                    commit_ts: 10,
+                    mutations: vec![SequencerMutation::Put {
+                        key: b"a".to_vec(),
+                        value: b"1".to_vec(),
+                        lease_id: None,
+                    }],
+                },
+                CommitDecisionApply {
+                    commit_ts: 11,
+                    mutations: vec![SequencerMutation::Put {
+                        key: b"m".to_vec(),
+                        value: b"1".to_vec(),
+                        lease_id: None,
+                    }],
+                },
+                CommitDecisionApply {
+                    commit_ts: 12,
+                    mutations: vec![SequencerMutation::Put {
+                        key: b"z".to_vec(),
+                        value: b"3".to_vec(),
+                        lease_id: None,
+                    }],
+                },
+            ],
+        )
+        .await;
 
     let intent = harness.split_intent(11, 1, b"m", 2);
     harness

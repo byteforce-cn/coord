@@ -33,11 +33,12 @@ use coord_server::raft::region::RegionManager;
 use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
-use coord_server::raft::type_config::SequencerValidationLimits;
+use coord_server::raft::type_config::{SequencerMutation, SequencerValidationLimits};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
-use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
+use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
+use coord_server::storage::region_table::RegionTable;
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
 
@@ -321,6 +322,82 @@ impl WatchNode {
             .expect("put v2");
     }
 
+    /// 应用权威 Region 表，并为表中尚未装配的 Region 建运行时（单节点 initialize）。
+    ///
+    /// 生产由 `RegionLifecycle::reconcile` 做这件事；测试要在 split/merge 拓扑
+    /// 变化后写数据，因此在这里同步等 leader。
+    pub async fn apply_region_table_and_spawn(&self, table: RegionTable) {
+        self.manager
+            .apply_region_table(&table)
+            .expect("apply region table");
+        let base = self._dir.path().to_path_buf();
+        for meta in &table.regions {
+            if self.manager.runtime(meta.region_id).is_some() {
+                continue;
+            }
+            self.manager
+                .spawn_registered_region(
+                    &self._factory,
+                    &self._rpc,
+                    RegionRuntimeSpec {
+                        meta: meta.clone(),
+                        data_dir: region_data_dir(&base, meta.region_id),
+                        raft_config: Arc::new(raft_config()),
+                        object_store: None,
+                        revision_mode: RevisionMode::CommitTs,
+                    },
+                    true,
+                )
+                .await
+                .expect("spawn table region");
+        }
+        wait_for_leaders(&self.node, &self.manager).await;
+    }
+
+    /// 表已移除的 Region：停 raft 组并摘除运行时（模拟 RegionLifecycle retire）。
+    pub async fn retire_region(&self, region_id: u64) {
+        let Some(rt) = self.manager.runtime(region_id) else {
+            return;
+        };
+        rt.raft.shutdown().await.expect("shutdown region raft");
+        self.manager.detach_runtime(region_id);
+    }
+
+    /// 在指定 Region 上直接 apply 一条带 Commit Log 的决策，模拟 cutover 窗口
+    /// 内父 Region 先 apply、子 Region 稍后从决策日志重放同一 `commit_ts`。
+    pub async fn replay_decision_on_region(
+        &self,
+        region_id: u64,
+        key: &[u8],
+        value: &[u8],
+        commit_ts: u64,
+    ) {
+        let rt = self.manager.runtime(region_id).expect("region runtime");
+        rt.mvcc
+            .apply_commit_decisions_with_log(
+                &[coord_server::raft::type_config::CommitDecisionApplyLog {
+                    shard_id: coord_server::storage::commit_log::COMMIT_LOG_STAGING_SHARD_ID,
+                    region_id,
+                    commit_ts,
+                    txn_id: format!("replay-{commit_ts}").into_bytes(),
+                    start_ts: commit_ts.saturating_sub(1),
+                    mutations: vec![SequencerMutation::Put {
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                        lease_id: None,
+                    }],
+                }],
+                1,
+                AppliedLogId {
+                    term: 1,
+                    node_id: 1,
+                    index: 1,
+                },
+                4 * 1024 * 1024,
+            )
+            .expect("replay decision");
+    }
+
     pub async fn begin(&self, start_ts: i64) -> coord_proto::txn::v2::BeginResponse {
         TxnV2::begin(
             &*self.node,
@@ -484,13 +561,13 @@ pub async fn wait_for_leaders(node: &CoordNode, manager: &RegionManager) {
             .current_leader()
             .await
             == Some(1);
-        let data_ready = (1..=2).all(|id| {
-            manager.runtime(id).is_some_and(|rt| {
+        let runtimes = manager.list_runtimes();
+        let data_ready = !runtimes.is_empty()
+            && runtimes.iter().all(|rt| {
                 let m = rt.raft.metrics();
                 let m = m.borrow_watched();
                 m.current_leader == Some(1) && m.last_quorum_acked.is_some()
-            })
-        });
+            });
         if root_leader && data_ready {
             return;
         }

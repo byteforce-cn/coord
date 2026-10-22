@@ -1,6 +1,6 @@
 //! KV-T G5（#161）`coord-routing-epoch` 入口校验：
 //!
-//! - 全部 v2 数据面服务（KV/Txn/Watch/Lease）在 handler 入口校验 metadata；
+//! - 全部 v2 数据面服务（KV/Txn/Watch/Lease/Storage）在 handler 入口校验 metadata；
 //!   与本地已应用 Region 表 `version` 不一致 → `ABORTED` + `EPOCH_STALE`，
 //!   trailing metadata 回传本节点当前版本（ADR-0015 D12.5）；
 //! - metadata 缺失不校验（单 Region / 尚未学到版本的客户端）；
@@ -19,7 +19,15 @@ use coord_proto::kv::v2::kv_server::KvServer;
 use coord_proto::kv::v2::{DeleteRequest, PutRequest, RangeRequest};
 use coord_proto::lease::v2::lease_client::LeaseClient;
 use coord_proto::lease::v2::lease_server::LeaseServer;
-use coord_proto::lease::v2::{LeaseGrantRequest, LeaseKeepAliveRequest, LeaseTimeToLiveRequest};
+use coord_proto::lease::v2::{
+    LeaseGrantRequest, LeaseKeepAliveRequest, LeaseRevokeRequest, LeaseTimeToLiveRequest,
+};
+use coord_proto::storage::v2::storage_client::StorageClient;
+use coord_proto::storage::v2::storage_server::StorageServer;
+use coord_proto::storage::v2::{
+    DeleteRequest as StorageDeleteRequest, GetRequest as StorageGetRequest, PutMeta,
+    PutRequest as StoragePutRequest, StatRequest,
+};
 use coord_proto::txn::v2::txn_client::TxnClient;
 use coord_proto::txn::v2::txn_server::TxnServer;
 use coord_proto::txn::v2::{
@@ -93,12 +101,16 @@ async fn start_server() -> TestServer {
     let mut node = CoordNode::new(Arc::clone(&mvcc));
     node.node_id = NODE_ID;
     node.region_manager = Some(Arc::clone(&manager));
+    node.object_limits = Some(Arc::new(
+        coord_server::storage::object_store::ObjectLimits::default(),
+    ));
     node.set_kvt_state(
         KvTState::new(true, KvTRuntimeConfig::default()).with_implemented([
             KvTCapability::Kv,
             KvTCapability::Txn,
             KvTCapability::Lease,
             KvTCapability::Watch,
+            KvTCapability::Storage,
         ]),
     );
     let node = Arc::new(node);
@@ -112,6 +124,7 @@ async fn start_server() -> TestServer {
             .add_service(TxnServer::from_arc(Arc::clone(&serving)))
             .add_service(LeaseServer::from_arc(Arc::clone(&serving)))
             .add_service(WatchServer::from_arc(Arc::clone(&serving)))
+            .add_service(StorageServer::from_arc(Arc::clone(&serving)))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await;
     });
@@ -247,6 +260,70 @@ async fn stale_routing_epoch_is_rejected_on_every_v2_data_entry() {
         lease
             .lease_keep_alive(with_epoch(
                 tokio_stream::iter(vec![LeaseKeepAliveRequest { lease_id: 1 }]),
+                &stale,
+            ))
+            .await,
+    );
+    assert_epoch_stale(
+        lease
+            .lease_revoke(with_epoch(
+                LeaseRevokeRequest {
+                    lease_id: 1,
+                    request_id: b"revoke".to_vec(),
+                },
+                &stale,
+            ))
+            .await,
+    );
+
+    let mut storage = StorageClient::new(channel.clone());
+    assert_epoch_stale(
+        storage
+            .stat(with_epoch(
+                StatRequest {
+                    bucket: "b".to_string(),
+                    object_id: b"o".to_vec(),
+                    read_ts: 0,
+                },
+                &stale,
+            ))
+            .await,
+    );
+    assert_epoch_stale(
+        storage
+            .delete(with_epoch(
+                StorageDeleteRequest {
+                    bucket: "b".to_string(),
+                    object_id: b"o".to_vec(),
+                    request_id: b"delete".to_vec(),
+                },
+                &stale,
+            ))
+            .await,
+    );
+    assert_epoch_stale(
+        storage
+            .get(with_epoch(
+                StorageGetRequest {
+                    bucket: "b".to_string(),
+                    object_id: b"o".to_vec(),
+                    read_ts: 0,
+                },
+                &stale,
+            ))
+            .await
+            .map(|response| response.into_inner()),
+    );
+    assert_epoch_stale(
+        storage
+            .put(with_epoch(
+                tokio_stream::iter(vec![StoragePutRequest {
+                    part: Some(coord_proto::storage::v2::put_request::Part::Meta(PutMeta {
+                        bucket: "b".to_string(),
+                        object_id: b"o".to_vec(),
+                        total_size: 1,
+                    })),
+                }]),
                 &stale,
             ))
             .await,

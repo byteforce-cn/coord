@@ -22,6 +22,7 @@ use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
 use coord_server::raft::region_runtime::CoordRangeImportTarget;
 use coord_server::raft::state_machine::StateMachineStore;
+use coord_server::raft::type_config::{CommitDecisionApply, SequencerMutation};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RaftNode};
 use coord_server::split_merge::{
     RangeImportMigrator, RangeImportTarget, RegionImportTargetResolver, RegionMvccResolver,
@@ -53,6 +54,38 @@ fn applied(index: u64) -> AppliedLogId {
         node_id: NODE_ID,
         index,
     }
+}
+
+fn decision(commit_ts: u64, mutations: Vec<SequencerMutation>) -> CommitDecisionApply {
+    CommitDecisionApply {
+        commit_ts,
+        mutations,
+    }
+}
+
+fn put(key: &[u8], value: &[u8], lease_id: Option<i64>) -> SequencerMutation {
+    SequencerMutation::Put {
+        key: key.to_vec(),
+        value: value.to_vec(),
+        lease_id,
+    }
+}
+
+fn delete(key: &[u8]) -> SequencerMutation {
+    SequencerMutation::Delete { key: key.to_vec() }
+}
+
+/// 用决策 apply 推进 Region 水位与决策游标（两者必须一致）。
+fn apply_decisions(storage: &MvccStorage<RedbBackend>, decisions: Vec<CommitDecisionApply>) {
+    let through = decisions.last().map_or(0, |decision| decision.commit_ts);
+    storage
+        .apply_commit_decisions(&decisions, 1, applied(through.max(1)))
+        .expect("apply decisions");
+}
+
+/// 用空决策把 Region 推到指定 revision，用于让两侧水位收敛。
+fn advance_to(storage: &MvccStorage<RedbBackend>, revision: u64) {
+    apply_decisions(storage, vec![decision(revision, Vec::new())]);
 }
 
 fn region(region_id: u64, start: &[u8], end: &[u8]) -> RegionMeta {
@@ -134,16 +167,15 @@ async fn donor_region() -> (TempDir, Arc<MvccStorage<RedbBackend>>) {
     let storage = Arc::new(
         MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).expect("donor mvcc"),
     );
-    storage
-        .put_at_commit_ts(b"m", b"1", Some(7), 11, applied(1))
-        .unwrap();
-    storage
-        .put_at_commit_ts(b"z", b"3", None, 12, applied(2))
-        .unwrap();
-    storage
-        .put_at_commit_ts(b"n", b"9", None, 13, applied(3))
-        .unwrap();
-    storage.delete_at_commit_ts(b"n", 14, applied(4)).unwrap();
+    apply_decisions(
+        storage.as_ref(),
+        vec![
+            decision(11, vec![put(b"m", b"1", Some(7))]),
+            decision(12, vec![put(b"z", b"3", None)]),
+            decision(13, vec![put(b"n", b"9", None)]),
+            decision(14, vec![delete(b"n")]),
+        ],
+    );
     (dir, storage)
 }
 
@@ -205,9 +237,9 @@ fn migrator(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_merge_migrator_moves_right_rows_into_left_and_keeps_history() {
     let (_left_dir, left, target) = boot_left_region().await;
-    left.put_at_commit_ts(b"a", b"left", None, 20, applied(10))
-        .expect("seed left row");
+    apply_decisions(&left, vec![decision(20, vec![put(b"a", b"left", None)])]);
     let (_donor_dir, donor) = donor_region().await;
+    advance_to(&donor, 20);
     let drain = RecordingDrain::new();
 
     migrator(
@@ -241,7 +273,7 @@ async fn test_merge_migrator_moves_right_rows_into_left_and_keeps_history() {
         0,
         "merge 不压缩接收方历史"
     );
-    assert_eq!(donor.current_revision(), 14, "源只读、revision 不变");
+    assert_eq!(donor.current_revision(), 20, "源只读、水位与接收方一致");
     assert_eq!(
         left.range(b"", 10).unwrap().len(),
         3,
@@ -253,8 +285,7 @@ async fn test_merge_migrator_moves_right_rows_into_left_and_keeps_history() {
 async fn test_merge_migrator_is_idempotent_across_restarts() {
     let (_left_dir, left, target) = boot_left_region().await;
     // 接收方已 apply 到源水位（合并前它一直在推进自己的 revision）。
-    left.put_at_commit_ts(b"a", b"left", None, 14, applied(10))
-        .expect("seed left revision");
+    apply_decisions(&left, vec![decision(14, vec![put(b"a", b"left", None)])]);
     let (_donor_dir, donor) = donor_region().await;
     let m = migrator(
         &left,
@@ -307,13 +338,67 @@ async fn test_merge_fails_closed_when_receiver_lags_donor() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_merge_fails_closed_when_donor_lags_the_receiver() {
+    let (_left_dir, left, target) = boot_left_region().await;
+    apply_decisions(&left, vec![decision(20, vec![put(b"a", b"left", None)])]);
+    let (_donor_dir, donor) = donor_region().await;
+
+    let err = migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect_err("donor 落后接收方时必须失败");
+
+    assert!(
+        err.contains("merge donor") && err.contains("behind"),
+        "{err}"
+    );
+    assert!(left.get(b"m").unwrap().is_none(), "不得导入任何行");
+    assert_eq!(left.current_revision(), 20, "失败不得改水位");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_merge_fails_closed_when_the_receiver_has_unapplied_decisions() {
+    let (_left_dir, left, target) = boot_left_region().await;
+    // 直写把水位推到 20，但决策游标仍停在 0：合并会跳过 (0, 20] 的决策。
+    left.put_at_commit_ts(b"a", b"left", None, 20, applied(10))
+        .expect("seed direct write");
+    let (_donor_dir, donor) = donor_region().await;
+    advance_to(&donor, 20);
+
+    let err = migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect_err("接收方决策游标落后水位时必须失败");
+
+    assert!(
+        err.contains("decision cursor") && err.contains("behind"),
+        "{err}"
+    );
+    assert!(left.get(b"m").unwrap().is_none(), "不得导入任何行");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_merge_keeps_left_history_and_seals_absorbed_range() {
     let (_left_dir, left, target) = boot_left_region().await;
-    left.put_at_commit_ts(b"a", b"left", None, 5, applied(9))
-        .expect("seed early left row");
-    left.put_at_commit_ts(b"b", b"left", None, 20, applied(10))
-        .expect("push left revision past the donor");
+    apply_decisions(
+        &left,
+        vec![
+            decision(5, vec![put(b"a", b"left", None)]),
+            decision(20, vec![put(b"b", b"left", None)]),
+        ],
+    );
     let (_donor_dir, donor) = donor_region().await;
+    advance_to(&donor, 20);
 
     migrator(
         &left,
@@ -373,11 +458,15 @@ async fn test_merge_drain_failure_imports_nothing() {
 async fn test_merge_clears_stale_rows_from_a_prior_partial_run() {
     let (_left_dir, left, target) = boot_left_region().await;
     // 上一次部分导入留下、但源侧后来已删除的 Key：不先清空就会在重试后复活。
-    left.put_at_commit_ts(b"n", b"stale", None, 9, applied(9))
-        .expect("seed stale imported row");
-    left.put_at_commit_ts(b"a", b"left", None, 20, applied(10))
-        .expect("seed left row");
+    apply_decisions(
+        &left,
+        vec![
+            decision(9, vec![put(b"n", b"stale", None)]),
+            decision(20, vec![put(b"a", b"left", None)]),
+        ],
+    );
     let (_donor_dir, donor) = donor_region().await;
+    advance_to(&donor, 20);
 
     migrator(
         &left,
