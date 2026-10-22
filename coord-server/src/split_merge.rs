@@ -193,18 +193,23 @@ impl RangeImportMigrator {
                 .export_range_page(start, end, after.as_deref(), self.page_size, watermark)
                 .map_err(|e| format!("export range page: {e}"))?;
             let pinned = *watermark.get_or_insert(page.revision);
+            if seal_prior_history && after.is_none() {
+                // 快照 revision 已包含 == cursor 的决策。源游标落后说明有决策
+                // 尚未 apply 却已被水位越过；目标从 watermark 续跑就会永久跳过
+                // 它们（apply 在 fence 前停住）。
+                let cursor = source
+                    .last_applied_decision_ts()
+                    .map_err(|e| format!("read split source decision cursor: {e}"))?;
+                if cursor != pinned {
+                    return Err(format!(
+                        "split source decision cursor {cursor} is behind the exported revision \
+                         {pinned}; refusing to seed the target from an unapplied watermark"
+                    ));
+                }
+            }
             let done = page.next_after.is_none();
-            // 空白源 Region 的 revision 可以是 0，但导入水位必须 > 0：
-            // 用 1 让目标水位仍可被未来 commit_ts 推开。
             target
-                .import_range(
-                    start,
-                    end,
-                    page.rows,
-                    pinned.max(1),
-                    seal_prior_history,
-                    done,
-                )
+                .import_range(start, end, page.rows, pinned, seal_prior_history, done)
                 .await?;
             if done {
                 break;
@@ -311,6 +316,33 @@ impl RangeImportMigrator {
             return Err(format!(
                 "absorbing region {absorbing} has applied revision {receiver_revision}, behind \
                  the merge donor's {pin}; refusing to import until decision apply catches up"
+            ));
+        }
+        if receiver_revision > pin {
+            return Err(format!(
+                "merge donor region {donor} has applied revision {pin}, behind the absorbing \
+                 region {absorbing}'s {receiver_revision}; refusing to skip the donor's pending \
+                 decisions"
+            ));
+        }
+        // 接收方游标若落后自身水位，`(cursor, pin]` 的决策还没 apply；导入快照
+        // 只覆盖 donor 区间，直接合并会让这些接收方自己的决策永远被游标跳过。
+        let donor_cursor = source
+            .last_applied_decision_ts()
+            .map_err(|e| format!("read merge donor decision cursor: {e}"))?;
+        if donor_cursor != pin {
+            return Err(format!(
+                "merge donor region {donor} decision cursor {donor_cursor} is behind its \
+                 applied revision {pin}; refusing to import until the donor catches up"
+            ));
+        }
+        let receiver_cursor = receiver
+            .last_applied_decision_ts()
+            .map_err(|e| format!("read absorbing region decision cursor: {e}"))?;
+        if receiver_cursor != receiver_revision {
+            return Err(format!(
+                "absorbing region {absorbing} decision cursor {receiver_cursor} is behind its \
+                 applied revision {receiver_revision}; refusing to skip its pending decisions"
             ));
         }
 

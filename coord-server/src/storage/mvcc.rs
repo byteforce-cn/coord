@@ -1217,9 +1217,11 @@ impl<B: StorageBackend> MvccStorage<B> {
                 "range import requires commit_ts revision semantics".to_string(),
             ));
         }
-        if watermark == 0 {
+        // 空 Region 的 revision 可以是 0；只要有行，导入水位就必须为正，
+        // 否则 `mod_revision in (0, watermark]` 的校验无法成立。
+        if watermark == 0 && !rows.is_empty() {
             return Err(Error::InvalidArgument(
-                "range import watermark must be > 0".to_string(),
+                "range import watermark must be > 0 for non-empty pages".to_string(),
             ));
         }
 
@@ -1329,6 +1331,19 @@ impl<B: StorageBackend> MvccStorage<B> {
                         .unwrap_or(0);
                     let compacted = previous_compacted.max(watermark).min(target_revision);
                     tx.insert(TABLE_META, META_COMPACT_REVISION, &compacted.to_be_bytes())?;
+                    // 快照已包含 `<= watermark` 的全部决策：目标游标必须从这里
+                    // 续跑。停在 0 会让 `apply_commit_decisions` 在第一条旧决策上
+                    // 遇到「commit_ts <= current_revision 且无 changelog」而永久
+                    // 停住（safe_ts 随之封顶）。
+                    let previous_cursor = tx
+                        .get(TABLE_KV, DECISION_APPLIED_TS)?
+                        .and_then(|bytes| decode_u64(&bytes))
+                        .unwrap_or(0);
+                    tx.insert(
+                        TABLE_KV,
+                        DECISION_APPLIED_TS,
+                        &previous_cursor.max(watermark).to_be_bytes(),
+                    )?;
                 } else {
                     let mut floors: Vec<ImportHistoryFloor> = tx
                         .get(TABLE_KV, IMPORT_HISTORY_FLOORS)?
@@ -5799,6 +5814,50 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_range_import_seeds_target_decision_cursor() {
+        let (_source_dir, source) = create_commit_ts_storage();
+        source
+            .put_at_commit_ts(b"m", b"1", None, 11, applied_for(1))
+            .unwrap();
+        let page = source
+            .export_range_page(b"m", b"", None, 0, Some(11))
+            .unwrap();
+
+        let (_target_dir, target) = create_commit_ts_storage();
+        target
+            .apply_range_import(
+                b"m",
+                b"",
+                &page.rows,
+                page.revision,
+                true,
+                true,
+                applied_for(5),
+            )
+            .expect("split import");
+        assert_eq!(
+            target.last_applied_decision_ts().unwrap(),
+            11,
+            "split 目标必须跳过已包含在快照里的决策"
+        );
+
+        // 快照之前的历史决策只能被跳过；卡在 fence 前会让该 Region 的
+        // 决策 apply 与 safe_ts 永久停住。
+        let replayed = target
+            .apply_commit_decisions(&[decision(5, vec![put(b"m", b"old")])], 6, applied_for(6))
+            .unwrap();
+        assert_eq!(replayed.through_ts, 11);
+        assert_eq!(replayed.decisions, 0);
+        assert_eq!(target.get(b"m").unwrap().as_deref(), Some(&b"1"[..]));
+
+        let applied = target
+            .apply_commit_decisions(&[decision(12, vec![put(b"m", b"2")])], 7, applied_for(7))
+            .unwrap();
+        assert_eq!(applied.through_ts, 12);
+        assert_eq!(target.get(b"m").unwrap().as_deref(), Some(&b"2"[..]));
+    }
+
+    #[test]
     fn test_apply_range_import_merge_keeps_target_history() {
         let (_target_dir, target) = create_commit_ts_storage();
         // 接收方已经 apply 到导入水位（合并前它一直在推进 revision）。
@@ -5981,6 +6040,19 @@ mod tests {
                 applied_for(3),
             )
             .expect_err("mod_revision above the watermark must be rejected");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+        // 空页允许 watermark=0（空 Region）；有行时必须为正。
+        let err = target
+            .apply_range_import(
+                b"a",
+                b"z",
+                &[row(b"a", b"v", 1)],
+                0,
+                true,
+                true,
+                applied_for(4),
+            )
+            .expect_err("non-empty pages need a positive watermark");
         assert!(matches!(err, Error::InvalidArgument(_)));
     }
 

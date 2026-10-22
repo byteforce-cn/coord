@@ -24,6 +24,7 @@ use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
 use coord_server::raft::region_runtime::CoordRangeImportTarget;
 use coord_server::raft::state_machine::StateMachineStore;
+use coord_server::raft::type_config::{CommitDecisionApply, SequencerMutation};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RaftNode};
 use coord_server::split_merge::{
     RangeImportMigrator, RangeImportTarget, RegionImportTargetResolver, RegionMvccResolver,
@@ -204,7 +205,29 @@ fn applied(index: u64) -> AppliedLogId {
     }
 }
 
+fn decision(commit_ts: u64, mutations: Vec<SequencerMutation>) -> CommitDecisionApply {
+    CommitDecisionApply {
+        commit_ts,
+        mutations,
+    }
+}
+
+fn put(key: &[u8], value: &[u8], lease_id: Option<i64>) -> SequencerMutation {
+    SequencerMutation::Put {
+        key: key.to_vec(),
+        value: value.to_vec(),
+        lease_id,
+    }
+}
+
+fn delete(key: &[u8]) -> SequencerMutation {
+    SequencerMutation::Delete { key: key.to_vec() }
+}
+
 /// 父 Region：a=10、m=11（lease 7）、z=12，n 在 14 被删除（子区间 tombstone）。
+///
+/// 数据由决策 apply 播种：split 的导入水位必须等于源决策游标，否则目标
+/// 会从快照里跳过尚未 apply 的决策。
 async fn source_region_with_rows() -> (TempDir, Arc<MvccStorage<RedbBackend>>) {
     let dir = tempfile::tempdir().unwrap();
     let backend = RedbBackend::open(dir.path(), &Default::default()).expect("open source store");
@@ -212,18 +235,27 @@ async fn source_region_with_rows() -> (TempDir, Arc<MvccStorage<RedbBackend>>) {
         MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).expect("source mvcc"),
     );
     storage
-        .put_at_commit_ts(b"a", b"1", None, 10, applied(1))
+        .apply_commit_decisions(
+            &[
+                decision(10, vec![put(b"a", b"1", None)]),
+                decision(11, vec![put(b"m", b"1", Some(7))]),
+                decision(12, vec![put(b"z", b"3", None)]),
+                decision(13, vec![put(b"n", b"9", None)]),
+                decision(14, vec![delete(b"n")]),
+            ],
+            1,
+            applied(1),
+        )
         .unwrap();
-    storage
-        .put_at_commit_ts(b"m", b"1", Some(7), 11, applied(2))
-        .unwrap();
-    storage
-        .put_at_commit_ts(b"z", b"3", None, 12, applied(3))
-        .unwrap();
-    storage
-        .put_at_commit_ts(b"n", b"9", None, 13, applied(4))
-        .unwrap();
-    storage.delete_at_commit_ts(b"n", 14, applied(5)).unwrap();
+    (dir, storage)
+}
+
+async fn empty_source() -> (TempDir, Arc<MvccStorage<RedbBackend>>) {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = RedbBackend::open(dir.path(), &Default::default()).expect("open source store");
+    let storage = Arc::new(
+        MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).expect("source mvcc"),
+    );
     (dir, storage)
 }
 
@@ -332,7 +364,40 @@ async fn test_split_migrator_moves_live_rows_and_pins_revision() {
     assert_eq!(meta.lease_id, 7, "lease 绑定随行搬迁");
     assert_eq!(target_mvcc.current_revision(), 14);
     assert_eq!(target_mvcc.compacted_revision().unwrap(), 14);
+    assert_eq!(
+        target_mvcc.last_applied_decision_ts().unwrap(),
+        14,
+        "目标游标必须从导入水位续跑"
+    );
     assert_eq!(source.current_revision(), 14, "源只读、revision 不变");
+
+    // cutover 之后的决策必须能在目标上 apply，而不是卡在旧决策上。
+    let applied = target_mvcc
+        .apply_commit_decisions(&[decision(15, vec![put(b"m", b"2", None)])], 2, applied(2))
+        .unwrap();
+    assert_eq!(applied.through_ts, 15);
+    assert_eq!(target_mvcc.get(b"m").unwrap().as_deref(), Some(&b"2"[..]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_empty_source_split_keeps_the_target_cursor_at_zero() {
+    let (_src_dir, source) = empty_source().await;
+    let (_dst_dir, target_mvcc, target) = boot_target_region().await;
+
+    migrator(&source, target, RecordingDrain::new())
+        .migrate(&split_plan())
+        .await
+        .expect("empty split migration");
+
+    assert_eq!(target_mvcc.current_revision(), 0);
+    assert_eq!(target_mvcc.last_applied_decision_ts().unwrap(), 0);
+    // 源 revision 0 表示还没有任何决策；目标不能把游标钉到 1，否则第一条
+    // commit_ts=1 的决策会被永久跳过。
+    let applied = target_mvcc
+        .apply_commit_decisions(&[decision(1, vec![put(b"m", b"1", None)])], 2, applied(2))
+        .unwrap();
+    assert_eq!(applied.through_ts, 1);
+    assert_eq!(target_mvcc.get(b"m").unwrap().as_deref(), Some(&b"1"[..]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
