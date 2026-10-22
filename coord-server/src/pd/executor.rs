@@ -89,12 +89,40 @@ pub trait SplitMergeMigrator: Send + Sync {
 
     /// 解除 fence（与 `arm_write_fence` 同一 `op_id` 幂等）。
     ///
-    /// 失败返回 `Err`：执行器保留 intent 下一拍重试，避免 fence 泄漏成永久只读。
+    /// `Ok(true)` = 本节点拥有该 fence 的 Region（源 leader / donor leader）且它
+    /// 已被清除（或本来就不需要）；`Ok(false)` = 不是本节点的 Region（不是它的
+    /// leader / 本地没有副本），必须留给真正的 leader 清，调用方**不得**据此清理
+    /// intent。失败返回 `Err`：intent 保留，下一拍重试，避免 fence 泄漏成永久只读。
     async fn release_write_fence(
         &self,
         op_id: u64,
         plan: &SplitMergePlan,
-    ) -> std::result::Result<(), String>;
+    ) -> std::result::Result<bool, String>;
+
+    /// merge 的 donor leader 自己把 fence 提进 donor Region 的 raft（#167）。
+    ///
+    /// 由**每个节点**的 executor 在扫描执行中的 merge intent 时调用：只有本节点
+    /// 是 donor leader 时才有意义（返回值 `true` = fence 已 apply；`false` = 本
+    /// 节点不负责 arm）。吸收方在导出前等本地副本看到同一 `op_id`。
+    async fn arm_donor_write_fence(
+        &self,
+        _op_id: u64,
+        _plan: &SplitMergePlan,
+    ) -> std::result::Result<bool, String> {
+        Ok(false)
+    }
+
+    /// 解除 merge 的 donor fence。
+    ///
+    /// `Ok(true)` = 本地是 donor leader 且 fence 已清（或 donor 已不在本地表）；
+    /// `Ok(false)` = 本节点不负责；`Err` = 提案失败，保留下次重试。
+    async fn release_donor_write_fence(
+        &self,
+        _op_id: u64,
+        _plan: &SplitMergePlan,
+    ) -> std::result::Result<bool, String> {
+        Ok(true)
+    }
 }
 
 /// 表拥有路由与 split version；PD 拥有成员（`peers`/`conf_ver`）与心跳统计。
@@ -521,19 +549,29 @@ impl OperatorExecutor {
                     // 解 fence 是 best-effort：提不到（换届后本节点不再是源 Region
                     // leader）不能让 intent 永远留在 Applied。fence 对 cutover 后的
                     // 父 Region 区间是惰性的，后续 merge 会无条件清掉它。
-                    if let Err(e) = self.release_fence(op_id, &intent.plan).await {
-                        tracing::warn!(
-                            op_id,
-                            error = %e,
-                            "split fence release failed; the next merge clears it"
-                        );
-                    }
+                    let _ = self.release_fence(op_id, &intent.plan).await;
                     self.finalize_split_merge(system.as_ref(), op_id).await?;
                     return Ok(());
                 }
                 IntentPhase::Rejected { reason } => {
-                    if let Err(e) = self.release_fence(op_id, &intent.plan).await {
-                        tracing::warn!(op_id, error = %e, "split fence release failed");
+                    // 表没动，fence 仍在活的区间上：只有拥有该 Region 的 leader
+                    // 能清。本节点清不了就保留 intent，让 leader 的下一拍清完
+                    // 再收口；不能在 fence 仍生效时把 intent 丢掉。
+                    match self.release_fence(op_id, &intent.plan).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Err(format!(
+                                "split/merge cutover rejected: {reason}; \
+                                 write fence cleanup pending on its region leader \
+                                 (intent retained)"
+                            ))
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "split/merge cutover rejected: {reason}; \
+                                 fence release failed: {e} (intent retained)"
+                            ))
+                        }
                     }
                     if let Err(e) = system.propose_pd(PdOp::ClearIntent { op_id }).await {
                         tracing::warn!("PD split/merge: clear rejected intent {op_id}: {e}");
@@ -601,17 +639,18 @@ impl OperatorExecutor {
         }
     }
 
-    /// 解除 split 的直写 fence。
+    /// 解除直写 fence。
     ///
-    /// 未装配搬迁器时不会有 fence（arm 走同一钩子），直接成功。
+    /// `Ok(true)` = 本节点拥有该 fence 的 Region 且已清（或本来就不需要）；
+    /// `Ok(false)` = 本节点不是相应 Region 的 leader，intent 必须保留给 leader 清。
     async fn release_fence(
         &self,
         op_id: u64,
         plan: &SplitMergePlan,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<bool, String> {
         match self.migrator() {
             Some(migrator) => migrator.release_write_fence(op_id, plan).await,
-            None => Ok(()),
+            None => Ok(false),
         }
     }
 
@@ -637,7 +676,9 @@ impl OperatorExecutor {
     ///
     /// 只驱动 `claimed_by == 本节点` 的 Running 条目：单 owner 避免多节点并发
     /// 迁移；崩溃后由 Running 超时 `Requeue` 让新 leader 重新认领并接手同一
-    /// intent（计划不重算）。
+    /// intent（计划不重算）。非 `Applied` 的 intent 在清理前必须先清掉它持有
+    /// 的直写 fence；本节点不是相应 Region 的 leader 时保留 intent，由 owner
+    /// 的下一拍清完再收口。
     async fn recover_intents(
         &self,
         system: &dyn SystemRaftHandle,
@@ -693,7 +734,30 @@ impl OperatorExecutor {
                     }
                     return Some(op);
                 }
-                // 他节点在跑（或仍 Pending）：别抢。
+                // 他节点在跑：别抢。merge 的 donor leader 可能是本节点——
+                // 把 fence 提进 donor 自己的日志（吸收方在导出前等本地副本看到它）。
+                if entry.is_running() {
+                    if intent.phase == IntentPhase::Prepared {
+                        if let Some(migrator) = self.migrator() {
+                            match migrator
+                                .arm_donor_write_fence(intent.op_id, &intent.plan)
+                                .await
+                            {
+                                Ok(true) => tracing::debug!(
+                                    op_id = intent.op_id,
+                                    "PD executor: merge donor write fence is armed"
+                                ),
+                                Ok(false) => {}
+                                Err(e) => tracing::warn!(
+                                    op_id = intent.op_id,
+                                    "PD executor: arm merge donor write fence failed: {e}"
+                                ),
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // 仍 Pending：还没人开始执行，别抢。
                 if !entry.is_terminal() {
                     continue;
                 }
@@ -719,6 +783,22 @@ impl OperatorExecutor {
                         tracing::warn!(
                             "PD executor: read region table for intent {}: {e}",
                             intent.op_id
+                        );
+                        continue;
+                    }
+                }
+            }
+            // 非 Applied 的 intent 还持有**活区间**上的 fence：只有拥有该 Region
+            // 的 leader 能清。本节点清不了（`Ok(false)`）或失败就保留 intent，
+            // 下一拍/真正的 leader 继续；不能把 fence 的最后一个句柄丢掉。
+            if !matches!(intent.phase, IntentPhase::Applied { .. }) {
+                match self.release_fence(intent.op_id, &intent.plan).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => {
+                        tracing::warn!(
+                            op_id = intent.op_id,
+                            "PD executor: release write fence failed: {e}"
                         );
                         continue;
                     }
@@ -1874,6 +1954,7 @@ mod tests {
         calls: Mutex<Vec<crate::storage::region_table::SplitMergePlan>>,
         fences: Mutex<Vec<String>>,
         fail: AtomicBool,
+        release_succeeds: AtomicBool,
     }
 
     impl FakeMigrator {
@@ -1882,6 +1963,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 fences: Mutex::new(Vec::new()),
                 fail: AtomicBool::new(false),
+                release_succeeds: AtomicBool::new(true),
             })
         }
 
@@ -1896,6 +1978,11 @@ mod tests {
 
         fn fail_next(&self) {
             self.fail.store(true, Ordering::SeqCst);
+        }
+
+        /// 模拟「本节点不是 fence 所属 Region 的 leader」：清不了，intent 必须保留。
+        fn set_release_succeeds(&self, succeeds: bool) {
+            self.release_succeeds.store(succeeds, Ordering::SeqCst);
         }
     }
 
@@ -1927,9 +2014,33 @@ mod tests {
             &self,
             op_id: u64,
             _plan: &crate::storage::region_table::SplitMergePlan,
-        ) -> std::result::Result<(), String> {
+        ) -> std::result::Result<bool, String> {
             self.fences.lock().unwrap().push(format!("release:{op_id}"));
-            Ok(())
+            Ok(self.release_succeeds.load(Ordering::SeqCst))
+        }
+
+        async fn arm_donor_write_fence(
+            &self,
+            op_id: u64,
+            _plan: &crate::storage::region_table::SplitMergePlan,
+        ) -> std::result::Result<bool, String> {
+            self.fences
+                .lock()
+                .unwrap()
+                .push(format!("donor-arm:{op_id}"));
+            Ok(true)
+        }
+
+        async fn release_donor_write_fence(
+            &self,
+            op_id: u64,
+            _plan: &crate::storage::region_table::SplitMergePlan,
+        ) -> std::result::Result<bool, String> {
+            self.fences
+                .lock()
+                .unwrap()
+                .push(format!("donor-release:{op_id}"));
+            Ok(true)
         }
     }
 
@@ -1956,6 +2067,103 @@ mod tests {
     fn resolver_for(fake: &Arc<FakeRaft>) -> Arc<RegionRaftResolver> {
         let raft: Arc<dyn RegionRaftHandle> = fake.clone();
         Arc::new(move |_rid| Some(raft.clone()))
+    }
+
+    fn merge_intent(op_id: u64) -> PdIntent {
+        let mut table = crate::storage::region_table::RegionTable::default();
+        table
+            .init(vec![region_meta(1, b"", b"m"), region_meta(2, b"m", b"")])
+            .unwrap();
+        let plan = plan_merge(&table, 1, 2).unwrap();
+        PdIntent {
+            op_id,
+            owner: 2,
+            plan,
+            phase: IntentPhase::Prepared,
+        }
+    }
+
+    /// 吸收方 leader 在别的节点执行 merge 时，本节点若是 donor leader 就把 fence
+    /// 提进 donor 自己的 raft；吸收方会在导出前等本地副本看到它。
+    #[tokio::test]
+    async fn test_running_merge_intent_arms_the_donor_fence_on_the_donor_leader() {
+        let migrator = FakeMigrator::new();
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        system
+            .propose_pd(PdOp::RecordIntent {
+                intent: merge_intent(21),
+            })
+            .await
+            .expect("record intent");
+        system.seed_running(21, Operator::MergeRegion { left: 1, right: 2 }, 2, 2);
+        let resolve = resolver_for(&fake);
+
+        assert!(
+            ex.execute_one(&*resolve).await.is_none(),
+            "the absorbing leader owns the merge; this node only arms the donor fence"
+        );
+        assert_eq!(migrator.fences(), vec!["donor-arm:21"]);
+    }
+
+    /// operator 进入终态后必须先清掉 fence 再收口 intent；清不了就保留 intent。
+    #[tokio::test]
+    async fn test_terminal_merge_intent_releases_the_write_fence_before_cleanup() {
+        let migrator = FakeMigrator::new();
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        system
+            .propose_pd(PdOp::RecordIntent {
+                intent: merge_intent(22),
+            })
+            .await
+            .expect("record intent");
+        system.seed_terminal(
+            22,
+            Operator::MergeRegion { left: 1, right: 2 },
+            false,
+            "migration failed",
+        );
+        let resolve = resolver_for(&fake);
+
+        assert!(ex.execute_one(&*resolve).await.is_none());
+        assert_eq!(migrator.fences(), vec!["release:22"]);
+        assert!(system.intents().is_empty(), "intent cleared after cleanup");
+    }
+
+    /// fence 仍生效（本节点不是 owner）时绝对不能清 intent：否则 fence 的最后一个
+    /// 句柄丢了，被挡区间永久只读。
+    #[tokio::test]
+    async fn test_terminal_merge_intent_is_retained_until_the_owner_releases_the_fence() {
+        let migrator = FakeMigrator::new();
+        migrator.set_release_succeeds(false);
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        system
+            .propose_pd(PdOp::RecordIntent {
+                intent: merge_intent(23),
+            })
+            .await
+            .expect("record intent");
+        system.seed_terminal(
+            23,
+            Operator::MergeRegion { left: 1, right: 2 },
+            false,
+            "migration failed",
+        );
+        let resolve = resolver_for(&fake);
+
+        assert!(ex.execute_one(&*resolve).await.is_none());
+        assert_eq!(migrator.fences(), vec!["release:23"]);
+        assert_eq!(
+            system.intents().len(),
+            1,
+            "fence owner has not released yet"
+        );
+
+        migrator.set_release_succeeds(true);
+        assert!(ex.execute_one(&*resolve).await.is_none());
+        assert!(
+            system.intents().is_empty(),
+            "owner released: intent cleaned"
+        );
     }
 
     #[tokio::test]
