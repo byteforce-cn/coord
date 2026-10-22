@@ -179,10 +179,10 @@
   订阅指标：`coord_kv_t_watch_streams`、`coord_kv_t_watch_batches_total`、
   `coord_kv_t_watch_events_total`、`coord_kv_t_watch_lag_commit_ts`、
   `coord_kv_t_watch_history_unavailable_total`、`coord_kv_t_watch_backpressure_total`。
-  **授权边界**：能力 `data:watch:subscribe`；鉴权层对非空 scope 的该能力授权目前
-  整体 fail-closed（prefix 级 watch 授权待后续 auth 项），handler 在收到
-  `DeferredScopeGrants` 时会按首帧区间判定，且保留命名空间（`/_pki/` 等）与
-  `/obj/` 的订阅一律拒绝。
+  **授权边界**：能力 `data:watch:subscribe`；非空 scope 的授权按订阅首帧的
+  key/range 判定（鉴权层放行并下发 `DeferredScopeGrants`，handler 在首帧
+  `check_deferred_scope`）；越界订阅返回 `PERMISSION_DENIED`，v1/v2 同口径；
+  保留命名空间（`/_pki/` 等）与 `/obj/` 的订阅一律拒绝。
 - **路由**：可带 metadata `coord-routing-epoch`（值为 Region 表 `version`）；
   与服务端已应用版本不一致返回 `ABORTED` + `EPOCH_STALE`（trailing metadata
   回传当前版本），刷新路由后重试；不带该 metadata 不校验。

@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 
 use coord_core::auth::cct::{is_expired, CctPayload, CctToken};
 use coord_core::auth::trie::{scope_covers_interval, ScopeTrie};
+use coord_core::grpc_auth::DeferredScopeGrants;
 use http_body_util::BodyExt;
 use tonic::Status;
 use tower::{Layer, Service, ServiceExt};
@@ -311,6 +312,62 @@ impl ServerAuthInterceptor {
             .map(|k| ScopeAccess::point(k.to_vec()))
             .collect();
         self.validate_scope_access(cct_str, peer_cn, capability_id, &accesses)
+    }
+
+    /// 延后 scope 判定（客户端流式 Watch）的授权快照。
+    ///
+    /// Watch 的订阅前缀在**流首帧**里；鉴权层缓存流 body 会让请求永久挂起，
+    /// 所以 scope 判定只能由 handler 拿到首帧后执行。本方法在放行时把该能力
+    /// 的授权 scope 列表交给 handler（[`DeferredScopeGrants`]）：
+    ///
+    /// - `Ok(None)` = 本层不施加 scope 约束（鉴权关闭 / root 旁路）；
+    /// - `Ok(Some(_))` = handler 必须用首帧区间调
+    ///   [`coord_core::grpc_auth::check_deferred_scope`]；
+    /// - `Err(reason)` = 凭据无效或该能力未被授予 → 在鉴权层拒绝。
+    ///
+    /// **缺快照不能表达"未授权"**：handler 把 `None` 当作"不施加约束"，如果
+    /// 未授权也返回 `None`，有约束的调用方就会 fail-open。
+    pub fn deferred_scope_grants(
+        &self,
+        cct_str: Option<&str>,
+        capability_id: &str,
+    ) -> Result<Option<DeferredScopeGrants>, String> {
+        if !self.enabled {
+            return Ok(None);
+        }
+        let cct_str = cct_str.ok_or_else(|| "missing CCT token".to_string())?;
+        let cct_str = extract_bearer_token(Some(cct_str)).unwrap_or(cct_str);
+        let cct = self
+            .decode_and_verify(cct_str)
+            .map_err(|e| format!("CCT validation failed: {e}"))?;
+        if is_expired(&cct.payload, self.clock_drift_secs) {
+            return Err("CCT expired".into());
+        }
+        if self.revocation_store.is_revoked(&cct.payload.jti) {
+            return Err("CCT has been revoked".into());
+        }
+        if coord_core::auth::is_root(&cct.payload.roles) {
+            return Ok(None);
+        }
+
+        // scope_overrides 是 per-token 覆盖，优先于角色授权（与 `authorize` 同口径）。
+        let grant_scopes = match cct.payload.scope_overrides.get(capability_id) {
+            Some(scope) => vec![scope.clone()],
+            None => match &self.role_provider {
+                Some(provider) => provider.scopes_for_capability(&cct.payload.roles, capability_id),
+                None => Vec::new(),
+            },
+        };
+        if grant_scopes.is_empty() {
+            return Err(format!(
+                "capability '{capability_id}' not granted to roles {:?}",
+                cct.payload.roles
+            ));
+        }
+        Ok(Some(DeferredScopeGrants {
+            capability_id: capability_id.to_string(),
+            grant_scopes,
+        }))
     }
 
     /// 区间感知的多 key/区间校验。
@@ -766,6 +823,28 @@ where
             self.audit_deny(&rpc_method, &reason);
             return ServerAuthFuture::Deny(Some(Status::permission_denied(reason)));
         };
+
+        // 延后 scope 判定（客户端流式 Watch）：鉴权层看不到流首帧，只能把授权
+        // 快照交给 handler。**不能**落到下面的通用 `validate`：那会把带 scope
+        // 的授权整块拒掉（功能损失），而如果直接放行又不给快照，就是 fail-open。
+        if coord_core::grpc_auth::is_deferred_scope_rpc(&rpc_method) {
+            return match self
+                .interceptor
+                .deferred_scope_grants(auth_header.as_deref(), &capability_id)
+            {
+                Ok(grants) => {
+                    let mut req = req;
+                    if let Some(grants) = grants {
+                        req.extensions_mut().insert(grants);
+                    }
+                    ServerAuthFuture::Allow(self.inner.call(req))
+                }
+                Err(reason) => {
+                    self.audit_deny(&rpc_method, &reason);
+                    ServerAuthFuture::Deny(Some(classify_denial(&reason)))
+                }
+            };
+        }
 
         // scope 承载方法 → 缓存 body 提取 key，做多 key scope 校验
         if needs_scope_extraction(&rpc_method) {
@@ -2007,6 +2086,180 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("16"),
             "grpc-status 16 = UNAUTHENTICATED"
+        );
+    }
+
+    // ──── 延后 scope 判定（Watch）────
+    //
+    // Watch 的订阅前缀在**流首帧**里，鉴权层缓存 body 会让请求永久挂起，所以
+    // 判定必须延后到 handler；鉴权层的责任是放行时把授权 scope 快照放进请求
+    // 扩展。缺了快照 = handler 认为"本层不施加约束" = 越权订阅（fail-open）。
+
+    /// 有约束的角色授权：快照必须带该能力的 scope，且用首帧区间能真实判定。
+    #[test]
+    fn deferred_scope_grants_collects_role_scopes_and_enforces_scope() {
+        use coord_core::grpc_auth::{check_deferred_scope, watch_create_access};
+
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("watcher").unwrap();
+        auth_manager
+            .role_grant_capability("watcher", "data:watch:subscribe", "/app/counter/")
+            .unwrap();
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
+
+        let cct = make_test_cct(&keyring, vec!["watcher"], std::collections::HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+        let grants = interceptor
+            .deferred_scope_grants(Some(&auth_header), "data:watch:subscribe")
+            .expect("scoped watch capability must produce a grant snapshot")
+            .expect("role grant must be visible in the snapshot");
+        assert_eq!(grants.capability_id, "data:watch:subscribe");
+        assert_eq!(grants.grant_scopes, vec!["/app/counter/".to_string()]);
+
+        let in_scope = watch_create_access(b"/app/counter/a", b"");
+        assert!(
+            check_deferred_scope(Some(&grants), &[in_scope]).is_ok(),
+            "in-scope subscription must pass the deferred check"
+        );
+        let out_of_scope = watch_create_access(b"/other/a", b"");
+        assert!(
+            check_deferred_scope(Some(&grants), &[out_of_scope]).is_err(),
+            "out-of-scope subscription must be rejected"
+        );
+
+        // 无约束授权（空 scope）也要产生快照：handler 靠它区分"无约束"与
+        // "请求没经过鉴权层"。
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("open-watcher").unwrap();
+        auth_manager
+            .role_grant_capability("open-watcher", "data:watch:subscribe", "")
+            .unwrap();
+        let interceptor =
+            ServerAuthInterceptor::new(keyring.clone(), make_revocation_store(), true)
+                .with_role_provider(auth_manager);
+        let cct = make_test_cct(
+            &keyring,
+            vec!["open-watcher"],
+            std::collections::HashMap::new(),
+        );
+        let grants = interceptor
+            .deferred_scope_grants(Some(&format!("Bearer {cct}")), "data:watch:subscribe")
+            .expect("unrestricted watch capability must produce a snapshot")
+            .expect("empty scope grant must be preserved in the snapshot");
+        assert_eq!(grants.grant_scopes, vec![String::new()]);
+        let unrestricted = watch_create_access(b"/anything", b"");
+        assert!(
+            check_deferred_scope(Some(&grants), &[unrestricted]).is_ok(),
+            "empty scope must allow any prefix"
+        );
+    }
+
+    /// root / 缺能力 / 非法凭据：root 不产生快照（既有全能力旁路），缺能力
+    /// 在鉴权层就拒绝——快照缺失不能承担"未授权"的语义。
+    #[test]
+    fn deferred_scope_grants_is_fail_closed_for_missing_capability_and_root_bypasses() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("reader").unwrap();
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
+
+        let root_cct = make_test_cct(&keyring, vec!["root"], std::collections::HashMap::new());
+        assert!(
+            interceptor
+                .deferred_scope_grants(Some(&format!("Bearer {root_cct}")), "data:watch:subscribe")
+                .unwrap_or_else(|e| panic!("root must be allowed: {e}"))
+                .is_none(),
+            "root bypass must not produce a snapshot"
+        );
+
+        let reader_cct = make_test_cct(&keyring, vec!["reader"], std::collections::HashMap::new());
+        let err = interceptor
+            .deferred_scope_grants(
+                Some(&format!("Bearer {reader_cct}")),
+                "data:watch:subscribe",
+            )
+            .expect_err("missing capability must be denied at the auth layer");
+        assert!(err.contains("not granted"), "unexpected denial: {err}");
+
+        assert!(
+            interceptor
+                .deferred_scope_grants(None, "data:watch:subscribe")
+                .is_err(),
+            "missing token must be denied"
+        );
+    }
+
+    /// 鉴权层必须把快照**真的放进请求扩展**：只测 `deferred_scope_grants()`
+    /// 只能证明快照算得对，证明不了它到了 handler 手里。
+    #[derive(Clone)]
+    struct CapturingDeferredGrants {
+        seen: Arc<parking_lot::Mutex<Vec<Option<DeferredScopeGrants>>>>,
+    }
+
+    impl Service<http::Request<tonic::body::Body>> for CapturingDeferredGrants {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = tonic::Status;
+        type Future = std::future::Ready<Result<http::Response<tonic::body::Body>, tonic::Status>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+            self.seen
+                .lock()
+                .push(req.extensions().get::<DeferredScopeGrants>().cloned());
+            std::future::ready(Ok(http::Response::new(tonic::body::Body::empty())))
+        }
+    }
+
+    #[tokio::test]
+    async fn server_auth_service_hands_watch_grant_snapshot_to_handler() {
+        let keyring = make_keyring();
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("watcher").unwrap();
+        auth_manager
+            .role_grant_capability("watcher", "data:watch:subscribe", "/app/counter/")
+            .unwrap();
+        let interceptor =
+            ServerAuthInterceptor::new(keyring.clone(), make_revocation_store(), true)
+                .with_role_provider(auth_manager);
+
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut svc = ServerAuthService {
+            inner: CapturingDeferredGrants {
+                seen: Arc::clone(&seen),
+            },
+            interceptor: Arc::new(interceptor),
+        };
+
+        let cct = make_test_cct(&keyring, vec!["watcher"], std::collections::HashMap::new());
+        let req = http::Request::builder()
+            .uri("/coord.watch.Watch/Watch")
+            .header("authorization", format!("Bearer {cct}"))
+            .body(tonic::body::Body::empty())
+            .expect("build request");
+        let resp = svc.call(req).await.expect("auth service must not fail");
+        assert_eq!(
+            resp.status(),
+            http::StatusCode::OK,
+            "scoped watch must be deferred, not rejected as a whole"
+        );
+
+        let captured = seen.lock().clone();
+        assert_eq!(captured.len(), 1, "inner must receive exactly one request");
+        assert_eq!(
+            captured[0],
+            Some(DeferredScopeGrants {
+                capability_id: "data:watch:subscribe".to_string(),
+                grant_scopes: vec!["/app/counter/".to_string()],
+            }),
+            "handler must receive the grant snapshot; missing it means fail-open"
         );
     }
 

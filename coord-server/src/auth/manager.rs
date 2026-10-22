@@ -1132,6 +1132,27 @@ impl AuthManager {
         Ok(role.capability_grants.clone())
     }
 
+    /// 某能力在给定角色集合上的全部授权 scope（去重，保持发现顺序）。
+    ///
+    /// 只返回 `capability_grants` 的显式 scope；没有该能力授权时返回空列表
+    /// （调用方据此 fail-closed）。`scope` 为空串表示无限制，调用方必须保留
+    /// 空串——它是"无约束"的唯—表达，不能当作"没有授权"丢弃。
+    pub fn scopes_for_capability(&self, roles: &[String], capability_id: &str) -> Vec<String> {
+        let roles_map = self.roles.read();
+        let mut scopes = Vec::new();
+        for role_name in roles {
+            let Some(role) = roles_map.get(role_name) else {
+                continue;
+            };
+            for grant in &role.capability_grants {
+                if grant.capability_id == capability_id && !scopes.contains(&grant.scope) {
+                    scopes.push(grant.scope.clone());
+                }
+            }
+        }
+        scopes
+    }
+
     // ──── User-Role assignment ────
 
     /// Grant a role to a user
