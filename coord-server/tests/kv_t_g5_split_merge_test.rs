@@ -100,8 +100,12 @@ impl SplitMergeMigrator for RecordingMigrator {
         Ok(())
     }
 
-    async fn release_write_fence(&self, _op_id: u64, _plan: &SplitMergePlan) -> Result<(), String> {
-        Ok(())
+    async fn release_write_fence(
+        &self,
+        _op_id: u64,
+        _plan: &SplitMergePlan,
+    ) -> Result<bool, String> {
+        Ok(true)
     }
 }
 
