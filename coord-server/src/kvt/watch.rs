@@ -139,17 +139,27 @@ impl WatchEvent {
         filter: &WatchFilter,
     ) -> Option<Self> {
         let mut changes = Vec::new();
+        // cutover 窗口内同一决策可能先在父 Region apply、再在子 Region 重放，
+        // 两条 CommitRecord 的 region_id 不同但 key 相同。按 record 顺序去重：
+        // 同一 record 内的多次变更（同事务 put+delete 同 key）不是重放，保留。
+        let mut seen_keys = std::collections::BTreeSet::new();
         for record in records {
+            let mut record_keys = Vec::new();
             for change in record.changes {
                 if !filter.matches(&change) {
                     continue;
                 }
+                if seen_keys.contains(&change.key) {
+                    continue;
+                }
+                record_keys.push(change.key.clone());
                 let mut change = change;
                 if !filter.prev_kv {
                     change.prev = None;
                 }
                 changes.push(change);
             }
+            seen_keys.extend(record_keys);
         }
         if changes.is_empty() {
             return None;
@@ -711,6 +721,38 @@ mod tests {
         let with_prev =
             WatchEvent::from_records(7, vec![record(7, 1, b"a")], &with_prev_filter).unwrap();
         assert!(with_prev.changes[0].prev.is_some());
+    }
+
+    #[test]
+    fn event_dedups_cross_region_replays() {
+        let filter = WatchFilter::all();
+        // cutover 窗口内同一决策先在父 Region apply、再在子 Region 重放：
+        // 两条记录携带同一个 key，只能产出一个 change。
+        let event = WatchEvent::from_records(
+            7,
+            vec![
+                record(7, 1, b"replayed"),
+                record(7, 3, b"replayed"),
+                record(7, 3, b"other"),
+            ],
+            &filter,
+        )
+        .expect("matching changes");
+        let keys: Vec<_> = event.changes.iter().map(|c| c.key.clone()).collect();
+        assert_eq!(
+            keys,
+            vec![b"replayed".to_vec(), b"other".to_vec()],
+            "same key from a replayed region fragment must collapse to one change"
+        );
+
+        // 同一 record 内的多次变更（如 put+delete 同 key）不是重放，必须保留。
+        let mut same_record = record(7, 1, b"twice");
+        same_record.changes.push(change(b"twice", None));
+        let event =
+            WatchEvent::from_records(7, vec![same_record], &filter).expect("matching changes");
+        assert_eq!(event.changes.len(), 2);
+        assert_eq!(event.changes[0].key, b"twice");
+        assert_eq!(event.changes[1].key, b"twice");
     }
 
     #[test]
