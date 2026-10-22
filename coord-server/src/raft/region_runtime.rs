@@ -500,6 +500,7 @@ impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
         end: &[u8],
         rows: Vec<crate::storage::mvcc::VersionedKv>,
         watermark: u64,
+        seal_prior_history: bool,
         done: bool,
     ) -> std::result::Result<u64, String> {
         self.wait_for_leader().await?;
@@ -508,6 +509,7 @@ impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
             end_key: end.to_vec(),
             rows,
             watermark,
+            seal_prior_history,
             done,
         };
         let resp = self

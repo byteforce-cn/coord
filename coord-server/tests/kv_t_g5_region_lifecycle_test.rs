@@ -525,7 +525,7 @@ async fn test_lifecycle_precreates_split_target_and_promotes_after_cutover() {
         },
     )];
     assert_eq!(
-        port.import_range(b"m", b"", rows, 10, true)
+        port.import_range(b"m", b"", rows, 10, true, true)
             .await
             .expect("import through the pending target raft"),
         1

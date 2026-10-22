@@ -35,8 +35,10 @@ pub type RegionImportTargetResolver =
 ///
 /// - `watermark` = 源快照 revision，必须逐页恒等（导入行的 `mod_revision`
 ///   不得越过它）；
-/// - `done` 只在最后一页为真：实现方据此把目标 revision 与「split 前历史
-///   不可用」的压缩水位钉到 `watermark`；
+/// - `seal_prior_history` 只在最后一页有意义：split 的全新目标据此把
+///   「split 前历史不可用」的压缩水位钉到 `watermark`；merge 的接收方传
+///   `false`，保留自己的历史；
+/// - `done` 只在最后一页为真：实现方据此把目标 revision 抬到 `watermark`；
 /// - 返回实际写入行数：重放已导入的页返回 0 而不是错误（幂等契约）。
 #[async_trait::async_trait]
 pub trait RangeImportTarget: Send + Sync {
@@ -46,6 +48,7 @@ pub trait RangeImportTarget: Send + Sync {
         end: &[u8],
         rows: Vec<VersionedKv>,
         watermark: u64,
+        seal_prior_history: bool,
         done: bool,
     ) -> std::result::Result<u64, String>;
 }
@@ -200,7 +203,7 @@ impl SplitMergeMigrator for RangeImportMigrator {
             // 空白源 Region 的 revision 可以是 0，但导入水位必须 > 0：
             // 用 1 让目标水位仍可被未来 commit_ts 推开。
             target
-                .import_range(start, end, page.rows, pinned.max(1), done)
+                .import_range(start, end, page.rows, pinned.max(1), true, done)
                 .await?;
             if done {
                 break;

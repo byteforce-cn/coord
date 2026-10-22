@@ -1164,9 +1164,10 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// - 保留每行的 `KvMetadata`（`create_revision`/`mod_revision`/`version`/
     ///   `lease_id`），因此 split 后 lease 绑定与 `mod_revision` 不回退；
     /// - 目标已有更高 `mod_revision` 的行保持不变（旧页不得覆盖新决策）；
-    /// - `done` 时把 `current_revision` 抬到 `watermark`，并把新 Region 的
-    ///   `compacted_revision` 抬到 `watermark`：split 之前的区域历史明确不可用，
-    ///   而不是用残缺 changelog 拼出错误的历史视图；
+    /// - `done` 时把 `current_revision` 抬到 `watermark`；只有
+    ///   `seal_prior_history`（split 的全新目标）才把 `compacted_revision`
+    ///   抬到 `watermark`：split 之前的区域历史明确不可用，而 merge 的接收方
+    ///   已有自己的历史，不能因为导入右半而压缩它；
     /// - 同一页重放返回 0，不重复写入。
     pub fn apply_range_import(
         &self,
@@ -1174,6 +1175,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         end: &[u8],
         rows: &[VersionedKv],
         watermark: Revision,
+        seal_prior_history: bool,
         done: bool,
         applied: AppliedLogId,
     ) -> Result<u64> {
@@ -1282,9 +1284,9 @@ impl<B: StorageBackend> MvccStorage<B> {
                     META_CURRENT_REVISION,
                     &target_revision.to_be_bytes(),
                 )?;
-                // 只有全新目标 Region 需要把 split 前的历史标成不可用；
+                // 只有 split 的全新目标需要把 split 前的历史标成不可用；
                 // merge 的接收方已有自己的历史，不能因为导入右半而压缩它。
-                if current_before == 0 {
+                if seal_prior_history {
                     let previous_compacted = tx
                         .get(TABLE_META, META_COMPACT_REVISION)?
                         .and_then(|bytes| decode_u64(&bytes))
@@ -5612,7 +5614,7 @@ mod tests {
 
         let (_target_dir, target) = create_commit_ts_storage();
         let imported = target
-            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, applied_for(5))
+            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, true, applied_for(5))
             .expect("import");
         assert_eq!(imported, 2);
         assert_eq!(target.get(b"a").unwrap().as_deref(), Some(&b"1"[..]));
@@ -5626,9 +5628,40 @@ mod tests {
         ));
 
         let replay = target
-            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, applied_for(6))
+            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, true, applied_for(6))
             .expect("replay");
         assert_eq!(replay, 0, "同一页重放不得重复写入");
+    }
+
+    #[test]
+    fn test_apply_range_import_merge_keeps_target_history() {
+        let (_target_dir, target) = create_commit_ts_storage();
+        // 空的左 Region（current_revision = 0）也有自己的历史窗口：merge 不得
+        // 因为导入右半而把左半历史标成不可用。
+        let rows = vec![(
+            b"m".to_vec(),
+            b"1".to_vec(),
+            KvMetadata {
+                version: 1,
+                create_revision: 11,
+                mod_revision: 11,
+                lease_id: 0,
+                deleted: false,
+            },
+        )];
+        target
+            .apply_range_import(b"m", b"", &rows, 14, false, true, applied_for(1))
+            .expect("merge import");
+        assert_eq!(target.current_revision(), 14);
+        assert_eq!(
+            target.compacted_revision().unwrap(),
+            0,
+            "merge 不压缩接收方历史"
+        );
+        assert!(
+            target.range_at_revision(b"m", b"", 10, 1).is_ok(),
+            "旧 read_ts 仍可读"
+        );
     }
 
     #[test]
@@ -5649,7 +5682,7 @@ mod tests {
             },
         )];
         let imported = target
-            .apply_range_import(b"a", b"z", &rows, 15, true, applied_for(2))
+            .apply_range_import(b"a", b"z", &rows, 15, false, true, applied_for(2))
             .expect("import older page");
         assert_eq!(imported, 0);
         assert_eq!(target.get(b"a").unwrap().as_deref(), Some(&b"new"[..]));
@@ -5674,13 +5707,13 @@ mod tests {
 
         let (_dir, v1) = create_storage();
         let err = v1
-            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 1)], 10, true, applied_for(1))
+            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 1)], 10, true, true, applied_for(1))
             .expect_err("v1 must reject range imports");
         assert!(matches!(err, Error::FailedPrecondition(_)));
 
         let (_dir, target) = create_commit_ts_storage();
         let err = target
-            .apply_range_import(b"m", b"z", &[row(b"a", b"v", 1)], 10, true, applied_for(1))
+            .apply_range_import(b"m", b"z", &[row(b"a", b"v", 1)], 10, true, true, applied_for(1))
             .expect_err("out-of-range key must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
         let err = target
@@ -5690,12 +5723,13 @@ mod tests {
                 &[row(b"a", b"v", 1), row(b"a", b"v", 1)],
                 10,
                 true,
+                true,
                 applied_for(2),
             )
             .expect_err("duplicate key must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
         let err = target
-            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 11)], 10, true, applied_for(3))
+            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 11)], 10, true, true, applied_for(3))
             .expect_err("mod_revision above the watermark must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
     }

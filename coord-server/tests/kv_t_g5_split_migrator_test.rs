@@ -135,7 +135,7 @@ async fn test_import_range_crosses_the_target_region_raft() {
     let (_dir, mvcc, target) = boot_target_region().await;
 
     let imported = target
-        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true)
+        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true, true)
         .await
         .expect("import through the target raft");
 
@@ -163,7 +163,7 @@ async fn test_target_import_waits_for_leader_election() {
     let port = CoordRangeImportTarget::from_raft(target.raft.clone())
         .with_leader_wait(Duration::from_secs(5));
     let imported = port
-        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true)
+        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true, true)
         .await
         .expect("import waits through leader election");
     election.await.expect("election task");
@@ -284,6 +284,7 @@ impl RangeImportTarget for DriftTarget {
         end: &[u8],
         rows: Vec<(Vec<u8>, Vec<u8>, KvMetadata)>,
         watermark: u64,
+        seal_prior_history: bool,
         done: bool,
     ) -> Result<u64, String> {
         if !self.fired.swap(true, Ordering::SeqCst) {
@@ -292,7 +293,7 @@ impl RangeImportTarget for DriftTarget {
                 .expect("inject source drift");
         }
         self.inner
-            .import_range(start, end, rows, watermark, done)
+            .import_range(start, end, rows, watermark, seal_prior_history, done)
             .await
     }
 }

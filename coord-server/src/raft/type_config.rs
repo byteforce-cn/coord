@@ -758,6 +758,9 @@ pub enum Command {
         end_key: Vec<u8>,
         rows: Vec<(Vec<u8>, Vec<u8>, crate::storage::mvcc::KvMetadata)>,
         watermark: u64,
+        /// split 的全新目标才把导入完成时的历史水位钉在 `watermark`；
+        /// merge 的接收方保留自己的历史与压缩水位。
+        seal_prior_history: bool,
         done: bool,
     },
 }
@@ -850,11 +853,12 @@ impl std::fmt::Display for Command {
             Command::ImportRange {
                 rows,
                 watermark,
+                seal_prior_history,
                 done,
                 ..
             } => write!(
                 f,
-                "ImportRange(rows={}, watermark={watermark}, done={done})",
+                "ImportRange(rows={}, watermark={watermark}, seal_prior_history={seal_prior_history}, done={done})",
                 rows.len()
             ),
         }
