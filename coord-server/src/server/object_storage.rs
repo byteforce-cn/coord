@@ -434,15 +434,28 @@ pub async fn object_gc_loop(target: ObjectGcTarget) {
     tracing::info!("object gc loop started (leader-only, interval {interval:?})");
     loop {
         ticker.tick().await;
-        object_gc_once(&target).await;
+        let outcome = object_gc_once(&target).await;
+        if outcome != GcOutcome::default() {
+            tracing::debug!(?outcome, "object gc pass");
+        }
     }
 }
 
+/// 一轮 GC 的结果（运维观测/测试断言用）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcOutcome {
+    /// 被回收的 stale Creating 对象数
+    pub deleted_stale: u64,
+    /// 被清理的孤儿对象目录数
+    pub swept_orphans: u64,
+}
+
 /// 一轮 GC（拆出来便于测试直接驱动；语义见 [`object_gc_loop`]）。
-pub async fn object_gc_once(target: &ObjectGcTarget) {
+pub async fn object_gc_once(target: &ObjectGcTarget) -> GcOutcome {
+    let mut outcome = GcOutcome::default();
     // 仅 leader（避免 follower 落后误删）
     if target.raft.current_leader().await != Some(target.node_id) {
-        return;
+        return outcome;
     }
     // ReadIndex 屏障（leader 身份校验在 openraft ReadPolicy::ReadIndex 内）
     if let Err(e) = target
@@ -451,13 +464,13 @@ pub async fn object_gc_once(target: &ObjectGcTarget) {
         .await
     {
         tracing::debug!("object gc read barrier failed: {e}");
-        return;
+        return outcome;
     }
     let manifests = match list_manifests(&target.mvcc) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!("object gc scan failed: {e}");
-            return;
+            return outcome;
         }
     };
     let now = now_unix();
@@ -485,21 +498,34 @@ pub async fn object_gc_once(target: &ObjectGcTarget) {
                     .propose_object_op_v2(&object_target, delete_op.clone())
                     .await
                 {
-                    Ok((commit_ts, ok)) => tracing::info!(
-                        "object gc: deleted stale creating object {}/{} (commit_ts={commit_ts}, ok={ok})",
-                        String::from_utf8_lossy(bucket),
-                        String::from_utf8_lossy(object_id)
-                    ),
+                    Ok((commit_ts, ok)) => {
+                        outcome.deleted_stale += 1;
+                        tracing::info!(
+                            "object gc: deleted stale creating object {}/{} \
+                             (commit_ts={commit_ts}, ok={ok})",
+                            String::from_utf8_lossy(bucket),
+                            String::from_utf8_lossy(object_id)
+                        );
+                    }
                     Err(e) => tracing::warn!("object gc v2 delete failed: {e}"),
                 }
             }
-            None => match target.raft.client_write(Command::ObjectStore(delete_op)).await {
+            None => match target
+                .raft
+                .client_write(Command::ObjectStore(delete_op))
+                .await
+            {
                 Ok(resp) => match resp.response() {
-                    Response::ObjectStore { ok, .. } => tracing::info!(
-                        "object gc: deleted stale creating object {}/{} (ok={ok})",
-                        String::from_utf8_lossy(bucket),
-                        String::from_utf8_lossy(object_id)
-                    ),
+                    Response::ObjectStore { ok, .. } => {
+                        if *ok {
+                            outcome.deleted_stale += 1;
+                        }
+                        tracing::info!(
+                            "object gc: deleted stale creating object {}/{} (ok={ok})",
+                            String::from_utf8_lossy(bucket),
+                            String::from_utf8_lossy(object_id)
+                        );
+                    }
                     _ => tracing::warn!("object gc: unexpected response"),
                 },
                 Err(e) => tracing::warn!("object gc delete propose failed: {e}"),
@@ -509,8 +535,13 @@ pub async fn object_gc_once(target: &ObjectGcTarget) {
     // 2) 孤儿 chunk 文件回收
     let live = live_object_hashes(&manifests);
     match target.chunk_store.sweep_orphans(&live) {
-        Ok(n) if n > 0 => tracing::info!("object gc: swept {n} orphan object dirs"),
-        Ok(_) => {}
+        Ok(n) => {
+            outcome.swept_orphans = n;
+            if n > 0 {
+                tracing::info!("object gc: swept {n} orphan object dirs");
+            }
+        }
         Err(e) => tracing::warn!("object gc orphan sweep failed: {e}"),
     }
+    outcome
 }

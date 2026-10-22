@@ -700,20 +700,16 @@ impl CoordNode {
     /// 对象写路径（v2，ADR-0015 D7）：manifest 行 revision = TSO 分配的
     /// `commit_ts`，而不是 raft log index。
     ///
-    /// 取 TSO 与提案在同一把锁内完成——与 Commit Sequencer 的「取 TSO → 提案」
-    /// 以及 safe-ts fence 发布共用同一把锁：fence 只能越过已提案的条目。跨节点
-    /// 仍可能出现「已分配、未提案」被 fence 越过的窗口，此时 apply 返回
-    /// `CommitRejected`，这里换新 `commit_ts` 有界重试，客户端看不到这次内部重试。
+    /// 不持 Commit Sequencer 的 fence 锁：那会把对象 Region 的提案延迟（leader
+    /// 选举/网络抖动，最长到 `write_timeout`）转嫁给全局提交串行化点。代价是
+    /// 「已分配、未提案」的 `commit_ts` 可能被 safe-ts fence 越过——apply 用
+    /// `CommitRejected` 响应拒绝该条目（不写数据、不 wedge raft），这里换新
+    /// `commit_ts` 有界重试；与 `coord.kv.v2` Put 的 `CommitRejected` 同口径。
     pub(crate) async fn propose_object_op_v2(
         &self,
         target: &ObjectTarget,
         op: crate::raft::type_config::ObjectStoreOp,
     ) -> Result<(u64, bool), tonic::Status> {
-        let sequencer = self.commit_sequencer().ok_or_else(|| {
-            crate::kvt::kv_t_assembly_status(
-                "object storage v2 requires the commit sequencer (region 0 assembly missing)",
-            )
-        })?;
         let tso = self.tso_client().ok_or_else(|| {
             crate::kvt::kv_t_assembly_status(
                 "object storage v2 requires a TSO client (region 0 assembly missing)",
@@ -726,9 +722,6 @@ impl CoordNode {
         retry_object_commit(|| {
             let op = Arc::clone(&op);
             async move {
-                // 锁必须覆盖「取 TSO → 提案」：否则 fence 可以越过本条的
-                // commit_ts，apply 时被拒（客户端会看到一次莫名的上传失败）。
-                let _gate = sequencer.lock_fence_publication().await;
                 let fence = self.storage.safe_ts_fence().map_err(map_err)?;
                 let commit_ts = tso
                     .get_ts_above(fence)
@@ -744,10 +737,9 @@ impl CoordNode {
                     .client_write_with_timeout(raft, cmd, target.region_id)
                     .await?;
                 Ok(match resp.response() {
-                    Response::ObjectStore { ok, .. } => ObjectCommitAttempt::Applied {
-                        commit_ts,
-                        ok: *ok,
-                    },
+                    Response::ObjectStore { ok, .. } => {
+                        ObjectCommitAttempt::Applied { commit_ts, ok: *ok }
+                    }
                     Response::CommitRejected {
                         commit_ts,
                         current_revision,
@@ -1907,9 +1899,15 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
 /// v2 对象 op 的一次提案结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObjectCommitAttempt {
-    Applied { commit_ts: u64, ok: bool },
+    Applied {
+        commit_ts: u64,
+        ok: bool,
+    },
     /// `commit_ts` 已被 safe-ts fence 越过（apply 没写任何数据）
-    Rejected { commit_ts: u64, current_revision: u64 },
+    Rejected {
+        commit_ts: u64,
+        current_revision: u64,
+    },
 }
 
 /// `commit_ts` 被 fence 越过时的最大重试次数。
@@ -3907,10 +3905,13 @@ mod tests {
             chunk_store: None,
         };
         let err = node
-            .propose_object_op_v2(&target, crate::raft::type_config::ObjectStoreOp::Delete {
-                bucket: b"b".to_vec(),
-                object_id: b"o".to_vec(),
-            })
+            .propose_object_op_v2(
+                &target,
+                crate::raft::type_config::ObjectStoreOp::Delete {
+                    bucket: b"b".to_vec(),
+                    object_id: b"o".to_vec(),
+                },
+            )
             .await
             .expect_err("missing region 0 assembly must fail closed");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);

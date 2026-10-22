@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -1254,17 +1255,16 @@ impl watch_v2::watch_server::Watch for CoordNode {
 /// 对象存储运行时限制。未启用 = 配置/装配问题（FAILED_PRECONDITION），
 /// 不是「未实现」：能力门禁已在前面把两者分开。
 fn object_limits(node: &CoordNode) -> Result<Arc<ObjectLimits>, Status> {
-    node.object_limits
-        .clone()
-        .ok_or_else(|| kv_t_assembly_status("object storage is disabled: [object_storage].enabled=false"))
+    node.object_limits.clone().ok_or_else(|| {
+        kv_t_assembly_status("object storage is disabled: [object_storage].enabled=false")
+    })
 }
 
-fn object_chunk_store(node: &CoordNode, target: &ObjectTarget) -> Result<Arc<ChunkStore>, Status> {
-    let _ = object_limits(node)?;
-    target
-        .chunk_store
-        .clone()
-        .ok_or_else(|| kv_t_assembly_status("object storage is disabled on this region"))
+/// 该 Region 的 chunk 存储：`None` = `[object_storage]` 未启用（装配缺失）。
+fn object_chunk_store(target: &ObjectTarget) -> Result<Arc<ChunkStore>, Status> {
+    target.chunk_store.clone().ok_or_else(|| {
+        kv_t_assembly_status("object storage is disabled: [object_storage].enabled=false")
+    })
 }
 
 fn object_stat_v2(bucket: &str, object_id: &[u8], m: &ObjectManifest) -> storage_v2::ObjectStat {
@@ -1354,7 +1354,8 @@ fn now_unix_secs() -> i64 {
 
 #[tonic::async_trait]
 impl storage_v2::storage_server::Storage for CoordNode {
-    type GetStream = tokio_stream::wrappers::ReceiverStream<Result<storage_v2::GetResponse, Status>>;
+    type GetStream =
+        tokio_stream::wrappers::ReceiverStream<Result<storage_v2::GetResponse, Status>>;
 
     async fn put(
         &self,
@@ -1367,25 +1368,24 @@ impl storage_v2::storage_server::Storage for CoordNode {
 
         let mut stream = request.into_inner();
         // 首帧必须携带 meta（bucket/object_id/total_size）
-        let meta = match stream.message().await? {
-            Some(storage_v2::PutRequest {
-                part: Some(storage_v2::put_request::Part::Meta(meta)),
-            }) => meta,
-            Some(_) => {
-                return Err(attach(
+        let meta =
+            match stream.message().await? {
+                Some(storage_v2::PutRequest {
+                    part: Some(storage_v2::put_request::Part::Meta(meta)),
+                }) => meta,
+                Some(_) => return Err(attach(
                     Status::invalid_argument(
                         "first PutRequest message must carry meta (bucket/object_id/total_size)",
                     ),
                     CoordErrorCode::InvalidArgument,
-                ))
-            }
-            None => {
-                return Err(attach(
-                    Status::invalid_argument("empty Put stream"),
-                    CoordErrorCode::InvalidArgument,
-                ))
-            }
-        };
+                )),
+                None => {
+                    return Err(attach(
+                        Status::invalid_argument("empty Put stream"),
+                        CoordErrorCode::InvalidArgument,
+                    ))
+                }
+            };
         let bucket = meta.bucket;
         let object_id = meta.object_id;
         object_store::validate_ref(bucket.as_bytes(), &object_id).map_err(v2_status)?;
@@ -1396,9 +1396,7 @@ impl storage_v2::storage_server::Storage for CoordNode {
             n if n > 0 => Some(n as u64),
             _ => {
                 return Err(attach(
-                    Status::invalid_argument(
-                        "total_size must be > 0 (declared) or -1 (unknown)",
-                    ),
+                    Status::invalid_argument("total_size must be > 0 (declared) or -1 (unknown)"),
                     CoordErrorCode::InvalidArgument,
                 ))
             }
@@ -1414,7 +1412,7 @@ impl storage_v2::storage_server::Storage for CoordNode {
         }
 
         let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
-        let store = object_chunk_store(self, &target)?;
+        let store = object_chunk_store(&target)?;
 
         // 配额 admission（尽力而为）：估算 = 已用 + 本次声明（未知长度按上限保守估）
         let estimate = declared.unwrap_or(limits.max_object_size);
@@ -1570,15 +1568,16 @@ impl storage_v2::storage_server::Storage for CoordNode {
         object_store::validate_ref(bucket.as_bytes(), &object_id).map_err(v2_status)?;
 
         let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
-        let store = object_chunk_store(self, &target)?;
-        let manifest = read_object_manifest_at(self, &target, bucket.as_bytes(), &object_id, req.read_ts)
-            .await?
-            .ok_or_else(|| {
-                Status::not_found(format!(
-                    "object {bucket}/{} not found",
-                    String::from_utf8_lossy(&object_id)
-                ))
-            })?;
+        let store = object_chunk_store(&target)?;
+        let manifest =
+            read_object_manifest_at(self, &target, bucket.as_bytes(), &object_id, req.read_ts)
+                .await?
+                .ok_or_else(|| {
+                    Status::not_found(format!(
+                        "object {bucket}/{} not found",
+                        String::from_utf8_lossy(&object_id)
+                    ))
+                })?;
         if !manifest.committed {
             return Err(Status::failed_precondition(format!(
                 "object {bucket}/{} upload in progress or aborted (not committed)",
@@ -1608,16 +1607,43 @@ impl storage_v2::storage_server::Storage for CoordNode {
                 let bucket = bucket_c.clone();
                 let object_id = object_id_c.clone();
                 let res = tokio::task::spawn_blocking(move || {
-                    object_store::read_manifest_chunk(&store, &manifest, bucket.as_bytes(), &object_id, seq)
-                        .map_err(|err| match err {
-                            Error::NotFound { .. } if historical => history_unavailable(&object_id),
-                            Error::NotFound { .. } => Status::not_found(format!(
+                    if historical {
+                        // 历史读必须验内容哈希：chunk 文件不随 revision 版本化，
+                        // 删除后重建的同尺寸对象会复用同一路径——只比长度会把
+                        // 新对象的字节当成旧版本返回（静默给错数据）。
+                        let Some(rec) = manifest.chunks.get(seq as usize) else {
+                            return Err(history_unavailable(&object_id));
+                        };
+                        match store.read_chunk(bucket.as_bytes(), &object_id, seq) {
+                            Ok(data) => {
+                                let mut hasher = Sha256::new();
+                                hasher.update(&data);
+                                let digest: [u8; 32] = hasher.finalize().into();
+                                if digest != rec.sha256 {
+                                    return Err(history_unavailable(&object_id));
+                                }
+                                Ok(data)
+                            }
+                            Err(Error::NotFound { .. }) => Err(history_unavailable(&object_id)),
+                            Err(other) => Err(map_err(other)),
+                        }
+                    } else {
+                        match object_store::read_manifest_chunk(
+                            &store,
+                            &manifest,
+                            bucket.as_bytes(),
+                            &object_id,
+                            seq,
+                        ) {
+                            Ok(data) => Ok(data),
+                            Err(Error::NotFound { .. }) => Err(Status::not_found(format!(
                                 "object {}/{} disappeared during Get",
                                 String::from_utf8_lossy(bucket.as_bytes()),
                                 String::from_utf8_lossy(&object_id)
-                            )),
-                            other => map_err(other),
-                        })
+                            ))),
+                            Err(other) => Err(map_err(other)),
+                        }
+                    }
                 })
                 .await;
                 let data = match res {
@@ -1661,9 +1687,10 @@ impl storage_v2::storage_server::Storage for CoordNode {
         object_store::validate_ref(bucket.as_bytes(), &object_id).map_err(v2_status)?;
 
         let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
-        object_chunk_store(self, &target)?;
-        let manifest = read_object_manifest_at(self, &target, bucket.as_bytes(), &object_id, req.read_ts)
-            .await?;
+        object_chunk_store(&target)?;
+        let manifest =
+            read_object_manifest_at(self, &target, bucket.as_bytes(), &object_id, req.read_ts)
+                .await?;
         let stat = match manifest {
             Some(m) => object_stat_v2(&bucket, &object_id, &m),
             None => missing_object_stat(&bucket, &object_id),
@@ -1684,7 +1711,7 @@ impl storage_v2::storage_server::Storage for CoordNode {
         object_store::validate_ref(bucket.as_bytes(), &object_id).map_err(v2_status)?;
 
         let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
-        object_chunk_store(self, &target)?;
+        object_chunk_store(&target)?;
         // 线性一致读：不存在就不提案（避免无谓的 commit_ts 消耗与 tombstone）
         self.object_linearizable(&target).await?;
         if object_store::read_manifest(&target.mvcc, bucket.as_bytes(), &object_id)

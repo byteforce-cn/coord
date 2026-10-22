@@ -918,26 +918,20 @@ impl std::fmt::Display for Command {
             Command::ObjectStoreV2(op) => {
                 write!(f, "ObjectStoreV2(commit_ts={}, ", op.commit_ts)?;
                 match &op.op {
-                    ObjectStoreOp::Begin { bucket, .. } => write!(
-                        f,
-                        "Begin(bucket={}))",
-                        String::from_utf8_lossy(bucket)
-                    ),
+                    ObjectStoreOp::Begin { bucket, .. } => {
+                        write!(f, "Begin(bucket={}))", String::from_utf8_lossy(bucket))
+                    }
                     ObjectStoreOp::Chunk { bucket, seq, .. } => write!(
                         f,
                         "Chunk(bucket={}, seq={seq}))",
                         String::from_utf8_lossy(bucket)
                     ),
-                    ObjectStoreOp::Commit { bucket, .. } => write!(
-                        f,
-                        "Commit(bucket={}))",
-                        String::from_utf8_lossy(bucket)
-                    ),
-                    ObjectStoreOp::Delete { bucket, .. } => write!(
-                        f,
-                        "Delete(bucket={}))",
-                        String::from_utf8_lossy(bucket)
-                    ),
+                    ObjectStoreOp::Commit { bucket, .. } => {
+                        write!(f, "Commit(bucket={}))", String::from_utf8_lossy(bucket))
+                    }
+                    ObjectStoreOp::Delete { bucket, .. } => {
+                        write!(f, "Delete(bucket={}))", String::from_utf8_lossy(bucket))
+                    }
                 }
             }
         }

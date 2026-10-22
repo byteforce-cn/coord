@@ -946,11 +946,15 @@ impl StateMachineStore {
                 // index 做 revision，写进 v2 Region 会与 commit_ts 撞 changelog
                 // 键，让 read_ts 读到错历史（v2 数据面走 `ObjectStoreV2`）。
                 if sm.revision_mode() == crate::storage::mvcc::RevisionMode::CommitTs {
-                    tracing::warn!(
-                        "ignoring v1 ObjectStore command on a commit_ts region: {op:?}"
-                    );
+                    tracing::warn!("ignoring v1 ObjectStore command on a commit_ts region: {op:?}");
                     sm.persist_applied(revision, applied).map_err(io_err)?;
-                    return Ok((Response::ObjectStore { revision, ok: false }, None));
+                    return Ok((
+                        Response::ObjectStore {
+                            revision,
+                            ok: false,
+                        },
+                        None,
+                    ));
                 }
                 let ok = crate::storage::object_store::apply_object_store_op(
                     sm,
@@ -963,8 +967,23 @@ impl StateMachineStore {
                 Ok((Response::ObjectStore { revision, ok }, None))
             }
             Command::ObjectStoreV2(op_v2) => {
-                // v2 对象数据面：commit_ts 由提议侧（TSO + fence 锁）填；冲突
-                // 作为响应返回而不是 Err（同 `Command::PutV2`）。
+                // v2 对象数据面：commit_ts 由提议侧（TSO）填；冲突作为响应返回
+                // 而不是 Err（同 `Command::PutV2`）。v1 Region 不得接受它：
+                // CommitTs 策略会把 commit_ts 写成 `META_CURRENT_REVISION`，
+                // 破坏 v1 的 `revision == log index` 不变量。
+                if sm.revision_mode() != crate::storage::mvcc::RevisionMode::CommitTs {
+                    tracing::warn!(
+                        "ignoring v2 ObjectStoreV2 command on a log-index region: {op_v2:?}"
+                    );
+                    sm.set_last_applied(applied).map_err(io_err)?;
+                    return Ok((
+                        Response::CommitRejected {
+                            commit_ts: op_v2.commit_ts,
+                            current_revision: sm.current_revision(),
+                        },
+                        None,
+                    ));
+                }
                 let outcome = crate::storage::object_store::apply_object_store_op_v2(
                     sm,
                     op_v2,
