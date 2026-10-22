@@ -31,9 +31,7 @@ use coord_server::split_merge::{
 };
 use coord_server::storage::mvcc::{AppliedLogId, KvMetadata, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
-use coord_server::storage::region_table::{
-    plan_split, RegionTable, SplitMergeKind, SplitMergePlan,
-};
+use coord_server::storage::region_table::{plan_split, RegionTable, SplitMergePlan};
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
 
@@ -266,12 +264,7 @@ fn migrator(
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&src)));
     let target_resolver: Arc<RegionImportTargetResolver> =
         Arc::new(move |region_id| (region_id == 2).then(|| Arc::clone(&target)));
-    RangeImportMigrator::new(
-        source_resolver,
-        target_resolver,
-        Arc::new(|_| None),
-        drain,
-    )
+    RangeImportMigrator::new(source_resolver, target_resolver, Arc::new(|_| None), drain)
 }
 
 /// 第一次导入前先推进源 revision，模拟「导出期间源没冻结」的漂移。
@@ -419,11 +412,11 @@ async fn test_split_migrator_waits_for_the_target_region_to_be_assembled() {
         Arc::new(|_| None),
         RecordingDrain::new(),
     )
-        .with_page_size(1)
-        .with_target_wait(Duration::from_secs(2))
-        .migrate(&split_plan())
-        .await
-        .expect("migration waits for the pending target");
+    .with_page_size(1)
+    .with_target_wait(Duration::from_secs(2))
+    .migrate(&split_plan())
+    .await
+    .expect("migration waits for the pending target");
 
     assert!(
         attempts.load(Ordering::SeqCst) >= 4,
@@ -449,10 +442,10 @@ async fn test_split_migrator_gives_up_when_the_target_never_appears() {
         Arc::new(|_| None),
         RecordingDrain::new(),
     )
-        .with_target_wait(Duration::from_millis(150))
-        .migrate(&split_plan())
-        .await
-        .expect_err("missing target must fail the migration");
+    .with_target_wait(Duration::from_millis(150))
+    .migrate(&split_plan())
+    .await
+    .expect_err("missing target must fail the migration");
 
     assert!(err.contains("not assembled"), "{err}");
     assert!(

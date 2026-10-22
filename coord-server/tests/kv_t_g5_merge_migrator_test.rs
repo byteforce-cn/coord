@@ -91,8 +91,7 @@ async fn boot_left_region() -> (
 
     let backend = RedbBackend::open(&root, &Default::default()).expect("open left region store");
     let mvcc = Arc::new(
-        MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs)
-            .expect("left mvcc"),
+        MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).expect("left mvcc"),
     );
     let log = LogStore::new(&root).await.expect("open left region log");
     let sm = StateMachineStore::new(
@@ -133,8 +132,7 @@ async fn donor_region() -> (TempDir, Arc<MvccStorage<RedbBackend>>) {
     let dir = tempfile::tempdir().expect("temp dir");
     let backend = RedbBackend::open(dir.path(), &Default::default()).expect("open donor store");
     let storage = Arc::new(
-        MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs)
-            .expect("donor mvcc"),
+        MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).expect("donor mvcc"),
     );
     storage
         .put_at_commit_ts(b"m", b"1", Some(7), 11, applied(1))
@@ -194,9 +192,8 @@ fn migrator(
         Arc::new(move |region_id| (region_id == 2).then(|| Arc::clone(&donor)));
     let targets: Arc<RegionImportTargetResolver> =
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&target)));
-    let ranges: Arc<RegionRangeResolver> = Arc::new(|region_id| {
-        (region_id == 2).then(|| (b"m".to_vec(), Vec::new()))
-    });
+    let ranges: Arc<RegionRangeResolver> =
+        Arc::new(|region_id| (region_id == 2).then(|| (b"m".to_vec(), Vec::new())));
     RangeImportMigrator::new(source, targets, ranges, drain)
 }
 
@@ -246,8 +243,8 @@ async fn test_merge_migrator_moves_right_rows_into_left_and_keeps_history() {
 async fn test_merge_migrator_is_idempotent_across_restarts() {
     let (_left_dir, left, target) = boot_left_region().await;
     let (_donor_dir, donor) = donor_region().await;
-    let m = migrator(target, &donor, RecordingDrain::new() as Arc<dyn SplitDrain>)
-        .with_page_size(1);
+    let m =
+        migrator(target, &donor, RecordingDrain::new() as Arc<dyn SplitDrain>).with_page_size(1);
 
     m.migrate(&merge_plan()).await.expect("first migration");
     let before = left.get_kv_metadata(b"m").unwrap().unwrap();

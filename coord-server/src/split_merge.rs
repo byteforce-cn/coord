@@ -31,8 +31,7 @@ pub type RegionMvccResolver =
 ///
 /// 不把区间写进 `SplitMergePlan`：计划经 bincode 存进 region 0 intent journal，
 /// 追加字段会让既有 intent 无法解码。
-pub type RegionRangeResolver =
-    dyn Fn(RegionId) -> Option<(Vec<u8>, Vec<u8>)> + Send + Sync;
+pub type RegionRangeResolver = dyn Fn(RegionId) -> Option<(Vec<u8>, Vec<u8>)> + Send + Sync;
 
 /// Region → 经该 Region raft 导入一页的目标端口。
 pub type RegionImportTargetResolver =

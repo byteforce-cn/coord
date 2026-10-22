@@ -1169,6 +1169,7 @@ impl<B: StorageBackend> MvccStorage<B> {
     ///   抬到 `watermark`：split 之前的区域历史明确不可用，而 merge 的接收方
     ///   已有自己的历史，不能因为导入右半而压缩它；
     /// - 同一页重放返回 0，不重复写入。
+    #[allow(clippy::too_many_arguments)] // 导入一页的全部要素即为协议参数，无聚合收益
     pub fn apply_range_import(
         &self,
         start: &[u8],
@@ -5614,7 +5615,15 @@ mod tests {
 
         let (_target_dir, target) = create_commit_ts_storage();
         let imported = target
-            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, true, applied_for(5))
+            .apply_range_import(
+                b"a",
+                b"z",
+                &page.rows,
+                page.revision,
+                true,
+                true,
+                applied_for(5),
+            )
             .expect("import");
         assert_eq!(imported, 2);
         assert_eq!(target.get(b"a").unwrap().as_deref(), Some(&b"1"[..]));
@@ -5628,7 +5637,15 @@ mod tests {
         ));
 
         let replay = target
-            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, true, applied_for(6))
+            .apply_range_import(
+                b"a",
+                b"z",
+                &page.rows,
+                page.revision,
+                true,
+                true,
+                applied_for(6),
+            )
             .expect("replay");
         assert_eq!(replay, 0, "同一页重放不得重复写入");
     }
@@ -5707,13 +5724,29 @@ mod tests {
 
         let (_dir, v1) = create_storage();
         let err = v1
-            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 1)], 10, true, true, applied_for(1))
+            .apply_range_import(
+                b"a",
+                b"z",
+                &[row(b"a", b"v", 1)],
+                10,
+                true,
+                true,
+                applied_for(1),
+            )
             .expect_err("v1 must reject range imports");
         assert!(matches!(err, Error::FailedPrecondition(_)));
 
         let (_dir, target) = create_commit_ts_storage();
         let err = target
-            .apply_range_import(b"m", b"z", &[row(b"a", b"v", 1)], 10, true, true, applied_for(1))
+            .apply_range_import(
+                b"m",
+                b"z",
+                &[row(b"a", b"v", 1)],
+                10,
+                true,
+                true,
+                applied_for(1),
+            )
             .expect_err("out-of-range key must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
         let err = target
@@ -5729,7 +5762,15 @@ mod tests {
             .expect_err("duplicate key must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
         let err = target
-            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 11)], 10, true, true, applied_for(3))
+            .apply_range_import(
+                b"a",
+                b"z",
+                &[row(b"a", b"v", 11)],
+                10,
+                true,
+                true,
+                applied_for(3),
+            )
             .expect_err("mod_revision above the watermark must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
     }
