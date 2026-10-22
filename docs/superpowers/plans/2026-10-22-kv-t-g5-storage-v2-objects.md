@@ -23,7 +23,7 @@
 ## Rulings（本计划对 spec 的落地裁定）
 
 1. **一个对象 op = 一条 raft 日志 + 显式 commit_ts**：apply 在同一步里写 chunk 文件并写 manifest 行，保持 v1「文件 + manifest 同一条目」的原子性；不拆成「文件条目 + manifest PutV2 条目」（拆开会把部分上传暴露成两个 revision，重放语义和配额记账都要重做）。
-2. **commit_ts 在 Sequencer 的 `lock_fence_publication` 内分配并提案**：safe_ts 的 fence 只能越过已提案的条目（续用 #142 的既有不变量）。跨节点仍存在「已分配未提案」被 fence 越过的窗口 ⇒ apply 返回 `CommitRejected`，handler 换新 ts 重试（有界 8 次），客户端看不到这次内部重试。
+2. **commit_ts 由 TSO 分配、不持 Sequencer 的 fence 锁**：持锁会把对象 Region 的提案延迟（最长到 `write_timeout`）转嫁给全局提交串行化点。代价是「已分配未提案」的 ts 可能被 safe-ts fence 越过 ⇒ apply 返回 `CommitRejected`（不写数据、不 wedge raft），handler 换新 ts 有界重试（8 次），客户端看不到这次内部重试。这与 `coord.kv.v2` Put 的 `CommitRejected` 同口径；正确性不依赖锁（被拒条目什么都不写），只有拒绝频率受影响。
 3. **`read_ts` 语义**：`0` = ReadIndex 线性一致 + 当前 manifest；`>0` = 等 `safe_ts` 后用 `get_at_revision` 读 manifest 快照。chunk 字节不进 MVCC：快照 manifest 指向的 chunk 文件已被后续 Delete 删除时返回 `OUT_OF_RANGE` + `HISTORY_UNAVAILABLE`（绝不回退成当前值）。
 4. **缺对象的三条路径各不相同**（proto 头注）：`Stat` 返回 `exists=false` 的零 stat（`exists` 字段就是为此存在）；`Get` 返回 `NOT_FOUND`（流无法表达缺席）；`Delete` 返回 `NOT_FOUND`（调用方可视为已删除）。
 5. **对象 manifest 不产生 Watch 事件**（v1 同口径，`/obj/` 订阅本身被拒）；manifest 的 changelog 行仍写入，供 `read_ts` 快照读使用。
@@ -114,12 +114,11 @@ Expected: 新增 3 例 + 既有对象/状态机用例全绿（v1 行为不变）
 
 **Interfaces:**
 - `async fn propose_object_op_v2(&self, target: &ObjectTarget, op: ObjectStoreOp) -> Result<(u64, bool), tonic::Status>`（返回 `(commit_ts, ok)`）
-- `fn object_fence_source(&self) -> Result<u64, tonic::Status>`（读 region 0 `safe_ts_fence`）
-- `fn sequencer_proposal_gate(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, tonic::Status>`（未装配 sequencer → `FAILED_PRECONDITION`）
+- `async fn retry_object_commit<F, Fut>(...) -> Result<(u64, bool), tonic::Status>`（拒绝重试；耗尽保留 `COMMIT_REJECTED` 结构化错误码）
 
 - [ ] **Step 1: 写失败测试**
 
-用 `tokio::sync::Mutex` 模拟 propose 门 + 假 TSO：断言 ① 两次并发 `propose_object_op_v2` 的提案顺序与 commit_ts 顺序一致；② `Response::CommitRejected` 时用新 ts 重试并在第 2 次成功；③ 重试次数耗尽返回 `ABORTED` + `CommitRejected`。
+纯逻辑夹具：断言 ① `Response::CommitRejected` 时用新 ts 重试并在第 3 次成功；② 重试耗尽保留 `COMMIT_REJECTED` 结构化错误码与被拒的 ts；③ 非 `CommitRejected` 的 Status 立即返回、不重试；④ 未装配 TSO 客户端 → `FAILED_PRECONDITION`。
 
 - [ ] **Step 2: 实现**
 
