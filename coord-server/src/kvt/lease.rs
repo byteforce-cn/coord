@@ -6,7 +6,7 @@
 //! 所在 Region 扇出 `DeleteKeysByLeaseV2`。数据 Region 以更高 `commit_ts`
 //! 已 apply 时删除会被 `COMMIT_REJECTED`，revoker 重新取时间戳并更新决策后重试。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -476,6 +476,27 @@ fn enqueue_revoked_from_storage(node: &CoordNode, pending: &mut BTreeSet<(Region
     }
 }
 
+/// 本节点是否有该 Region 副本、且它仍处于迁移窗口（直写 fence 生效）。
+///
+/// 窗口内清理必须整体延后：落在父/donor 会把已导出的行在目标复活，落在吸收方
+/// 则是空跑并把 `commit_ts` 烧成 replay。读不到 fence 按「仍在窗口」处理
+/// （fail-closed）：宁可下一拍再试，也不要在窗口内插一条清理。
+fn region_fenced(node: &CoordNode, region_id: RegionId) -> bool {
+    let Some(manager) = &node.region_manager else {
+        return false;
+    };
+    manager
+        .runtime(region_id)
+        .map(|rt| match rt.mvcc.direct_write_fence() {
+            Ok(fence) => fence.is_some(),
+            Err(e) => {
+                tracing::warn!(region_id, "lease.v2 cleanup fence read failed: {e}");
+                true
+            }
+        })
+        .unwrap_or(false)
+}
+
 impl CoordNode {
     /// 到期清理 worker：region 0 leader 扫描过期租约并写入 Revoke 决策。
     ///
@@ -548,6 +569,11 @@ impl CoordNode {
         tokio::spawn(async move {
             let mut pending: BTreeSet<(RegionId, i64, u64)> = BTreeSet::new();
             let mut need_ts: BTreeSet<i64> = BTreeSet::new();
+            // 被迁移窗口挡住的清理：lease → (commit_ts, 挡住它的 Region)。窗口内
+            // 不提案也不重取 TSO；记录的 Region 都不再 fence（或组已被移除）后
+            // 用同一 ts 按**当时**的表重扇出——cutover 会把 key 搬到新 Region，
+            // 只重试原 Region 会漏清。
+            let mut deferred: BTreeMap<i64, (u64, BTreeSet<RegionId>)> = BTreeMap::new();
             let mut ticks: u32 = 0;
             enqueue_revoked_from_storage(&node, &mut pending);
 
@@ -611,6 +637,15 @@ impl CoordNode {
                     };
                     match rt.raft.current_leader().await {
                         Some(leader) if leader == node.node_id => {
+                            if region_fenced(&node, region_id) {
+                                deferred
+                                    .entry(lease_id)
+                                    .or_insert_with(|| (commit_ts, BTreeSet::new()))
+                                    .1
+                                    .insert(region_id);
+                                done.push((region_id, lease_id, commit_ts));
+                                continue;
+                            }
                             let cmd = Command::DeleteKeysByLeaseV2 {
                                 lease_id,
                                 commit_ts,
@@ -644,6 +679,25 @@ impl CoordNode {
                 }
                 for key in done {
                     pending.remove(&key);
+                }
+
+                // 窗口结束（fence 清或 Region 组消失）后重扇出：让 cutover 后
+                // 真正持有这些 key 的 Region 也收到同一条清理。
+                if !deferred.is_empty() {
+                    let ready: Vec<i64> = deferred
+                        .iter()
+                        .filter(|(_, (_, regions))| {
+                            regions
+                                .iter()
+                                .all(|region_id| !region_fenced(&node, *region_id))
+                        })
+                        .map(|(lease_id, _)| *lease_id)
+                        .collect();
+                    for lease_id in ready {
+                        if let Some((commit_ts, _)) = deferred.remove(&lease_id) {
+                            enqueue_lease(&node, &mut pending, lease_id, commit_ts);
+                        }
+                    }
                 }
 
                 if need_ts.is_empty() {

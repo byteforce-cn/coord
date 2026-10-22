@@ -3194,8 +3194,25 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
 
         self.backend.write(|tx| {
-            self.accept_commit_ts(tx, commit_ts)?;
+            // 迁移窗口内整块 Region 的 key 归属都在变：删在父/donor 会让已导出的
+            // 行在目标复活，吸收方此刻又没有搬进来的行。清理是区域级判据，整条
+            // 拒绝，由 revoker 在窗口结束后按当时的 Region 表重试。
+            if Self::direct_write_fence_in_tx(tx)?.is_some() {
+                return Err(Error::CommitRejected {
+                    commit_ts,
+                    current_revision: Self::current_revision_in_tx(tx, self.revision_mode)?,
+                });
+            }
             let deleted = Self::delete_keys_by_lease_in_tx(tx, lease_id, commit_ts)?;
+            if deleted.is_empty() {
+                // 没有绑定行：不写 changelog、不推 revision。搬迁（merge 导入）
+                // 之后仍可能把带同一 lease、revision 更旧的行搬进来；这里记一条
+                // 空 Lease 事件会让同一 ts 的清理被判成 replay，那些行就永远
+                // 删不掉。
+                tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+                return Ok((ApplyOutcome::applied(), deleted));
+            }
+            self.accept_commit_ts(tx, commit_ts)?;
             let changes: Vec<KeyValueChange> = deleted
                 .iter()
                 .map(|key| KeyValueChange {
@@ -8817,6 +8834,78 @@ mod tests {
                 current_revision: 103,
             }
         ));
+    }
+
+    #[test]
+    fn test_lease_v2_cleanup_defers_while_a_migration_fence_is_active() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"a", b"1", Some(7), 100, applied_for(1))
+            .unwrap();
+        storage
+            .put_at_commit_ts(b"b", b"2", Some(7), 101, applied_for(2))
+            .unwrap();
+        // split 源/merge donor 的窗口标记覆盖整段区间；清理是区域级判据，
+        // 不看命中 key 落在哪一段（窗口内整块 Region 的 key 归属都在变）。
+        storage
+            .fence_direct_writes(b"a", b"", 9, applied_for(3))
+            .unwrap();
+
+        let err = storage
+            .delete_keys_by_lease_at_commit_ts(7, 102, applied_for(4))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::CommitRejected {
+                    commit_ts: 102,
+                    current_revision: 101,
+                }
+            ),
+            "窗口内的清理必须显式拒绝，交给 revoker 窗口后再重试",
+        );
+        assert!(storage.get(b"a").unwrap().is_some());
+        assert!(storage.get(b"b").unwrap().is_some());
+        assert!(!storage.changelog_contains_revision(102).unwrap());
+        assert_eq!(storage.current_revision(), 101);
+
+        // cutover 完成后（fence 清除）同一 commit_ts 的清理才落。
+        storage.clear_direct_write_fence(9, applied_for(5)).unwrap();
+        let (_outcome, mut deleted) = storage
+            .delete_keys_by_lease_at_commit_ts(7, 102, applied_for(6))
+            .unwrap();
+        deleted.sort();
+        assert_eq!(deleted, vec![b"a".to_vec(), b"b".to_vec()]);
+    }
+
+    #[test]
+    fn test_lease_v2_empty_cleanup_does_not_consume_the_commit_ts() {
+        let (_dir, storage) = create_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"k", b"v", None, 99, applied_for(1))
+            .unwrap();
+
+        // 空清理（本 Region 没有绑定行）：不写 changelog、不推 revision。
+        let (outcome, deleted) = storage
+            .delete_keys_by_lease_at_commit_ts(7, 101, applied_for(2))
+            .unwrap();
+        assert!(!outcome.replayed, "空清理是已应用（无副作用），不是重放");
+        assert!(deleted.is_empty());
+        assert!(!storage.changelog_contains_revision(101).unwrap());
+        assert_eq!(storage.current_revision(), 99);
+
+        // merge 随后把带同一 lease、revision 更旧的行搬进本 Region：如果空清理
+        // 记过一条 Lease 事件，这里同一 ts 会被当成 replay，行就永远删不掉。
+        storage
+            .put_at_commit_ts(b"m", b"v", Some(7), 100, applied_for(3))
+            .unwrap();
+        let (outcome, deleted) = storage
+            .delete_keys_by_lease_at_commit_ts(7, 101, applied_for(4))
+            .unwrap();
+        assert!(!outcome.replayed);
+        assert_eq!(deleted, vec![b"m".to_vec()]);
+        assert!(storage.get(b"m").unwrap().is_none());
+        assert_eq!(storage.current_revision(), 101);
     }
 
     // ──── Commit Sequencer（#146）────
