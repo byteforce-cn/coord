@@ -17,7 +17,7 @@
 // 复制下每个 Region 的 peers 相同，按 Region 差异化分布归 #161/#162。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,6 +43,31 @@ use crate::storage::region_table::{RegionChange, RegionTable};
 /// 一次 tick 是一次单键读（表版本没前进就 no-op），间隔只决定「表变化 → 运行时
 /// 就绪」的延迟上界；期间数据面拿到可重试的 `RouteNotReady`。
 pub const REGION_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// 预创建目标目录里的持久化标记：存在 = 这个目录是「为 split 预创建、从未
+/// cutover」的目标。
+///
+/// 不能只凭「表里没有、intent 里也没有」判定目录可回收——正式 Region 被 merge
+/// 从表里移除后目录要保留（救援路径）。标记在预创建时写入、提升时删除（及接管
+/// 时兜底清理），因此跨进程重启仍能区分「孤儿目标」与「已提升过的 Region」。
+pub const PENDING_TARGET_MARKER: &str = "pending-split-target";
+
+/// 写入预创建标记（先落标记再建 raft 组：崩溃留下的目录必须能被重启后的清扫
+/// 认出来）。`create_dir_all` 允许目录已存在（重试/重启路径）。
+fn mark_pending_target(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join(PENDING_TARGET_MARKER),
+        b"pending split target; removed when the region is promoted\n",
+    )
+}
+
+/// `regions/region-{id:016x}` → id（非该形态的目录一律忽略）。
+fn parse_region_dir_name(name: &std::ffi::OsStr) -> Option<RegionId> {
+    let hex = name.to_str()?.strip_prefix("region-")?;
+    let region_id = RegionId::from_str_radix(hex, 16).ok()?;
+    (region_id != 0).then_some(region_id)
+}
 
 /// 构造 [`RegionLifecycle`] 所需的节点级依赖（全部是启动期装配一次的句柄）。
 pub struct RegionLifecycleSpec {
@@ -89,6 +114,8 @@ pub struct ReconcileOutcome {
     pub pending_promoted: u64,
     /// 未 cutover 就被回收（停机）的 split 目标数量
     pub pending_retired: u64,
+    /// 重启后按持久化标记清扫的孤儿 split 目标目录数量
+    pub pending_dirs_swept: u64,
 }
 
 struct RegionMember {
@@ -229,6 +256,9 @@ impl RegionLifecycle {
                 compaction,
             },
         );
+        // 提升窗口里崩溃/重启后目标已进表：落过 pending 标记的目录这里是正式
+        // Region，清掉标记（否则将来 merge 把 Region 移出表后会被当成孤儿回收）。
+        self.clear_pending_marker(meta.region_id);
         tracing::info!(
             region_id = meta.region_id,
             node = self.node_id,
@@ -276,15 +306,13 @@ impl RegionLifecycle {
         Ok(true)
     }
 
-    /// 本节点需要预创建的 split 目标（intent journal 里尚未 cutover 的 Add）。
+    /// intent journal 里尚未提升的目标 Region（不含表里已有的）；不做本节点
+    /// 副本过滤——孤儿目录清扫用它判断「是否仍被计划引用」。
     ///
     /// 只认 `Prepared`/`Applied`：`Rejected` 计划不改表，目标不该继续占用 raft
-    /// 组。`Applied` 但表中尚无目标只出现在本节点视图滞后的窗口，按 pending 处理
-    /// 下一 tick 就会提升。
-    fn desired_pending_targets(
-        &self,
-        table: &RegionTable,
-    ) -> std::result::Result<Vec<RegionMeta>, String> {
+    /// 组或目录。`Applied` 但表中尚无目标只出现在本节点视图滞后的窗口，按 pending
+    /// 处理下一 tick 就会提升。
+    fn planned_targets(&self, table: &RegionTable) -> std::result::Result<Vec<RegionMeta>, String> {
         let intents = self
             .table
             .pd_intents()
@@ -298,12 +326,46 @@ impl RegionLifecycle {
                 let RegionChange::Add { meta } = change else {
                     continue;
                 };
-                if table.get(meta.region_id).is_none() && self.is_local_replica(meta) {
+                if table.get(meta.region_id).is_none() {
                     targets.insert(meta.region_id, meta.clone());
                 }
             }
         }
         Ok(targets.into_values().collect())
+    }
+
+    /// 本节点需要预创建的 split 目标（intent journal 里尚未 cutover 的 Add）。
+    fn desired_pending_targets(
+        &self,
+        table: &RegionTable,
+    ) -> std::result::Result<Vec<RegionMeta>, String> {
+        Ok(self
+            .planned_targets(table)?
+            .into_iter()
+            .filter(|meta| self.is_local_replica(meta))
+            .collect())
+    }
+
+    /// 删除目录上的 pending 标记（提升/接管后目录已是正式 Region）。
+    ///
+    /// 删除失败只告警：表里的 Region 清扫不碰，且同一 tick 的接管路径会再试
+    /// 一次；真正的风险只在「清理一直失败 + 该 Region 后来被 merge 移出表」。
+    fn clear_pending_marker(&self, region_id: RegionId) {
+        let path = region_data_dir(&self.base_dir, region_id).join(PENDING_TARGET_MARKER);
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!(
+                region_id,
+                node = self.node_id,
+                "pending split target marker cleared"
+            ),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(
+                region_id,
+                path = %path.display(),
+                error = %err,
+                "clear pending split target marker failed"
+            ),
+        }
     }
 
     /// 装配一个未注册路由的目标 Region 运行时（cutover 前）。
@@ -332,6 +394,10 @@ impl RegionLifecycle {
             object_store: self.object_store.clone(),
             revision_mode: self.revision_mode,
         };
+        // 先落持久化标记再建组：进程在「预创建 → 提升」之间崩溃时，重启后的
+        // reconcile 只能靠它认出「从未提升过」的目标目录。
+        mark_pending_target(&spec.data_dir)
+            .map_err(|err| format!("mark split target dir {}: {err}", spec.data_dir.display()))?;
         // 成员初始化只由 region 0 leader 提交（与数据 Region / Commit Log shard
         // 组同约定）：其余节点用空成员集启动，从 leader 复制的日志里学会配置。
         let initialize = self.region0_raft.current_leader().await == Some(self.node_id);
@@ -390,6 +456,87 @@ impl RegionLifecycle {
             "split target runtime retired without cutover (data dir queued for reclaim)"
         );
         Ok(true)
+    }
+
+    /// 清扫崩溃遗留的 split 目标目录（跨进程重启的回收路径）。
+    ///
+    /// 重启后内存里的 [`Self::reclaim`] 是空的：预创建完、还没 cutover 的目标若在
+    /// 停机期间丢掉 intent（执行失败/被裁掉），目录就只剩持久化标记。判据（全部
+    /// 满足才删）：
+    ///
+    /// 1. 目录带 [`PENDING_TARGET_MARKER`]——已提升过的 Region 即使之后被 merge
+    ///    移出表也保留目录（救援路径不变）；
+    /// 2. 权威表里没有这个 id（在表里 = 已 cutover 或 id 已被重新使用）；
+    /// 3. intent journal 里没有未终止计划引用它（重启后仍被计划 = 搬迁还要用它）。
+    ///
+    /// 由 [`Self::reconcile`] 每拍在拿到非空权威表后调用：目录数很少，删除失败下拍
+    /// 重试，重复执行幂等；持 `transition` 与预创建/停机互斥。表未初始化
+    /// （`version == 0`，v1 静态装配）没有权威判据 → 不碰任何目录。
+    pub async fn sweep_orphan_split_dirs(&self) -> std::result::Result<u64, String> {
+        let table = self
+            .table
+            .region_table()
+            .map_err(|err| format!("read authoritative region table: {err}"))?;
+        self.sweep_orphan_split_dirs_with(&table).await
+    }
+
+    async fn sweep_orphan_split_dirs_with(
+        &self,
+        table: &RegionTable,
+    ) -> std::result::Result<u64, String> {
+        if table.version == 0 {
+            return Ok(0);
+        }
+        let _guard = self.transition.lock().await;
+        let planned: BTreeSet<RegionId> = self
+            .planned_targets(table)?
+            .into_iter()
+            .map(|meta| meta.region_id)
+            .collect();
+        let regions_dir = self.base_dir.join("regions");
+        let entries = match std::fs::read_dir(&regions_dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(err) => {
+                return Err(format!("scan {}: {err}", regions_dir.display()));
+            }
+        };
+        let mut swept = 0;
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("scan {}: {err}", regions_dir.display()))?;
+            let Some(region_id) = parse_region_dir_name(&entry.file_name()) else {
+                continue;
+            };
+            if table.get(region_id).is_some()
+                || planned.contains(&region_id)
+                || self.pending.read().contains_key(&region_id)
+            {
+                continue;
+            }
+            let dir = entry.path();
+            if !dir.join(PENDING_TARGET_MARKER).is_file() {
+                continue;
+            }
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {
+                    swept += 1;
+                    tracing::info!(
+                        region_id,
+                        node = self.node_id,
+                        path = %dir.display(),
+                        "orphan split target dir reclaimed after restart"
+                    );
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => swept += 1,
+                Err(err) => tracing::warn!(
+                    region_id,
+                    path = %dir.display(),
+                    error = %err,
+                    "reclaim orphan split target dir failed; retrying on the next reconcile tick"
+                ),
+            }
+        }
+        Ok(swept)
     }
 
     /// 删除未 cutover 目标的数据目录（已导入的页与 raft 日志）。
@@ -488,6 +635,7 @@ impl RegionLifecycle {
                     if self.manager.attach_runtime(Arc::clone(&runtime)) {
                         outcome.pending_promoted += 1;
                     }
+                    self.clear_pending_marker(region_id);
                     self.pending.write().remove(&region_id);
                 }
                 Some(_) => {
@@ -583,6 +731,13 @@ impl RegionLifecycle {
         }
 
         self.reclaim_aborted_dirs().await;
+        match self.sweep_orphan_split_dirs_with(&table).await {
+            Ok(swept) => outcome.pending_dirs_swept = swept,
+            Err(err) => tracing::warn!(
+                error = %err,
+                "sweep orphan split target dirs failed; retrying on the next reconcile tick"
+            ),
+        }
         Ok(outcome)
     }
 
@@ -604,7 +759,8 @@ impl RegionLifecycle {
                             || outcome.retired > 0
                             || outcome.pending_spawned > 0
                             || outcome.pending_promoted > 0
-                            || outcome.pending_retired > 0 =>
+                            || outcome.pending_retired > 0
+                            || outcome.pending_dirs_swept > 0 =>
                     {
                         tracing::info!(
                             table_version = this.manager.table_version(),
@@ -613,6 +769,7 @@ impl RegionLifecycle {
                             pending_spawned = outcome.pending_spawned,
                             pending_promoted = outcome.pending_promoted,
                             pending_retired = outcome.pending_retired,
+                            pending_dirs_swept = outcome.pending_dirs_swept,
                             "region lifecycle reconciled"
                         );
                     }
