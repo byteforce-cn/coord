@@ -95,6 +95,14 @@ impl SplitMergeMigrator for RecordingMigrator {
             Ok(())
         }
     }
+
+    async fn arm_write_fence(&self, _op_id: u64, _plan: &SplitMergePlan) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn release_write_fence(&self, _op_id: u64, _plan: &SplitMergePlan) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// 数据 Region raft 替身：split/merge 只需要 leader 守卫。

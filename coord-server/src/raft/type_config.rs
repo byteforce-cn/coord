@@ -802,6 +802,22 @@ pub enum Command {
     /// 时钟/配置）。冲突（`commit_ts <= current_revision`）按
     /// `Response::CommitRejected` 返回，不是 raft 错误。
     ObjectStoreV2(ObjectStoreOpV2),
+    /// 冻结源 Region 一段区间的 v2 直写（split 迁移窗口，#167）。
+    ///
+    /// **末尾追加**；只在源 Region 自己的 raft 提出。fence 与它要挡的直写共享
+    /// 同一个 apply 序：apply 在本命令之前的直写一定进了之后的导出水位，之后的
+    /// 直写一律 `DirectWritesFenced`。`op_id` 是 operator id（同 id 幂等，不同 id
+    /// 直接替换：同一 Region 的 split/merge 串行）。`end_key` 空 = +∞。
+    FenceDirectWrites {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        op_id: u64,
+    },
+    /// 解除直写 fence：只有记录仍属于同一 `op_id` 时生效。
+    ///
+    /// **末尾追加**；cutover 已应用或本次搬迁放弃后提出，避免卡住的 split 把
+    /// 一段区间变成永久只读。
+    ClearDirectWriteFence { op_id: u64 },
 }
 
 impl std::fmt::Display for Command {
@@ -934,6 +950,19 @@ impl std::fmt::Display for Command {
                     }
                 }
             }
+            Command::FenceDirectWrites {
+                start_key,
+                end_key,
+                op_id,
+            } => write!(
+                f,
+                "FenceDirectWrites(op_id={op_id}, [{}, {}))",
+                String::from_utf8_lossy(start_key),
+                String::from_utf8_lossy(end_key)
+            ),
+            Command::ClearDirectWriteFence { op_id } => {
+                write!(f, "ClearDirectWriteFence(op_id={op_id})")
+            }
         }
     }
 }
@@ -1056,6 +1085,14 @@ pub enum Response {
     ImportRangeCleared {
         cleared: u64,
     },
+    /// 直写 fence 已生效（#167）：本命令之前 apply 的直写已进导出水位。
+    DirectWritesFenced {
+        op_id: u64,
+    },
+    /// 直写 fence 已解除（`op_id` 不匹配时为 no-op）。
+    DirectWriteFenceCleared {
+        op_id: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -1139,6 +1176,12 @@ impl std::fmt::Display for Response {
             }
             Response::ImportRangeCleared { cleared } => {
                 write!(f, "ImportRangeCleared(cleared={cleared})")
+            }
+            Response::DirectWritesFenced { op_id } => {
+                write!(f, "DirectWritesFenced(op_id={op_id})")
+            }
+            Response::DirectWriteFenceCleared { op_id } => {
+                write!(f, "DirectWriteFenceCleared(op_id={op_id})")
             }
         }
     }

@@ -75,6 +75,26 @@ pub type AddPeerTargetResolver = dyn Fn(RegionId) -> Option<(NodeID, String)> + 
 #[async_trait::async_trait]
 pub trait SplitMergeMigrator: Send + Sync {
     async fn migrate(&self, plan: &SplitMergePlan) -> std::result::Result<(), String>;
+
+    /// 冻结源 Region 搬迁区间的 v2 直写（#167），`op_id` 是 operator id。
+    ///
+    /// 实现必须把 fence 提案进**源 Region 自己的 raft**：fence 与它要挡的直写
+    /// 共享 apply 序，`Ok` 返回后落在该区间的直写要么已进之后的导出水位，要么
+    /// 被拒。不实现（返回 `Ok`）等于不做 fence——只有测试替身可以这样。
+    async fn arm_write_fence(
+        &self,
+        op_id: u64,
+        plan: &SplitMergePlan,
+    ) -> std::result::Result<(), String>;
+
+    /// 解除 fence（与 `arm_write_fence` 同一 `op_id` 幂等）。
+    ///
+    /// 失败返回 `Err`：执行器保留 intent 下一拍重试，避免 fence 泄漏成永久只读。
+    async fn release_write_fence(
+        &self,
+        op_id: u64,
+        plan: &SplitMergePlan,
+    ) -> std::result::Result<(), String>;
 }
 
 /// 表拥有路由与 split version；PD 拥有成员（`peers`/`conf_ver`）与心跳统计。
@@ -498,10 +518,23 @@ impl OperatorExecutor {
         loop {
             match intent.phase.clone() {
                 IntentPhase::Applied { .. } => {
+                    // 解 fence 是 best-effort：提不到（换届后本节点不再是源 Region
+                    // leader）不能让 intent 永远留在 Applied。fence 对 cutover 后的
+                    // 父 Region 区间是惰性的，后续 merge 会无条件清掉它。
+                    if let Err(e) = self.release_fence(op_id, &intent.plan).await {
+                        tracing::warn!(
+                            op_id,
+                            error = %e,
+                            "split fence release failed; the next merge clears it"
+                        );
+                    }
                     self.finalize_split_merge(system.as_ref(), op_id).await?;
                     return Ok(());
                 }
                 IntentPhase::Rejected { reason } => {
+                    if let Err(e) = self.release_fence(op_id, &intent.plan).await {
+                        tracing::warn!(op_id, error = %e, "split fence release failed");
+                    }
                     if let Err(e) = system.propose_pd(PdOp::ClearIntent { op_id }).await {
                         tracing::warn!("PD split/merge: clear rejected intent {op_id}: {e}");
                     }
@@ -511,19 +544,39 @@ impl OperatorExecutor {
                     let migrator = self.migrator().ok_or_else(|| {
                         "split/merge data migration is not wired; refusing to cut over".to_string()
                     })?;
-                    migrator.migrate(&intent.plan).await?;
-                    system
+                    // fence 必须先于 `migrate`（导出水位）：落在这之后的直写不再
+                    // 可能出现在快照里，所以必须被拒而不是被丢掉。
+                    if let Err(e) = migrator.arm_write_fence(op_id, &intent.plan).await {
+                        let _ = migrator.release_write_fence(op_id, &intent.plan).await;
+                        return Err(e);
+                    }
+                    if let Err(e) = migrator.migrate(&intent.plan).await {
+                        // 本次放弃：写入落在尚未 cutover 的父 Region，下一轮
+                        // 重新导出就会包含它们；持续持有只会让区间变永久只读。
+                        let _ = migrator.release_write_fence(op_id, &intent.plan).await;
+                        return Err(e);
+                    }
+                    if let Err(e) = system
                         .propose_pd(PdOp::Cutover { op_id })
                         .await
-                        .map_err(|e| format!("propose split/merge cutover {op_id}: {e}"))?;
-                    intent = self.wait_cutover(system.as_ref(), op_id).await?;
+                        .map_err(|e| format!("propose split/merge cutover {op_id}: {e}"))
+                    {
+                        let _ = migrator.release_write_fence(op_id, &intent.plan).await;
+                        return Err(e);
+                    }
+                    match self.wait_cutover(system.as_ref(), op_id).await {
+                        Ok(next) => intent = next,
+                        Err(e) => {
+                            let _ = migrator.release_write_fence(op_id, &intent.plan).await;
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }
     }
 
-    /// 轮询本节点 region 0 视图，直到 intent 离开 `Prepared`。
-    ///
+    /// 轮询本节点 region 0 视图，直到 intent 离开 `Prepared`。    ///
     /// `propose_pd` 在 region 0 leader 上 apply 后才返回；本节点是 follower 时
     /// 本地视图可能滞后。超时返回错误但**保留 intent**：下一次恢复/GC 会按
     /// 已落地的阶段继续，不会重复切表。
@@ -545,6 +598,20 @@ impl OperatorExecutor {
                 ));
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// 解除 split 的直写 fence。
+    ///
+    /// 未装配搬迁器时不会有 fence（arm 走同一钩子），直接成功。
+    async fn release_fence(
+        &self,
+        op_id: u64,
+        plan: &SplitMergePlan,
+    ) -> std::result::Result<(), String> {
+        match self.migrator() {
+            Some(migrator) => migrator.release_write_fence(op_id, plan).await,
+            None => Ok(()),
         }
     }
 
@@ -1802,9 +1869,10 @@ mod tests {
         table
     }
 
-    /// 迁移钩子替身：记录计划；可注入一次失败。
+    /// 迁移钩子替身：记录计划与 fence 生命周期；可注入一次失败。
     struct FakeMigrator {
         calls: Mutex<Vec<crate::storage::region_table::SplitMergePlan>>,
+        fences: Mutex<Vec<String>>,
         fail: AtomicBool,
     }
 
@@ -1812,12 +1880,18 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 calls: Mutex::new(Vec::new()),
+                fences: Mutex::new(Vec::new()),
                 fail: AtomicBool::new(false),
             })
         }
 
         fn calls(&self) -> Vec<crate::storage::region_table::SplitMergePlan> {
             self.calls.lock().unwrap().clone()
+        }
+
+        /// fence 事件（`arm:op_id` / `release:op_id`，按发生顺序）。
+        fn fences(&self) -> Vec<String> {
+            self.fences.lock().unwrap().clone()
         }
 
         fn fail_next(&self) {
@@ -1831,12 +1905,31 @@ mod tests {
             &self,
             plan: &crate::storage::region_table::SplitMergePlan,
         ) -> std::result::Result<(), String> {
+            self.fences.lock().unwrap().push("migrate".to_string());
             self.calls.lock().unwrap().push(plan.clone());
             if self.fail.load(Ordering::SeqCst) {
                 Err("migration failed".to_string())
             } else {
                 Ok(())
             }
+        }
+
+        async fn arm_write_fence(
+            &self,
+            op_id: u64,
+            _plan: &crate::storage::region_table::SplitMergePlan,
+        ) -> std::result::Result<(), String> {
+            self.fences.lock().unwrap().push(format!("arm:{op_id}"));
+            Ok(())
+        }
+
+        async fn release_write_fence(
+            &self,
+            op_id: u64,
+            _plan: &crate::storage::region_table::SplitMergePlan,
+        ) -> std::result::Result<(), String> {
+            self.fences.lock().unwrap().push(format!("release:{op_id}"));
+            Ok(())
         }
     }
 
@@ -1905,6 +1998,56 @@ mod tests {
         // 重复执行：队列里没有 Pending 条目，不得再触发迁移。
         assert!(ex.execute_one(&*resolve).await.is_none());
         assert_eq!(migrator.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_split_arms_write_fence_before_migration_and_releases_after_cutover() {
+        let migrator = FakeMigrator::new();
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        system.seed_pending(
+            11,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            1,
+        );
+        let resolve = resolver_for(&fake);
+
+        ex.execute_one(&*resolve).await.expect("operator executed");
+        assert_eq!(
+            migrator.fences(),
+            vec!["arm:11", "migrate", "release:11"],
+            "fence 必须包住 migrate 与 cutover，且带同一 op_id 解除"
+        );
+        assert_eq!(system.table().version, 2);
+    }
+
+    #[tokio::test]
+    async fn test_split_migration_failure_still_releases_write_fence() {
+        let migrator = FakeMigrator::new();
+        migrator.fail_next();
+        let (_pd, ex, system, fake) = split_executor(single_region_table(), Some(migrator.clone()));
+        system.seed_pending(
+            12,
+            Operator::SplitRegion {
+                region_id: 1,
+                split_key: b"m".to_vec(),
+                new_region_id: 2,
+            },
+            1,
+        );
+        let resolve = resolver_for(&fake);
+
+        ex.execute_one(&*resolve).await.expect("operator processed");
+        assert_eq!(
+            migrator.fences(),
+            vec!["arm:12", "migrate", "release:12"],
+            "搬迁失败也必须解 fence，否则卡住的 split 会把区间变永久只读"
+        );
+        assert_eq!(system.table().version, 1, "表不动");
+        assert_eq!(system.intents().len(), 1, "intent 保留重试");
     }
 
     #[tokio::test]
@@ -1977,6 +2120,11 @@ mod tests {
 
         ex.execute_one(&*resolve).await.expect("operator executed");
         assert_eq!(migrator.calls().len(), 1);
+        assert_eq!(
+            migrator.fences(),
+            vec!["arm:7", "migrate", "release:7"],
+            "merge 也要走 fence 钩子（吸收方扩回区间前无条件摘掉上一次 split 的 fence）"
+        );
         let table = system.table();
         assert_eq!(table.version, 2);
         assert_eq!(table.get(1).unwrap().end_key, b"");

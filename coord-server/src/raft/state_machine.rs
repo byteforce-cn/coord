@@ -1058,12 +1058,35 @@ impl StateMachineStore {
                     .map_err(io_err)?;
                 Ok((Response::SafeTsAdvanced { revision }, None))
             }
+            Command::FenceDirectWrites {
+                start_key,
+                end_key,
+                op_id,
+            } => {
+                // 与它要挡的直写共享 apply 序，所以记录本身写进源 Region 的 MVCC：
+                // 本命令之前的直写已 apply（进了之后的导出水位），之后的被挡。
+                let effective = sm
+                    .fence_direct_writes(start_key, end_key, *op_id, applied)
+                    .map_err(io_err)?;
+                Ok((Response::DirectWritesFenced { op_id: effective }, None))
+            }
+            Command::ClearDirectWriteFence { op_id } => {
+                sm.clear_direct_write_fence(*op_id, applied)
+                    .map_err(io_err)?;
+                Ok((Response::DirectWriteFenceCleared { op_id: *op_id }, None))
+            }
             Command::PutV2 {
                 key,
                 value,
                 lease_id,
                 commit_ts,
             } => {
+                if let Some(op_id) = sm.direct_write_fence_hit(key, None).map_err(io_err)? {
+                    // 被 fence 的直写不写数据/不推 revision；仍推进 applied，
+                    // 否则重启后同一命令被无限重放（同 CommitRejected）。
+                    sm.set_last_applied(applied).map_err(io_err)?;
+                    return Ok((Response::DirectWritesFenced { op_id }, None));
+                }
                 match sm.put_at_commit_ts(key, value, *lease_id, *commit_ts, applied) {
                     Ok(outcome) => {
                         let event = if outcome.replayed {
@@ -1104,6 +1127,10 @@ impl StateMachineStore {
                 }
             }
             Command::DeleteV2 { key, commit_ts } => {
+                if let Some(op_id) = sm.direct_write_fence_hit(key, None).map_err(io_err)? {
+                    sm.set_last_applied(applied).map_err(io_err)?;
+                    return Ok((Response::DirectWritesFenced { op_id }, None));
+                }
                 match sm.delete_at_commit_ts(key, *commit_ts, applied) {
                     Ok(outcome) => {
                         let event = if outcome.replayed {
@@ -1148,6 +1175,14 @@ impl StateMachineStore {
                 range_end,
                 commit_ts,
             } => {
+                if let Some(op_id) = sm
+                    .direct_write_fence_hit(key, Some(range_end))
+                    .map_err(io_err)?
+                {
+                    // 区间写与 fence 相交就整条拒绝：只挡相交部分会留下半搬状态。
+                    sm.set_last_applied(applied).map_err(io_err)?;
+                    return Ok((Response::DirectWritesFenced { op_id }, None));
+                }
                 match sm.delete_range_at_commit_ts(key, range_end, *commit_ts, applied) {
                     Ok(outcome) => {
                         let event = if outcome.replayed {
@@ -1786,6 +1821,84 @@ mod tests {
                 .index,
             5
         );
+    }
+
+    /// split 迁移窗口的直写 fence（#167）：fence apply 之后的直写被拒，区间外与
+    /// 内部水位不受影响；clear 后区间内恢复可写。
+    #[test]
+    fn test_apply_direct_write_fence_rejects_only_migrating_range() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        let apply = |cmd: Command, index: u64| {
+            store
+                .execute_command(store.state_machine.as_ref(), &cmd, index, applied_at(index))
+                .expect("fence command must not be a raft error")
+        };
+        let put = |key: &[u8], commit_ts: u64| Command::PutV2 {
+            key: key.to_vec(),
+            value: b"v".to_vec(),
+            lease_id: None,
+            commit_ts,
+        };
+
+        let (resp, event) = apply(
+            Command::FenceDirectWrites {
+                start_key: b"m".to_vec(),
+                end_key: Vec::new(),
+                op_id: 9,
+            },
+            1,
+        );
+        assert!(matches!(resp, Response::DirectWritesFenced { op_id: 9 }));
+        assert!(event.is_none(), "fence 本身不上 Watch");
+
+        // 区间内：拒绝且不推 revision、不产生事件、不卡 applied 水位。
+        let (resp, event) = apply(put(b"m2", 100), 2);
+        assert!(matches!(resp, Response::DirectWritesFenced { op_id: 9 }));
+        assert!(event.is_none());
+        assert_eq!(store.state_machine.current_revision(), 0);
+        assert_eq!(
+            store
+                .state_machine
+                .get_applied_log_id()
+                .unwrap()
+                .unwrap()
+                .index,
+            2
+        );
+
+        // 父 Region 左半段仍然在线可写。
+        let (resp, _) = apply(put(b"a", 100), 3);
+        assert!(matches!(resp, Response::Put { revision: 100 }));
+
+        // 区间写与 fence 相交 → 整条拒绝，而不是只挡相交部分。
+        let (resp, _) = apply(
+            Command::DeleteRangeV2 {
+                key: b"a".to_vec(),
+                range_end: b"z".to_vec(),
+                commit_ts: 101,
+            },
+            4,
+        );
+        assert!(matches!(resp, Response::DirectWritesFenced { op_id: 9 }));
+        assert_eq!(store.state_machine.current_revision(), 100);
+
+        // 决策水位/安全点不被 fence 挡：父 Region 的已 apply 水位必须继续走。
+        let (resp, _) = apply(Command::AdvanceSafeTs { commit_ts: 150 }, 5);
+        assert!(matches!(resp, Response::SafeTsAdvanced { revision: 150 }));
+
+        // 旧 op_id 的 clear 不解开新一轮 fence。
+        let (resp, _) = apply(Command::ClearDirectWriteFence { op_id: 8 }, 6);
+        assert!(matches!(
+            resp,
+            Response::DirectWriteFenceCleared { op_id: 8 }
+        ));
+        let (resp, _) = apply(put(b"m2", 151), 7);
+        assert!(matches!(resp, Response::DirectWritesFenced { op_id: 9 }));
+
+        // 同 op_id 清除后恢复可写。
+        apply(Command::ClearDirectWriteFence { op_id: 9 }, 8);
+        let (resp, _) = apply(put(b"m2", 152), 9);
+        assert!(matches!(resp, Response::Put { revision: 152 }));
     }
 
     /// v2 范围删除共享同一 commit_ts，并写入对应 revision 的事件。
