@@ -45,10 +45,10 @@ jobs:
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -105,10 +105,10 @@ jobs:
       - name: Install protoc (coord-proto build + wire-descriptor gate dependency)
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
       - name: Assert the fmt gate turns red on an injected violation
         run: |
@@ -360,10 +360,10 @@ jobs:
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
       - uses: actions/setup-java@v4
         with:
@@ -442,10 +442,10 @@ jobs:
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
       - name: Build tests
         run: cargo build --workspace --tests
@@ -480,10 +480,10 @@ jobs:
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
       # 插件引擎 feature 门控：默认（plugin-js）、全开、全关三种组合必须构建通过
       - name: Check default features (plugin-js)
@@ -556,10 +556,10 @@ jobs:
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
       - name: cargo audit (RustSec)
         uses: rustsec/audit-check@v2.0.0
@@ -582,10 +582,10 @@ jobs:
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
       - name: Build tests
         run: cargo build --workspace --tests
@@ -708,10 +708,10 @@ jobs:
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
       - name: Run release benchmarks + regression gate
         run: bash scripts/bench-ci.sh

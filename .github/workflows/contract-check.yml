@@ -70,10 +70,10 @@ jobs:
       - name: Install protoc（descriptor 级比对需要）
         run: |
           set -euo pipefail
-          timeout --kill-after=10 240 sudo apt-get update \
+          timeout --kill-after=10 600 sudo apt-get update \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
-          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
 
       - name: wire-descriptor（**descriptor 级**契约 ↔ 实现一致性）
