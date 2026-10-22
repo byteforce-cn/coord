@@ -9,9 +9,11 @@
 //! 拿到 `UNAVAILABLE` 后误判为网络故障。
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
+use tokio::sync::mpsc;
 use tonic::{Request, Response, Status, Streaming};
 
 use coord_proto::kv::v2 as kv_v2;
@@ -31,29 +33,17 @@ use super::txn::{ReadIntent, ReadSetLimit, SessionError};
 use super::KvTCapability;
 use crate::raft::tso::{normalize_batch_size, TsoAllocator, TsoBatch};
 use crate::raft::type_config::{
-    Command, Response as RaftResponse, SequencerInvalid, SequencerMutation, SequencerOutcome,
-    SequencerReadRange,
+    Command, ObjectStoreOp, Response as RaftResponse, SequencerInvalid, SequencerMutation,
+    SequencerOutcome, SequencerReadRange,
 };
-use crate::server::{map_err, CoordNode, KvRangeSegment};
-
-/// 门禁 + 未实现哨兵。
-fn shell(capability: KvTCapability, node: &CoordNode) -> Status {
-    match node.kvt().gate(capability) {
-        Err(status) => status,
-        Ok(()) => Status::unimplemented(format!(
-            "{} gate passed but the handler is not implemented yet",
-            capability.package()
-        )),
-    }
-}
-
-type ShellStream<T> = tokio_stream::Empty<Result<T, Status>>;
+use crate::server::{map_err, CoordNode, KvRangeSegment, ObjectTarget};
+use crate::storage::object_store::{self, ChunkStore, ObjectLimits, ObjectManifest};
 
 // ──── coord.tso.v2 ────
 
 /// TSO 分配链路的错误映射：先结构化分类（NOT_LEADER / INVALID_ARGUMENT /
 /// UNAVAILABLE），再交给通用 `map_err` 脱敏。
-pub(super) fn tso_status(err: Error) -> Status {
+pub(crate) fn tso_status(err: Error) -> Status {
     let code = match &err {
         Error::NotLeader { .. } | Error::NotLeaderNoHint => Some(CoordErrorCode::NotLeader),
         Error::InvalidArgument(_) => Some(CoordErrorCode::InvalidArgument),
@@ -80,6 +70,14 @@ async fn allocate_tso(node: &CoordNode, batch_size: u32) -> Result<TsoBatch, Sta
     };
     let allocator = TsoAllocator::new(raft.as_ref().clone(), node.node_id);
     allocator.allocate(batch_size).await.map_err(tso_status)
+}
+
+/// v2 能力装配缺失（无 region 0 raft / sequencer / TSO）→ FAILED_PRECONDITION。
+pub(crate) fn kv_t_assembly_status(msg: &str) -> Status {
+    attach(
+        Status::failed_precondition(msg.to_string()),
+        CoordErrorCode::FailedPrecondition,
+    )
 }
 
 fn ts_to_i64(ts: u64) -> Result<i64, Status> {
@@ -129,7 +127,7 @@ impl tso_v2::tso_server::Tso for CoordNode {
 // ──── coord.kv.v2 ────
 
 /// 结构化错误映射：v2 调用方只按 trailer 码分支，不得解析消息文本。
-fn v2_status(err: Error) -> Status {
+pub(crate) fn v2_status(err: Error) -> Status {
     let code = match &err {
         Error::InvalidArgument(_) => Some(CoordErrorCode::InvalidArgument),
         Error::RevisionCompacted { .. } | Error::HistoryUnavailable { .. } => {
@@ -1253,36 +1251,464 @@ impl watch_v2::watch_server::Watch for CoordNode {
 
 // ──── coord.storage.v2 ────
 
+/// 对象存储运行时限制。未启用 = 配置/装配问题（FAILED_PRECONDITION），
+/// 不是「未实现」：能力门禁已在前面把两者分开。
+fn object_limits(node: &CoordNode) -> Result<Arc<ObjectLimits>, Status> {
+    node.object_limits
+        .clone()
+        .ok_or_else(|| kv_t_assembly_status("object storage is disabled: [object_storage].enabled=false"))
+}
+
+fn object_chunk_store(node: &CoordNode, target: &ObjectTarget) -> Result<Arc<ChunkStore>, Status> {
+    let _ = object_limits(node)?;
+    target
+        .chunk_store
+        .clone()
+        .ok_or_else(|| kv_t_assembly_status("object storage is disabled on this region"))
+}
+
+fn object_stat_v2(bucket: &str, object_id: &[u8], m: &ObjectManifest) -> storage_v2::ObjectStat {
+    storage_v2::ObjectStat {
+        bucket: bucket.to_string(),
+        object_id: object_id.to_vec(),
+        size: m.size as i64,
+        chunks: m.chunks.len() as i64,
+        commit_ts: m.last_revision as i64,
+        create_ts: m.create_revision as i64,
+        exists: true,
+        committed: m.committed,
+    }
+}
+
+/// 缺对象的 Stat：proto 的 `exists` 字段就是为此存在（不返回 NOT_FOUND），
+/// 与 Get/Delete（流/删除语义无法表达缺席）不同。
+fn missing_object_stat(bucket: &str, object_id: &[u8]) -> storage_v2::ObjectStat {
+    storage_v2::ObjectStat {
+        bucket: bucket.to_string(),
+        object_id: object_id.to_vec(),
+        size: 0,
+        chunks: 0,
+        commit_ts: 0,
+        create_ts: 0,
+        exists: false,
+        committed: false,
+    }
+}
+
+/// 读 manifest：`read_ts == 0` 走 ReadIndex 线性一致读，`> 0` 读历史快照。
+///
+/// 历史读先等 `safe_ts` 越过 `read_ts`（该时间点的历史已不再变化），再按
+/// changelog 重建 manifest——不能拿当前值顶替（那会把删除后的重建读成旧对象）。
+async fn read_object_manifest_at(
+    node: &CoordNode,
+    target: &ObjectTarget,
+    bucket: &[u8],
+    object_id: &[u8],
+    read_ts: i64,
+) -> Result<Option<ObjectManifest>, Status> {
+    if read_ts < 0 {
+        return Err(attach(
+            Status::invalid_argument("read_ts must be >= 0"),
+            CoordErrorCode::InvalidArgument,
+        ));
+    }
+    if read_ts == 0 {
+        node.object_linearizable(target).await?;
+        return object_store::read_manifest(&target.mvcc, bucket, object_id).map_err(map_err);
+    }
+    let read_ts = read_ts as u64;
+    if read_ts > node.safe_ts() {
+        wait_for_safe_ts(node, read_ts, node.kvt().config().read_ts_wait_ms).await?;
+    }
+    let key = object_store::manifest_key(bucket, object_id);
+    match target.mvcc.get_at_revision(&key, read_ts) {
+        Ok(row) => row
+            .map(|bytes| {
+                ObjectManifest::from_bytes(&bytes)
+                    .ok_or_else(|| Status::internal("corrupt object manifest row"))
+            })
+            .transpose(),
+        Err(err) => Err(v2_status(err)),
+    }
+}
+
+/// chunk 文件缺失：历史读下对象字节不保留（chunk 不进 MVCC），必须是显式的
+/// `OUT_OF_RANGE` + `HISTORY_UNAVAILABLE`，不能回退成当前值。
+fn history_unavailable(object_id: &[u8]) -> Status {
+    attach(
+        Status::out_of_range(format!(
+            "object bytes for {} at read_ts are out of range: chunk files are not versioned \
+             (overwritten/deleted since read_ts)",
+            String::from_utf8_lossy(object_id)
+        )),
+        CoordErrorCode::OutOfRange,
+    )
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 #[tonic::async_trait]
 impl storage_v2::storage_server::Storage for CoordNode {
-    type GetStream = ShellStream<storage_v2::GetResponse>;
+    type GetStream = tokio_stream::wrappers::ReceiverStream<Result<storage_v2::GetResponse, Status>>;
 
     async fn put(
         &self,
-        _request: Request<Streaming<storage_v2::PutRequest>>,
+        request: Request<Streaming<storage_v2::PutRequest>>,
     ) -> Result<Response<storage_v2::PutResponse>, Status> {
-        Err(shell(KvTCapability::Storage, self))
+        self.kvt().gate(KvTCapability::Storage)?;
+        guard_routing_epoch(self, request.metadata())?;
+        self.ensure_writable()?;
+        let limits = object_limits(self)?;
+
+        let mut stream = request.into_inner();
+        // 首帧必须携带 meta（bucket/object_id/total_size）
+        let meta = match stream.message().await? {
+            Some(storage_v2::PutRequest {
+                part: Some(storage_v2::put_request::Part::Meta(meta)),
+            }) => meta,
+            Some(_) => {
+                return Err(attach(
+                    Status::invalid_argument(
+                        "first PutRequest message must carry meta (bucket/object_id/total_size)",
+                    ),
+                    CoordErrorCode::InvalidArgument,
+                ))
+            }
+            None => {
+                return Err(attach(
+                    Status::invalid_argument("empty Put stream"),
+                    CoordErrorCode::InvalidArgument,
+                ))
+            }
+        };
+        let bucket = meta.bucket;
+        let object_id = meta.object_id;
+        object_store::validate_ref(bucket.as_bytes(), &object_id).map_err(v2_status)?;
+        // `total_size`：`> 0` = 声明长度（Commit 须严格相等）；`-1` = 未知长度
+        // （流末按实际字节定长，累计上限 = `max_object_size`）；其余非法。
+        let declared: Option<u64> = match meta.total_size {
+            -1 => None,
+            n if n > 0 => Some(n as u64),
+            _ => {
+                return Err(attach(
+                    Status::invalid_argument(
+                        "total_size must be > 0 (declared) or -1 (unknown)",
+                    ),
+                    CoordErrorCode::InvalidArgument,
+                ))
+            }
+        };
+        if declared.is_some_and(|n| n > limits.max_object_size) {
+            return Err(attach(
+                Status::invalid_argument(format!(
+                    "total_size must be in (0, {}]",
+                    limits.max_object_size
+                )),
+                CoordErrorCode::InvalidArgument,
+            ));
+        }
+
+        let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
+        let store = object_chunk_store(self, &target)?;
+
+        // 配额 admission（尽力而为）：估算 = 已用 + 本次声明（未知长度按上限保守估）
+        let estimate = declared.unwrap_or(limits.max_object_size);
+        if limits.quota_bytes > 0 {
+            let used = store.usage_bytes().map_err(map_err)?;
+            if used.saturating_add(estimate) > limits.quota_bytes {
+                return Err(Status::resource_exhausted(format!(
+                    "object storage quota exceeded: used {used} + {estimate} > {}",
+                    limits.quota_bytes
+                )));
+            }
+        }
+
+        let (_, ok) = self
+            .propose_object_op_v2(
+                &target,
+                ObjectStoreOp::Begin {
+                    bucket: bucket.as_bytes().to_vec(),
+                    object_id: object_id.clone(),
+                    total_size: declared.unwrap_or(0),
+                    started_at_unix: now_unix_secs(),
+                },
+            )
+            .await?;
+        if !ok {
+            return Err(Status::already_exists(format!(
+                "object {bucket}/{} already exists (committed or upload in progress)",
+                String::from_utf8_lossy(&object_id)
+            )));
+        }
+
+        // 逐 chunk 经 raft 提交；manifest 行与 chunk 文件在同一条目里落盘
+        let mut seq: u32 = 0;
+        let mut sent_bytes: u64 = 0;
+        loop {
+            let msg = match stream.message().await {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(e) => {
+                    // 客户端中止：残留 Creating 由 GC 回收
+                    return Err(Status::aborted(format!(
+                        "put stream error (partial object left for GC): {e}"
+                    )));
+                }
+            };
+            let data = match msg.part {
+                Some(storage_v2::put_request::Part::Chunk(data)) => data,
+                Some(storage_v2::put_request::Part::Meta(_)) => {
+                    return Err(attach(
+                        Status::invalid_argument("meta must only appear as the first message"),
+                        CoordErrorCode::InvalidArgument,
+                    ))
+                }
+                None => {
+                    return Err(attach(
+                        Status::invalid_argument("empty PutRequest message"),
+                        CoordErrorCode::InvalidArgument,
+                    ))
+                }
+            };
+            if data.is_empty() || data.len() > limits.chunk_size {
+                return Err(attach(
+                    Status::invalid_argument(format!(
+                        "chunk size {} must be in (0, {}]",
+                        data.len(),
+                        limits.chunk_size
+                    )),
+                    CoordErrorCode::InvalidArgument,
+                ));
+            }
+            let len = data.len() as u64;
+            let bound = declared.unwrap_or(limits.max_object_size);
+            if sent_bytes.saturating_add(len) > bound {
+                return Err(attach(
+                    Status::invalid_argument(if declared.is_some() {
+                        "uploaded bytes exceed declared total_size"
+                    } else {
+                        "uploaded bytes exceed max object size"
+                    }),
+                    CoordErrorCode::InvalidArgument,
+                ));
+            }
+            let (_, ok) = self
+                .propose_object_op_v2(
+                    &target,
+                    ObjectStoreOp::Chunk {
+                        bucket: bucket.as_bytes().to_vec(),
+                        object_id: object_id.clone(),
+                        seq,
+                        data,
+                        now_unix: now_unix_secs(),
+                    },
+                )
+                .await?;
+            if !ok {
+                return Err(Status::aborted(
+                    "chunk rejected by state machine (ordering/limits); abort upload \
+                     (partial object left for GC)",
+                ));
+            }
+            sent_bytes += len;
+            seq += 1;
+        }
+
+        if seq == 0 {
+            return Err(attach(
+                Status::invalid_argument("object must contain at least one chunk"),
+                CoordErrorCode::InvalidArgument,
+            ));
+        }
+        let (commit_ts, ok) = self
+            .propose_object_op_v2(
+                &target,
+                ObjectStoreOp::Commit {
+                    bucket: bucket.as_bytes().to_vec(),
+                    object_id: object_id.clone(),
+                },
+            )
+            .await?;
+        if !ok {
+            return Err(attach(
+                Status::invalid_argument(
+                    "commit rejected: received bytes != declared total_size (partial object \
+                     left for GC)",
+                ),
+                CoordErrorCode::InvalidArgument,
+            ));
+        }
+        let final_size = declared.unwrap_or(sent_bytes);
+        tracing::info!(
+            bucket = %bucket,
+            chunks = seq,
+            size = final_size,
+            commit_ts,
+            "object committed (v2)"
+        );
+        Ok(Response::new(storage_v2::PutResponse {
+            commit_ts: ts_to_i64(commit_ts)?,
+            size: final_size as i64,
+            chunks: seq as i64,
+        }))
     }
 
     async fn get(
         &self,
-        _request: Request<storage_v2::GetRequest>,
+        request: Request<storage_v2::GetRequest>,
     ) -> Result<Response<Self::GetStream>, Status> {
-        Err(shell(KvTCapability::Storage, self))
+        self.kvt().gate(KvTCapability::Storage)?;
+        guard_routing_epoch(self, request.metadata())?;
+        let req = request.into_inner();
+        let bucket = req.bucket;
+        let object_id = req.object_id;
+        object_store::validate_ref(bucket.as_bytes(), &object_id).map_err(v2_status)?;
+
+        let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
+        let store = object_chunk_store(self, &target)?;
+        let manifest = read_object_manifest_at(self, &target, bucket.as_bytes(), &object_id, req.read_ts)
+            .await?
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "object {bucket}/{} not found",
+                    String::from_utf8_lossy(&object_id)
+                ))
+            })?;
+        if !manifest.committed {
+            return Err(Status::failed_precondition(format!(
+                "object {bucket}/{} upload in progress or aborted (not committed)",
+                String::from_utf8_lossy(&object_id)
+            )));
+        }
+
+        let historical = req.read_ts > 0;
+        let (tx, rx) = mpsc::channel::<Result<storage_v2::GetResponse, Status>>(4);
+        let bucket_c = bucket.clone();
+        let object_id_c = object_id.clone();
+        tokio::spawn(async move {
+            let first = storage_v2::GetResponse {
+                part: Some(storage_v2::get_response::Part::Stat(object_stat_v2(
+                    &bucket_c,
+                    &object_id_c,
+                    &manifest,
+                ))),
+            };
+            if tx.send(Ok(first)).await.is_err() {
+                return;
+            }
+            let n = manifest.chunks.len() as u32;
+            for seq in 0..n {
+                let store = Arc::clone(&store);
+                let manifest = manifest.clone();
+                let bucket = bucket_c.clone();
+                let object_id = object_id_c.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    object_store::read_manifest_chunk(&store, &manifest, bucket.as_bytes(), &object_id, seq)
+                        .map_err(|err| match err {
+                            Error::NotFound { .. } if historical => history_unavailable(&object_id),
+                            Error::NotFound { .. } => Status::not_found(format!(
+                                "object {}/{} disappeared during Get",
+                                String::from_utf8_lossy(bucket.as_bytes()),
+                                String::from_utf8_lossy(&object_id)
+                            )),
+                            other => map_err(other),
+                        })
+                })
+                .await;
+                let data = match res {
+                    Ok(Ok(d)) => d,
+                    Ok(Err(e)) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(Status::internal(format!("chunk read task join: {e}"))))
+                            .await;
+                        return;
+                    }
+                };
+                if tx
+                    .send(Ok(storage_v2::GetResponse {
+                        part: Some(storage_v2::get_response::Part::Chunk(data)),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     async fn stat(
         &self,
-        _request: Request<storage_v2::StatRequest>,
+        request: Request<storage_v2::StatRequest>,
     ) -> Result<Response<storage_v2::StatResponse>, Status> {
-        Err(shell(KvTCapability::Storage, self))
+        self.kvt().gate(KvTCapability::Storage)?;
+        guard_routing_epoch(self, request.metadata())?;
+        let req = request.into_inner();
+        let bucket = req.bucket;
+        let object_id = req.object_id;
+        object_store::validate_ref(bucket.as_bytes(), &object_id).map_err(v2_status)?;
+
+        let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
+        object_chunk_store(self, &target)?;
+        let manifest = read_object_manifest_at(self, &target, bucket.as_bytes(), &object_id, req.read_ts)
+            .await?;
+        let stat = match manifest {
+            Some(m) => object_stat_v2(&bucket, &object_id, &m),
+            None => missing_object_stat(&bucket, &object_id),
+        };
+        Ok(Response::new(storage_v2::StatResponse { stat: Some(stat) }))
     }
 
     async fn delete(
         &self,
-        _request: Request<storage_v2::DeleteRequest>,
+        request: Request<storage_v2::DeleteRequest>,
     ) -> Result<Response<storage_v2::DeleteResponse>, Status> {
-        Err(shell(KvTCapability::Storage, self))
+        self.kvt().gate(KvTCapability::Storage)?;
+        guard_routing_epoch(self, request.metadata())?;
+        self.ensure_writable()?;
+        let req = request.into_inner();
+        let bucket = req.bucket;
+        let object_id = req.object_id;
+        object_store::validate_ref(bucket.as_bytes(), &object_id).map_err(v2_status)?;
+
+        let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
+        object_chunk_store(self, &target)?;
+        // 线性一致读：不存在就不提案（避免无谓的 commit_ts 消耗与 tombstone）
+        self.object_linearizable(&target).await?;
+        if object_store::read_manifest(&target.mvcc, bucket.as_bytes(), &object_id)
+            .map_err(map_err)?
+            .is_none()
+        {
+            return Err(Status::not_found(format!(
+                "object {bucket}/{} not found",
+                String::from_utf8_lossy(&object_id)
+            )));
+        }
+        let (commit_ts, ok) = self
+            .propose_object_op_v2(
+                &target,
+                ObjectStoreOp::Delete {
+                    bucket: bucket.as_bytes().to_vec(),
+                    object_id: object_id.clone(),
+                },
+            )
+            .await?;
+        Ok(Response::new(storage_v2::DeleteResponse {
+            deleted: ok,
+            commit_ts: ts_to_i64(commit_ts)?,
+        }))
     }
 }
 

@@ -349,17 +349,17 @@ fn kv_target_from_runtime(rt: &crate::raft::region_runtime::RegionRuntime) -> Kv
 
 /// 对象存储执行目标（一个 Region，或 legacy 单 Raft）——对象 manifest 读写的
 /// raft/mvcc + 该目标数据目录下的 chunk 文件存储。
-struct ObjectTarget {
+pub(crate) struct ObjectTarget {
     /// 目标 Region（legacy 模式为 0）
-    region_id: RegionId,
+    pub(crate) region_id: RegionId,
     /// 该 Region 的 MVCC（manifest 读写目标）
-    mvcc: Arc<MvccStorage<RedbBackend>>,
+    pub(crate) mvcc: Arc<MvccStorage<RedbBackend>>,
     /// 该 Region 的 Raft 实例（None = 单节点直写模式，仅测试出现）
-    raft: Option<Arc<CoordRaft>>,
+    pub(crate) raft: Option<Arc<CoordRaft>>,
     /// 该 Region 的 LogStore（读屏障幻影态终检用）
-    raft_log_store: Option<LogStore>,
+    pub(crate) raft_log_store: Option<LogStore>,
     /// 该 Region 的 chunk 文件存储（对象存储启用时为 Some）
-    chunk_store: Option<Arc<crate::storage::object_store::ChunkStore>>,
+    pub(crate) chunk_store: Option<Arc<crate::storage::object_store::ChunkStore>>,
 }
 
 impl CoordNode {
@@ -649,7 +649,7 @@ impl CoordNode {
     /// 路由键 = manifest key（`/obj/m/{bucket}/{object_id}`），与 KV 共享 keyspace
     /// 平铺——Multi-Raft 开启时经 RegionManager 自动路由进所属 Region（chunk 文件
     /// 存该 Region 数据目录）；关闭时 = region 0 根（字节级退化）。
-    fn object_target_for(
+    pub(crate) fn object_target_for(
         &self,
         bucket: &[u8],
         object_id: &[u8],
@@ -697,8 +697,80 @@ impl CoordNode {
         }
     }
 
+    /// 对象写路径（v2，ADR-0015 D7）：manifest 行 revision = TSO 分配的
+    /// `commit_ts`，而不是 raft log index。
+    ///
+    /// 取 TSO 与提案在同一把锁内完成——与 Commit Sequencer 的「取 TSO → 提案」
+    /// 以及 safe-ts fence 发布共用同一把锁：fence 只能越过已提案的条目。跨节点
+    /// 仍可能出现「已分配、未提案」被 fence 越过的窗口，此时 apply 返回
+    /// `CommitRejected`，这里换新 `commit_ts` 有界重试，客户端看不到这次内部重试。
+    pub(crate) async fn propose_object_op_v2(
+        &self,
+        target: &ObjectTarget,
+        op: crate::raft::type_config::ObjectStoreOp,
+    ) -> Result<(u64, bool), tonic::Status> {
+        let sequencer = self.commit_sequencer().ok_or_else(|| {
+            crate::kvt::kv_t_assembly_status(
+                "object storage v2 requires the commit sequencer (region 0 assembly missing)",
+            )
+        })?;
+        let tso = self.tso_client().ok_or_else(|| {
+            crate::kvt::kv_t_assembly_status(
+                "object storage v2 requires a TSO client (region 0 assembly missing)",
+            )
+        })?;
+        let raft = target.raft.as_ref().ok_or_else(|| {
+            tonic::Status::unavailable("object storage requires raft mode (single-node dev off)")
+        })?;
+        let op = Arc::new(op);
+        retry_object_commit(|| {
+            let op = Arc::clone(&op);
+            async move {
+                // 锁必须覆盖「取 TSO → 提案」：否则 fence 可以越过本条的
+                // commit_ts，apply 时被拒（客户端会看到一次莫名的上传失败）。
+                let _gate = sequencer.lock_fence_publication().await;
+                let fence = self.storage.safe_ts_fence().map_err(map_err)?;
+                let commit_ts = tso
+                    .get_ts_above(fence)
+                    .await
+                    .map_err(crate::kvt::tso_status)?;
+                let cmd = crate::raft::type_config::Command::ObjectStoreV2(
+                    crate::raft::type_config::ObjectStoreOpV2 {
+                        op: (*op).clone(),
+                        commit_ts,
+                    },
+                );
+                let resp = self
+                    .client_write_with_timeout(raft, cmd, target.region_id)
+                    .await?;
+                Ok(match resp.response() {
+                    Response::ObjectStore { ok, .. } => ObjectCommitAttempt::Applied {
+                        commit_ts,
+                        ok: *ok,
+                    },
+                    Response::CommitRejected {
+                        commit_ts,
+                        current_revision,
+                    } => ObjectCommitAttempt::Rejected {
+                        commit_ts: *commit_ts,
+                        current_revision: *current_revision,
+                    },
+                    other => {
+                        return Err(tonic::Status::internal(format!(
+                            "unexpected raft response for ObjectStoreV2: {other:?}"
+                        )))
+                    }
+                })
+            }
+        })
+        .await
+    }
+
     /// 对象读路径：ReadIndex 线性一致屏障后返回（与 KV 读同口径）
-    async fn object_linearizable(&self, target: &ObjectTarget) -> Result<(), tonic::Status> {
+    pub(crate) async fn object_linearizable(
+        &self,
+        target: &ObjectTarget,
+    ) -> Result<(), tonic::Status> {
         self.ensure_linearizable_on(
             target.raft.as_deref(),
             target.raft_log_store.as_ref(),
@@ -1830,6 +1902,50 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
         }
         Error::Crypto(_) => tonic::Status::internal("crypto error"),
     }
+}
+
+/// v2 对象 op 的一次提案结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectCommitAttempt {
+    Applied { commit_ts: u64, ok: bool },
+    /// `commit_ts` 已被 safe-ts fence 越过（apply 没写任何数据）
+    Rejected { commit_ts: u64, current_revision: u64 },
+}
+
+/// `commit_ts` 被 fence 越过时的最大重试次数。
+///
+/// 每次重试都换更大的 `commit_ts`，被拒绝的条目没有副作用；窗口本身是
+/// 「已分配、未提案」的亚毫秒级竞态，8 次足够吸收，耗尽则让客户端整体重试。
+pub(crate) const OBJECT_COMMIT_TS_ATTEMPTS: usize = 8;
+
+/// 分配 commit_ts → 提案 → 被 fence 越过就换新 ts 重试。
+pub(crate) async fn retry_object_commit<F, Fut>(
+    mut attempt: F,
+) -> Result<(u64, bool), tonic::Status>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<ObjectCommitAttempt, tonic::Status>>,
+{
+    let mut last = None;
+    for _ in 0..OBJECT_COMMIT_TS_ATTEMPTS {
+        match attempt().await? {
+            ObjectCommitAttempt::Applied { commit_ts, ok } => return Ok((commit_ts, ok)),
+            rejected @ ObjectCommitAttempt::Rejected { .. } => last = Some(rejected),
+        }
+    }
+    let (commit_ts, current_revision) = match last {
+        Some(ObjectCommitAttempt::Rejected {
+            commit_ts,
+            current_revision,
+        }) => (commit_ts, current_revision),
+        _ => (0, 0),
+    };
+    Err(crate::kvt::v2_status(
+        coord_core::error::Error::CommitRejected {
+            commit_ts,
+            current_revision,
+        },
+    ))
 }
 
 /// 将存储/raft 等内部错误映射为 gRPC Status。
@@ -3701,6 +3817,104 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ──── v2 对象写路径：commit_ts 分配/重试（#166） ────
+
+    #[tokio::test]
+    async fn test_retry_object_commit_uses_a_new_commit_ts_after_rejection() {
+        let mut attempted = 0u64;
+        let (commit_ts, ok) = super::retry_object_commit(|| {
+            attempted += 1;
+            let n = attempted;
+            async move {
+                if n < 3 {
+                    Ok(super::ObjectCommitAttempt::Rejected {
+                        commit_ts: 100 + n,
+                        current_revision: 100 + n,
+                    })
+                } else {
+                    Ok(super::ObjectCommitAttempt::Applied {
+                        commit_ts: 100 + n,
+                        ok: true,
+                    })
+                }
+            }
+        })
+        .await
+        .expect("third attempt must succeed");
+        assert_eq!(attempted, 3, "每次重试都必须重新分配 commit_ts");
+        assert_eq!(commit_ts, 103);
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn test_retry_object_commit_exhaustion_keeps_commit_rejected_code() {
+        let mut attempted = 0usize;
+        let err = super::retry_object_commit(|| {
+            attempted += 1;
+            async {
+                Ok(super::ObjectCommitAttempt::Rejected {
+                    commit_ts: 7,
+                    current_revision: 9,
+                })
+            }
+        })
+        .await
+        .expect_err("exhausted retries must surface an error");
+        assert_eq!(attempted, super::OBJECT_COMMIT_TS_ATTEMPTS);
+        assert_eq!(
+            coord_core::error_code::error_code_of(&err).as_deref(),
+            Some("COMMIT_REJECTED"),
+            "重试耗尽必须保留结构化错误码，客户端才能区分可重试与不可重试"
+        );
+        assert!(
+            err.message().contains("7") && err.message().contains("9"),
+            "错误信息必须带上被拒的 commit_ts 与当前 revision：{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_object_commit_does_not_swallow_status_errors() {
+        let mut attempted = 0usize;
+        let err = super::retry_object_commit(|| {
+            attempted += 1;
+            async { Err(tonic::Status::unavailable("leader moved")) }
+        })
+        .await
+        .expect_err("status errors must surface immediately");
+        assert_eq!(attempted, 1, "非 CommitRejected 的错误不得重试");
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn test_propose_object_op_v2_requires_assembly() {
+        use coord_core::storage::StorageBackend as _;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RedbBackend::open(dir.path(), &Default::default()).unwrap();
+        let mvcc = Arc::new(
+            MvccStorage::new_with_revision_mode(
+                backend,
+                crate::storage::mvcc::RevisionMode::CommitTs,
+            )
+            .unwrap(),
+        );
+        let node = CoordNode::new(Arc::clone(&mvcc));
+        let target = ObjectTarget {
+            region_id: 0,
+            mvcc: Arc::clone(&mvcc),
+            raft: None,
+            raft_log_store: None,
+            chunk_store: None,
+        };
+        let err = node
+            .propose_object_op_v2(&target, crate::raft::type_config::ObjectStoreOp::Delete {
+                bucket: b"b".to_vec(),
+                object_id: b"o".to_vec(),
+            })
+            .await
+            .expect_err("missing region 0 assembly must fail closed");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
 
     /// `COMMIT_REJECTED` 必须走结构化 trailer：调用方只按码分支，
     /// 不能依赖文案（WHITEPAPER §6.1.1）。
