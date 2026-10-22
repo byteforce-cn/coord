@@ -801,18 +801,25 @@ impl StateMachineStore {
                 end_key,
                 rows,
                 watermark,
-                seal_prior_history,
+                done,
+            }
+            | Command::ImportRangePreserveHistory {
+                start_key,
+                end_key,
+                rows,
+                watermark,
                 done,
             } => {
-                // split 搬迁的变更已经在全局 Commit Log 里；这里再发 Watch
-                // 事件会让订阅者收到重复变更。
+                // split/merge 搬迁的变更已经在全局 Commit Log 里；这里再发
+                // Watch 事件会让订阅者收到重复变更。
+                let seal_prior_history = !matches!(cmd, Command::ImportRangePreserveHistory { .. });
                 let imported = sm
                     .apply_range_import(
                         start_key,
                         end_key,
                         rows,
                         *watermark,
-                        *seal_prior_history,
+                        seal_prior_history,
                         *done,
                         applied,
                     )
@@ -1683,7 +1690,6 @@ mod tests {
             end_key: b"z".to_vec(),
             rows: rows.clone(),
             watermark: 42,
-            seal_prior_history: true,
             done: true,
         };
         let (resp, event) = store

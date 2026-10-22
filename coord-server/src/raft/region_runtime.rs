@@ -504,13 +504,24 @@ impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
         done: bool,
     ) -> std::result::Result<u64, String> {
         self.wait_for_leader().await?;
-        let command = Command::ImportRange {
-            start_key: start.to_vec(),
-            end_key: end.to_vec(),
-            rows,
-            watermark,
-            seal_prior_history,
-            done,
+        let start_key = start.to_vec();
+        let end_key = end.to_vec();
+        let command = if seal_prior_history {
+            Command::ImportRange {
+                start_key,
+                end_key,
+                rows,
+                watermark,
+                done,
+            }
+        } else {
+            Command::ImportRangePreserveHistory {
+                start_key,
+                end_key,
+                rows,
+                watermark,
+                done,
+            }
         };
         let resp = self
             .raft

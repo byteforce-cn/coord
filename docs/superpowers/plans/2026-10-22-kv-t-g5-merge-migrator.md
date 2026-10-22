@@ -4,7 +4,7 @@
 
 **Goal:** 把 merge 从 fail-closed 变成真实数据搬迁：drain 合并后的整段区间 → 以右 Region 的固定 revision 分页导出 live 行 → 经左（接收方）Region raft 分页导入 → cutover 后只剩左 Region，且左 Region 自己的历史/压缩水位不被抬高。
 
-**Architecture:** 复用 #163 的 `RangeImportMigrator`、`RangeImportTarget`、`SplitDrain` 端口；新增 `RegionRangeResolver`（从本地已应用权威表取被吸收 Region 的 key 区间）。导入端口增加显式 `seal_prior_history` 标志：split 目标（全新 Region）在 `done` 页把历史水位钉到 `watermark`；merge 接收方已有自己的历史，只抬高 `current_revision`，绝不动 `compacted_revision`。
+**Architecture:** 复用 #163 的 `RangeImportMigrator`、`RangeImportTarget`、`SplitDrain` 端口；新增 `RegionRangeResolver`（从本地已应用权威表取被吸收 Region 的 key 区间）。导入端口增加显式 `seal_prior_history` 标志：split 目标（全新 Region）在 `done` 页把历史水位钉到 `watermark`；merge 接收方已有自己的历史，只抬高 `current_revision`，绝不动 `compacted_revision`。raft 命令用独立变体 `ImportRangePreserveHistory` 承载 merge 语义，保持旧 `ImportRange` 日志条目可解码。
 
 **Tech Stack:** Rust / openraft / redb / tokio / async-trait。
 
@@ -29,11 +29,12 @@
 5. **不做右 Region 目录回收**：cutover 后由 table 驱动的 `RegionLifecycle` retire 右 Region（停机、目录保留）；物理删除不属于本切片。
 6. **跨协调节点 drain 与 cutover 连续性归 #167**：本切片只保证本节点协调的会话被 drain、搬迁数据与 revision 单调。
 7. **不改 `SplitMergePlan`/`RegionChange` 的 wire 形状**：merge 所需的右 Region id 已在 `RegionChange::Remove` 中；区间通过 resolver 取得。
+8. **不改 `Command::ImportRange` 的形状**：merge 用末尾追加的 `ImportRangePreserveHistory` 变体；给既有变体加字段会让升级前写入的 raft 日志不可解码。
 
 ## File Structure
 
 - Modify: `coord-server/src/storage/mvcc.rs` — `apply_range_import` 增加 `seal_prior_history`，历史压缩只在显式请求时发生。
-- Modify: `coord-server/src/raft/type_config.rs` — `Command::ImportRange` 增加 `seal_prior_history` 字段。
+- Modify: `coord-server/src/raft/type_config.rs` — 末尾追加 `Command::ImportRangePreserveHistory`（旧 `ImportRange` 保持不变）。
 - Modify: `coord-server/src/raft/state_machine.rs` — 透传 `seal_prior_history`。
 - Modify: `coord-server/src/raft/region_runtime.rs` — `RangeImportTarget::import_range` 增加参数并经 raft 提案。
 - Modify: `coord-server/src/split_merge.rs` — `RegionRangeResolver`、merge 分支、merge 判定/区间校验。
@@ -66,7 +67,8 @@
 
 **Interfaces:**
 - `MvccStorage::apply_range_import(&self, start, end, rows, watermark, seal_prior_history: bool, done, applied) -> Result<u64>`
-- `Command::ImportRange { start_key, end_key, rows, watermark, seal_prior_history, done }`
+- `Command::ImportRange { start_key, end_key, rows, watermark, done }`（split，行为不变）
+- `Command::ImportRangePreserveHistory { start_key, end_key, rows, watermark, done }`（merge，不压缩接收方历史）
 - `RangeImportTarget::import_range(&self, start, end, rows, watermark, seal_prior_history: bool, done)`
 
 - [ ] **Step 1: 写失败测试（merge 不压缩历史）**
@@ -96,7 +98,7 @@ Expected: FAIL（参数个数不匹配）
 
 - [ ] **Step 3: 实现显式标志**
 
-`apply_range_import` 签名增加 `seal_prior_history: bool`；`done` 分支改为 `if done && seal_prior_history { ... }`，注释改成「split 的新目标没有可保留的历史；merge 接收方有」。同步 `Command::ImportRange`、状态机透传、`CoordRangeImportTarget`；split 搬迁器传 `true`。
+`apply_range_import` 签名增加 `seal_prior_history: bool`；`done` 分支改为 `if done && seal_prior_history { ... }`，注释改成「split 的新目标没有可保留的历史；merge 接收方有」。`Command::ImportRange` 保持原形状，末尾追加 `ImportRangePreserveHistory`；状态机按变体传 `true`/`false`，`CoordRangeImportTarget` 按端口参数选变体。
 
 - [ ] **Step 4: 更新既有测试并运行**
 

@@ -752,15 +752,25 @@ pub enum Command {
     /// Split 数据搬迁：把源 Region 的一页 live range 快照应用到本 Region。
     ///
     /// **末尾追加**；只在目标 Region 自己的 raft 提出，`rows` 保留每行的
-    /// `KvMetadata`。`done` 为最后一页时把 Region revision 抬到 `watermark`。
+    /// `KvMetadata`。`done` 为最后一页时把 Region revision 抬到 `watermark`，
+    /// 并把历史水位钉在导入点（split 的新目标没有可保留的历史）。
     ImportRange {
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         rows: Vec<(Vec<u8>, Vec<u8>, crate::storage::mvcc::KvMetadata)>,
         watermark: u64,
-        /// split 的全新目标才把导入完成时的历史水位钉在 `watermark`；
-        /// merge 的接收方保留自己的历史与压缩水位。
-        seal_prior_history: bool,
+        done: bool,
+    },
+    /// Merge 数据搬迁：把被吸收 Region 的一页 live range 快照应用到本 Region。
+    ///
+    /// 与 `ImportRange` 的区别只在最后一页：接收方已有自己的历史与压缩水位，
+    /// 导入只抬高 `current_revision`，不得把历史标成不可用。独立变体而不是给
+    /// `ImportRange` 加字段——旧 raft 日志里的 split 导入必须继续可解码。
+    ImportRangePreserveHistory {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        rows: Vec<(Vec<u8>, Vec<u8>, crate::storage::mvcc::KvMetadata)>,
+        watermark: u64,
         done: bool,
     },
 }
@@ -853,12 +863,21 @@ impl std::fmt::Display for Command {
             Command::ImportRange {
                 rows,
                 watermark,
-                seal_prior_history,
                 done,
                 ..
             } => write!(
                 f,
-                "ImportRange(rows={}, watermark={watermark}, seal_prior_history={seal_prior_history}, done={done})",
+                "ImportRange(rows={}, watermark={watermark}, done={done})",
+                rows.len()
+            ),
+            Command::ImportRangePreserveHistory {
+                rows,
+                watermark,
+                done,
+                ..
+            } => write!(
+                f,
+                "ImportRangePreserveHistory(rows={}, watermark={watermark}, done={done})",
                 rows.len()
             ),
         }
@@ -1104,6 +1123,50 @@ mod tests {
                 assert_eq!(lease_id, Some(42));
             }
             _ => panic!("expected Put"),
+        }
+    }
+
+    #[test]
+    fn test_command_import_range_variants_serde_roundtrip() {
+        let rows = vec![(
+            b"k".to_vec(),
+            b"v".to_vec(),
+            crate::storage::mvcc::KvMetadata {
+                version: 1,
+                create_revision: 7,
+                mod_revision: 7,
+                lease_id: 0,
+                deleted: false,
+            },
+        )];
+        // split 与 merge 是独立变体：旧日志里的 ImportRange 不能因为新增字段
+        // 而变成不可解码。
+        for cmd in [
+            Command::ImportRange {
+                start_key: b"a".to_vec(),
+                end_key: b"z".to_vec(),
+                rows: rows.clone(),
+                watermark: 7,
+                done: true,
+            },
+            Command::ImportRangePreserveHistory {
+                start_key: b"a".to_vec(),
+                end_key: b"z".to_vec(),
+                rows,
+                watermark: 7,
+                done: true,
+            },
+        ] {
+            let bytes = postcard::to_allocvec(&cmd).unwrap();
+            let decoded: Command = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded.to_string(), cmd.to_string());
+            match decoded {
+                Command::ImportRange { watermark, .. }
+                | Command::ImportRangePreserveHistory { watermark, .. } => {
+                    assert_eq!(watermark, 7);
+                }
+                _ => panic!("expected a range import command"),
+            }
         }
     }
 
