@@ -21,6 +21,8 @@ pub(crate) mod lease;
 pub mod safe_ts;
 pub mod sequencer;
 mod services;
+
+pub(crate) use services::{kv_t_assembly_status, tso_status, v2_status};
 pub(crate) mod txn;
 pub mod watch;
 mod watch_rpc;

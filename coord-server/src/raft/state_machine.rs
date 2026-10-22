@@ -941,6 +941,21 @@ impl StateMachineStore {
                 // 对象存储数据面：manifest 状态迁移 + chunk 文件副作用。
                 // ok=false（冲突/no-op）不是 raft 错误——用户级竞态不得 wedge raft；
                 // 文件写失败（磁盘）→ Err（由水位/配额前置避免）。不上 Watch。
+                //
+                // v2（CommitTs）下 v1 命令必须是无副作用的 no-op：v1 以 raft log
+                // index 做 revision，写进 v2 Region 会与 commit_ts 撞 changelog
+                // 键，让 read_ts 读到错历史（v2 数据面走 `ObjectStoreV2`）。
+                if sm.revision_mode() == crate::storage::mvcc::RevisionMode::CommitTs {
+                    tracing::warn!("ignoring v1 ObjectStore command on a commit_ts region: {op:?}");
+                    sm.persist_applied(revision, applied).map_err(io_err)?;
+                    return Ok((
+                        Response::ObjectStore {
+                            revision,
+                            ok: false,
+                        },
+                        None,
+                    ));
+                }
                 let ok = crate::storage::object_store::apply_object_store_op(
                     sm,
                     op,
@@ -950,6 +965,51 @@ impl StateMachineStore {
                 )
                 .map_err(io_err)?;
                 Ok((Response::ObjectStore { revision, ok }, None))
+            }
+            Command::ObjectStoreV2(op_v2) => {
+                // v2 对象数据面：commit_ts 由提议侧（TSO）填；冲突作为响应返回
+                // 而不是 Err（同 `Command::PutV2`）。v1 Region 不得接受它：
+                // CommitTs 策略会把 commit_ts 写成 `META_CURRENT_REVISION`，
+                // 破坏 v1 的 `revision == log index` 不变量。
+                if sm.revision_mode() != crate::storage::mvcc::RevisionMode::CommitTs {
+                    tracing::warn!(
+                        "ignoring v2 ObjectStoreV2 command on a log-index region: {op_v2:?}"
+                    );
+                    sm.set_last_applied(applied).map_err(io_err)?;
+                    return Ok((
+                        Response::CommitRejected {
+                            commit_ts: op_v2.commit_ts,
+                            current_revision: sm.current_revision(),
+                        },
+                        None,
+                    ));
+                }
+                let outcome = crate::storage::object_store::apply_object_store_op_v2(
+                    sm,
+                    op_v2,
+                    applied,
+                    self.object_chunk_store.as_deref(),
+                )
+                .map_err(io_err)?;
+                match outcome {
+                    crate::storage::object_store::ObjectApply::Applied(ok) => Ok((
+                        Response::ObjectStore {
+                            revision: op_v2.commit_ts,
+                            ok,
+                        },
+                        None,
+                    )),
+                    crate::storage::object_store::ObjectApply::Rejected {
+                        commit_ts,
+                        current_revision,
+                    } => Ok((
+                        Response::CommitRejected {
+                            commit_ts,
+                            current_revision,
+                        },
+                        None,
+                    )),
+                }
             }
             Command::Tso(op) => {
                 // 全局 TSO（region 0 system raft）：高水位与 META_LAST_APPLIED
@@ -1596,6 +1656,102 @@ mod tests {
             node_id: 1,
             index,
         }
+    }
+
+    /// v2 对象 op：manifest 行用 commit_ts；冲突以 `CommitRejected` 响应返回
+    /// （不是 raft 错误），且 applied 水位必须前进，否则重启后无限重放。
+    #[test]
+    fn test_apply_object_store_v2_rejection_is_a_response_and_advances_applied() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        let begin = |object_id: &[u8], commit_ts: u64| {
+            Command::ObjectStoreV2(crate::raft::type_config::ObjectStoreOpV2 {
+                op: crate::raft::type_config::ObjectStoreOp::Begin {
+                    bucket: b"b".to_vec(),
+                    object_id: object_id.to_vec(),
+                    total_size: 0,
+                    started_at_unix: 1,
+                },
+                commit_ts,
+            })
+        };
+        let (resp, _) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &begin(b"o", 1_000),
+                5,
+                applied_at(5),
+            )
+            .expect("begin apply");
+        match resp {
+            Response::ObjectStore { revision, ok } => {
+                assert_eq!(revision, 1_000);
+                assert!(ok);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let (resp, _) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &begin(b"o2", 999),
+                6,
+                applied_at(6),
+            )
+            .expect("rejected apply must not be a raft error");
+        match resp {
+            Response::CommitRejected {
+                commit_ts,
+                current_revision,
+            } => {
+                assert_eq!(commit_ts, 999);
+                assert_eq!(current_revision, 1_000);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(
+            store
+                .state_machine
+                .get_applied_log_id()
+                .unwrap()
+                .map(|id| id.index),
+            Some(6),
+            "拒绝必须落 applied 水位"
+        );
+        assert_eq!(store.state_machine.current_revision(), 1_000);
+    }
+
+    /// v1 `ObjectStore` 命令在 v2 Region 必须是无副作用 no-op：否则 log index
+    /// 会作为 revision 写进 changelog，与 commit_ts 撞键。
+    #[test]
+    fn test_apply_v1_object_store_on_commit_ts_region_is_a_noop() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        let (resp, _) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::ObjectStore(crate::raft::type_config::ObjectStoreOp::Begin {
+                    bucket: b"b".to_vec(),
+                    object_id: b"o".to_vec(),
+                    total_size: 0,
+                    started_at_unix: 1,
+                }),
+                7,
+                applied_at(7),
+            )
+            .expect("v1 object op must not wedge raft");
+        match resp {
+            Response::ObjectStore { ok, .. } => assert!(!ok),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(store.state_machine.current_revision(), 0);
+        assert!(!store.state_machine.changelog_contains_revision(7).unwrap());
+        assert_eq!(
+            store
+                .state_machine
+                .get_applied_log_id()
+                .unwrap()
+                .map(|id| id.index),
+            Some(7)
+        );
     }
 
     /// v2 写命令的 revision 来自 `commit_ts`，不是 apply 的 log index。

@@ -50,7 +50,7 @@ use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpc
 use coord_server::raft::region::{spawn_configured_regions, RegionManager, RegionSeed};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::system_raft::{CoordSystemRaftHandle, SystemRaftHandle};
-use coord_server::server::object_storage::object_gc_loop;
+use coord_server::server::object_storage::{object_gc_loop, ObjectGcTarget};
 use coord_server::server::CoordNode;
 use coord_server::storage::compaction::{CompactionConfig, CompactionManager};
 use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
@@ -2992,13 +2992,15 @@ async fn run_server(
             },
         )
         // #136/#137：TSO；#141：coord.kv.v2 单 Region 读写；
-        // #144：coord.txn.v2 读阶段（Begin/Read/Abort）；#145：coord.lease.v2。
+        // #144：coord.txn.v2 读阶段（Begin/Read/Abort）；#145：coord.lease.v2；
+        // #166：coord.storage.v2 对象数据面（`[object_storage].enabled` 时才有目标）。
         .with_implemented([
             coord_server::kvt::KvTCapability::Tso,
             coord_server::kvt::KvTCapability::Kv,
             coord_server::kvt::KvTCapability::Txn,
             coord_server::kvt::KvTCapability::Watch,
             coord_server::kvt::KvTCapability::Lease,
+            coord_server::kvt::KvTCapability::Storage,
         ]),
     );
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
@@ -3268,7 +3270,10 @@ async fn run_server(
     // 解码上限须容纳单 chunk 消息：4MiB chunk 的 protobuf 编码消息 = 字段头
     // (1B) + varint 长度前缀(≤4B) + payload，略超 4MiB → 上限 = chunk_size +
     // 64KiB 余量（raft RPC 另有 16MiB 上限，见 RAFT_MAX_DECODING_MSG）。
-    let storage_svc = if cfg.object_storage.enabled {
+    //
+    // v2 集群不注册 v1 `coord.storage`（B-KVT-2）：v1 写路径以 raft log index 当
+    // revision，会与 v2 Region 的 commit_ts 撞 changelog 键。
+    let storage_svc = if cfg.object_storage.enabled && !cfg.kv_t.enabled {
         let obj_decode_limit = cfg.object_storage.chunk_size_bytes + 64 * 1024;
         Some(StorageServer::from_arc(Arc::clone(&node)).max_decoding_message_size(obj_decode_limit))
     } else {
@@ -3754,14 +3759,16 @@ async fn run_server(
             // 而朴素 spawn 丢弃 handle，谁都发现不了。
             coord_server::supervisor::spawn_supervised(
                 "object_gc_loop(root)",
-                object_gc_loop(
+                object_gc_loop(ObjectGcTarget {
                     node_id,
-                    Arc::clone(&raft),
-                    Arc::clone(&mvcc),
-                    Arc::clone(store),
-                    Arc::clone(limits),
-                    cfg.object_storage.gc_interval_secs,
-                ),
+                    region_id: 0,
+                    raft: Arc::clone(&raft),
+                    mvcc: Arc::clone(&mvcc),
+                    chunk_store: Arc::clone(store),
+                    limits: Arc::clone(limits),
+                    interval_secs: cfg.object_storage.gc_interval_secs,
+                    v2: cfg.kv_t.enabled.then(|| Arc::clone(&node)),
+                }),
             );
             tracing::info!("Object gc loop started (legacy/root)");
         }
@@ -3773,14 +3780,16 @@ async fn run_server(
                         // 受监督（Region 级 GC 死亡同样静默）
                         coord_server::supervisor::spawn_supervised(
                             "object_gc_loop",
-                            object_gc_loop(
+                            object_gc_loop(ObjectGcTarget {
                                 node_id,
-                                Arc::new(rt.raft.clone()),
-                                Arc::clone(&rt.mvcc),
-                                Arc::clone(store),
-                                Arc::clone(limits),
-                                cfg.object_storage.gc_interval_secs,
-                            ),
+                                region_id: rid,
+                                raft: Arc::new(rt.raft.clone()),
+                                mvcc: Arc::clone(&rt.mvcc),
+                                chunk_store: Arc::clone(store),
+                                limits: Arc::clone(limits),
+                                interval_secs: cfg.object_storage.gc_interval_secs,
+                                v2: cfg.kv_t.enabled.then(|| Arc::clone(&node)),
+                            }),
                         );
                         tracing::info!("Region {rid} object gc loop started");
                     }

@@ -386,7 +386,7 @@ impl PdQueueEntry {
 /// - Delete：KV tombstone + 同步删除 chunk 文件（幂等；no-op 也消耗 revision）。
 ///
 /// **末尾追加**（变体索引 = 旧日志/快照兼容；勿插队）。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectStoreOp {
     /// 开始上传：创建 Creating manifest（声明期望总字节数）。
     /// `total_size == 0` = **未知长度**（Commit 时按实际累计字节定长）；
@@ -411,6 +411,17 @@ pub enum ObjectStoreOp {
     Commit { bucket: Vec<u8>, object_id: Vec<u8> },
     /// 删除：KV tombstone + chunk 文件清理
     Delete { bucket: Vec<u8>, object_id: Vec<u8> },
+}
+
+/// 一次 v2 对象 op 与其 `commit_ts`（manifest 行的 revision）。
+///
+/// 只承载 v1 [`ObjectStoreOp`] 的语义 + 显式 commit_ts：apply 侧的文件副作用
+/// （chunk 落盘、删除 chunk 文件）与 manifest 行写在同一条日志条目里完成。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectStoreOpV2 {
+    pub op: ObjectStoreOp,
+    /// 全局 commit_ts（`> 0`；manifest 行的 revision）
+    pub commit_ts: u64,
 }
 
 /// 全局时间戳（TSO）命令（仅 region 0 system raft 提出）。
@@ -783,6 +794,14 @@ pub enum Command {
         start_key: Vec<u8>,
         end_key: Vec<u8>,
     },
+    /// v2 对象数据面：manifest 行以显式 `commit_ts` 写入（ADR-0015 D7）。
+    ///
+    /// **末尾追加**；与 `ObjectStore` 的区别只有 revision 口径——v1 用 raft
+    /// log index（`ObjectStore` 保持原样，旧日志继续可解码），v2 用全局
+    /// `commit_ts`。`commit_ts` 必须在提议前由 TSO 分配并写进日志（apply 不读
+    /// 时钟/配置）。冲突（`commit_ts <= current_revision`）按
+    /// `Response::CommitRejected` 返回，不是 raft 错误。
+    ObjectStoreV2(ObjectStoreOpV2),
 }
 
 impl std::fmt::Display for Command {
@@ -896,6 +915,25 @@ impl std::fmt::Display for Command {
                 String::from_utf8_lossy(start_key),
                 String::from_utf8_lossy(end_key)
             ),
+            Command::ObjectStoreV2(op) => {
+                write!(f, "ObjectStoreV2(commit_ts={}, ", op.commit_ts)?;
+                match &op.op {
+                    ObjectStoreOp::Begin { bucket, .. } => {
+                        write!(f, "Begin(bucket={}))", String::from_utf8_lossy(bucket))
+                    }
+                    ObjectStoreOp::Chunk { bucket, seq, .. } => write!(
+                        f,
+                        "Chunk(bucket={}, seq={seq}))",
+                        String::from_utf8_lossy(bucket)
+                    ),
+                    ObjectStoreOp::Commit { bucket, .. } => {
+                        write!(f, "Commit(bucket={}))", String::from_utf8_lossy(bucket))
+                    }
+                    ObjectStoreOp::Delete { bucket, .. } => {
+                        write!(f, "Delete(bucket={}))", String::from_utf8_lossy(bucket))
+                    }
+                }
+            }
         }
     }
 }

@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 
 use super::mvcc::{AppliedLogId, MvccStorage};
 use super::redb_backend::RedbBackend;
-use crate::raft::type_config::ObjectStoreOp;
+use crate::raft::type_config::{ObjectStoreOp, ObjectStoreOpV2};
 
 /// 对象保留用户前缀（KV/Txn/Watch 对其拒绝；对象 manifest 存于其下）
 pub const OBJECT_PREFIX: &[u8] = b"/obj/";
@@ -897,7 +897,30 @@ fn decode_hex(s: &str) -> std::result::Result<Vec<u8>, ()> {
 
 // ──── raft apply：manifest 状态迁移 + chunk 文件副作用 ────
 
-/// 执行单个 ObjectStoreOp（raft apply 路径，SM 单写者串行）。
+/// v2 对象 op 的 apply 结果。
+///
+/// v1 的 revision 由 raft log index 保证单调，只有「是否产生变更」；v2 的
+/// `commit_ts` 可能已被 safe-ts fence 越过（跨节点「已分配未提案」窗口），
+/// 拒绝必须作为响应返回而不是 raft 错误——用户级竞态不得 wedge raft。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectApply {
+    /// 是否产生了状态变更（false = no-op/冲突/重放）
+    Applied(bool),
+    /// `commit_ts <= current_revision`：本条目未写任何数据
+    Rejected {
+        commit_ts: u64,
+        current_revision: u64,
+    },
+}
+
+/// manifest 行的 revision 口径（v1 = raft log index，v2 = 全局 commit_ts）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestRevision {
+    LogIndex,
+    CommitTs,
+}
+
+/// 执行单个 ObjectStoreOp（v1，raft log index 语义）。
 ///
 /// 约定：
 /// - 任何分支都保证 `META_LAST_APPLIED == revision`（有状态变更时由
@@ -913,9 +936,103 @@ pub fn apply_object_store_op(
     applied: AppliedLogId,
     chunks: Option<&ChunkStore>,
 ) -> Result<bool> {
+    match apply_object_store_op_inner(
+        sm,
+        op,
+        revision,
+        ManifestRevision::LogIndex,
+        applied,
+        chunks,
+    )? {
+        ObjectApply::Applied(ok) => Ok(ok),
+        ObjectApply::Rejected { .. } => Ok(false),
+    }
+}
+
+/// 执行单个 v2 对象 op（manifest 行 revision = 显式 `commit_ts`）。
+///
+/// 文件副作用（chunk 落盘/删除）与 manifest 行在同一条日志条目里完成：拆成两个
+/// revision 会把部分上传暴露给读，重放与配额记账都要重做。
+pub fn apply_object_store_op_v2(
+    sm: &MvccStorage<RedbBackend>,
+    op_v2: &ObjectStoreOpV2,
+    applied: AppliedLogId,
+    chunks: Option<&ChunkStore>,
+) -> Result<ObjectApply> {
+    if op_v2.commit_ts == 0 {
+        return Err(Error::InvalidArgument(
+            "object commit_ts must be > 0".to_string(),
+        ));
+    }
+    apply_object_store_op_inner(
+        sm,
+        &op_v2.op,
+        op_v2.commit_ts,
+        ManifestRevision::CommitTs,
+        applied,
+        chunks,
+    )
+}
+
+fn apply_object_store_op_inner(
+    sm: &MvccStorage<RedbBackend>,
+    op: &ObjectStoreOp,
+    revision: u64,
+    policy: ManifestRevision,
+    applied: AppliedLogId,
+    chunks: Option<&ChunkStore>,
+) -> Result<ObjectApply> {
+    match apply_object_store_op_body(sm, op, revision, policy, applied, chunks) {
+        Err(Error::CommitRejected {
+            commit_ts,
+            current_revision,
+        }) => {
+            // 拒绝也要推进 applied，否则重启后同一命令被无限重放。
+            sm.set_last_applied(applied)?;
+            Ok(ObjectApply::Rejected {
+                commit_ts,
+                current_revision,
+            })
+        }
+        other => other,
+    }
+}
+
+fn apply_object_store_op_body(
+    sm: &MvccStorage<RedbBackend>,
+    op: &ObjectStoreOp,
+    revision: u64,
+    policy: ManifestRevision,
+    applied: AppliedLogId,
+    chunks: Option<&ChunkStore>,
+) -> Result<ObjectApply> {
+    let put_manifest = |key: &[u8], value: &[u8]| -> Result<()> {
+        match policy {
+            ManifestRevision::LogIndex => {
+                let _ = sm.put_at_revision(key, value, None, revision, applied)?;
+            }
+            ManifestRevision::CommitTs => {
+                let _ = sm.put_at_commit_ts(key, value, None, revision, applied)?;
+            }
+        }
+        Ok(())
+    };
+    let delete_manifest = |key: &[u8]| -> Result<()> {
+        match policy {
+            ManifestRevision::LogIndex => {
+                let _ = sm.delete_at_revision(key, revision, applied)?;
+            }
+            ManifestRevision::CommitTs => {
+                let _ = sm.delete_at_commit_ts(key, revision, applied)?;
+            }
+        }
+        Ok(())
+    };
+    let persist = || -> Result<()> { sm.persist_applied(revision, applied) };
+
     // 重放守卫：该 revision 已应用 → no-op
     if sm.changelog_contains_revision(revision)? {
-        return Ok(false);
+        return Ok(ObjectApply::Applied(false));
     }
 
     let (bucket, object_id) = match op {
@@ -940,15 +1057,15 @@ pub fn apply_object_store_op(
             // 允许重建。
             if sm.get(&key)?.is_some() {
                 // no-op：持久化 applied 水位即可
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             }
             // `total_size == 0` = 未知长度：合法，仅在 Commit 时定长；
             // 上限由 Chunk 分支按 `max_object_size` 兜底。
             let m = ObjectManifest::creating(*total_size, revision, *started_at_unix);
             let bytes = m.to_bytes()?;
-            let _ = sm.put_at_revision(&key, &bytes, None, revision, applied)?;
-            Ok(true)
+            put_manifest(&key, &bytes)?;
+            Ok(ObjectApply::Applied(true))
         }
         ObjectStoreOp::Chunk {
             seq,
@@ -961,24 +1078,24 @@ pub fn apply_object_store_op(
             })?;
             let Some(raw) = sm.get(&key)? else {
                 // manifest 缺失（无 Begin / 已删除）：no-op 落水位
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             };
             let Some(mut m) = ObjectManifest::from_bytes(&raw) else {
                 return Err(Error::Internal("corrupt object manifest row".into()));
             };
             if m.committed {
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             }
             if *seq as usize != m.chunks.len() {
                 // 顺序错乱（并发上传/重试重叠）：no-op
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             }
             if data.is_empty() || data.len() > store.limits.chunk_size {
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             }
             // 声明长度 = 硬上限；未知长度（0）→ 以 `max_object_size` 为上限。
             let bound = if m.total_size == 0 {
@@ -987,12 +1104,12 @@ pub fn apply_object_store_op(
                 m.total_size
             };
             if m.size + data.len() as u64 > bound || m.total_size > store.limits.max_object_size {
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             }
             // 1) chunk 文件落盘（幂等；失败 → Err，raft 挂起由前置防护避免）
             store.write_chunk(&bucket, &object_id, *seq, data)?;
-            // 2) manifest 追加（put_at_revision：replay 守卫 + changelog + applied）
+            // 2) manifest 追加（put_manifest：replay 守卫 + changelog + applied）
             let mut hasher = Sha256::new();
             hasher.update(data);
             let sha: [u8; 32] = hasher.finalize().into();
@@ -1005,26 +1122,26 @@ pub fn apply_object_store_op(
             m.last_revision = revision;
             m.last_write_at_unix = *now_unix;
             let bytes = m.to_bytes()?;
-            let _ = sm.put_at_revision(&key, &bytes, None, revision, applied)?;
-            Ok(true)
+            put_manifest(&key, &bytes)?;
+            Ok(ObjectApply::Applied(true))
         }
         ObjectStoreOp::Commit { .. } => {
             let Some(raw) = sm.get(&key)? else {
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             };
             let Some(mut m) = ObjectManifest::from_bytes(&raw) else {
                 return Err(Error::Internal("corrupt object manifest row".into()));
             };
             if m.committed {
                 // 幂等（重试 Commit）：视为成功
-                sm.persist_applied(revision, applied)?;
-                return Ok(true);
+                persist()?;
+                return Ok(ObjectApply::Applied(true));
             }
             if m.chunks.is_empty() {
                 // 无数据（客户端中断）：拒绝，留待 GC
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             }
             if m.total_size == 0 {
                 // 未知长度：以实际累计字节**定长**后提交。
@@ -1032,28 +1149,28 @@ pub fn apply_object_store_op(
                 m.total_size = m.size;
             } else if m.size != m.total_size {
                 // 字节数与 Begin 声明不符（客户端中断/撒谎）：拒绝，留待 GC
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
+                persist()?;
+                return Ok(ObjectApply::Applied(false));
             }
             m.committed = true;
             m.last_revision = revision;
             let bytes = m.to_bytes()?;
-            let _ = sm.put_at_revision(&key, &bytes, None, revision, applied)?;
-            Ok(true)
+            put_manifest(&key, &bytes)?;
+            Ok(ObjectApply::Applied(true))
         }
         ObjectStoreOp::Delete { .. } => {
             // 删除语义：对「存在（任意状态：Creating/Committed）」的对象
             // tombstone + 删除 chunk 文件（幂等；no-op 也消耗 revision）。
             let exists = sm.get(&key)?.is_some();
             // KV tombstone（无论是否存在都消耗 revision；持久化 applied）
-            let _ = sm.delete_at_revision(&key, revision, applied)?;
+            delete_manifest(&key)?;
             if exists {
                 if let Some(store) = chunks {
                     let _ = store.delete_object_files(&bucket, &object_id);
                 }
-                Ok(true)
+                Ok(ObjectApply::Applied(true))
             } else {
-                Ok(false)
+                Ok(ObjectApply::Applied(false))
             }
         }
     }
@@ -1560,5 +1677,129 @@ mod tests {
         assert_eq!(store.read_chunk(b"b", b"o", 0).unwrap(), b"a");
         assert_eq!(store.read_chunk(b"b", b"o", 1).unwrap(), b"b");
         assert_eq!(store.read_chunk(b"b", b"o", 2).unwrap(), b"c");
+    }
+
+    // ──── v2（#166）：manifest 行 revision = 显式 commit_ts ────
+
+    fn commit_ts_storage() -> (tempfile::TempDir, Arc<MvccStorage<RedbBackend>>) {
+        use coord_core::storage::StorageBackend as _;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RedbBackend::open(dir.path(), &Default::default()).unwrap();
+        let sm = Arc::new(
+            MvccStorage::new_with_revision_mode(
+                backend,
+                crate::storage::mvcc::RevisionMode::CommitTs,
+            )
+            .unwrap(),
+        );
+        (dir, sm)
+    }
+
+    fn begin_v2(object_id: &[u8], commit_ts: u64) -> ObjectStoreOpV2 {
+        ObjectStoreOpV2 {
+            op: ObjectStoreOp::Begin {
+                bucket: b"b".to_vec(),
+                object_id: object_id.to_vec(),
+                total_size: 0,
+                started_at_unix: 1,
+            },
+            commit_ts,
+        }
+    }
+
+    #[test]
+    fn test_apply_object_store_op_v2_uses_commit_ts_as_revision() {
+        let (dir, sm) = commit_ts_storage();
+        let chunks = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), None).unwrap();
+        let out = apply_object_store_op_v2(
+            &sm,
+            &begin_v2(b"o", 1_000),
+            AppliedLogId::standalone(1_000),
+            Some(&chunks),
+        )
+        .unwrap();
+        assert_eq!(out, ObjectApply::Applied(true));
+        let m = read_manifest(&sm, b"b", b"o").unwrap().unwrap();
+        assert_eq!(
+            m.create_revision, 1_000,
+            "v2 manifest 的 create_revision 必须是 commit_ts，不是 raft log index"
+        );
+        assert_eq!(m.last_revision, 1_000);
+        assert_eq!(sm.current_revision(), 1_000);
+    }
+
+    #[test]
+    fn test_apply_object_store_op_v2_rejects_out_of_order_commit_ts() {
+        let (dir, sm) = commit_ts_storage();
+        let chunks = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), None).unwrap();
+        apply_object_store_op_v2(
+            &sm,
+            &begin_v2(b"o", 1_000),
+            AppliedLogId::standalone(1_000),
+            Some(&chunks),
+        )
+        .unwrap();
+
+        let chunk = ObjectStoreOpV2 {
+            op: ObjectStoreOp::Chunk {
+                bucket: b"b".to_vec(),
+                object_id: b"o".to_vec(),
+                seq: 0,
+                data: b"hello".to_vec(),
+                now_unix: 2,
+            },
+            commit_ts: 999,
+        };
+        let out =
+            apply_object_store_op_v2(&sm, &chunk, AppliedLogId::standalone(999), Some(&chunks))
+                .unwrap();
+        assert_eq!(
+            out,
+            ObjectApply::Rejected {
+                commit_ts: 999,
+                current_revision: 1_000,
+            }
+        );
+        let m = read_manifest(&sm, b"b", b"o").unwrap().unwrap();
+        assert!(m.chunks.is_empty(), "被拒绝的条目不得写 manifest");
+        assert_eq!(sm.current_revision(), 1_000);
+        assert!(
+            !sm.changelog_contains_revision(999).unwrap(),
+            "拒绝不得产生 changelog（否则 read_ts 会读到不存在的写入）"
+        );
+    }
+
+    #[test]
+    fn test_apply_object_store_op_v2_replay_is_noop() {
+        let (dir, sm) = commit_ts_storage();
+        let chunks = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), None).unwrap();
+        let begin = begin_v2(b"o", 1_000);
+        apply_object_store_op_v2(&sm, &begin, AppliedLogId::standalone(1_000), Some(&chunks))
+            .unwrap();
+        let chunk = ObjectStoreOpV2 {
+            op: ObjectStoreOp::Chunk {
+                bucket: b"b".to_vec(),
+                object_id: b"o".to_vec(),
+                seq: 0,
+                data: b"hello".to_vec(),
+                now_unix: 2,
+            },
+            commit_ts: 1_001,
+        };
+        let first =
+            apply_object_store_op_v2(&sm, &chunk, AppliedLogId::standalone(1_001), Some(&chunks))
+                .unwrap();
+        assert_eq!(first, ObjectApply::Applied(true));
+        let replay =
+            apply_object_store_op_v2(&sm, &chunk, AppliedLogId::standalone(1_001), Some(&chunks))
+                .unwrap();
+        assert_eq!(
+            replay,
+            ObjectApply::Applied(false),
+            "同一 commit_ts 重放必须无副作用"
+        );
+        let m = read_manifest(&sm, b"b", b"o").unwrap().unwrap();
+        assert_eq!(m.chunks.len(), 1, "重放不得重复追加 chunk 记录");
+        assert_eq!(m.last_revision, 1_001);
     }
 }
