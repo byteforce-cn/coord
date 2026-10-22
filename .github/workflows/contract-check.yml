@@ -68,7 +68,13 @@ jobs:
         run: bash apis/contracts/scripts/check-wire-sync.sh
 
       - name: Install protoc（descriptor 级比对需要）
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: |
+          set -euo pipefail
+          timeout --kill-after=10 240 sudo apt-get update \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
+          timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends protobuf-compiler
 
       - name: wire-descriptor（**descriptor 级**契约 ↔ 实现一致性）
         # `check-wire-sync.sh` 按**字段名全文匹配**，不精确到
