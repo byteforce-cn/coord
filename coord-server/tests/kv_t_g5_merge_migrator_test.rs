@@ -183,13 +183,18 @@ impl SplitDrain for FailingDrain {
 }
 
 fn migrator(
+    left: &Arc<MvccStorage<RedbBackend>>,
     target: Arc<dyn RangeImportTarget>,
     donor: &Arc<MvccStorage<RedbBackend>>,
     drain: Arc<dyn SplitDrain>,
 ) -> RangeImportMigrator {
     let donor = Arc::clone(donor);
-    let source: Arc<RegionMvccResolver> =
-        Arc::new(move |region_id| (region_id == 2).then(|| Arc::clone(&donor)));
+    let left_source = Arc::clone(left);
+    let source: Arc<RegionMvccResolver> = Arc::new(move |region_id| match region_id {
+        1 => Some(Arc::clone(&left_source)),
+        2 => Some(Arc::clone(&donor)),
+        _ => None,
+    });
     let targets: Arc<RegionImportTargetResolver> =
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&target)));
     let ranges: Arc<RegionRangeResolver> =
@@ -205,11 +210,16 @@ async fn test_merge_migrator_moves_right_rows_into_left_and_keeps_history() {
     let (_donor_dir, donor) = donor_region().await;
     let drain = RecordingDrain::new();
 
-    migrator(target, &donor, Arc::clone(&drain) as Arc<dyn SplitDrain>)
-        .with_page_size(1)
-        .migrate(&merge_plan())
-        .await
-        .expect("merge migration");
+    migrator(
+        &left,
+        target,
+        &donor,
+        Arc::clone(&drain) as Arc<dyn SplitDrain>,
+    )
+    .with_page_size(1)
+    .migrate(&merge_plan())
+    .await
+    .expect("merge migration");
 
     assert_eq!(
         drain.calls(),
@@ -242,9 +252,17 @@ async fn test_merge_migrator_moves_right_rows_into_left_and_keeps_history() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_merge_migrator_is_idempotent_across_restarts() {
     let (_left_dir, left, target) = boot_left_region().await;
+    // 接收方已 apply 到源水位（合并前它一直在推进自己的 revision）。
+    left.put_at_commit_ts(b"a", b"left", None, 14, applied(10))
+        .expect("seed left revision");
     let (_donor_dir, donor) = donor_region().await;
-    let m =
-        migrator(target, &donor, RecordingDrain::new() as Arc<dyn SplitDrain>).with_page_size(1);
+    let m = migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .with_page_size(1);
 
     m.migrate(&merge_plan()).await.expect("first migration");
     let before = left.get_kv_metadata(b"m").unwrap().unwrap();
@@ -264,25 +282,74 @@ async fn test_merge_migrator_is_idempotent_across_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_merge_into_empty_left_raises_revision_but_keeps_history() {
+async fn test_merge_fails_closed_when_receiver_lags_donor() {
     let (_left_dir, left, target) = boot_left_region().await;
-    assert_eq!(left.current_revision(), 0, "左 Region 还没有任何提交");
+    assert_eq!(
+        left.current_revision(),
+        0,
+        "左 Region 还没有 apply 任何决策"
+    );
     let (_donor_dir, donor) = donor_region().await;
 
-    migrator(target, &donor, RecordingDrain::new() as Arc<dyn SplitDrain>)
-        .migrate(&merge_plan())
-        .await
-        .expect("merge migration");
+    let err = migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect_err("接收方落后于源水位时必须失败");
 
-    assert_eq!(left.current_revision(), 14, "左 revision 抬到右水位");
+    assert!(err.contains("behind"), "{err}");
+    assert!(left.get(b"m").unwrap().is_none(), "不得导入任何行");
+    assert_eq!(left.current_revision(), 0, "失败不得抬水位");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_merge_keeps_left_history_and_seals_absorbed_range() {
+    let (_left_dir, left, target) = boot_left_region().await;
+    left.put_at_commit_ts(b"a", b"left", None, 5, applied(9))
+        .expect("seed early left row");
+    left.put_at_commit_ts(b"b", b"left", None, 20, applied(10))
+        .expect("push left revision past the donor");
+    let (_donor_dir, donor) = donor_region().await;
+
+    migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect("merge migration");
+
+    assert_eq!(left.current_revision(), 20, "水位不回退");
     assert_eq!(
         left.compacted_revision().unwrap(),
         0,
-        "空左 Region 的历史窗口仍属于自己，不得被 merge 压缩"
+        "merge 不压缩接收方历史"
+    );
+
+    // 左半历史仍然可读。
+    let left_rows = left
+        .range_at_revision(b"", b"m", 10, 10)
+        .expect("left history stays readable");
+    assert_eq!(left_rows, vec![(b"a".to_vec(), b"left".to_vec())]);
+
+    // 吸收区间的历史读在导入水位之前必须显式失败（导入行没有 changelog）。
+    assert!(
+        left.range_at_revision(b"m", b"", 10, 10).is_err(),
+        "低于导入水位的区间历史必须 HISTORY_UNAVAILABLE"
     );
     assert!(
-        left.range_at_revision(b"m", b"", 10, 1).is_ok(),
-        "旧 read_ts 不得因 merge 变成 HISTORY_UNAVAILABLE"
+        left.get_at_revision(b"z", 10).is_err(),
+        "点读同样不得回填导入值"
+    );
+    assert!(
+        left.get_at_revision(b"z", 20).ok().flatten().is_some(),
+        "导入水位之后的历史读可回填导入值"
     );
 }
 
@@ -291,7 +358,7 @@ async fn test_merge_drain_failure_imports_nothing() {
     let (_left_dir, left, target) = boot_left_region().await;
     let (_donor_dir, donor) = donor_region().await;
 
-    let err = migrator(target, &donor, Arc::new(FailingDrain))
+    let err = migrator(&left, target, &donor, Arc::new(FailingDrain))
         .migrate(&merge_plan())
         .await
         .expect_err("drain 失败必须让整次搬迁失败");
@@ -300,6 +367,34 @@ async fn test_merge_drain_failure_imports_nothing() {
     assert!(left.get(b"m").unwrap().is_none(), "未 drain 不得导入");
     assert!(left.get(b"z").unwrap().is_none());
     assert_eq!(left.current_revision(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_merge_clears_stale_rows_from_a_prior_partial_run() {
+    let (_left_dir, left, target) = boot_left_region().await;
+    // 上一次部分导入留下、但源侧后来已删除的 Key：不先清空就会在重试后复活。
+    left.put_at_commit_ts(b"n", b"stale", None, 9, applied(9))
+        .expect("seed stale imported row");
+    left.put_at_commit_ts(b"a", b"left", None, 20, applied(10))
+        .expect("seed left row");
+    let (_donor_dir, donor) = donor_region().await;
+
+    migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect("merge migration");
+
+    assert!(
+        left.get(b"n").unwrap().is_none(),
+        "重试必须清掉上次部分导入、而源侧已删除的行"
+    );
+    assert_eq!(left.get(b"m").unwrap().as_deref(), Some(&b"1"[..]));
+    assert_eq!(left.get(b"z").unwrap().as_deref(), Some(&b"3"[..]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -342,7 +437,7 @@ async fn test_merge_fails_closed_when_donor_range_is_missing_or_mismatched() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_merge_plan_without_donor_region_is_rejected() {
-    let (_left_dir, _left, target) = boot_left_region().await;
+    let (_left_dir, left, target) = boot_left_region().await;
     let (_donor_dir, donor) = donor_region().await;
     let mut plan = merge_plan();
     assert_eq!(plan.kind, SplitMergeKind::Merge);
@@ -353,9 +448,44 @@ async fn test_merge_plan_without_donor_region_is_rejected() {
         )
     });
 
-    let err = migrator(target, &donor, RecordingDrain::new() as Arc<dyn SplitDrain>)
-        .migrate(&plan)
-        .await
-        .expect_err("merge without a donor must fail");
+    let err = migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&plan)
+    .await
+    .expect_err("merge without a donor must fail");
     assert!(err.contains("donor"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_merge_plan_with_two_donors_is_rejected() {
+    let (_left_dir, left, target) = boot_left_region().await;
+    let (_donor_dir, donor) = donor_region().await;
+    let mut plan = merge_plan();
+    let second = plan
+        .changes
+        .iter()
+        .find(|change| {
+            matches!(
+                change,
+                coord_server::storage::region_table::RegionChange::Remove { .. }
+            )
+        })
+        .cloned()
+        .expect("merge plan removes its donor");
+    plan.changes.push(second);
+
+    let err = migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&plan)
+    .await
+    .expect_err("merge with two donors must fail");
+    assert!(err.contains("exactly one donor"), "{err}");
 }

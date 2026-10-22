@@ -5,7 +5,7 @@
 //! - 搬迁器先 drain 子区间，再按固定 revision 分页导出/导入；
 //! - 源 revision 在导出期间前进 → 整次迁移失败，不拼接两代快照；
 //! - 重复执行幂等（同值重放不写、revision 不倒退）；
-//! - merge 在 #164 前 fail-closed。
+//! - 每次搬迁先清空目标区间（重试不复活源侧已删除的 Key）。
 
 mod common;
 
@@ -276,6 +276,10 @@ struct DriftTarget {
 
 #[async_trait]
 impl RangeImportTarget for DriftTarget {
+    async fn reset_range(&self, start: &[u8], end: &[u8]) -> Result<(), String> {
+        self.inner.reset_range(start, end).await
+    }
+
     async fn import_range(
         &self,
         start: &[u8],

@@ -832,6 +832,14 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::ClearImportRange { start_key, end_key } => {
+                // 区间在 cutover 前不属于本 Region；清掉上一次部分导入的残留，
+                // 避免源侧已删除的 Key 在重试后复活。
+                let cleared = sm
+                    .clear_imported_range(start_key, end_key, applied)
+                    .map_err(io_err)?;
+                Ok((Response::ImportRangeCleared { cleared }, None))
+            }
             Command::Lease(op) => {
                 let (outcome, changes) =
                     sm.apply_lease_op(op, revision, applied).map_err(io_err)?;
@@ -1723,6 +1731,72 @@ mod tests {
             Response::ImportRange { imported, .. } => assert_eq!(imported, 0),
             other => panic!("unexpected response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_apply_import_range_preserve_history_keeps_receiver_watermarks() {
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        // 接收方已经 apply 到导入水位（merge 不替它抬 revision）。
+        store
+            .state_machine
+            .put_at_commit_ts(b"a", b"left", None, 42, applied_at(1))
+            .unwrap();
+        store
+            .state_machine
+            .put_at_commit_ts(b"b", b"left", None, 50, applied_at(2))
+            .unwrap();
+        let cmd = Command::ImportRangePreserveHistory {
+            start_key: b"k".to_vec(),
+            end_key: b"z".to_vec(),
+            rows: vec![(
+                b"k".to_vec(),
+                b"v".to_vec(),
+                crate::storage::mvcc::KvMetadata {
+                    version: 2,
+                    create_revision: 30,
+                    mod_revision: 42,
+                    lease_id: 0,
+                    deleted: false,
+                },
+            )],
+            watermark: 42,
+            done: true,
+        };
+        let (resp, event) = store
+            .execute_command(store.state_machine.as_ref(), &cmd, 7, applied_at(7))
+            .expect("merge import apply");
+        assert!(event.is_none(), "import 不得重复发 watch 事件");
+        match resp {
+            Response::ImportRange {
+                imported,
+                watermark,
+            } => assert_eq!((imported, watermark), (1, 42)),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(
+            store.state_machine.current_revision(),
+            50,
+            "merge 不得抬接收方 current_revision"
+        );
+        assert_eq!(
+            store.state_machine.compacted_revision().unwrap(),
+            0,
+            "merge 不得压缩接收方历史"
+        );
+        assert!(
+            store
+                .state_machine
+                .range_at_revision(b"k", b"", 10, 41)
+                .is_err(),
+            "吸收区间在导入水位之前的历史读必须失败"
+        );
+        assert!(
+            store
+                .state_machine
+                .range_at_revision(b"", b"k", 10, 41)
+                .is_ok(),
+            "接收方自己的历史仍可读"
+        );
     }
 
     /// #139：Compact 响应取 current revision，不是 log index。

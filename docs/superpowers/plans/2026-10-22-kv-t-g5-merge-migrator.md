@@ -4,7 +4,7 @@
 
 **Goal:** 把 merge 从 fail-closed 变成真实数据搬迁：drain 合并后的整段区间 → 以右 Region 的固定 revision 分页导出 live 行 → 经左（接收方）Region raft 分页导入 → cutover 后只剩左 Region，且左 Region 自己的历史/压缩水位不被抬高。
 
-**Architecture:** 复用 #163 的 `RangeImportMigrator`、`RangeImportTarget`、`SplitDrain` 端口；新增 `RegionRangeResolver`（从本地已应用权威表取被吸收 Region 的 key 区间）。导入端口增加显式 `seal_prior_history` 标志：split 目标（全新 Region）在 `done` 页把历史水位钉到 `watermark`；merge 接收方已有自己的历史，只抬高 `current_revision`，绝不动 `compacted_revision`。raft 命令用独立变体 `ImportRangePreserveHistory` 承载 merge 语义，保持旧 `ImportRange` 日志条目可解码。
+**Architecture:** 复用 #163 的 `RangeImportMigrator`、`RangeImportTarget`、`SplitDrain` 端口；新增 `RegionRangeResolver`（从本地已应用权威表取被吸收 Region 的 key 区间）。导入端口增加显式 `seal_prior_history` 标志：split 目标（全新 Region）在 `done` 页把历史水位钉到 `watermark`；merge 接收方不动 `compacted_revision`，也不替它抬 `current_revision`（只由自身决策 apply 推进），而是把被吸收区间与导入水位记成区间历史下限。raft 命令用独立变体 `ImportRangePreserveHistory` 承载 merge 语义，保持旧 `ImportRange` 日志条目可解码；另加 `ClearImportRange` 让每次搬迁重试对目标区间保持权威。
 
 **Tech Stack:** Rust / openraft / redb / tokio / async-trait。
 
@@ -24,8 +24,8 @@
 
 1. **被吸收区间从本地权威表解析，不写进 `SplitMergePlan`**：`SplitMergePlan` 经 bincode 存进 region 0 intent journal，追加字段会让既有 intent 无法解码。新增 `RegionRangeResolver`（生产 = `RegionManager::get_region` 的 meta），在 `Prepared` 阶段按当前表解析右 Region；表里没有右 Region、或区间端点与合并计划的 `Update` 不一致 → 整次失败（intent 保留重试）。
 2. **drain 覆盖合并后的整段 `[merged.start, merged.end)`**：左、右两侧的读集都必须冻结；drain 失败/超时不得导出一页。
-3. **左 revision 单调、历史不压缩**：`done` 页把左 `current_revision` 抬到 `max(left_current, right_watermark)`；`compacted_revision` 只在 `seal_prior_history=true`（split 新目标）时推进。
-4. **行元数据原样搬迁**：`create_revision`/`mod_revision`/`version`/`lease_id` 保留，tombstone 不导出（不复活删除）；页级按 `mod_revision` 幂等。
+3. **左 revision 单调、历史不压缩**：merge 导入前要求接收方已 apply 到源水位（`current_revision >= donor revision`），因此导入不需要抬 `current_revision`——抬过未应用决策会让该 Region 的决策 apply 永久卡住（`safe_ts` 用同一约束封顶）；`compacted_revision` 只在 `seal_prior_history=true`（split 新目标）时推进。吸收区间低于导入水位的历史读返回 `HISTORY_UNAVAILABLE`（导入行没有 changelog，回填当前值等于静默给错历史）。
+4. **行元数据原样搬迁**：`create_revision`/`mod_revision`/`version`/`lease_id` 保留，tombstone 不导出；因为 tombstone 不导出，每次搬迁（含重试）先经 `ClearImportRange` 清空目标区间再导出，否则上一次部分导入的残留会在源侧删除后复活；页级按 `mod_revision` 幂等。
 5. **不做右 Region 目录回收**：cutover 后由 table 驱动的 `RegionLifecycle` retire 右 Region（停机、目录保留）；物理删除不属于本切片。
 6. **跨协调节点 drain 与 cutover 连续性归 #167**：本切片只保证本节点协调的会话被 drain、搬迁数据与 revision 单调。
 7. **不改 `SplitMergePlan`/`RegionChange` 的 wire 形状**：merge 所需的右 Region id 已在 `RegionChange::Remove` 中；区间通过 resolver 取得。
@@ -33,12 +33,12 @@
 
 ## File Structure
 
-- Modify: `coord-server/src/storage/mvcc.rs` — `apply_range_import` 增加 `seal_prior_history`，历史压缩只在显式请求时发生。
-- Modify: `coord-server/src/raft/type_config.rs` — 末尾追加 `Command::ImportRangePreserveHistory`（旧 `ImportRange` 保持不变）。
+- Modify: `coord-server/src/storage/mvcc.rs` — `apply_range_import` 增加 `seal_prior_history`，历史压缩只在显式请求时发生；merge 记录区间历史下限（`/_sys/kv_t/import_history_floors`，随快照导出），历史读低于下限返回 `HistoryUnavailable`；新增 `clear_imported_range`。
+- Modify: `coord-server/src/raft/type_config.rs` — 末尾追加 `Command::ImportRangePreserveHistory` 与 `Command::ClearImportRange`（旧 `ImportRange` 保持不变）。
 - Modify: `coord-server/src/raft/state_machine.rs` — 透传 `seal_prior_history`。
 - Modify: `coord-server/src/raft/region_runtime.rs` — `RangeImportTarget::import_range` 增加参数并经 raft 提案。
 - Modify: `coord-server/src/split_merge.rs` — `RegionRangeResolver`、merge 分支、merge 判定/区间校验。
-- Modify: `coord/src/main.rs` — 生产装配注入 range resolver。
+- Modify: `coord/src/main.rs` — 生产装配注入 range resolver（无需改参数）。
 - Create: `coord-server/tests/kv_t_g5_merge_migrator_test.rs` — 真实左 Region raft + 真实右 Region 存储。
 - Modify: `coord-server/tests/kv_t_g5_split_migrator_test.rs` — 端口新参数、删除「merge 未实现」用例。
 - Modify: `coord-server/tests/kv_t_g5_region_lifecycle_test.rs` — 构造器新参数。

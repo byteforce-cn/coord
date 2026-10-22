@@ -764,14 +764,24 @@ pub enum Command {
     /// Merge 数据搬迁：把被吸收 Region 的一页 live range 快照应用到本 Region。
     ///
     /// 与 `ImportRange` 的区别只在最后一页：接收方已有自己的历史与压缩水位，
-    /// 导入只抬高 `current_revision`，不得把历史标成不可用。独立变体而不是给
-    /// `ImportRange` 加字段——旧 raft 日志里的 split 导入必须继续可解码。
+    /// 导入不抬 `current_revision`，也不把历史标成不可用（区间历史下限单独记录）。
+    /// 独立变体而不是给 `ImportRange` 加字段——旧 raft 日志里的 split 导入必须
+    /// 继续可解码。
     ImportRangePreserveHistory {
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         rows: Vec<(Vec<u8>, Vec<u8>, crate::storage::mvcc::KvMetadata)>,
         watermark: u64,
         done: bool,
+    },
+    /// 搬迁重试前清空目标 Region 的一段区间（split/merge 共用）。
+    ///
+    /// **末尾追加**；只在目标 Region 自己的 raft 提出。区间在 cutover 前不属于
+    /// 目标 Region，清掉的是上一次部分导入的残留——源侧已删除的 Key 不会被
+    /// 重新导出（tombstone 不搬），不先清空就会在重试后复活。
+    ClearImportRange {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
     },
 }
 
@@ -879,6 +889,12 @@ impl std::fmt::Display for Command {
                 f,
                 "ImportRangePreserveHistory(rows={}, watermark={watermark}, done={done})",
                 rows.len()
+            ),
+            Command::ClearImportRange { start_key, end_key } => write!(
+                f,
+                "ClearImportRange([{}, {}))",
+                String::from_utf8_lossy(start_key),
+                String::from_utf8_lossy(end_key)
             ),
         }
     }
@@ -998,6 +1014,10 @@ pub enum Response {
         imported: u64,
         watermark: u64,
     },
+    /// 搬迁重试前的区间清空结果：本次删除的 live 行数（幂等，重放为 0）。
+    ImportRangeCleared {
+        cleared: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -1078,6 +1098,9 @@ impl std::fmt::Display for Response {
             Response::RegionMeta { outcome } => write!(f, "RegionMeta({outcome:?})"),
             Response::ImportRange { imported, watermark } => {
                 write!(f, "ImportRange(imported={imported}, watermark={watermark})")
+            }
+            Response::ImportRangeCleared { cleared } => {
+                write!(f, "ImportRangeCleared(cleared={cleared})")
             }
         }
     }
@@ -1168,6 +1191,38 @@ mod tests {
                 _ => panic!("expected a range import command"),
             }
         }
+    }
+
+    #[test]
+    fn test_command_import_range_encoding_stays_decodable_for_old_logs() {
+        // postcard 用变体序号编码；这段 golden 字节是「升级前写入的 split 导入
+        // 日志仍可解码」的契约。新增变体必须追加在 `Command` 末尾，插到前面会
+        // 让旧日志按错位序号解码。
+        let cmd = Command::ImportRange {
+            start_key: b"a".to_vec(),
+            end_key: b"z".to_vec(),
+            rows: vec![(
+                b"k".to_vec(),
+                b"v".to_vec(),
+                crate::storage::mvcc::KvMetadata {
+                    version: 1,
+                    create_revision: 1,
+                    mod_revision: 1,
+                    lease_id: 0,
+                    deleted: false,
+                },
+            )],
+            watermark: 1,
+            done: true,
+        };
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        assert_eq!(
+            bytes,
+            vec![25, 1, 97, 1, 122, 1, 1, 107, 1, 118, 2, 2, 2, 0, 0, 1, 1],
+            "ImportRange 的 postcard 编码是旧日志兼容契约"
+        );
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded, Command::ImportRange { .. }));
     }
 
     #[test]
