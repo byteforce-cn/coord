@@ -3085,6 +3085,12 @@ impl Watch for CoordNode {
         &self,
         request: tonic::Request<tonic::Streaming<WatchRequest>>,
     ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
+        // 延后 scope 判定（#210）：鉴权层看不到流首帧，只把授权快照放进扩展；
+        // 这里必须真的用它判定，否则"放行但没人判"就是越权订阅。
+        let grants = request
+            .extensions()
+            .get::<coord_core::grpc_auth::DeferredScopeGrants>()
+            .cloned();
         let mut stream = request.into_inner();
         let first_req = stream
             .message()
@@ -3114,7 +3120,8 @@ impl Watch for CoordNode {
         }
 
         // 内部保留命名空间守卫：Watch 不得订阅 PKI / 租约 / ID / PD 簿记。
-        // 鉴权层只覆盖一元 KV/Txn（流式 body 不可预读），Watch 在这里闭合。
+        // scope 授权已由上方首帧判定覆盖；保留命名空间的拒绝不依赖 scope
+        // （无约束授权也不得订阅），所以仍在 handler 单独闭合。
         if let Some(ns) = crate::auth::interceptor::reserved_internal_kv_namespace(
             &create_req.key,
             &create_req.range_end,
@@ -3122,6 +3129,21 @@ impl Watch for CoordNode {
             return Err(tonic::Status::permission_denied(format!(
                 "watch on reserved internal namespace {ns} is not supported"
             )));
+        }
+
+        // 有约束的授权在首帧判定：v1 的 `range_end` 为空 = 前缀订阅，用
+        // `watch_create_access`（与投递侧同一区间语义）而不是 KV 的点语义。
+        if let Some(grants) = grants.as_ref() {
+            let access =
+                coord_core::grpc_auth::watch_create_access(&create_req.key, &create_req.range_end);
+            coord_core::grpc_auth::check_deferred_scope(Some(grants), &[access]).map_err(
+                |reason| {
+                    coord_core::error_code::attach(
+                        tonic::Status::permission_denied(reason),
+                        coord_core::error_code::CoordErrorCode::PermissionDenied,
+                    )
+                },
+            )?;
         }
 
         // 解析 Watch 目标——legacy 用节点级 dispatcher + storage；

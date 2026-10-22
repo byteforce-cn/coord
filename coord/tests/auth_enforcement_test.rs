@@ -486,6 +486,152 @@ async fn test_auth_enforcement_full_matrix() {
     let _ = child.wait();
 }
 
+/// 有 scope 约束的 Watch（v1）按首帧 prefix 放行/拒绝。
+///
+/// 这条链路横跨：tower 鉴权层（放行 + 下发 `DeferredScopeGrants`）→ v1 Watch
+/// handler（首帧判定）。任何一端缺失都会 fail-open 或把有约束的调用方整块拒绝。
+#[tokio::test]
+async fn test_scoped_watch_grants_are_enforced_per_prefix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().to_path_buf();
+    let grpc_port = find_free_port();
+    let raft_port = find_free_port();
+    let addr = format!("127.0.0.1:{grpc_port}");
+
+    let mut child = spawn_server(&data_dir, grpc_port, raft_port);
+    wait_ready(grpc_port, Duration::from_secs(60)).await;
+
+    let mut auth = AuthClient::new(channel(&addr).await);
+    let root_cct = authenticate_ready(&mut auth, &data_dir, "root", "test-root-password-123")
+        .await
+        .cct;
+
+    auth.user_add(with_token(
+        coord_proto::auth::UserAddRequest {
+            name: "watcher".to_string(),
+            password: "watcher-pw".to_string(),
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may add watcher user");
+    auth.role_add(with_token(
+        RoleAddRequest {
+            name: "watch-app".to_string(),
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may add watch role");
+    auth.role_grant_capability(with_token(
+        coord_proto::auth::RoleGrantCapabilityRequest {
+            role: "watch-app".to_string(),
+            capability_id: "data:watch:subscribe".to_string(),
+            scope: "/app/".to_string(),
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may grant a scoped watch capability");
+    auth.user_grant_role(with_token(
+        coord_proto::auth::UserGrantRoleRequest {
+            user: "watcher".to_string(),
+            role: "watch-app".to_string(),
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may grant the watch role");
+
+    let watcher_cct = auth
+        .authenticate(coord_proto::auth::AuthenticateRequest {
+            name: "watcher".to_string(),
+            password: "watcher-pw".to_string(),
+        })
+        .await
+        .expect("watcher may authenticate")
+        .into_inner()
+        .cct;
+
+    // 范围内：建流后写入，事件必须到达。
+    let mut watch = WatchClient::new(channel(&addr).await);
+    let in_scope = tokio_stream::once(WatchRequest {
+        request: Some(coord_proto::watch::watch_request::Request::Create(
+            coord_proto::watch::WatchCreateRequest {
+                key: b"/app/".to_vec(),
+                range_end: vec![],
+                start_revision: 0,
+                prev_kv: false,
+            },
+        )),
+    });
+    let mut stream = watch
+        .watch(with_token(in_scope, &watcher_cct))
+        .await
+        .expect("in-scope watch must be allowed")
+        .into_inner();
+
+    let mut kv = KvClient::new(channel(&addr).await);
+    kv.put(with_token(
+        PutRequest {
+            key: b"/app/x".to_vec(),
+            value: b"v".to_vec(),
+            ..Default::default()
+        },
+        &root_cct,
+    ))
+    .await
+    .expect("root may seed an in-scope event");
+
+    let resp = tokio::time::timeout(Duration::from_secs(10), stream.message())
+        .await
+        .expect("in-scope watch must deliver an event")
+        .expect("watch stream must not fail")
+        .expect("watch stream must not end");
+    assert!(
+        resp.events
+            .iter()
+            .any(|event| event.kvs.iter().any(|kv| kv.key == b"/app/x")),
+        "in-scope event must be delivered: {resp:?}"
+    );
+
+    // 范围外：首帧必须被拒（PERMISSION_DENIED，而不是建流后静默丢事件）。
+    let out_of_scope = tokio_stream::once(WatchRequest {
+        request: Some(coord_proto::watch::watch_request::Request::Create(
+            coord_proto::watch::WatchCreateRequest {
+                key: b"/other/".to_vec(),
+                range_end: vec![],
+                start_revision: 0,
+                prev_kv: false,
+            },
+        )),
+    });
+    match watch.watch(with_token(out_of_scope, &watcher_cct)).await {
+        Err(status) => {
+            assert_eq!(
+                status.code(),
+                tonic::Code::PermissionDenied,
+                "out-of-scope watch must be PERMISSION_DENIED: {status}"
+            );
+        }
+        Ok(response) => {
+            let mut stream = response.into_inner();
+            let status = tokio::time::timeout(Duration::from_secs(5), stream.message())
+                .await
+                .expect("out-of-scope watch must fail promptly")
+                .expect_err("out-of-scope watch must not deliver events");
+            assert_eq!(
+                status.code(),
+                tonic::Code::PermissionDenied,
+                "out-of-scope watch must be PERMISSION_DENIED: {status}"
+            );
+        }
+    }
+
+    child.kill().unwrap();
+    let _ = child.wait();
+}
+
 /// 发送 HTTP 请求（BFF 端口 = grpc + 10），返回原始响应文本。
 async fn http_request(port: u16, req: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
