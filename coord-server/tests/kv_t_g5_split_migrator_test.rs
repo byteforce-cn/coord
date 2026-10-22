@@ -266,7 +266,12 @@ fn migrator(
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&src)));
     let target_resolver: Arc<RegionImportTargetResolver> =
         Arc::new(move |region_id| (region_id == 2).then(|| Arc::clone(&target)));
-    RangeImportMigrator::new(source_resolver, target_resolver, drain)
+    RangeImportMigrator::new(
+        source_resolver,
+        target_resolver,
+        Arc::new(|_| None),
+        drain,
+    )
 }
 
 /// 第一次导入前先推进源 revision，模拟「导出期间源没冻结」的漂移。
@@ -408,7 +413,12 @@ async fn test_split_migrator_waits_for_the_target_region_to_be_assembled() {
         }
     });
 
-    RangeImportMigrator::new(source_resolver, target_resolver, RecordingDrain::new())
+    RangeImportMigrator::new(
+        source_resolver,
+        target_resolver,
+        Arc::new(|_| None),
+        RecordingDrain::new(),
+    )
         .with_page_size(1)
         .with_target_wait(Duration::from_secs(2))
         .migrate(&split_plan())
@@ -433,7 +443,12 @@ async fn test_split_migrator_gives_up_when_the_target_never_appears() {
     let target_resolver: Arc<RegionImportTargetResolver> = Arc::new(|_| None);
 
     let started = std::time::Instant::now();
-    let err = RangeImportMigrator::new(source_resolver, target_resolver, RecordingDrain::new())
+    let err = RangeImportMigrator::new(
+        source_resolver,
+        target_resolver,
+        Arc::new(|_| None),
+        RecordingDrain::new(),
+    )
         .with_target_wait(Duration::from_millis(150))
         .migrate(&split_plan())
         .await
@@ -444,23 +459,4 @@ async fn test_split_migrator_gives_up_when_the_target_never_appears() {
         started.elapsed() < Duration::from_secs(5),
         "target wait must stay bounded"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_split_migrator_rejects_merge_until_164() {
-    let (_src_dir, source) = source_region_with_rows().await;
-    let (_dst_dir, _target_mvcc, target) = boot_target_region().await;
-    let merge = SplitMergePlan {
-        kind: SplitMergeKind::Merge,
-        source_region: 1,
-        target_region: None,
-        changes: Vec::new(),
-        expected_table_version: 1,
-    };
-
-    let err = migrator(&source, target, RecordingDrain::new())
-        .migrate(&merge)
-        .await
-        .expect_err("merge is not implemented");
-    assert!(err.contains("#164"), "{err}");
 }
