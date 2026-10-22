@@ -49,7 +49,7 @@ jobs:
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends protobuf-compiler
+            apt-get install -y protobuf-compiler
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy (non-test targets, -D warnings)
@@ -109,7 +109,7 @@ jobs:
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends protobuf-compiler
+            apt-get install -y protobuf-compiler
       - name: Assert the fmt gate turns red on an injected violation
         run: |
           set -euo pipefail
@@ -364,7 +364,7 @@ jobs:
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends protobuf-compiler
+            apt-get install -y protobuf-compiler
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -446,7 +446,7 @@ jobs:
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends protobuf-compiler
+            apt-get install -y protobuf-compiler
       - name: Build tests
         run: cargo build --workspace --tests
       - name: Pre-clean leaked test processes
@@ -484,7 +484,7 @@ jobs:
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends protobuf-compiler
+            apt-get install -y protobuf-compiler
       # 插件引擎 feature 门控：默认（plugin-js）、全开、全关三种组合必须构建通过
       - name: Check default features (plugin-js)
         run: cargo check -p coord-agent --all-targets
@@ -560,7 +560,7 @@ jobs:
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends protobuf-compiler
+            apt-get install -y protobuf-compiler
       - name: cargo audit (RustSec)
         uses: rustsec/audit-check@v2.0.0
         with:
@@ -586,7 +586,7 @@ jobs:
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends protobuf-compiler
+            apt-get install -y protobuf-compiler
       - name: Build tests
         run: cargo build --workspace --tests
       # 每个进程级套件之前都要清一次孤儿进程（而不只是 job 开头清一次）。
@@ -712,7 +712,7 @@ jobs:
             -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 240 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends protobuf-compiler
+            apt-get install -y protobuf-compiler
       - name: Run release benchmarks + regression gate
         run: bash scripts/bench-ci.sh
       - name: Upload benchmark report
