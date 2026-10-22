@@ -296,7 +296,13 @@ fn migrator(
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&src)));
     let target_resolver: Arc<RegionImportTargetResolver> =
         Arc::new(move |region_id| (region_id == 2).then(|| Arc::clone(&target)));
-    RangeImportMigrator::new(source_resolver, target_resolver, Arc::new(|_| None), drain)
+    RangeImportMigrator::new(
+        source_resolver,
+        target_resolver,
+        Arc::new(|_| None),
+        Arc::new(|_| None),
+        drain,
+    )
 }
 
 /// 第一次导入前先推进源 revision，模拟「导出期间源没冻结」的漂移。
@@ -479,6 +485,7 @@ async fn test_split_migrator_waits_for_the_target_region_to_be_assembled() {
         source_resolver,
         target_resolver,
         Arc::new(|_| None),
+        Arc::new(|_| None),
         RecordingDrain::new(),
     )
     .with_page_size(1)
@@ -508,6 +515,7 @@ async fn test_split_migrator_gives_up_when_the_target_never_appears() {
     let err = RangeImportMigrator::new(
         source_resolver,
         target_resolver,
+        Arc::new(|_| None),
         Arc::new(|_| None),
         RecordingDrain::new(),
     )

@@ -204,6 +204,20 @@ pub(crate) fn guard_routing_epoch(
     Err(status)
 }
 
+/// split 迁移窗口内的直写拒绝（#167）。
+///
+/// 与 `guard_routing_epoch` 同码：调用方只按码分支，都是「刷新路由 + 退避重试」
+/// 语义（cutover 前后的两条路径不同，重试时机也不同）。
+fn direct_writes_fenced(op_id: u64) -> Status {
+    attach(
+        Status::new(
+            tonic::Code::Aborted,
+            format!("region range is migrating (split fence op {op_id}); refresh route and retry"),
+        ),
+        CoordErrorCode::EpochStale,
+    )
+}
+
 fn require_positive_ts(name: &str, ts: i64) -> Result<u64, Status> {
     if ts <= 0 {
         return Err(attach(
@@ -459,6 +473,9 @@ impl kv_v2::kv_server::Kv for CoordNode {
                         commit_ts: *commit_ts,
                         current_revision: *current_revision,
                     }));
+                }
+                RaftResponse::DirectWritesFenced { op_id } => {
+                    return Err(direct_writes_fenced(*op_id));
                 }
                 other => {
                     return Err(Status::internal(format!(
@@ -737,6 +754,9 @@ impl kv_v2::kv_server::Kv for CoordNode {
                         commit_ts: *commit_ts,
                         current_revision: *current_revision,
                     }));
+                }
+                RaftResponse::DirectWritesFenced { op_id } => {
+                    return Err(direct_writes_fenced(*op_id));
                 }
                 other => {
                     return Err(Status::internal(format!(

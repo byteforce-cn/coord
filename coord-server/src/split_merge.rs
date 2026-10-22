@@ -19,6 +19,8 @@ use crate::pd::executor::SplitMergeMigrator;
 use crate::raft::region::RegionManager;
 use crate::raft::region_lifecycle::RegionLifecycle;
 use crate::raft::region_runtime::CoordRangeImportTarget;
+use crate::raft::type_config::{Command, Response};
+use crate::raft::CoordRaft;
 use crate::storage::mvcc::{MvccStorage, VersionedKv};
 use crate::storage::redb_backend::RedbBackend;
 use crate::storage::region_table::{RegionChange, SplitMergeKind, SplitMergePlan};
@@ -36,6 +38,13 @@ pub type RegionRangeResolver = dyn Fn(RegionId) -> Option<(Vec<u8>, Vec<u8>)> + 
 /// Region → 经该 Region raft 导入一页的目标端口。
 pub type RegionImportTargetResolver =
     dyn Fn(RegionId) -> Option<Arc<dyn RangeImportTarget>> + Send + Sync;
+
+/// Region → 本节点上该 Region 的 raft 句柄（直写 fence 的提案入口）。
+///
+/// 只在**本节点是该 Region leader** 时提案才有意义（openraft 把 follower 的
+/// `client_write` 拒为 `ForwardToLeader`）；split 的认领条件就是源 Region 的
+/// leader，所以源侧 fence 总是可提案的。
+pub type RegionRaftResolver = dyn Fn(RegionId) -> Option<CoordRaft> + Send + Sync;
 
 /// 目标 Region 的分页导入端口。
 ///
@@ -99,6 +108,13 @@ const TARGET_RESOLVE_POLL: Duration = Duration::from_millis(50);
 /// 目标组刚预创建时等待 leader 选举的上界（与目标解析等待同一量级）。
 const TARGET_LEADER_WAIT: Duration = Duration::from_secs(10);
 
+/// fence 提案的等待上界：认领后可能刚发生换届，`client_write` 会返回
+/// `ForwardToLeader`；有界重试后仍失败则整次失败（intent 保留重试）。
+const FENCE_PROPOSE_WAIT: Duration = Duration::from_secs(10);
+
+/// fence 提案重试间隔。
+const FENCE_PROPOSE_POLL: Duration = Duration::from_millis(50);
+
 /// Split 的真实数据搬迁器：drain → 固定 revision 分页导出 → 经目标 raft 导入。
 ///
 /// 幂等契约：每页导入按目标行的 `mod_revision` 去重，重放同一页返回 0；因此
@@ -109,6 +125,7 @@ pub struct RangeImportMigrator {
     source: Arc<RegionMvccResolver>,
     targets: Arc<RegionImportTargetResolver>,
     ranges: Arc<RegionRangeResolver>,
+    source_raft: Arc<RegionRaftResolver>,
     drain: Arc<dyn SplitDrain>,
     page_size: usize,
     drain_timeout: Duration,
@@ -120,12 +137,14 @@ impl RangeImportMigrator {
         source: Arc<RegionMvccResolver>,
         targets: Arc<RegionImportTargetResolver>,
         ranges: Arc<RegionRangeResolver>,
+        source_raft: Arc<RegionRaftResolver>,
         drain: Arc<dyn SplitDrain>,
     ) -> Self {
         Self {
             source,
             targets,
             ranges,
+            source_raft,
             drain,
             page_size: DEFAULT_PAGE_SIZE,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
@@ -168,6 +187,52 @@ impl RangeImportMigrator {
                 ));
             }
             tokio::time::sleep(TARGET_RESOLVE_POLL).await;
+        }
+    }
+
+    /// fence 目标：split 的源 Region + 子 Region 接管区间 `[start, end)`。
+    ///
+    /// merge 返回 `None`：执行器的认领条件只看吸收方（左）的 leader，donor 的
+    /// leader 可能在别的节点，从本节点提案只会拿到 `ForwardToLeader`；donor 侧的
+    /// fence 需要「donor leader 自己认领 fence」的机制（见 boundaries B-KVT-10）。
+    fn split_fence(plan: &SplitMergePlan) -> Option<(RegionId, Vec<u8>, Vec<u8>)> {
+        if plan.kind != SplitMergeKind::Split {
+            return None;
+        }
+        let target_id = plan.target_region?;
+        let child = plan.changes.iter().find_map(|change| match change {
+            RegionChange::Add { meta } if meta.region_id == target_id => Some(meta),
+            _ => None,
+        })?;
+        Some((
+            plan.source_region,
+            child.start_key.clone(),
+            child.end_key.clone(),
+        ))
+    }
+
+    /// 向源 Region raft 提案一条 fence 命令，有界重试换届窗口。
+    async fn propose_source_fence(
+        &self,
+        region_id: RegionId,
+        cmd: Command,
+    ) -> std::result::Result<Response, String> {
+        let raft = (self.source_raft)(region_id).ok_or_else(|| {
+            format!("source region {region_id} raft is not assembled on this node")
+        })?;
+        let deadline = tokio::time::Instant::now() + FENCE_PROPOSE_WAIT;
+        loop {
+            match raft.client_write(cmd.clone()).await {
+                Ok(resp) => return Ok(resp.response().clone()),
+                Err(err) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "source region {region_id} fence proposal failed: {err}"
+                        ));
+                    }
+                    tokio::time::sleep(FENCE_PROPOSE_POLL).await;
+                }
+            }
         }
     }
 
@@ -375,6 +440,54 @@ impl SplitMergeMigrator for RangeImportMigrator {
             SplitMergeKind::Merge => self.migrate_merge(plan).await,
         }
     }
+
+    async fn arm_write_fence(
+        &self,
+        op_id: u64,
+        plan: &SplitMergePlan,
+    ) -> std::result::Result<(), String> {
+        let Some((region_id, start, end)) = Self::split_fence(plan) else {
+            // merge：吸收方扩回被吸收区间前先**无条件**摘掉上一次 split 可能留下
+            // 的 fence（clear 是 best-effort，换届时提不出去；否则扩回后的区间
+            // 会被一条陈旧的 fence 永久拒写）。donor 侧的 fence 仍 open。
+            let absorbing = plan.source_region;
+            let cmd = Command::ClearDirectWriteFence { op_id: 0 };
+            return match self.propose_source_fence(absorbing, cmd).await? {
+                Response::DirectWriteFenceCleared { .. } => Ok(()),
+                other => Err(format!(
+                    "absorbing region {absorbing} returned unexpected fence response: {other}"
+                )),
+            };
+        };
+        let cmd = Command::FenceDirectWrites {
+            start_key: start,
+            end_key: end,
+            op_id,
+        };
+        match self.propose_source_fence(region_id, cmd).await? {
+            Response::DirectWritesFenced { op_id: armed } if armed == op_id => Ok(()),
+            other => Err(format!(
+                "source region {region_id} returned unexpected fence response: {other}"
+            )),
+        }
+    }
+
+    async fn release_write_fence(
+        &self,
+        op_id: u64,
+        plan: &SplitMergePlan,
+    ) -> std::result::Result<(), String> {
+        let Some((region_id, ..)) = Self::split_fence(plan) else {
+            return Ok(());
+        };
+        let cmd = Command::ClearDirectWriteFence { op_id };
+        match self.propose_source_fence(region_id, cmd).await? {
+            Response::DirectWriteFenceCleared { op_id: cleared } if cleared == op_id => Ok(()),
+            other => Err(format!(
+                "source region {region_id} returned unexpected fence response: {other}"
+            )),
+        }
+    }
 }
 
 /// 生产接线：源 = `RegionManager` 本节点运行时 MVCC；目标 = `RegionLifecycle`
@@ -389,6 +502,7 @@ pub fn range_import_migrator(
 ) -> Arc<dyn SplitMergeMigrator> {
     let manager = Arc::clone(manager);
     let ranges_source = Arc::clone(&manager);
+    let raft_source = Arc::clone(&manager);
     let source: Arc<RegionMvccResolver> = Arc::new(move |region_id| {
         manager
             .runtime(region_id)
@@ -411,5 +525,80 @@ pub fn range_import_migrator(
         })
     });
 
-    Arc::new(RangeImportMigrator::new(source, targets, ranges, drain))
+    let source_raft: Arc<RegionRaftResolver> =
+        Arc::new(move |region_id| raft_source.runtime(region_id).map(|rt| rt.raft.clone()));
+
+    Arc::new(RangeImportMigrator::new(
+        source,
+        targets,
+        ranges,
+        source_raft,
+        drain,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::region_table::{plan_merge, plan_split, RegionTable};
+    use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta};
+
+    fn region(id: RegionId, start: &[u8], end: &[u8]) -> RegionMeta {
+        RegionMeta {
+            region_id: id,
+            start_key: start.to_vec(),
+            end_key: end.to_vec(),
+            epoch: RegionEpoch::initial(),
+            peers: vec![Peer {
+                node_id: 1,
+                raft_addr: "127.0.0.1:1".to_string(),
+                role: PeerRole::Voter,
+            }],
+            approximate_size: 0,
+            approximate_keys: 0,
+        }
+    }
+
+    fn table(regions: Vec<RegionMeta>) -> RegionTable {
+        let mut table = RegionTable::default();
+        table.init(regions).unwrap();
+        table
+    }
+
+    /// fence 区间 = 子 Region 接管的右半段；父 Region 左半段保持可写。
+    #[test]
+    fn test_split_fence_covers_only_the_child_range() {
+        let plan = plan_split(&table(vec![region(1, b"", b"")]), 1, b"m", 2).unwrap();
+        let (region_id, start, end) = RangeImportMigrator::split_fence(&plan).expect("split fence");
+        assert_eq!(region_id, 1);
+        assert_eq!(start, b"m");
+        assert!(end.is_empty(), "父 Region 无上界 → fence 到 +∞");
+    }
+
+    /// 父 Region 有上界时 fence 到同一上界（兄弟 Region 的区间不受影响）。
+    #[test]
+    fn test_split_fence_respects_the_parent_upper_bound() {
+        let plan = plan_split(
+            &table(vec![region(1, b"", b"z"), region(3, b"z", b"")]),
+            1,
+            b"m",
+            2,
+        )
+        .unwrap();
+        let (_, start, end) = RangeImportMigrator::split_fence(&plan).expect("split fence");
+        assert_eq!(start, b"m");
+        assert_eq!(end, b"z");
+    }
+
+    /// merge 不在本切片给 donor 提 fence（认领条件只看吸收方 leader）。
+    #[test]
+    fn test_merge_has_no_split_fence_range() {
+        let plan = plan_merge(
+            &table(vec![region(1, b"", b"m"), region(2, b"m", b"")]),
+            1,
+            2,
+        )
+        .unwrap();
+        assert!(RangeImportMigrator::split_fence(&plan).is_none());
+    }
 }

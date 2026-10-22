@@ -928,6 +928,33 @@ mod tests {
         assert_eq!(restored.sys_entries.len(), 1);
     }
 
+    /// split 的直写 fence 随 `/_sys/*` 域进快照：装快照的副本与新 leader 必须
+    /// 继续拒绝搬迁区间的直写，否则 cutover 窗口会在父 Region 双写。
+    #[test]
+    fn test_snapshot_preserves_direct_write_fence() {
+        let (_tmp, storage) = setup_storage();
+        storage
+            .fence_direct_writes(b"m", b"", 7, AppliedLogId::standalone(1))
+            .unwrap();
+
+        let data = export_snapshot_data(&storage, 9, 7).unwrap();
+        let tmp2 = TempDir::new().unwrap();
+        let backend2 = RedbBackend::open(tmp2.path(), &StorageConfig::default()).unwrap();
+        let storage2 = MvccStorage::new(backend2).unwrap();
+        import_snapshot_data(&storage2, &data).unwrap();
+
+        let fence = storage2
+            .direct_write_fence()
+            .unwrap()
+            .expect("fence must travel in the /_sys/ snapshot domain");
+        assert_eq!(fence.op_id, 7);
+        assert_eq!(
+            storage2.direct_write_fence_hit(b"m", None).unwrap(),
+            Some(7),
+            "restored replica must keep rejecting the migrating range"
+        );
+    }
+
     #[test]
     fn test_snapshot_compacted_revision_roundtrip() {
         let (_tmp, storage) = setup_storage();

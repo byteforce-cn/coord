@@ -231,7 +231,7 @@ fn migrator(
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&target)));
     let ranges: Arc<RegionRangeResolver> =
         Arc::new(|region_id| (region_id == 2).then(|| (b"m".to_vec(), Vec::new())));
-    RangeImportMigrator::new(source, targets, ranges, drain)
+    RangeImportMigrator::new(source, targets, ranges, Arc::new(|_| None), drain)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -504,6 +504,7 @@ async fn test_merge_fails_closed_when_donor_range_is_missing_or_mismatched() {
         Arc::clone(&source),
         Arc::clone(&targets),
         missing,
+        Arc::new(|_| None),
         RecordingDrain::new(),
     )
     .migrate(&merge_plan())
@@ -514,10 +515,16 @@ async fn test_merge_fails_closed_when_donor_range_is_missing_or_mismatched() {
     // 区间端点与计划不一致（例如表已变化）→ 同样 fail-closed。
     let mismatched: Arc<RegionRangeResolver> =
         Arc::new(|region_id| (region_id == 2).then(|| (b"m".to_vec(), b"zz".to_vec())));
-    let err = RangeImportMigrator::new(source, targets, mismatched, RecordingDrain::new())
-        .migrate(&merge_plan())
-        .await
-        .expect_err("mismatched donor range must fail");
+    let err = RangeImportMigrator::new(
+        source,
+        targets,
+        mismatched,
+        Arc::new(|_| None),
+        RecordingDrain::new(),
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect_err("mismatched donor range must fail");
     assert!(err.contains("does not match"), "{err}");
 
     assert!(left.get(b"m").unwrap().is_none());

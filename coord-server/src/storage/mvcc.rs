@@ -175,6 +175,13 @@ const SEQUENCER_INDEX_LAST_TS: &[u8] = b"/_sys/seq/vidx_last_ts";
 /// 同一条 redb 事务推进，崩溃后从游标续跑。
 const DECISION_APPLIED_TS: &[u8] = b"/_sys/kv_t/decision_applied";
 
+/// 直写 fence（split 迁移窗口）：`op_id(u64 BE) || start_len(u32 BE) || start || end`。
+///
+/// 选 `/_sys/`：随 Region 快照整域导出/恢复——装快照或换 leader 后 fence 必须
+/// 继续生效，否则搬迁窗口内父 Region 会重新接受落在搬迁区间的直写，cutover 后
+/// 这些行不会有任何副本。`end` 为空表示 +∞。
+const DIRECT_WRITE_FENCE: &[u8] = b"/_sys/kv_t/direct_write_fence";
+
 /// 合并导入区间的历史下限（`TABLE_KV` 系统行，随快照导出）：
 /// postcard(`Vec<(start_key, end_key, watermark)>`)，`end_key` 为空表示无上界。
 ///
@@ -185,6 +192,42 @@ const IMPORT_HISTORY_FLOORS: &[u8] = b"/_sys/kv_t/import_history_floors";
 
 /// 一条导入区间历史下限：`(start_key, end_key, watermark)`（`end_key` 空 = 无上界）。
 type ImportHistoryFloor = (Vec<u8>, Vec<u8>, Revision);
+
+/// 一条生效中的直写 fence：`[start_key, end_key)`（`end_key` 空 = +∞）。
+///
+/// `op_id` 是提案方（split 执行器）的 operator id：同 id 的 arm/clear 幂等，
+/// 迟到的旧 intent 不能解开新一次迁移的 fence。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectWriteFence {
+    pub start_key: Vec<u8>,
+    pub end_key: Vec<u8>,
+    pub op_id: u64,
+}
+
+/// `key` 是否落在 `[start, end)`（`end` 空 = +∞）。
+fn fence_contains(start: &[u8], end: &[u8], key: &[u8]) -> bool {
+    start <= key && (end.is_empty() || key < end)
+}
+
+fn encode_direct_write_fence(start: &[u8], end: &[u8], op_id: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + start.len() + end.len());
+    out.extend_from_slice(&op_id.to_be_bytes());
+    out.extend_from_slice(&(start.len() as u32).to_be_bytes());
+    out.extend_from_slice(start);
+    out.extend_from_slice(end);
+    out
+}
+
+fn decode_direct_write_fence(bytes: &[u8]) -> Option<DirectWriteFence> {
+    let op_id = u64::from_be_bytes(bytes.get(0..8)?.try_into().ok()?);
+    let start_len = u32::from_be_bytes(bytes.get(8..12)?.try_into().ok()?) as usize;
+    let start_key = bytes.get(12..12 + start_len)?.to_vec();
+    Some(DirectWriteFence {
+        start_key,
+        end_key: bytes.get(12 + start_len..)?.to_vec(),
+        op_id,
+    })
+}
 
 /// 完整决策记录（#148 应用、#153 CommitRecord 的上游输入）。
 ///
@@ -5160,6 +5203,87 @@ impl<B: StorageBackend> MvccStorage<B> {
             .unwrap_or(false))
     }
 
+    /// 写入/替换直写 fence（split 源 Region）。
+    ///
+    /// 同一 `op_id` 重放是 no-op（返回已生效的 op_id）；不同 `op_id` 表示新一轮
+    /// 迁移，直接替换——operator 队列对同一 Region 的 split/merge 是串行的。
+    pub fn fence_direct_writes(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        op_id: u64,
+        applied: AppliedLogId,
+    ) -> Result<u64> {
+        self.backend.write(|tx| {
+            if Self::applied_contains(tx, applied)? {
+                return Ok(Self::direct_write_fence_in_tx(tx)?.map_or(0, |f| f.op_id));
+            }
+            tx.insert(
+                TABLE_KV,
+                DIRECT_WRITE_FENCE,
+                &encode_direct_write_fence(start, end, op_id),
+            )?;
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(op_id)
+        })
+    }
+
+    /// 清除直写 fence：只有记录仍属于 `op_id` 时生效。
+    ///
+    /// 不匹配即 no-op——迁移失败后重试会换 op_id，旧执行的 clear 不能把新执行的
+    /// fence 摘掉。重放（同一 applied）同样 no-op。`op_id = 0` 表示无条件清除：
+    /// merge 扩回本 Region 区间前要摘掉上一次 split 泄漏的 fence（解 fence 是
+    /// best-effort，执行器换届时可能提不出去）。
+    pub fn clear_direct_write_fence(&self, op_id: u64, applied: AppliedLogId) -> Result<()> {
+        self.backend.write(|tx| {
+            if Self::applied_contains(tx, applied)? {
+                return Ok(());
+            }
+            if Self::direct_write_fence_in_tx(tx)?
+                .is_some_and(|fence| op_id == 0 || fence.op_id == op_id)
+            {
+                tx.remove(TABLE_KV, DIRECT_WRITE_FENCE)?;
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(())
+        })
+    }
+
+    /// 当前生效的直写 fence（无则 `None`）。
+    pub fn direct_write_fence(&self) -> Result<Option<DirectWriteFence>> {
+        self.backend.read(|tx| Self::direct_write_fence_in_tx(tx))
+    }
+
+    fn direct_write_fence_in_tx(tx: &dyn ReadTx) -> Result<Option<DirectWriteFence>> {
+        tx.get(TABLE_KV, DIRECT_WRITE_FENCE)?
+            .map(|bytes| {
+                decode_direct_write_fence(&bytes).ok_or_else(|| {
+                    Error::Storage("decode /_sys/kv_t/direct_write_fence".to_string())
+                })
+            })
+            .transpose()
+    }
+
+    /// 一条直写是否落在生效中的 fence 区间内；命中返回 fence 的 `op_id`。
+    ///
+    /// 点写传 `end = None`；区间写传 `[key, end)`，与 fence 区间**相交**即命中
+    /// （区间写不做部分应用：只挡相交部分会留下半搬状态）。
+    pub fn direct_write_fence_hit(&self, key: &[u8], end: Option<&[u8]>) -> Result<Option<u64>> {
+        let Some(fence) = self.direct_write_fence()? else {
+            return Ok(None);
+        };
+        let hit = match end {
+            None => fence_contains(&fence.start_key, &fence.end_key, key),
+            Some(end) => {
+                let empty = !end.is_empty() && end <= key;
+                !empty
+                    && (fence.end_key.is_empty() || key < fence.end_key.as_slice())
+                    && (end.is_empty() || fence.start_key.as_slice() < end)
+            }
+        };
+        Ok(hit.then_some(fence.op_id))
+    }
+
     /// 读取 region 0 PD 全局队列快照（按 op_id 升序；执行器/测试/审计读取）
     pub fn pd_queue_entries(&self) -> Result<Vec<crate::raft::type_config::PdQueueEntry>> {
         use crate::raft::type_config::PdQueueEntry;
@@ -5811,6 +5935,64 @@ mod tests {
             )
             .expect("replay");
         assert_eq!(replay, 0, "同一页重放不得重复写入");
+    }
+
+    #[test]
+    fn test_direct_write_fence_blocks_migrating_range() {
+        let (_dir, storage) = create_commit_ts_storage();
+        assert!(storage.direct_write_fence().unwrap().is_none());
+        assert_eq!(storage.direct_write_fence_hit(b"m", None).unwrap(), None);
+
+        storage
+            .fence_direct_writes(b"m", b"", 7, applied_for(1))
+            .unwrap();
+        let fence = storage.direct_write_fence().unwrap().expect("fence armed");
+        assert_eq!(fence.start_key, b"m");
+        assert!(fence.end_key.is_empty());
+        assert_eq!(fence.op_id, 7);
+
+        // [m, +∞)：区间内的点写命中，父 Region 的左半段照常可写。
+        assert_eq!(storage.direct_write_fence_hit(b"m", None).unwrap(), Some(7));
+        assert_eq!(
+            storage.direct_write_fence_hit(b"zzz", None).unwrap(),
+            Some(7)
+        );
+        assert_eq!(storage.direct_write_fence_hit(b"a", None).unwrap(), None);
+
+        // 区间写：与 fence 相交即命中（end 空 = +∞），不交或空区间不命中。
+        assert_eq!(
+            storage.direct_write_fence_hit(b"a", Some(b"z")).unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            storage.direct_write_fence_hit(b"a", Some(b"")).unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            storage.direct_write_fence_hit(b"a", Some(b"m")).unwrap(),
+            None
+        );
+        assert_eq!(
+            storage.direct_write_fence_hit(b"a", Some(b"a")).unwrap(),
+            None
+        );
+
+        // 旧 op_id 的 clear 不能解开新一轮 fence；同 op_id 重放 arm/clear 幂等。
+        storage.clear_direct_write_fence(6, applied_for(2)).unwrap();
+        assert!(storage.direct_write_fence().unwrap().is_some());
+        storage
+            .fence_direct_writes(b"m", b"", 7, applied_for(3))
+            .unwrap();
+        storage.clear_direct_write_fence(7, applied_for(4)).unwrap();
+        assert!(storage.direct_write_fence().unwrap().is_none());
+        assert_eq!(storage.direct_write_fence_hit(b"m", None).unwrap(), None);
+
+        // `op_id = 0` 无条件清除：merge 扩回区间前要摘掉上一次 split 泄漏的 fence。
+        storage
+            .fence_direct_writes(b"m", b"", 7, applied_for(5))
+            .unwrap();
+        storage.clear_direct_write_fence(0, applied_for(6)).unwrap();
+        assert!(storage.direct_write_fence().unwrap().is_none());
     }
 
     #[test]
