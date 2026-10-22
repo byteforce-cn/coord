@@ -5,7 +5,7 @@
 //! - 搬迁器先 drain 子区间，再按固定 revision 分页导出/导入；
 //! - 源 revision 在导出期间前进 → 整次迁移失败，不拼接两代快照；
 //! - 重复执行幂等（同值重放不写、revision 不倒退）；
-//! - merge 在 #164 前 fail-closed。
+//! - 每次搬迁先清空目标区间（重试不复活源侧已删除的 Key）。
 
 mod common;
 
@@ -31,9 +31,7 @@ use coord_server::split_merge::{
 };
 use coord_server::storage::mvcc::{AppliedLogId, KvMetadata, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
-use coord_server::storage::region_table::{
-    plan_split, RegionTable, SplitMergeKind, SplitMergePlan,
-};
+use coord_server::storage::region_table::{plan_split, RegionTable, SplitMergePlan};
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
 
@@ -135,7 +133,7 @@ async fn test_import_range_crosses_the_target_region_raft() {
     let (_dir, mvcc, target) = boot_target_region().await;
 
     let imported = target
-        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true)
+        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true, true)
         .await
         .expect("import through the target raft");
 
@@ -163,7 +161,7 @@ async fn test_target_import_waits_for_leader_election() {
     let port = CoordRangeImportTarget::from_raft(target.raft.clone())
         .with_leader_wait(Duration::from_secs(5));
     let imported = port
-        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true)
+        .import_range(b"m", b"", vec![live(b"m", b"1", 10, 7)], 10, true, true)
         .await
         .expect("import waits through leader election");
     election.await.expect("election task");
@@ -266,7 +264,7 @@ fn migrator(
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&src)));
     let target_resolver: Arc<RegionImportTargetResolver> =
         Arc::new(move |region_id| (region_id == 2).then(|| Arc::clone(&target)));
-    RangeImportMigrator::new(source_resolver, target_resolver, drain)
+    RangeImportMigrator::new(source_resolver, target_resolver, Arc::new(|_| None), drain)
 }
 
 /// 第一次导入前先推进源 revision，模拟「导出期间源没冻结」的漂移。
@@ -278,12 +276,17 @@ struct DriftTarget {
 
 #[async_trait]
 impl RangeImportTarget for DriftTarget {
+    async fn reset_range(&self, start: &[u8], end: &[u8]) -> Result<(), String> {
+        self.inner.reset_range(start, end).await
+    }
+
     async fn import_range(
         &self,
         start: &[u8],
         end: &[u8],
         rows: Vec<(Vec<u8>, Vec<u8>, KvMetadata)>,
         watermark: u64,
+        seal_prior_history: bool,
         done: bool,
     ) -> Result<u64, String> {
         if !self.fired.swap(true, Ordering::SeqCst) {
@@ -292,7 +295,7 @@ impl RangeImportTarget for DriftTarget {
                 .expect("inject source drift");
         }
         self.inner
-            .import_range(start, end, rows, watermark, done)
+            .import_range(start, end, rows, watermark, seal_prior_history, done)
             .await
     }
 }
@@ -407,12 +410,17 @@ async fn test_split_migrator_waits_for_the_target_region_to_be_assembled() {
         }
     });
 
-    RangeImportMigrator::new(source_resolver, target_resolver, RecordingDrain::new())
-        .with_page_size(1)
-        .with_target_wait(Duration::from_secs(2))
-        .migrate(&split_plan())
-        .await
-        .expect("migration waits for the pending target");
+    RangeImportMigrator::new(
+        source_resolver,
+        target_resolver,
+        Arc::new(|_| None),
+        RecordingDrain::new(),
+    )
+    .with_page_size(1)
+    .with_target_wait(Duration::from_secs(2))
+    .migrate(&split_plan())
+    .await
+    .expect("migration waits for the pending target");
 
     assert!(
         attempts.load(Ordering::SeqCst) >= 4,
@@ -432,34 +440,20 @@ async fn test_split_migrator_gives_up_when_the_target_never_appears() {
     let target_resolver: Arc<RegionImportTargetResolver> = Arc::new(|_| None);
 
     let started = std::time::Instant::now();
-    let err = RangeImportMigrator::new(source_resolver, target_resolver, RecordingDrain::new())
-        .with_target_wait(Duration::from_millis(150))
-        .migrate(&split_plan())
-        .await
-        .expect_err("missing target must fail the migration");
+    let err = RangeImportMigrator::new(
+        source_resolver,
+        target_resolver,
+        Arc::new(|_| None),
+        RecordingDrain::new(),
+    )
+    .with_target_wait(Duration::from_millis(150))
+    .migrate(&split_plan())
+    .await
+    .expect_err("missing target must fail the migration");
 
     assert!(err.contains("not assembled"), "{err}");
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "target wait must stay bounded"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_split_migrator_rejects_merge_until_164() {
-    let (_src_dir, source) = source_region_with_rows().await;
-    let (_dst_dir, _target_mvcc, target) = boot_target_region().await;
-    let merge = SplitMergePlan {
-        kind: SplitMergeKind::Merge,
-        source_region: 1,
-        target_region: None,
-        changes: Vec::new(),
-        expected_table_version: 1,
-    };
-
-    let err = migrator(&source, target, RecordingDrain::new())
-        .migrate(&merge)
-        .await
-        .expect_err("merge is not implemented");
-    assert!(err.contains("#164"), "{err}");
 }

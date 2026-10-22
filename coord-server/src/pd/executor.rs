@@ -67,7 +67,7 @@ pub type RegionRaftResolver = dyn Fn(RegionId) -> Option<Arc<dyn RegionRaftHandl
 /// 稍后重试）。
 pub type AddPeerTargetResolver = dyn Fn(RegionId) -> Option<(NodeID, String)> + Send + Sync;
 
-/// Split/Merge 的数据搬迁钩子（#163/#164 提供真实实现）。
+/// Split/Merge 的数据搬迁钩子（真实实现见 `split_merge::RangeImportMigrator`）。
 ///
 /// 契约：**幂等、可重入**。执行器在 cutover 前调用一次；进程重启后按 intent
 /// 重新进入时会再次调用同一计划。未装配钩子时执行器拒绝切表（fail-closed），
@@ -466,8 +466,7 @@ impl OperatorExecutor {
                 // 先确认搬迁钩子已装配，再产生任何副作用。
                 if self.migrator().is_none() {
                     return Err(
-                        "split/merge data migration not wired (#163); refusing to cut over"
-                            .to_string(),
+                        "split/merge data migration is not wired; refusing to cut over".to_string(),
                     );
                 }
                 let plan = match op {
@@ -510,8 +509,7 @@ impl OperatorExecutor {
                 }
                 IntentPhase::Prepared => {
                     let migrator = self.migrator().ok_or_else(|| {
-                        "split/merge data migration not wired (#163); refusing to cut over"
-                            .to_string()
+                        "split/merge data migration is not wired; refusing to cut over".to_string()
                     })?;
                     migrator.migrate(&intent.plan).await?;
                     system
@@ -636,7 +634,7 @@ impl OperatorExecutor {
             // operator 已终结或已从队列裁掉：intent 不会再有执行者。
             //
             // `Applied` 补一次对账再清；`Prepared` 直接清（表未动，数据搬迁
-            // 可能已复制，目录回收归 #163）。失败原因已经在队列条目里审计过，
+            // 可能已复制，split 目标目录由 `RegionLifecycle` 回收）。失败原因已经在队列条目里审计过，
             // 这里不再写第二份记录。
             if matches!(intent.phase, IntentPhase::Applied { .. }) {
                 match system.region_table() {

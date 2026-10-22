@@ -437,7 +437,8 @@ impl CompactProposer for RegionCompactProposer {
 
 /// 经目标 Region raft 导入一页 split/merge 搬迁数据。
 ///
-/// 只把 `Command::ImportRange` 提案给目标 Region 的 raft leader：导入必须
+/// 只把 `Command::ImportRange` / `Command::ImportRangePreserveHistory` /
+/// `Command::ClearImportRange` 提案给目标 Region 的 raft leader：导入必须
 /// 成为日志条目，副本/快照/压缩才对同一状态机收敛。非 leader 节点经
 /// openraft 的转发路径提出（与 `client_write` 的既有语义一致）。
 pub struct CoordRangeImportTarget {
@@ -494,21 +495,52 @@ impl CoordRangeImportTarget {
 
 #[async_trait]
 impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
+    async fn reset_range(&self, start: &[u8], end: &[u8]) -> std::result::Result<(), String> {
+        self.wait_for_leader().await?;
+        let resp = self
+            .raft
+            .client_write(Command::ClearImportRange {
+                start_key: start.to_vec(),
+                end_key: end.to_vec(),
+            })
+            .await
+            .map_err(|e| format!("target region raft clear import range: {e}"))?;
+        match resp.response() {
+            Response::ImportRangeCleared { .. } => Ok(()),
+            other => Err(format!(
+                "target region raft returned unexpected response: {other:?}"
+            )),
+        }
+    }
+
     async fn import_range(
         &self,
         start: &[u8],
         end: &[u8],
         rows: Vec<crate::storage::mvcc::VersionedKv>,
         watermark: u64,
+        seal_prior_history: bool,
         done: bool,
     ) -> std::result::Result<u64, String> {
         self.wait_for_leader().await?;
-        let command = Command::ImportRange {
-            start_key: start.to_vec(),
-            end_key: end.to_vec(),
-            rows,
-            watermark,
-            done,
+        let start_key = start.to_vec();
+        let end_key = end.to_vec();
+        let command = if seal_prior_history {
+            Command::ImportRange {
+                start_key,
+                end_key,
+                rows,
+                watermark,
+                done,
+            }
+        } else {
+            Command::ImportRangePreserveHistory {
+                start_key,
+                end_key,
+                rows,
+                watermark,
+                done,
+            }
         };
         let resp = self
             .raft

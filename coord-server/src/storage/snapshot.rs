@@ -532,6 +532,34 @@ mod tests {
         (tmp, storage)
     }
 
+    /// merge 导入的区间历史下限随 `/_sys/` 系统行入快照：装快照的副本不能
+    /// 重新把导入值当成合并前的历史（回填当前值）。
+    #[test]
+    fn test_snapshot_preserves_import_history_floors() {
+        let (_tmp, storage) = setup_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"a", b"left", None, 20, AppliedLogId::standalone(1))
+            .unwrap();
+        storage
+            .apply_range_import(b"m", b"", &[], 14, false, true, AppliedLogId::standalone(2))
+            .unwrap();
+        assert!(storage.get_at_revision(b"m", 10).is_err());
+
+        let data = export_snapshot_data(&storage, 2, 1).unwrap();
+        let restored = SnapshotData::from_bytes(&data.to_bytes().unwrap()).unwrap();
+        let (_tmp2, storage2) = setup_commit_ts_storage();
+        import_snapshot_data(&storage2, &restored).unwrap();
+
+        assert!(
+            storage2.get_at_revision(b"m", 10).is_err(),
+            "导入区间历史下限必须随快照恢复"
+        );
+        assert_eq!(
+            storage2.get_at_revision(b"a", 20).unwrap().as_deref(),
+            Some(&b"left"[..])
+        );
+    }
+
     /// #140：快照携带 current revision 与 TSO 高水位；装快照后两者都不倒退。
     #[test]
     fn test_snapshot_preserves_tso_and_revision() {

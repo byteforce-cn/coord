@@ -175,6 +175,17 @@ const SEQUENCER_INDEX_LAST_TS: &[u8] = b"/_sys/seq/vidx_last_ts";
 /// 同一条 redb 事务推进，崩溃后从游标续跑。
 const DECISION_APPLIED_TS: &[u8] = b"/_sys/kv_t/decision_applied";
 
+/// 合并导入区间的历史下限（`TABLE_KV` 系统行，随快照导出）：
+/// postcard(`Vec<(start_key, end_key, watermark)>`)，`end_key` 为空表示无上界。
+///
+/// 导入行没有 changelog，回放会把「窗口内无写入」当成「等于当前值」；低于
+/// 下限的历史读必须显式返回 `HistoryUnavailable`，否则会把导入值当成合并前
+/// 任意时刻的状态（删除的 key 还会静默消失）。
+const IMPORT_HISTORY_FLOORS: &[u8] = b"/_sys/kv_t/import_history_floors";
+
+/// 一条导入区间历史下限：`(start_key, end_key, watermark)`（`end_key` 空 = 无上界）。
+type ImportHistoryFloor = (Vec<u8>, Vec<u8>, Revision);
+
 /// 完整决策记录（#148 应用、#153 CommitRecord 的上游输入）。
 ///
 /// 只增不改：同一 `commit_ts` 不重写；`txn_id`/`request_id` 用于幂等排查。
@@ -426,6 +437,24 @@ pub(crate) fn encode_changelog_key(revision: Revision) -> Vec<u8> {
 /// 将 Revision 编码为大端字节
 pub fn revision_to_bytes(revision: Revision) -> [u8; 8] {
     revision.to_be_bytes()
+}
+
+/// 两个半开区间是否相交；空 `end` 表示无上界（与 `range_in` 一致）。
+fn ranges_intersect(a_start: &[u8], a_end: &[u8], b_start: &[u8], b_end: &[u8]) -> bool {
+    let a_before_b_end = b_end.is_empty() || a_start < b_end;
+    let b_before_a_end = a_end.is_empty() || b_start < a_end;
+    a_before_b_end && b_before_a_end
+}
+
+fn import_history_unavailable(target_revision: Revision, floor_revision: Revision) -> Error {
+    Error::HistoryUnavailable {
+        revision: target_revision,
+        detail: format!(
+            "history of the range merged into this region is unavailable before revision \
+             {floor_revision}: imported rows have no earlier changelog (requested revision \
+             {target_revision})"
+        ),
+    }
 }
 
 // ──── ChangeEvent ────
@@ -1164,16 +1193,22 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// - 保留每行的 `KvMetadata`（`create_revision`/`mod_revision`/`version`/
     ///   `lease_id`），因此 split 后 lease 绑定与 `mod_revision` 不回退；
     /// - 目标已有更高 `mod_revision` 的行保持不变（旧页不得覆盖新决策）；
-    /// - `done` 时把 `current_revision` 抬到 `watermark`，并把新 Region 的
-    ///   `compacted_revision` 抬到 `watermark`：split 之前的区域历史明确不可用，
-    ///   而不是用残缺 changelog 拼出错误的历史视图；
+    /// - split（`seal_prior_history`）的 `done` 把 `current_revision` 抬到
+    ///   `watermark`、并把 `compacted_revision` 抬到导入点：全新目标没有可保留
+    ///   的历史；
+    /// - merge 的接收方只导入行，不抬 `current_revision`（调用方必须先证明
+    ///   接收方已 apply 到导入水位，否则抬过未应用决策会让 apply 永久卡住）；
+    ///   也不动 `compacted_revision`，而把 `[start, end)` 的导入水位记成区间
+    ///   历史下限，低于它的历史读返回 `HistoryUnavailable`；
     /// - 同一页重放返回 0，不重复写入。
+    #[allow(clippy::too_many_arguments)] // 导入一页的全部要素即为协议参数，无聚合收益
     pub fn apply_range_import(
         &self,
         start: &[u8],
         end: &[u8],
         rows: &[VersionedKv],
         watermark: Revision,
+        seal_prior_history: bool,
         done: bool,
         applied: AppliedLogId,
     ) -> Result<u64> {
@@ -1276,25 +1311,88 @@ impl<B: StorageBackend> MvccStorage<B> {
             }
 
             if done {
-                let target_revision = current_before.max(watermark);
-                tx.insert(
-                    TABLE_META,
-                    META_CURRENT_REVISION,
-                    &target_revision.to_be_bytes(),
-                )?;
-                // 只有全新目标 Region 需要把 split 前的历史标成不可用；
-                // merge 的接收方已有自己的历史，不能因为导入右半而压缩它。
-                if current_before == 0 {
+                // split 的全新目标用导入点抬水位；merge 的接收方水位只能由它
+                // 自己的决策 apply 推进——抬到未应用决策之上会让
+                // `apply_commit_decisions` 卡在该决策之前（safe_ts 同样用
+                // 「下一条未应用决策 - 1」封顶）。调用方在导入前保证
+                // `watermark <= current`，因此这里不需要抬。
+                if seal_prior_history {
+                    let target_revision = current_before.max(watermark);
+                    tx.insert(
+                        TABLE_META,
+                        META_CURRENT_REVISION,
+                        &target_revision.to_be_bytes(),
+                    )?;
                     let previous_compacted = tx
                         .get(TABLE_META, META_COMPACT_REVISION)?
                         .and_then(|bytes| decode_u64(&bytes))
                         .unwrap_or(0);
                     let compacted = previous_compacted.max(watermark).min(target_revision);
                     tx.insert(TABLE_META, META_COMPACT_REVISION, &compacted.to_be_bytes())?;
+                } else {
+                    let mut floors: Vec<ImportHistoryFloor> = tx
+                        .get(TABLE_KV, IMPORT_HISTORY_FLOORS)?
+                        .map(|bytes| {
+                            postcard::from_bytes(&bytes).map_err(|e| {
+                                Error::DataCorruption(format!("decode import history floors: {e}"))
+                            })
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    match floors.iter_mut().find(|(s, e, _)| s == start && e == end) {
+                        Some(floor) => floor.2 = floor.2.max(watermark),
+                        None => floors.push((start.to_vec(), end.to_vec(), watermark)),
+                    }
+                    let encoded = postcard::to_allocvec(&floors).map_err(|e| {
+                        Error::Internal(format!("encode import history floors: {e}"))
+                    })?;
+                    tx.insert(TABLE_KV, IMPORT_HISTORY_FLOORS, &encoded)?;
                 }
             }
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
             Ok(imported)
+        })
+    }
+
+    /// 清空一段 Key 区间内的 live 行（split/merge 搬迁的「本轮权威」前置步骤）。
+    ///
+    /// 只用于 cutover 前、本 Region 尚未拥有该区间的场景：上一次部分导入留下的
+    /// 行可能已被源 Region 的新决策删除，重新分页导入不会覆盖它们（tombstone 不
+    /// 导出）。先物理删除再整段重导入，重试才不会复活已删除的 Key。
+    ///
+    /// 不写 changelog：这些行从未服务过读，区间历史由 `IMPORT_HISTORY_FLOORS`
+    /// 统一表达。重放返回 0（幂等）。
+    pub fn clear_imported_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        applied: AppliedLogId,
+    ) -> Result<u64> {
+        if self.revision_mode != RevisionMode::CommitTs {
+            return Err(Error::FailedPrecondition(
+                "range import requires commit_ts revision semantics".to_string(),
+            ));
+        }
+        self.backend.write(|tx| {
+            let mut stale: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            let range_start = encode_kv_key(start);
+            let range_end = if end.is_empty() {
+                Vec::new()
+            } else {
+                encode_kv_key(end)
+            };
+            for (internal_key, _) in tx.iter_range(TABLE_KV, &range_start, &range_end)? {
+                let Some(user_key) = decode_kv_key(&internal_key) else {
+                    continue;
+                };
+                stale.push((internal_key.to_vec(), encode_kv_meta_key(user_key)));
+            }
+            for (internal_key, meta_key) in &stale {
+                tx.remove(TABLE_KV, internal_key)?;
+                tx.remove(TABLE_KV_META, meta_key)?;
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(stale.len() as u64)
         })
     }
 
@@ -2016,6 +2114,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         target_revision: Revision,
     ) -> Result<HistoricalRangeView> {
         self.ensure_history_reconstructable(target_revision)?;
+        self.ensure_import_history_available(start, range_end, target_revision)?;
         let end_key = encode_changelog_key(target_revision.saturating_add(1));
 
         let (mut view, changed_after, last_write, post_events) = self.backend.read(|tx| {
@@ -5274,6 +5373,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         target_revision: Revision,
     ) -> Result<Option<Vec<u8>>> {
         self.ensure_history_reconstructable(target_revision)?;
+        self.ensure_key_import_history_available(key, target_revision)?;
         let end_key = encode_changelog_key(target_revision.saturating_add(1));
 
         // 第一遍：定位 <= target_revision 的最后一次写入，并记录 (T, ∞) 是否有写入。
@@ -5344,6 +5444,57 @@ impl<B: StorageBackend> MvccStorage<B> {
             });
         }
         Ok(())
+    }
+
+    /// 合并导入区间的历史下限守卫。
+    ///
+    /// 导入行没有 changelog，低于导入水位的读不可复原（源 Region 的早期值/删除
+    /// 从未搬过来），必须显式失败而不是回填导入值。区间不重叠时不影响接收方
+    /// 自己的历史。
+    fn ensure_import_history_available(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        target_revision: Revision,
+    ) -> Result<()> {
+        for (floor_start, floor_end, floor_revision) in self.import_history_floors()? {
+            if target_revision >= floor_revision {
+                continue;
+            }
+            if ranges_intersect(start, range_end, &floor_start, &floor_end) {
+                return Err(import_history_unavailable(target_revision, floor_revision));
+            }
+        }
+        Ok(())
+    }
+
+    /// 单 Key 版本的导入历史下限守卫（点读不能按半开区间判交集）。
+    fn ensure_key_import_history_available(
+        &self,
+        key: &[u8],
+        target_revision: Revision,
+    ) -> Result<()> {
+        for (floor_start, floor_end, floor_revision) in self.import_history_floors()? {
+            if target_revision >= floor_revision {
+                continue;
+            }
+            let in_floor = key >= floor_start.as_slice()
+                && (floor_end.is_empty() || key < floor_end.as_slice());
+            if in_floor {
+                return Err(import_history_unavailable(target_revision, floor_revision));
+            }
+        }
+        Ok(())
+    }
+
+    fn import_history_floors(&self) -> Result<Vec<ImportHistoryFloor>> {
+        self.backend.read(|tx| {
+            let Some(bytes) = tx.get(TABLE_KV, IMPORT_HISTORY_FLOORS)? else {
+                return Ok(Vec::new());
+            };
+            postcard::from_bytes(&bytes)
+                .map_err(|e| Error::DataCorruption(format!("decode import history floors: {e}")))
+        })
     }
 }
 
@@ -5612,7 +5763,15 @@ mod tests {
 
         let (_target_dir, target) = create_commit_ts_storage();
         let imported = target
-            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, applied_for(5))
+            .apply_range_import(
+                b"a",
+                b"z",
+                &page.rows,
+                page.revision,
+                true,
+                true,
+                applied_for(5),
+            )
             .expect("import");
         assert_eq!(imported, 2);
         assert_eq!(target.get(b"a").unwrap().as_deref(), Some(&b"1"[..]));
@@ -5626,9 +5785,109 @@ mod tests {
         ));
 
         let replay = target
-            .apply_range_import(b"a", b"z", &page.rows, page.revision, true, applied_for(6))
+            .apply_range_import(
+                b"a",
+                b"z",
+                &page.rows,
+                page.revision,
+                true,
+                true,
+                applied_for(6),
+            )
             .expect("replay");
         assert_eq!(replay, 0, "同一页重放不得重复写入");
+    }
+
+    #[test]
+    fn test_apply_range_import_merge_keeps_target_history() {
+        let (_target_dir, target) = create_commit_ts_storage();
+        // 接收方已经 apply 到导入水位（合并前它一直在推进 revision）。
+        target
+            .put_at_commit_ts(b"a", b"left", None, 14, applied_for(1))
+            .unwrap();
+        target
+            .put_at_commit_ts(b"b", b"left", None, 20, applied_for(2))
+            .unwrap();
+        let rows = vec![(
+            b"m".to_vec(),
+            b"1".to_vec(),
+            KvMetadata {
+                version: 1,
+                create_revision: 11,
+                mod_revision: 11,
+                lease_id: 0,
+                deleted: false,
+            },
+        )];
+        target
+            .apply_range_import(b"m", b"", &rows, 14, false, true, applied_for(3))
+            .expect("merge import");
+        assert_eq!(target.current_revision(), 20, "merge 不抬接收方水位");
+        assert_eq!(
+            target.compacted_revision().unwrap(),
+            0,
+            "merge 不压缩接收方历史"
+        );
+        // 左半历史仍可读。
+        assert!(target.range_at_revision(b"", b"m", 10, 10).is_ok());
+        // 吸收区间在导入水位之前的历史不可复原：导入行没有 changelog，
+        // 回填当前值会把「合并前不存在/不同值」静默说成导入值。
+        assert!(matches!(
+            target.range_at_revision(b"m", b"", 10, 10),
+            Err(Error::HistoryUnavailable { .. })
+        ));
+        assert!(matches!(
+            target.get_at_revision(b"m", 10),
+            Err(Error::HistoryUnavailable { .. })
+        ));
+        // 不低于导入水位的读仍能回填导入值。
+        assert_eq!(
+            target.get_at_revision(b"m", 20).unwrap().as_deref(),
+            Some(&b"1"[..])
+        );
+    }
+
+    #[test]
+    fn test_apply_range_import_never_raises_merge_receiver_revision() {
+        let (_target_dir, target) = create_commit_ts_storage();
+        target
+            .apply_range_import(b"m", b"", &[], 14, false, true, applied_for(1))
+            .expect("empty merge import");
+        // 接收方只能由自己的决策 apply 推进水位；抬过未应用决策会让
+        // `apply_commit_decisions` 永久卡住。
+        assert_eq!(target.current_revision(), 0);
+        assert_eq!(target.compacted_revision().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_clear_imported_range_removes_only_the_range_and_is_idempotent() {
+        let (_dir, target) = create_commit_ts_storage();
+        target
+            .put_at_commit_ts(b"a", b"keep", None, 5, applied_for(1))
+            .unwrap();
+        target
+            .put_at_commit_ts(b"m", b"stale", None, 6, applied_for(2))
+            .unwrap();
+        target
+            .put_at_commit_ts(b"z", b"stale", None, 7, applied_for(3))
+            .unwrap();
+
+        assert_eq!(
+            target
+                .clear_imported_range(b"m", b"", applied_for(4))
+                .unwrap(),
+            2
+        );
+        assert_eq!(target.get(b"a").unwrap().as_deref(), Some(&b"keep"[..]));
+        assert!(target.get(b"m").unwrap().is_none());
+        assert!(target.get(b"z").unwrap().is_none());
+        assert_eq!(
+            target
+                .clear_imported_range(b"m", b"", applied_for(5))
+                .unwrap(),
+            0,
+            "清空必须幂等"
+        );
     }
 
     #[test]
@@ -5649,7 +5908,7 @@ mod tests {
             },
         )];
         let imported = target
-            .apply_range_import(b"a", b"z", &rows, 15, true, applied_for(2))
+            .apply_range_import(b"a", b"z", &rows, 15, false, true, applied_for(2))
             .expect("import older page");
         assert_eq!(imported, 0);
         assert_eq!(target.get(b"a").unwrap().as_deref(), Some(&b"new"[..]));
@@ -5674,13 +5933,29 @@ mod tests {
 
         let (_dir, v1) = create_storage();
         let err = v1
-            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 1)], 10, true, applied_for(1))
+            .apply_range_import(
+                b"a",
+                b"z",
+                &[row(b"a", b"v", 1)],
+                10,
+                true,
+                true,
+                applied_for(1),
+            )
             .expect_err("v1 must reject range imports");
         assert!(matches!(err, Error::FailedPrecondition(_)));
 
         let (_dir, target) = create_commit_ts_storage();
         let err = target
-            .apply_range_import(b"m", b"z", &[row(b"a", b"v", 1)], 10, true, applied_for(1))
+            .apply_range_import(
+                b"m",
+                b"z",
+                &[row(b"a", b"v", 1)],
+                10,
+                true,
+                true,
+                applied_for(1),
+            )
             .expect_err("out-of-range key must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
         let err = target
@@ -5690,12 +5965,21 @@ mod tests {
                 &[row(b"a", b"v", 1), row(b"a", b"v", 1)],
                 10,
                 true,
+                true,
                 applied_for(2),
             )
             .expect_err("duplicate key must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
         let err = target
-            .apply_range_import(b"a", b"z", &[row(b"a", b"v", 11)], 10, true, applied_for(3))
+            .apply_range_import(
+                b"a",
+                b"z",
+                &[row(b"a", b"v", 11)],
+                10,
+                true,
+                true,
+                applied_for(3),
+            )
             .expect_err("mod_revision above the watermark must be rejected");
         assert!(matches!(err, Error::InvalidArgument(_)));
     }

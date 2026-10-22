@@ -27,6 +27,12 @@ use crate::storage::region_table::{RegionChange, SplitMergeKind, SplitMergePlan}
 pub type RegionMvccResolver =
     dyn Fn(RegionId) -> Option<Arc<MvccStorage<RedbBackend>>> + Send + Sync;
 
+/// Region → 本节点已应用权威表里的 Key Range（merge 定位被吸收区间）。
+///
+/// 不把区间写进 `SplitMergePlan`：计划经 bincode 存进 region 0 intent journal，
+/// 追加字段会让既有 intent 无法解码。
+pub type RegionRangeResolver = dyn Fn(RegionId) -> Option<(Vec<u8>, Vec<u8>)> + Send + Sync;
+
 /// Region → 经该 Region raft 导入一页的目标端口。
 pub type RegionImportTargetResolver =
     dyn Fn(RegionId) -> Option<Arc<dyn RangeImportTarget>> + Send + Sync;
@@ -35,17 +41,27 @@ pub type RegionImportTargetResolver =
 ///
 /// - `watermark` = 源快照 revision，必须逐页恒等（导入行的 `mod_revision`
 ///   不得越过它）；
-/// - `done` 只在最后一页为真：实现方据此把目标 revision 与「split 前历史
-///   不可用」的压缩水位钉到 `watermark`；
+/// - `seal_prior_history` 只在最后一页有意义：split 的全新目标据此把
+///   「split 前历史不可用」的压缩水位钉到 `watermark`；merge 的接收方传
+///   `false`，保留自己的历史（区间历史下限由存储层记录）；
+/// - `done` 只在最后一页为真；
 /// - 返回实际写入行数：重放已导入的页返回 0 而不是错误（幂等契约）。
 #[async_trait::async_trait]
 pub trait RangeImportTarget: Send + Sync {
+    /// 清空 `[start, end)`：每次搬迁重试的“本轮权威”前置步骤。
+    ///
+    /// 源侧已删除的 Key 不会被重新导出（tombstone 不搬），不清空就会在
+    /// 重试后复活上一次部分导入的残留。只在 cutover 前调用（区间尚不属于
+    /// 目标 Region）。
+    async fn reset_range(&self, start: &[u8], end: &[u8]) -> std::result::Result<(), String>;
+
     async fn import_range(
         &self,
         start: &[u8],
         end: &[u8],
         rows: Vec<VersionedKv>,
         watermark: u64,
+        seal_prior_history: bool,
         done: bool,
     ) -> std::result::Result<u64, String>;
 }
@@ -92,6 +108,7 @@ const TARGET_LEADER_WAIT: Duration = Duration::from_secs(10);
 pub struct RangeImportMigrator {
     source: Arc<RegionMvccResolver>,
     targets: Arc<RegionImportTargetResolver>,
+    ranges: Arc<RegionRangeResolver>,
     drain: Arc<dyn SplitDrain>,
     page_size: usize,
     drain_timeout: Duration,
@@ -102,11 +119,13 @@ impl RangeImportMigrator {
     pub fn new(
         source: Arc<RegionMvccResolver>,
         targets: Arc<RegionImportTargetResolver>,
+        ranges: Arc<RegionRangeResolver>,
         drain: Arc<dyn SplitDrain>,
     ) -> Self {
         Self {
             source,
             targets,
+            ranges,
             drain,
             page_size: DEFAULT_PAGE_SIZE,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
@@ -144,25 +163,58 @@ impl RangeImportMigrator {
             }
             if started.elapsed() >= self.target_wait {
                 return Err(format!(
-                    "split target region {target_id} raft is not assembled on this node \
-                     (pending region pre-creation has not caught up)"
+                    "region {target_id} raft is not assembled on this node \
+                     (target region pre-creation/attachment has not caught up)"
                 ));
             }
             tokio::time::sleep(TARGET_RESOLVE_POLL).await;
         }
     }
-}
 
-#[async_trait::async_trait]
-impl SplitMergeMigrator for RangeImportMigrator {
-    async fn migrate(&self, plan: &SplitMergePlan) -> std::result::Result<(), String> {
-        if plan.kind != SplitMergeKind::Split {
-            // merge 接收方已有自己的历史与水位，不能复用「新 Region 抬压缩
-            // 水位」的 split 语义；在其专属实现交付前拒绝切表（#164）。
-            return Err(
-                "merge data migration is not implemented (#164); refusing to cut over".to_string(),
-            );
+    /// 分页导入：首页取到的 revision 钉死整次搬迁，后续页用
+    /// `expected_revision` 校验源没有前进，避免把两代快照拼进同一个 Region。
+    ///
+    /// `seal_prior_history` 只影响最后一页。调用前先清空目标区间：本轮导出
+    /// 是唯一权威，上一次部分导入的残留（尤其源侧已删除的 Key）必须消失。
+    async fn import_pages(
+        &self,
+        source: &MvccStorage<RedbBackend>,
+        target: &dyn RangeImportTarget,
+        start: &[u8],
+        end: &[u8],
+        seal_prior_history: bool,
+        expected_revision: Option<u64>,
+    ) -> std::result::Result<u64, String> {
+        let mut after: Option<Vec<u8>> = None;
+        let mut watermark: Option<u64> = expected_revision;
+        target.reset_range(start, end).await?;
+        loop {
+            let page = source
+                .export_range_page(start, end, after.as_deref(), self.page_size, watermark)
+                .map_err(|e| format!("export range page: {e}"))?;
+            let pinned = *watermark.get_or_insert(page.revision);
+            let done = page.next_after.is_none();
+            // 空白源 Region 的 revision 可以是 0，但导入水位必须 > 0：
+            // 用 1 让目标水位仍可被未来 commit_ts 推开。
+            target
+                .import_range(
+                    start,
+                    end,
+                    page.rows,
+                    pinned.max(1),
+                    seal_prior_history,
+                    done,
+                )
+                .await?;
+            if done {
+                break;
+            }
+            after = page.next_after;
         }
+        Ok(watermark.unwrap_or(0))
+    }
+
+    async fn migrate_split(&self, plan: &SplitMergePlan) -> std::result::Result<(), String> {
         let target_id = plan
             .target_region
             .ok_or_else(|| "split plan has no target region".to_string())?;
@@ -186,34 +238,110 @@ impl SplitMergeMigrator for RangeImportMigrator {
         let start = child.start_key.as_slice();
         let end = child.end_key.as_slice();
         self.drain.drain(start, end, self.drain_timeout).await?;
-
-        let mut after: Option<Vec<u8>> = None;
-        // 首页取到的 revision 钉死整次搬迁：后续页用 expected_revision 校验源
-        // 没有前进，避免把两代快照拼进同一个新 Region。
-        let mut watermark: Option<u64> = None;
-        loop {
-            let page = source
-                .export_range_page(start, end, after.as_deref(), self.page_size, watermark)
-                .map_err(|e| format!("export split range page: {e}"))?;
-            let pinned = *watermark.get_or_insert(page.revision);
-            let done = page.next_after.is_none();
-            // 空白源 Region 的 revision 可以是 0，但导入水位必须 > 0：
-            // 用 1 让目标水位仍可被未来 commit_ts 推开。
-            target
-                .import_range(start, end, page.rows, pinned.max(1), done)
-                .await?;
-            if done {
-                break;
-            }
-            after = page.next_after;
-        }
+        let watermark = self
+            .import_pages(source.as_ref(), target.as_ref(), start, end, true, None)
+            .await?;
 
         tracing::info!(
             region_id = target_id,
-            watermark = watermark.unwrap_or(0),
+            watermark,
             "split range import complete"
         );
         Ok(())
+    }
+
+    /// merge：左（吸收方）保留自己的历史，只把右（被吸收方）的 live 行搬进来。
+    async fn migrate_merge(&self, plan: &SplitMergePlan) -> std::result::Result<(), String> {
+        let absorbing = plan.source_region;
+        let merged = plan
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                RegionChange::Update { meta } if meta.region_id == absorbing => Some(meta),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!("merge plan does not update the absorbing region {absorbing}")
+            })?;
+        let mut donors = plan.changes.iter().filter_map(|change| match change {
+            RegionChange::Remove { region_id, .. } => Some(*region_id),
+            _ => None,
+        });
+        let donor = donors
+            .next()
+            .ok_or_else(|| "merge plan has no donor region to absorb".to_string())?;
+        if donors.next().is_some() {
+            return Err("merge plan must remove exactly one donor region".to_string());
+        }
+
+        let (donor_start, donor_end) = (self.ranges)(donor).ok_or_else(|| {
+            format!("merge donor region {donor} is not in the local region table")
+        })?;
+        if donor_end != merged.end_key
+            || donor_start < merged.start_key
+            || (!donor_end.is_empty() && donor_start > donor_end)
+        {
+            return Err(format!(
+                "merge donor region {donor} range [{donor_start:?}, {donor_end:?}) does not \
+                 match the merged region [{:?}, {:?})",
+                merged.start_key, merged.end_key
+            ));
+        }
+
+        let source = (self.source)(donor).ok_or_else(|| {
+            format!("merge donor region {donor} storage is not assembled on this node")
+        })?;
+        let target = self.resolve_target(absorbing).await?;
+
+        // 左右两侧的读集都要冻结：合并后它们属于同一个 Region。
+        self.drain
+            .drain(&merged.start_key, &merged.end_key, self.drain_timeout)
+            .await?;
+
+        // 接收方尚未 apply 到源水位时不能导入：导入行会不可见，而把
+        // `current_revision` 抬过未应用决策会让该 Region 的决策 apply 永久
+        // 卡住（safe_ts 用同一约束）。直接失败：cutover 不推进，调度器会在
+        // apply 追上后重新下发 merge。
+        let pin = source.current_revision();
+        let receiver = (self.source)(absorbing).ok_or_else(|| {
+            format!("absorbing region {absorbing} storage is not assembled on this node")
+        })?;
+        let receiver_revision = receiver.current_revision();
+        if receiver_revision < pin {
+            return Err(format!(
+                "absorbing region {absorbing} has applied revision {receiver_revision}, behind \
+                 the merge donor's {pin}; refusing to import until decision apply catches up"
+            ));
+        }
+
+        let watermark = self
+            .import_pages(
+                source.as_ref(),
+                target.as_ref(),
+                &donor_start,
+                &donor_end,
+                false,
+                (pin > 0).then_some(pin),
+            )
+            .await?;
+
+        tracing::info!(
+            region_id = absorbing,
+            donor_region = donor,
+            watermark,
+            "merge range import complete"
+        );
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SplitMergeMigrator for RangeImportMigrator {
+    async fn migrate(&self, plan: &SplitMergePlan) -> std::result::Result<(), String> {
+        match plan.kind {
+            SplitMergeKind::Split => self.migrate_split(plan).await,
+            SplitMergeKind::Merge => self.migrate_merge(plan).await,
+        }
     }
 }
 
@@ -228,10 +356,17 @@ pub fn range_import_migrator(
     drain: Arc<dyn SplitDrain>,
 ) -> Arc<dyn SplitMergeMigrator> {
     let manager = Arc::clone(manager);
+    let ranges_source = Arc::clone(&manager);
     let source: Arc<RegionMvccResolver> = Arc::new(move |region_id| {
         manager
             .runtime(region_id)
             .map(|runtime| Arc::clone(&runtime.mvcc))
+    });
+    let ranges: Arc<RegionRangeResolver> = Arc::new(move |region_id| {
+        ranges_source.get_region(region_id).map(|handle| {
+            let meta = handle.meta.read();
+            (meta.start_key.clone(), meta.end_key.clone())
+        })
     });
 
     let lifecycle = Arc::clone(lifecycle);
@@ -244,5 +379,5 @@ pub fn range_import_migrator(
         })
     });
 
-    Arc::new(RangeImportMigrator::new(source, targets, drain))
+    Arc::new(RangeImportMigrator::new(source, targets, ranges, drain))
 }
