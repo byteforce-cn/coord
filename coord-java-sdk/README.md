@@ -2,7 +2,9 @@
 
 Java SDK for the Coord platform — the agent-side service surfaces (registry,
 config, lock, election, idgen, event, cache, MQ, scheduler, workflow, policy,
-PKI, transit, circuit breaker, rate limiter, feature flags, object store).
+PKI, transit, circuit breaker, rate limiter, feature flags, object store) plus
+the KV-T v2 TSO/KV/Lease data plane (requires `[kv_t].enabled=true` and an agent
+that forwards the v2 services).
 Maven coordinates: `cn.byteforce:coord-java-sdk` (Java 21+).
 
 > This README is a starting point only. The **normative consumer semantics**
@@ -89,13 +91,20 @@ try (CoordClient client = CoordClient.create(config)) {
         // process(m) — keep it idempotent; duplicates are normal
         client.mq().ack("orders", "orders-svc", m.partition(), m.offset());
     }
+
+    // KV-T v2 (requires [kv_t].enabled=true and a v2-aware agent)
+    long commitTs = client.tsoV2().getTimestamp();
+    client.kvV2().put("/app/k".getBytes(), "v".getBytes(), commitTs, false, new byte[0]);
+    var ranged = client.kvV2().range("/app/k".getBytes());
 }
 ```
 
 ## Client surfaces
 
-The SDK covers the **agent-side service surfaces**; the server KV data plane is
-served by the Rust `coord-client`.
+The SDK covers the **agent-side service surfaces**. The KV-T v2 data plane is
+available as `client.tsoV2()` / `client.kvV2()` / `client.leaseV2()`; the agent
+currently forwards TSO/KV/Lease v2 only. Txn/Watch/Storage v2 (and direct
+server access) are not part of this SDK surface yet.
 
 | Surface | Entry point | Notes |
 |:--|:--|:--|
@@ -110,6 +119,7 @@ served by the Rust `coord-client`.
 | Transit | `client.transit()` | envelope encryption + purpose-bound HMAC (`hmacSignWithPurpose` / `hmacVerifyWithPurpose`; persist the returned `keyId`); `rewrap` migrates DEKs during KEK rotation |
 | CircuitBreaker / RateLimiter / FeatureFlags | `client.circuitBreaker()`, `client.rateLimiter()`, `client.featureFlags()` | breaker/limiter are local (per-agent); feature flags live in the shared KV — `putFlag` / `putPercentageFlag` / `deleteFlag` / `listFlags` (management plane; takes effect immediately) |
 | ObjectStore | `client.objectStore()` | see `docs/production/volume-object-storage.md` |
+| KV-T v2 | `client.tsoV2()`, `client.kvV2()`, `client.leaseV2()` | `[kv_t].enabled=true`; writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; Txn/Watch/Storage v2 are not proxied yet |
 | Health | `client.healthCheck()` | agent health check |
 
 ## Errors

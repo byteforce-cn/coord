@@ -9,6 +9,9 @@ import cn.byteforce.coord.sdk.featureflags.FeatureFlagClient;
 import cn.byteforce.coord.sdk.health.HealthStatus;
 import cn.byteforce.coord.sdk.idgen.IdGenClient;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
+import cn.byteforce.coord.sdk.kv.v2.KvClient;
+import cn.byteforce.coord.sdk.lease.v2.LeaseClient;
+import cn.byteforce.coord.sdk.tso.v2.TsoClient;
 import cn.byteforce.coord.sdk.internal.proto.HealthCheckRequest;
 import cn.byteforce.coord.sdk.internal.proto.HealthCheckResponse;
 import cn.byteforce.coord.sdk.internal.proto.HealthGrpc;
@@ -54,6 +57,9 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@link #circuitBreaker()} — Agent-local circuit breaker state</li>
  *   <li>{@link #rateLimiter()} — Agent-local token-bucket rate limiting</li>
  *   <li>{@link #featureFlags()} — Feature flag evaluation (read-only wire)</li>
+ *   <li>{@link #tsoV2()}, {@link #kvV2()}, {@link #leaseV2()} — KV-T v2
+ *       timestamp/KV/lease data plane (requires a v2 cluster and an agent that
+ *       forwards the v2 services)</li>
  * </ul>
  * Must be closed via {@link #close()} to release resources gracefully.
  *
@@ -91,6 +97,9 @@ public final class CoordClient implements Closeable {
     private final PolicyClientImpl policyClient;
     private final PkiClientImpl pkiClient;
     private final ObjectStoreClientImpl objectStoreClient;
+    private final TsoV2ClientImpl tsoV2Client;
+    private final KvV2ClientImpl kvV2Client;
+    private final LeaseV2ClientImpl leaseV2Client;
     private final LeaderElectionClientImpl electionClient;
     private final EventClientImpl eventClient;
     private final SchedulerClientImpl schedulerClient;
@@ -141,6 +150,12 @@ public final class CoordClient implements Closeable {
                 config.getObservabilityProvider(), config);
         this.objectStoreClient = new ObjectStoreClientImpl(channelManager, errorMapper,
                 retryTemplate, config.getObservabilityProvider(), config);
+        this.tsoV2Client = new TsoV2ClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.kvV2Client = new KvV2ClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config, tsoV2Client);
+        this.leaseV2Client = new LeaseV2ClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
         this.electionClient = new LeaderElectionClientImpl(channelManager, errorMapper,
                 retryTemplate, config.getObservabilityProvider(), config);
         // 事件订阅的取流循环跑在受管理的虚拟线程执行器上（与 Watch / Workflow 同纪律）：
@@ -252,6 +267,38 @@ public final class CoordClient implements Closeable {
      */
     public ObjectStoreClient objectStore() {
         return objectStoreClient;
+    }
+
+    /**
+     * Returns the KV-T v2 timestamp oracle ({@code coord.tso.v2}).
+     * <p>
+     * Requires a v2 cluster ({@code [kv_t].enabled=true}) and an agent that
+     * forwards the v2 data plane. Batches are process-local; never persist and
+     * reuse them across restarts.
+     */
+    public TsoClient tsoV2() {
+        return tsoV2Client;
+    }
+
+    /**
+     * Returns the KV-T v2 key/value client ({@code coord.kv.v2}).
+     * <p>
+     * Writes take an explicit TSO {@code commitTs}; the convenience overloads
+     * fetch one fresh timestamp. Reads with {@code readTs=0} use the server's
+     * local {@code safe_ts} (not a cross-node linearizable snapshot).
+     */
+    public KvClient kvV2() {
+        return kvV2Client;
+    }
+
+    /**
+     * Returns the KV-T v2 lease client ({@code coord.lease.v2}).
+     * <p>
+     * {@code revoke} is idempotent: {@code commitTs=0} means there was no new
+     * deletion decision (already revoked/expired).
+     */
+    public LeaseClient leaseV2() {
+        return leaseV2Client;
     }
 
     /**

@@ -84,6 +84,9 @@ GA_IMPLS=(
   "cn/byteforce/coord/sdk/internal/rpc/CircuitBreakerClientImpl.java|contracts.circuitbreaker.v1"
   "cn/byteforce/coord/sdk/internal/rpc/RateLimiterClientImpl.java|contracts.ratelimiter.v1"
   "cn/byteforce/coord/sdk/internal/rpc/FeatureFlagClientImpl.java|contracts.featureflags.v1"
+  "cn/byteforce/coord/sdk/internal/rpc/TsoV2ClientImpl.java|contracts.tso.v2"
+  "cn/byteforce/coord/sdk/internal/rpc/KvV2ClientImpl.java|contracts.kv.v2"
+  "cn/byteforce/coord/sdk/internal/rpc/LeaseV2ClientImpl.java|contracts.lease.v2"
 )
 
 echo "── 1) 契约服务的 impl 必须引用契约命名空间 ──"
@@ -148,11 +151,13 @@ while IFS= read -r f; do
   rel="${f#"$CONTRACT_PROTO_DIR"/}"
   case "$rel" in
     grpc/health/*) continue ;;                       # 第三方标准 proto，随附
-    coord/kv/*|coord/txn/*|coord/lease/*|coord/watch/*|coord/maintenance/*) continue ;;
-    # KV-T v2 数据面（ADR-0015）：greenfield v2 的 SDK 客户端由 G6（#172）交付。
-    # 在这些客户端存在之前，不为骗过本门而建空壳 impl（“有 impl”不等于“有消费面”）；
-    # v1 同名域（coord.kv / txn / watch / lease / storage）仍受本门约束。
-    coord/tso/v2/*|coord/kv/v2/*|coord/txn/v2/*|coord/watch/v2/*|coord/lease/v2/*|coord/storage/v2/*) continue ;;
+    coord/maintenance/*) continue ;;
+    # v1 数据面（coord.kv / txn / watch / lease）仍受本门约束；只跳过**无 v1 面**
+    # 的 maintenance 与尚未交付 SDK 的 v2 域。
+    coord/kv/kv.proto|coord/txn/txn.proto|coord/watch/watch.proto|coord/lease/lease.proto) continue ;;
+    # KV-T v2 数据面（ADR-0015）：TSO/KV/Lease 已由 #172 交付；Txn/Watch/Storage
+    # 仍待后续切片，不建空壳 impl（“有 impl”不等于“有消费面”）。
+    coord/txn/v2/*|coord/watch/v2/*|coord/storage/v2/*) continue ;;
   esac
   [[ -z "$pkg" ]] && continue
   expected_pkgs+=("$pkg")

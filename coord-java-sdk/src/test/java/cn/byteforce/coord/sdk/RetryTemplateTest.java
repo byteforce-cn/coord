@@ -151,6 +151,34 @@ class RetryTemplateTest {
     }
 
     @Test
+    void shouldRetryOnSafeTsLagAndEpochStale() throws Exception {
+        for (ErrorCode retryable : new ErrorCode[]{
+                ErrorCode.SAFE_TS_LAG, ErrorCode.EPOCH_STALE}) {
+            AtomicInteger calls = new AtomicInteger(0);
+            String result = retryTemplate.execute(ctx -> {
+                if (calls.incrementAndGet() < 2) {
+                    throw new CoordException(retryable);
+                }
+                return "ok";
+            });
+            assertThat(result).isEqualTo("ok");
+            assertThat(calls.get()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void shouldNotRetryCommitRejected() {
+        AtomicInteger calls = new AtomicInteger(0);
+        assertThatThrownBy(() -> retryTemplate.execute(ctx -> {
+            calls.incrementAndGet();
+            throw new CoordException(ErrorCode.COMMIT_REJECTED);
+        })).isInstanceOf(CoordException.class)
+                .extracting(e -> ((CoordException) e).getErrorCode())
+                .isEqualTo(ErrorCode.COMMIT_REJECTED);
+        assertThat(calls.get()).isEqualTo(1);
+    }
+
+    @Test
     void shouldStillNotRetryInternal() {
         AtomicInteger calls = new AtomicInteger(0);
         assertThatThrownBy(() -> retryTemplate.execute(ctx -> {
