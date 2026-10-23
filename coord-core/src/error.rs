@@ -75,6 +75,17 @@ pub enum Error {
     #[error("history at revision {revision} is not reconstructable: {detail}")]
     HistoryUnavailable { revision: u64, detail: String },
 
+    /// v2 数据面的远端错误：保留显式 wire 码，供 agent 代理**原样**回传。
+    ///
+    /// 不能复用 [`Error::Internal`] 或按 gRPC 状态码兜底：`TXN_CONFLICT`、
+    /// `COMMIT_REJECTED`、`SAFE_TS_LAG` 等码决定调用方是重跑、拆分还是退避，
+    /// 状态码（ABORTED / FAILED_PRECONDITION / UNAVAILABLE）本身不足以区分。
+    #[error("{code}: {message}")]
+    V2 {
+        code: crate::error_code::CoordErrorCode,
+        message: String,
+    },
+
     /// 数据损坏
     #[error("data corruption: {0}")]
     DataCorruption(String),

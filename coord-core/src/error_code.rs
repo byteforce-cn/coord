@@ -140,6 +140,65 @@ impl CoordErrorCode {
             Self::SafeTsLag => "SAFE_TS_LAG",
         }
     }
+
+    /// 从 wire 值反解；未登记值返回 `None`。
+    ///
+    /// 只允许身份映射：反解结果必须能逐字回到 [`Self::as_str`]（穷举测试覆盖），
+    /// 否则一个拼错的 trailer 会被静默当成别的码。
+    pub fn from_wire(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|code| code.as_str() == value)
+    }
+
+    /// 是否只在 KV-T v2 数据面出现的码。
+    ///
+    /// 这些码不能落到通用 gRPC 状态码兜底：调用方按码决定「重跑事务 / 拆事务 /
+    /// 刷新路由 / 全量重同步」，而状态码粒度不足（如 `TXN_CONFLICT` 与
+    /// `TXN_NOT_FOUND` 都是 ABORTED）。
+    pub fn is_v2_specific(self) -> bool {
+        matches!(
+            self,
+            Self::TxnConflict
+                | Self::TxnNotFound
+                | Self::TxnTooLarge
+                | Self::ReadSetTooLarge
+                | Self::CommitRejected
+                | Self::EpochStale
+                | Self::HistoryUnavailable
+                | Self::SafeTsLag
+        )
+    }
+
+    /// 该码在 v2 数据面的规范 gRPC 状态码（与 `apis/contracts/WHITEPAPER.md` 一致）。
+    pub fn status_code(self) -> Code {
+        match self {
+            Self::Unauthenticated => Code::Unauthenticated,
+            Self::PermissionDenied => Code::PermissionDenied,
+            Self::NotFound => Code::NotFound,
+            Self::AlreadyExists => Code::AlreadyExists,
+            Self::InvalidArgument => Code::InvalidArgument,
+            Self::FailedPrecondition => Code::FailedPrecondition,
+            Self::OutOfRange => Code::OutOfRange,
+            Self::ResourceExhausted => Code::ResourceExhausted,
+            Self::DeadlineExceeded => Code::DeadlineExceeded,
+            Self::Unavailable => Code::Unavailable,
+            Self::NotLeader => Code::Unavailable,
+            Self::TxnCasFailed => Code::Aborted,
+            Self::Internal => Code::Internal,
+            Self::TxnConflict | Self::TxnNotFound | Self::EpochStale => Code::Aborted,
+            Self::TxnTooLarge | Self::ReadSetTooLarge => Code::InvalidArgument,
+            Self::CommitRejected => Code::FailedPrecondition,
+            Self::HistoryUnavailable => Code::OutOfRange,
+            Self::SafeTsLag => Code::Unavailable,
+        }
+    }
+
+    /// 以该码构造带 trailer 的 `Status`。
+    pub fn into_status(self, message: impl Into<String>) -> Status {
+        status(self.status_code(), message, self)
+    }
 }
 
 impl std::fmt::Display for CoordErrorCode {
@@ -258,6 +317,36 @@ mod tests {
                 "缺少 wire 码 {name}（契约要求）"
             );
         }
+    }
+
+    #[test]
+    fn from_wire_roundtrips_every_code() {
+        for code in CoordErrorCode::ALL {
+            assert_eq!(CoordErrorCode::from_wire(code.as_str()), Some(*code));
+        }
+        assert_eq!(CoordErrorCode::from_wire("NOT_A_CODE"), None);
+    }
+
+    /// v2 码的 gRPC 状态码是契约的一部分（proto 头注/WHITEPAPER）；
+    /// 客户端与 agent 代理都按这张表重建 `Status`。
+    #[test]
+    fn v2_codes_use_the_contract_status_codes() {
+        for (code, expected) in [
+            (CoordErrorCode::TxnConflict, Code::Aborted),
+            (CoordErrorCode::TxnNotFound, Code::Aborted),
+            (CoordErrorCode::TxnTooLarge, Code::InvalidArgument),
+            (CoordErrorCode::ReadSetTooLarge, Code::InvalidArgument),
+            (CoordErrorCode::CommitRejected, Code::FailedPrecondition),
+            (CoordErrorCode::EpochStale, Code::Aborted),
+            (CoordErrorCode::HistoryUnavailable, Code::OutOfRange),
+            (CoordErrorCode::SafeTsLag, Code::Unavailable),
+        ] {
+            assert!(code.is_v2_specific(), "{code:?} must be v2-specific");
+            let status = code.into_status(code.as_str());
+            assert_eq!(status.code(), expected, "{code:?} status code");
+            assert_eq!(error_code_of(&status).as_deref(), Some(code.as_str()));
+        }
+        assert!(!CoordErrorCode::NotFound.is_v2_specific());
     }
 
     #[test]

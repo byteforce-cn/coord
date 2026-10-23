@@ -88,6 +88,25 @@ pub(crate) fn from_status(status: tonic::Status) -> Error {
     }
 }
 
+/// v2 远端错误：显式 wire 码优先，其余回落到 [`from_status`]。
+///
+/// `TXN_CONFLICT` / `COMMIT_REJECTED` / `SAFE_TS_LAG` 等码决定调用方动作，
+/// 不能按 gRPC 状态码压成 `INTERNAL`；agent 代理需要这些码原样回传。
+/// v1 不会发出这些码，因此共用重试入口也是安全的。
+pub(crate) fn from_status_v2(status: tonic::Status) -> Error {
+    if let Some(code) = error_code_of(&status)
+        .as_deref()
+        .and_then(CoordErrorCode::from_wire)
+        .filter(|code| code.is_v2_specific())
+    {
+        return Error::V2 {
+            code,
+            message: status.message().to_string(),
+        };
+    }
+    from_status(status)
+}
+
 /// v2 时间戳上 wire 前先校验：`commit_ts`/`read_ts` 是 u64 语义，但 proto 字段是
 /// int64；越界直接拒绝，不能把回绕后的负值交给服务端当「旧时间戳」。
 pub(crate) fn ts_to_i64(name: &str, ts: u64) -> Result<i64> {
@@ -481,14 +500,14 @@ impl Client {
                     self.return_channel(&endpoint, channel);
 
                     match classify_tonic(&status) {
-                        RetryDecision::Abort => return Err(from_status(status)),
+                        RetryDecision::Abort => return Err(from_status_v2(status)),
                         RetryDecision::RetryImmediately | RetryDecision::RetryAfter(_) => {
                             match retry.next_attempt() {
                                 Some(wait) => {
                                     tokio::time::sleep(wait).await;
                                     continue;
                                 }
-                                None => return Err(from_status(status)),
+                                None => return Err(from_status_v2(status)),
                             }
                         }
                     }
@@ -528,7 +547,7 @@ impl Client {
                             continue;
                         }
                     }
-                    return Err(from_status(status));
+                    return Err(from_status_v2(status));
                 }
             }
         }
@@ -850,7 +869,27 @@ impl KvV2Client {
                 u64::try_from(ts)
                     .map_err(|_| Error::Internal(format!("TSO returned invalid ts {ts}")))
             }
-            Err(status) => Err(from_status(status)),
+            Err(status) => Err(from_status_v2(status)),
+        }
+    }
+
+    /// 从 `coord.tso.v2.Allocate` 申请一批时间戳 `[start_ts, end_ts)`。
+    ///
+    /// 批次是进程内内存态：重启即丢弃，不得持久化后复用（ADR-0015 D2）。
+    pub async fn allocate(&self, batch_size: u32) -> Result<(u64, u64)> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = tso_v2::tso_client::TsoClient::new(channel.clone());
+        match stub.allocate(tso_v2::AllocateRequest { batch_size }).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                let inner = resp.into_inner();
+                let start_ts = u64::try_from(inner.start_ts)
+                    .map_err(|_| Error::Internal("TSO returned a negative start_ts".into()))?;
+                let end_ts = u64::try_from(inner.end_ts)
+                    .map_err(|_| Error::Internal("TSO returned a negative end_ts".into()))?;
+                Ok((start_ts, end_ts))
+            }
+            Err(status) => Err(from_status_v2(status)),
         }
     }
 
@@ -859,6 +898,20 @@ impl KvV2Client {
         &self,
         key: &[u8],
         value: &[u8],
+        commit_ts: u64,
+        prev_kv: bool,
+        request_id: &[u8],
+    ) -> Result<(Option<kv_v2::KeyValue>, u64)> {
+        self.put_with_lease(key, value, 0, commit_ts, prev_kv, request_id)
+            .await
+    }
+
+    /// 同 [`Self::put`]，但把 key 绑定到租约（`lease_id = 0` 表示无租约）。
+    pub async fn put_with_lease(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        lease_id: i64,
         commit_ts: u64,
         prev_kv: bool,
         request_id: &[u8],
@@ -874,7 +927,7 @@ impl KvV2Client {
                 let mut request = tonic::Request::new(kv_v2::PutRequest {
                     key: key.clone(),
                     value: value.clone(),
-                    lease_id: 0,
+                    lease_id,
                     prev_kv,
                     request_id: request_id.clone(),
                     commit_ts,
@@ -935,7 +988,7 @@ impl KvV2Client {
                             continue;
                         }
                     }
-                    return Err(from_status(status));
+                    return Err(from_status_v2(status));
                 }
             }
         }
@@ -2614,6 +2667,42 @@ mod tests {
             Error::InvalidArgument(msg) => assert!(msg.contains("bad input")),
             _ => panic!("expected InvalidArgument"),
         }
+    }
+
+    /// v2 专属码必须保留（agent 代理要按码原样回传）：落到 `from_status` 的
+    /// 状态码兜底会把 `TXN_CONFLICT`/`SAFE_TS_LAG` 压成 `INTERNAL`。
+    #[test]
+    fn test_from_status_v2_preserves_wire_codes() {
+        for code in [
+            CoordErrorCode::TxnConflict,
+            CoordErrorCode::TxnNotFound,
+            CoordErrorCode::TxnTooLarge,
+            CoordErrorCode::ReadSetTooLarge,
+            CoordErrorCode::CommitRejected,
+            CoordErrorCode::EpochStale,
+            CoordErrorCode::HistoryUnavailable,
+            CoordErrorCode::SafeTsLag,
+        ] {
+            let status = coord_core::error_code::attach(
+                tonic::Status::new(code.status_code(), code.as_str()),
+                code,
+            );
+            match from_status_v2(status) {
+                Error::V2 { code: got, .. } => assert_eq!(got, code),
+                other => panic!("{code:?} must stay a V2 error, got {other:?}"),
+            }
+        }
+    }
+
+    /// 非 v2 专属码继续走 v1 映射：`NOT_FOUND` 仍是 `Error::NotFound`，
+    /// 不因 v2 错误通道而被改名。
+    #[test]
+    fn test_from_status_v2_keeps_generic_mapping() {
+        let status = coord_core::error_code::attach(
+            tonic::Status::not_found("missing"),
+            CoordErrorCode::NotFound,
+        );
+        assert!(matches!(from_status_v2(status), Error::NotFound { .. }));
     }
 
     // ──── 客户端背压（有界队列 + try_send + 溢出信号）────

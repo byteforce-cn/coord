@@ -8,12 +8,19 @@
 use std::time::Duration;
 
 use coord_agent::{AgentConfig, AgentServer};
+use coord_core::error_code::error_code_of;
 use coord_proto::kv::kv_client::KvClient;
+use coord_proto::kv::v2::kv_client::KvClient as KvV2Client;
+use coord_proto::kv::v2::PutRequest as PutRequestV2;
 use coord_proto::kv::PutRequest;
 use coord_proto::lease::lease_client::LeaseClient;
+use coord_proto::lease::v2::lease_client::LeaseClient as LeaseV2Client;
+use coord_proto::lease::v2::LeaseGrantRequest as LeaseGrantRequestV2;
 use coord_proto::lease::LeaseGrantRequest;
 use coord_proto::maintenance::maintenance_client::MaintenanceClient;
 use coord_proto::maintenance::StatusRequest;
+use coord_proto::tso::v2::tso_client::TsoClient as TsoV2Client;
+use coord_proto::tso::v2::GetTsRequest;
 use coord_proto::txn::txn_client::TxnClient;
 use coord_proto::txn::TxnRequest;
 use coord_proto::watch::watch_client::WatchClient;
@@ -108,6 +115,50 @@ async fn test_agent_grpc_server_starts_and_listens() {
             }
         }
     }
+
+    handle.abort();
+}
+
+/// KV-T v2 服务（TSO/KV/Lease）已注册；骨架模式下 fail-closed（UNAVAILABLE），
+/// 不是 `UNIMPLEMENTED`（未注册）也不是假成功。
+#[tokio::test]
+async fn test_agent_registers_kvt_v2_services_fail_closed() {
+    let port = find_port();
+    let config = test_config(port);
+    let addr = config.agent_addr.clone();
+
+    let server = AgentServer::new(config);
+    let handle = tokio::spawn(async move {
+        server.serve().await.unwrap();
+    });
+    let channel = connect_ready(&addr).await;
+
+    let err = KvV2Client::new(channel.clone())
+        .put(PutRequestV2 {
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            commit_ts: 1,
+            ..Default::default()
+        })
+        .await
+        .expect_err("skeleton v2 KV must fail closed");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+    assert_eq!(error_code_of(&err).as_deref(), Some("UNAVAILABLE"));
+
+    let err = TsoV2Client::new(channel.clone())
+        .get_ts(GetTsRequest {})
+        .await
+        .expect_err("skeleton v2 TSO must fail closed");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+
+    let err = LeaseV2Client::new(channel)
+        .lease_grant(LeaseGrantRequestV2 {
+            ttl_seconds: 30,
+            ..Default::default()
+        })
+        .await
+        .expect_err("skeleton v2 Lease must fail closed");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
 
     handle.abort();
 }

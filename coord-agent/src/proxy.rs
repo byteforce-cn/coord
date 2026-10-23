@@ -121,7 +121,7 @@ impl AgentInner {
 ///
 /// 映射以 `coord_core::error_code::CoordErrorCode` 为唯一定义；本函数是 agent
 /// 数据面（Java 经 agent 接入的主路径）上所有 `CoreError` 的**唯一**出口。
-fn map_core_error(e: CoreError) -> tonic::Status {
+pub(crate) fn map_core_error(e: CoreError) -> tonic::Status {
     use coord_core::error_code::{attach, CoordErrorCode as EC};
 
     let (status, code) = match &e {
@@ -175,10 +175,24 @@ fn map_core_error(e: CoreError) -> tonic::Status {
         CoreError::LeaseTTLOutOfRange { .. } => {
             (tonic::Status::out_of_range(e.to_string()), EC::OutOfRange)
         }
+        // v2 域错误即使从通用路径冒出来，也不能压成 INTERNAL：
+        // COMMIT_REJECTED 是「时间戳不变量被违反」，HISTORY_UNAVAILABLE 是
+        // 「窗口已回收」，EPOCH_STALE 是「刷新路由后重试」。
+        CoreError::CommitRejected { .. } => (
+            tonic::Status::failed_precondition(e.to_string()),
+            EC::CommitRejected,
+        ),
+        CoreError::HistoryUnavailable { .. } => (
+            tonic::Status::out_of_range(e.to_string()),
+            EC::HistoryUnavailable,
+        ),
+        CoreError::EpochStale { .. } => (tonic::Status::aborted(e.to_string()), EC::EpochStale),
         CoreError::WatchTooManyConnections { .. } | CoreError::Backpressure(_) => (
             tonic::Status::resource_exhausted(e.to_string()),
             EC::ResourceExhausted,
         ),
+        // v2 远端错误保留原码（代理层不能把它降级成 INTERNAL）。
+        CoreError::V2 { code, message } => return (*code).into_status(message.clone()),
         _ => (tonic::Status::internal(e.to_string()), EC::Internal),
     };
     attach(status, code)
