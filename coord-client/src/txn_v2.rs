@@ -134,6 +134,18 @@ impl TxnV2Session {
         mutations: Vec<proto::Mutation>,
         request_id: &[u8],
     ) -> Result<TxnCommit> {
+        self.commit_in_place(mutations, request_id).await
+    }
+
+    /// 同 [`Self::commit`]，但**保留会话句柄**：传输失败后代理可用同一会话
+    /// 与同一 `request_id` 重试（服务端按 `request_id` 回放首次 `commit_ts`）。
+    /// 成功返回后服务端会话已收口（再调用得到 `TXN_NOT_FOUND`）；冲突按契约
+    /// 换新 `start_ts` 重跑，调用方不应复用本会话。
+    pub async fn commit_in_place(
+        &self,
+        mutations: Vec<proto::Mutation>,
+        request_id: &[u8],
+    ) -> Result<TxnCommit> {
         let channel = self.channel()?.clone();
         let txn_id = self.txn_id.clone();
         let request_id = request_id.to_vec();

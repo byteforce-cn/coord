@@ -22,6 +22,8 @@ use coord_proto::maintenance::StatusRequest;
 use coord_proto::tso::v2::tso_client::TsoClient as TsoV2Client;
 use coord_proto::tso::v2::GetTsRequest;
 use coord_proto::txn::txn_client::TxnClient;
+use coord_proto::txn::v2::txn_client::TxnClient as TxnV2Client;
+use coord_proto::txn::v2::BeginRequest as BeginRequestV2;
 use coord_proto::txn::TxnRequest;
 use coord_proto::watch::watch_client::WatchClient;
 
@@ -119,7 +121,7 @@ async fn test_agent_grpc_server_starts_and_listens() {
     handle.abort();
 }
 
-/// KV-T v2 服务（TSO/KV/Lease）已注册；骨架模式下 fail-closed（UNAVAILABLE），
+/// KV-T v2 服务（TSO/KV/Lease/Txn）已注册；骨架模式下 fail-closed（UNAVAILABLE），
 /// 不是 `UNIMPLEMENTED`（未注册）也不是假成功。
 #[tokio::test]
 async fn test_agent_registers_kvt_v2_services_fail_closed() {
@@ -151,7 +153,7 @@ async fn test_agent_registers_kvt_v2_services_fail_closed() {
         .expect_err("skeleton v2 TSO must fail closed");
     assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
 
-    let err = LeaseV2Client::new(channel)
+    let err = LeaseV2Client::new(channel.clone())
         .lease_grant(LeaseGrantRequestV2 {
             ttl_seconds: 30,
             ..Default::default()
@@ -159,6 +161,16 @@ async fn test_agent_registers_kvt_v2_services_fail_closed() {
         .await
         .expect_err("skeleton v2 Lease must fail closed");
     assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+
+    let err = TxnV2Client::new(channel)
+        .begin(BeginRequestV2 {
+            start_ts: 0,
+            ttl_ms: 0,
+        })
+        .await
+        .expect_err("skeleton v2 Txn must fail closed");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+    assert_eq!(error_code_of(&err).as_deref(), Some("UNAVAILABLE"));
 
     handle.abort();
 }

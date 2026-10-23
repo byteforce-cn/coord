@@ -191,10 +191,13 @@
 - **对象存储**：manifest 用 `commit_ts`；`/obj/` 固定 Region 区间，不参与任意
   KV split；chunk 不随 KV split 迁移（`boundaries.md` B-KVT-3）。
 - **Agent 代理面（#170 进行中）**：`coord.tso.v2` / `coord.kv.v2` /
-  `coord.lease.v2` 已由 Agent 转发（不经过 Agent 的 KV 读缓存；routing epoch
-  由 Agent 内部客户端学习并在 `EPOCH_STALE` 后重试）；`coord.txn.v2` /
-  `coord.watch.v2` / `coord.storage.v2` 仍需直连 Server。未迁移的 Agent 内部
-  数据面调用在 v2 集群上按 v1 冻结口径 fail-closed，不静默降级。
+  `coord.lease.v2` / `coord.txn.v2` 已由 Agent 转发（KV 不经过 Agent 的读
+  缓存；routing epoch 由 Agent 内部客户端学习并在 `EPOCH_STALE` 后重试）。
+  Txn 会话按 `txn_id` 钉在 Begin 选中的协调节点上（ADR-0015 D12.2）：leader
+  切换不会把后续 `Read`/`Commit` 送到新 leader；未知/已结束会话回
+  `ABORTED` + `TXN_NOT_FOUND`，`Abort` 幂等成功。`coord.watch.v2` /
+  `coord.storage.v2` 仍需直连 Server。未迁移的 Agent 内部数据面调用在 v2
+  集群上按 v1 冻结口径 fail-closed，不静默降级。
 - **不承诺**：v1 数据迁移 / v1 facade；MQ v1 在 v2 集群不可用；MQ v2 未 GA；
   严格外部实时序（`boundaries.md` B-KVT-1..8）。
 
