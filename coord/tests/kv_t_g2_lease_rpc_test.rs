@@ -34,7 +34,7 @@ mod tests {
     use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
     use coord_server::raft::state_machine::StateMachineStore;
     use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
-    use coord_server::raft::type_config::LeaseV2Op;
+    use coord_server::raft::type_config::{Command, LeaseV2Op, Response};
     use coord_server::raft::{new_basic_node, new_raft, RaftConfig};
     use coord_server::server::CoordNode;
     use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
@@ -548,6 +548,87 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         h.node.start_kvt_lease_revoker(rx);
         wait_gone(&h, b"resume-key").await;
+    }
+
+    /// 迁移窗口内的租约清理必须整体延后：fence 的 Region 既不落删除，也不为
+    /// 同一条清理重新取 `commit_ts`；窗口结束（fence 清除）后按当时的表重扇出，
+    /// key 才被清掉。
+    #[tokio::test]
+    async fn test_lease_v2_cleanup_defers_on_fenced_region_until_cutover() {
+        let h = G2Node::start().await;
+        let mut lease = h.lease().await;
+
+        let grant = lease
+            .lease_grant(LeaseGrantRequest {
+                ttl_seconds: 60,
+                lease_id: 0,
+                request_id: b"defer-on-migration".to_vec(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        h.put_bound(b"a-fenced", b"v", grant.lease_id).await;
+        h.put_bound(b"m-fenced", b"v", grant.lease_id).await;
+
+        // Region 2 进入迁移窗口（split 源 / merge donor 的 fence 标记）。
+        let region = h.manager.runtime(2).expect("region 2 runtime");
+        let armed = region
+            .raft
+            .client_write(Command::FenceDirectWrites {
+                start_key: b"m".to_vec(),
+                end_key: Vec::new(),
+                op_id: 77,
+            })
+            .await
+            .expect("arm migration fence")
+            .response()
+            .clone();
+        assert!(matches!(armed, Response::DirectWritesFenced { op_id: 77 }));
+
+        lease
+            .lease_revoke(LeaseRevokeRequest {
+                lease_id: grant.lease_id,
+                request_id: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let recorded_ts = h
+            .node
+            .storage
+            .get_lease_v2_record(grant.lease_id)
+            .unwrap()
+            .expect("revoke record")
+            .revoked_commit_ts;
+
+        // 未 fence 的 Region 立即清理；fence 的 Region 延后。
+        wait_gone(&h, b"a-fenced").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            h.key_live(b"m-fenced"),
+            "a region inside a migration window must defer lease cleanup"
+        );
+        assert!(
+            region.mvcc.direct_write_fence().unwrap().is_some(),
+            "the window is still open"
+        );
+        assert_eq!(
+            h.node
+                .storage
+                .get_lease_v2_record(grant.lease_id)
+                .unwrap()
+                .expect("revoke record")
+                .revoked_commit_ts,
+            recorded_ts,
+            "the deferred cleanup must not re-allocate commit_ts while fenced",
+        );
+
+        // cutover 完成（fence 清除）：清理按当时的表重扇出并落在这个 Region。
+        region
+            .raft
+            .client_write(Command::ClearDirectWriteFence { op_id: 77 })
+            .await
+            .expect("clear migration fence");
+        wait_gone(&h, b"m-fenced").await;
     }
 
     #[tokio::test]

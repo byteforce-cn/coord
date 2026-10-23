@@ -634,7 +634,9 @@ impl StateMachineStore {
                 commit_ts,
             } => match sm.delete_keys_by_lease_at_commit_ts(*lease_id, *commit_ts, applied) {
                 Ok((outcome, deleted)) => {
-                    let event = if outcome.replayed {
+                    // 空删除（没有绑定行）不占 commit_ts、不产事件；只有真的删了
+                    // key 才有 Watch 事件可发。
+                    let event = if outcome.replayed || deleted.is_empty() {
                         None
                     } else {
                         Some(ChangeEvent {
