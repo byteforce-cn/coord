@@ -1,6 +1,6 @@
 # coord 运维 Runbook
 
-> Owner: maintainers ｜ Last verified: 2026-10-12
+> Owner: maintainers ｜ Last verified: 2026-10-23
 
 - **体例**：每条 = **触发 / 命令 / 预期输出 / 失败时怎么办**。
   「命令」一律是别人能重跑的东西；写不出的条目不入本表。
@@ -117,7 +117,9 @@ coord member remove --addr <leader> --id 4
 
 ## 3. 备份 / 恢复
 
-### 3.1 在线拉取快照（推荐）
+### 3.1 在线拉取单 Region 快照
+
+> 这是**单 Region 的状态机快照**，不是整节点备份；v2 集群的备份口径见 §3.3。
 
 ```bash
 coord snapshot pull --addr <leader> --output /backup/coord-$(date -u +%FT%H%M%SZ).snap --region 0
@@ -125,7 +127,9 @@ coord snapshot pull --addr <leader> --output /backup/coord-$(date -u +%FT%H%M%SZ
 
 **预期**：文件非空；`sha256sum` 可计算并归档。
 
-### 3.2 本地导出 / 恢复（停机）
+### 3.2 本地导出 / 恢复单 Region（停机）
+
+> 同样只是单 Region 状态机快照（含 TSO/current revision，但不含 Raft log/成员关系）；整节点备份见 §3.3。
 
 ```bash
 # 导出（直接读本地数据目录）
@@ -134,18 +138,55 @@ coord snapshot save --data-dir /var/lib/coord --output /backup/local.snap --regi
 coord snapshot restore --snapshot /backup/local.snap --data-dir /var/lib/coord --region 0
 ```
 
-### 3.3 已知边界（**必须告诉接入方**）
+### 3.3 v2 整节点离线备份 / 恢复（整节点备份口径）
+
+v2 的备份范围是 region 0（TSO/元数据/校验索引/shard 表）+ 各数据 Region + Commit
+Log shard + Raft log/snapshot。用 `coord backup` 在**所有节点停机后**原样复制一个
+已追平节点的数据目录；服务器没停会因 region 0 的 redb 锁直接失败。
+
+```bash
+# 备份（--output 必须不存在；清单与数据同一目录，manifest 最后写）
+coord backup save --data-dir /var/lib/coord --output /backup/coord-$(date -u +%FT%H%M%SZ)
+
+# 恢复（目标节点停机；空目录直接恢复，覆盖非空目录加 --replace）
+coord backup restore --input /backup/coord-<ts> --data-dir /var/lib/coord
+```
+
+**预期**：`<output>/coord-backup.json` 存在，`entries` 覆盖 `store.db`、各
+`regions/region-*/store.db`、`raft-log/log.db`；恢复输出 TSO high water /
+current revision；恢复后 TSO 继续从高水位发放（不复用），Commit Log 行可读
+（Watch cursor 续订不出现洞）。
+
+**失败时**：
+- `open ... is the server still running?` → 还有节点进程持有数据目录；先停掉再备份。
+- `manifest not found` / `size` / `checksum mismatch` → 备份不完整或被改动；重新备份，**不要**手工修清单。
+- `target ... is not empty` → 目标数据目录非空；确认节点已停并加 `--replace`
+  （旧目录保留为 `*.pre-restore-<ms>`，验证后可删）。
+- `TSO high water ... lower than manifest` / `current revision ... lower than manifest` → 备份目录与清单不是同一次备份；停止恢复，重新取备份。
+
+**边界**：
+- 这是**停机整目录**备份，含 Raft log/成员关系/根密钥；不是 Raft snapshot。
+  单 Region 快照（§3.1/§3.2）仍用于导出/追赶，不承担整节点备份。
+- 恢复只支持**同一节点**（node_id 不变）；不承诺把 A 节点目录恢复到 B 节点，
+  也不承诺在线（不停机）一致性备份。多节点时每个节点的数据目录分别归档。
+- Commit Log 行随目录恢复，窗口内历史可续读；窗口外的旧事件仍按 B-KVT-4
+  返回 `HISTORY_UNAVAILABLE`。
+
+### 3.4 已知边界（**必须告诉接入方**）
 
 - 快照恢复会**落后于集群当前状态**；恢复单个节点后它靠 raft 日志/快照追赶。
 - 对象存储面：快照恢复后落后节点的**本地 chunk 会被清空并 rebuild**，期间 `Get`
   返回 `UNAVAILABLE`（这是**已声明的边界**，不是缺陷）。见
   `docs/production/volume-object-storage.md` 与 `docs/production/ops/boundaries.md`。
 - **全集群配置必须一致**（尤其 `security.*` 与 `[multi_raft]`）。
+- 整节点备份/恢复（§3.3）要求全部节点停机；在线一致性备份不在当前承诺内。
 
 **演练要求**：至少演练一次「坏一个节点 → 用快照恢复 → `member list` 恢复 → 数据抽样读回」。
 
 > **已做**：**进程内**备份/恢复演练 10/10 通过（覆盖快照流→恢复、导出→清空→导入、
-> purge 守卫、重放幂等、kill -9 后 revision 不回退）。**它不替代本节的「演练要求」**：
+> purge 守卫、重放幂等、kill -9 后 revision 不回退）；v2 整节点离线备份/恢复的 CLI 回归
+> （`coord/tests/backup_cli_test.rs`：TSO 不复用、revision 不倒退、Commit Log 历史连续、
+> 清单缺失/篡改与运行中目录 fail-closed）。**它不替代本节的「演练要求」**：
 > 坏节点恢复 + 对象存储 + 多节点仍是 ⏳ 未做。
 
 ---

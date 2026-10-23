@@ -181,11 +181,22 @@ async fn test_watch_rpc_ack_and_cancel() {
         .expect("send cancel");
     tokio::time::sleep(Duration::from_millis(200)).await;
     fx.commit_pairs(&[(b"bb", b"v2")]).await;
-    let quiet = tokio::time::timeout(Duration::from_millis(700), open.stream.message()).await;
-    assert!(
-        quiet.is_err(),
-        "cancelled watch must not deliver more events: {quiet:?}"
-    );
+    // Cancel 前已排队的水位空批仍可能送达；契约是「不再产出事件」，不是
+    // 「通道立刻关闭」。窗口内允许空批/关闭，出现任何 event 即失败。
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(700);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, open.stream.message()).await {
+            Ok(Ok(Some(response))) => assert!(
+                response.events.is_empty(),
+                "cancelled watch must not deliver events: {response:?}"
+            ),
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+        }
+    }
     drop(open);
     server.shutdown().await;
 }

@@ -7,7 +7,9 @@
 // - security:  封存/解封/初始化密钥分片/轮换密钥
 // - member:    动态成员管理（添加/移除/晋升/列表）
 // - snapshot:  快照管理（保存/恢复）
+// - backup:    停机整节点备份/恢复（数据目录 + SHA-256 清单）
 
+mod backup;
 pub mod commands;
 mod config;
 pub mod credentials;
@@ -214,6 +216,10 @@ enum Commands {
     /// 快照管理
     #[command(subcommand)]
     Snapshot(SnapshotCmd),
+
+    /// 停机整节点备份/恢复（v2；与 snapshot 的状态机快照区分）
+    #[command(subcommand)]
+    Backup(BackupCmd),
 
     /// 认证与授权管理
     #[command(subcommand)]
@@ -520,6 +526,37 @@ enum SnapshotCmd {
         /// 目标 Region（0 = region 0 / 单 Raft；>0 = 该 Region）
         #[arg(long, default_value_t = 0)]
         region: u64,
+    },
+}
+
+// ──── Backup 子命令 ────
+
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// 备份整个数据目录（服务器必须已停止）
+    Save {
+        /// coord 数据目录
+        #[arg(long, default_value = "/var/lib/coord")]
+        data_dir: PathBuf,
+
+        /// 备份输出目录（必须不存在）
+        #[arg(long)]
+        output: PathBuf,
+    },
+
+    /// 从整节点备份恢复（目标节点必须已停止；非空目录需 --replace）
+    Restore {
+        /// 备份输入目录（含 coord-backup.json）
+        #[arg(long)]
+        input: PathBuf,
+
+        /// coord 数据目录
+        #[arg(long, default_value = "/var/lib/coord")]
+        data_dir: PathBuf,
+
+        /// 允许替换非空数据目录（旧目录保留为 *.pre-restore-<ms>）
+        #[arg(long, default_value_t = false)]
+        replace: bool,
     },
 }
 
@@ -1223,6 +1260,33 @@ async fn main() {
                 .await
                 {
                     tracing::error!("Snapshot pull failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Commands::Backup(cmd) => match cmd {
+            BackupCmd::Save { data_dir, output } => {
+                tracing::info!("Backing up {} to {}", data_dir.display(), output.display());
+                if let Err(e) = backup::save(&data_dir, &output) {
+                    tracing::error!("Backup save failed: {e}");
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            BackupCmd::Restore {
+                input,
+                data_dir,
+                replace,
+            } => {
+                tracing::info!(
+                    "Restoring backup {} to {}",
+                    input.display(),
+                    data_dir.display()
+                );
+                if let Err(e) = backup::restore(&input, &data_dir, replace) {
+                    tracing::error!("Backup restore failed: {e}");
+                    eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
             }
