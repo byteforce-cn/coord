@@ -14,9 +14,11 @@ import java.util.function.Function;
  * <ul>
  *   <li>Max 3 attempts total (1 initial + 2 retries).</li>
  *   <li>Retries on {@link ErrorCode#NOT_LEADER}, {@link ErrorCode#UNAVAILABLE},
- *       {@link ErrorCode#AGENT_UNAVAILABLE}, {@link ErrorCode#RESOURCE_EXHAUSTED}
- *       and {@link ErrorCode#DEADLINE_EXCEEDED}——与 Rust 客户端矩阵对齐
- *       （unavailable/deadline/timeout 均重试）。</li>
+ *       {@link ErrorCode#AGENT_UNAVAILABLE}, {@link ErrorCode#RESOURCE_EXHAUSTED},
+ *       {@link ErrorCode#DEADLINE_EXCEEDED}, {@link ErrorCode#SAFE_TS_LAG} and
+ *       {@link ErrorCode#EPOCH_STALE}——与 Rust 客户端矩阵对齐
+ *       （unavailable/deadline/timeout 均重试；safe-ts 等待超时与路由版本刷新
+ *       也是退避重试，不是业务失败）。</li>
  *   <li>{@code NOT_LEADER} 由服务端显式标注；若被压成 {@code AGENT_UNAVAILABLE}，
  *       语义上是"等 agent 恢复"而非"换 leader 重试"。本模板重试两者——但调用方
  *       与日志必须能区分它们。</li>
@@ -78,7 +80,9 @@ public final class RetryTemplate {
                 || code == ErrorCode.UNAVAILABLE
                 || code == ErrorCode.AGENT_UNAVAILABLE
                 || code == ErrorCode.RESOURCE_EXHAUSTED
-                || code == ErrorCode.DEADLINE_EXCEEDED;
+                || code == ErrorCode.DEADLINE_EXCEEDED
+                || code == ErrorCode.SAFE_TS_LAG
+                || code == ErrorCode.EPOCH_STALE;
     }
 
     /**
