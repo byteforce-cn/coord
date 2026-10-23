@@ -263,15 +263,18 @@ pub(crate) fn txn_error(status: tonic::Status) -> Error {
             // 只有 commit 会把冲突当成功结果；其它 RPC 看到冲突说明服务端状态异常。
             Error::Internal(format!("unexpected TXN_CONFLICT: {}", status.message()))
         }
-        Some(code) if code == CoordErrorCode::TxnNotFound.as_str() => Error::NotFound {
-            resource: "transaction",
-            key: status.message().to_string(),
+        Some(code) if code == CoordErrorCode::TxnNotFound.as_str() => Error::V2 {
+            code: CoordErrorCode::TxnNotFound,
+            message: status.message().to_string(),
         },
         Some(code)
             if code == CoordErrorCode::TxnTooLarge.as_str()
                 || code == CoordErrorCode::ReadSetTooLarge.as_str() =>
         {
-            Error::InvalidArgument(status.message().to_string())
+            Error::V2 {
+                code: CoordErrorCode::from_wire(code).unwrap_or(CoordErrorCode::Internal),
+                message: status.message().to_string(),
+            }
         }
         _ => from_status(status),
     }
@@ -300,8 +303,8 @@ mod tests {
         let missing = attach(tonic::Status::aborted("gone"), CoordErrorCode::TxnNotFound);
         assert!(matches!(
             txn_error(missing),
-            Error::NotFound {
-                resource: "transaction",
+            Error::V2 {
+                code: CoordErrorCode::TxnNotFound,
                 ..
             }
         ));
@@ -310,13 +313,25 @@ mod tests {
             tonic::Status::invalid_argument("big"),
             CoordErrorCode::TxnTooLarge,
         );
-        assert!(matches!(txn_error(too_large), Error::InvalidArgument(_)));
+        assert!(matches!(
+            txn_error(too_large),
+            Error::V2 {
+                code: CoordErrorCode::TxnTooLarge,
+                ..
+            }
+        ));
 
         let read_set = attach(
             tonic::Status::invalid_argument("read set"),
             CoordErrorCode::ReadSetTooLarge,
         );
-        assert!(matches!(txn_error(read_set), Error::InvalidArgument(_)));
+        assert!(matches!(
+            txn_error(read_set),
+            Error::V2 {
+                code: CoordErrorCode::ReadSetTooLarge,
+                ..
+            }
+        ));
 
         // 未附码的 UNAVAILABLE 仍按传输错误处理。
         assert!(matches!(

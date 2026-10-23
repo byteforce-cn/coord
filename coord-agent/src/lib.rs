@@ -26,6 +26,7 @@ pub mod pki;
 pub mod pki_store;
 pub mod plugin;
 mod proxy;
+mod proxy_v2;
 // Watch 的 scope 判定在 handler 侧（`proxy::WatchProxy::watch`），
 // 因此它的正反双测必须在 handler 级跑 —— 只测判定函数证明不了 handler 调了它。
 #[cfg(test)]
@@ -40,9 +41,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use coord_proto::kv::kv_server::KvServer;
+use coord_proto::kv::v2::kv_server::KvServer as KvV2Server;
 use coord_proto::lease::lease_server::LeaseServer;
+use coord_proto::lease::v2::lease_server::LeaseServer as LeaseV2Server;
 use coord_proto::maintenance::maintenance_server::MaintenanceServer;
 use coord_proto::storage::storage_server::StorageServer;
+use coord_proto::tso::v2::tso_server::TsoServer as TsoV2Server;
 use coord_proto::txn::txn_server::TxnServer;
 use coord_proto::watch::watch_server::WatchServer;
 
@@ -60,6 +64,9 @@ pub use pki_store::{
     CaRecord, CertRecord, CertStatus, KvPkiStore, MemoryPkiStore, PkiStore, PkiStoreError,
 };
 pub use proxy::AgentInner;
+// v2 代理的构造入口与 `AgentInner` 同理：集成测试要能验证「真的转发」而不是
+// 只验证 gRPC 注册；生产装配仍只经 `build_agent_grpc_router` 使用。
+pub use proxy_v2::{KvV2Proxy, LeaseV2Proxy, TsoV2Proxy};
 pub use service::{BaseService, ServiceConfig, ServiceResult, WorkflowDispatchConfig};
 pub use services::transit_store::{
     DekRecord, DekStoreError, KvTransitDekStore, MemoryTransitDekStore, TransitDekStore,
@@ -538,6 +545,15 @@ where
             crate::proxy::WatchProxy::new(svcs.inner.clone()).with_metrics(metrics),
         ))
         .add_service(MaintenanceServer::new(crate::proxy::MaintenanceProxy::new(
+            svcs.inner.clone(),
+        )))
+        .add_service(KvV2Server::new(crate::proxy_v2::KvV2Proxy::new(
+            svcs.inner.clone(),
+        )))
+        .add_service(TsoV2Server::new(crate::proxy_v2::TsoV2Proxy::new(
+            svcs.inner.clone(),
+        )))
+        .add_service(LeaseV2Server::new(crate::proxy_v2::LeaseV2Proxy::new(
             svcs.inner.clone(),
         )))
         .add_service(StorageServer::new(crate::proxy::StorageProxy::new(
@@ -2422,6 +2438,15 @@ impl AgentServer {
             .await;
         health_reporter
             .set_serving::<MaintenanceServer<MaintenanceProxy>>()
+            .await;
+        health_reporter
+            .set_serving::<KvV2Server<crate::proxy_v2::KvV2Proxy>>()
+            .await;
+        health_reporter
+            .set_serving::<TsoV2Server<crate::proxy_v2::TsoV2Proxy>>()
+            .await;
+        health_reporter
+            .set_serving::<LeaseV2Server<crate::proxy_v2::LeaseV2Proxy>>()
             .await;
 
         // 注册 gRPC Server Reflection 服务

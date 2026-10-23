@@ -1894,6 +1894,8 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
             tonic::Status::internal("data corruption")
         }
         Error::Crypto(_) => tonic::Status::internal("crypto error"),
+        // 远端 v2 错误只可能来自客户端代理层；保留其 wire 码与规范状态码。
+        Error::V2 { code, message } => (*code).into_status(message.clone()),
     }
 }
 
