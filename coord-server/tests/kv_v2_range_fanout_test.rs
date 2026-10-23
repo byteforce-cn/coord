@@ -389,8 +389,13 @@ async fn test_v1_cross_region_range_is_still_rejected() {
         }),
     )
     .await
-    .expect_err("v1 cross-region range stays unsupported");
-    assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+    .expect_err("the v1 data plane is frozen on a v2 cluster");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    assert!(
+        err.message()
+            .contains("v1 data plane is frozen on a v2 cluster"),
+        "freeze message must stay diagnosable: {err:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
