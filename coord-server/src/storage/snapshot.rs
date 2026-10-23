@@ -16,11 +16,12 @@ use serde::{Deserialize, Serialize};
 use coord_core::error::{Error, Result};
 use coord_core::storage::StorageBackend;
 
+use super::commit_log::COMMIT_LOG_PREFIX;
 use super::envelope;
 use super::mvcc::{
     encode_kv_key, encode_kv_meta_key, AppliedLogId, KvMetadata, MvccStorage, RevisionMode,
     CHANGELOG_PREFIX, META_COMPACT_REVISION, META_CURRENT_REVISION, META_LAST_APPLIED,
-    TABLE_CHANGELOG, TABLE_KV, TABLE_KV_META, TABLE_META,
+    TABLE_CHANGELOG, TABLE_COMMIT_LOG, TABLE_KV, TABLE_KV_META, TABLE_META,
 };
 
 // ──── Snapshot 数据结构 ────
@@ -78,6 +79,11 @@ pub struct SnapshotData {
     /// 历史读会**静默返回前值**（与实时读不一致）。导入时**整体替换**（先清空再
     /// 灌入）。
     pub changelog_entries: Vec<SnapshotRawEntry>,
+    /// Commit Log 行（`TABLE_COMMIT_LOG`，key = `/_sys/commit_log/{shard}/{ts}/{region}`）。
+    ///
+    /// 这些行不在 `TABLE_KV` 里，必须单列携带：shard Raft 组装快照/恢复时若丢失，
+    /// Watch 读到的历史会与 region 0 的 shard 表/水位矛盾（静默跳过事件）。整表替换。
+    pub commit_log_entries: Vec<SnapshotRawEntry>,
 }
 
 /// R-RFT-06：快照中的原始内部条目（非用户 KV 域）
@@ -112,10 +118,11 @@ pub struct SnapshotKvMeta {
 
 impl SnapshotData {
     /// 当前快照格式版本（版本号 +1；0.1.x 数据不承诺兼容）。
+    /// v7：携带 Commit Log 表（#169）——shard 快照/备份恢复后 Watch 历史不丢。
     /// v6：携带 `current_revision`（#140）——装快照后 revision 不倒退。
-    /// v5 及更早格式已退役：`from_bytes` 仅接受 v6，旧字节显式拒绝
+    /// v6 及更早格式已退役：`from_bytes` 仅接受 v7，旧字节显式拒绝
     /// （无迁移阶梯）。
-    const CURRENT_VERSION: u32 = 6;
+    const CURRENT_VERSION: u32 = 7;
 
     /// 创建空快照
     pub fn new(last_included_index: u64, last_included_term: u64) -> Self {
@@ -136,6 +143,7 @@ impl SnapshotData {
             pd_entries: Vec::new(),
             sys_entries: Vec::new(),
             changelog_entries: Vec::new(),
+            commit_log_entries: Vec::new(),
         }
     }
 
@@ -197,6 +205,7 @@ pub fn export_snapshot_data<B: StorageBackend>(
         pd_rows,
         sys_rows,
         changelog_rows,
+        commit_log_rows,
     ) = backend.read(|tx| {
         let applied = tx.get(TABLE_META, META_LAST_APPLIED)?;
         let current_revision = tx.get(TABLE_META, META_CURRENT_REVISION)?;
@@ -214,6 +223,7 @@ pub fn export_snapshot_data<B: StorageBackend>(
         // changelog 窗口（`apply_compact` 保留的 `>= compacted` 行）——
         // 装快照后的历史读/watch 重放依赖它，不能缺席（见 SnapshotData 字段注释）。
         let changelog_rows = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
+        let commit_log_rows = tx.iter_prefix(TABLE_COMMIT_LOG, COMMIT_LOG_PREFIX)?;
         Ok((
             applied,
             current_revision,
@@ -225,6 +235,7 @@ pub fn export_snapshot_data<B: StorageBackend>(
             pd_rows,
             sys_rows,
             changelog_rows,
+            commit_log_rows,
         ))
     })?;
 
@@ -321,6 +332,15 @@ pub fn export_snapshot_data<B: StorageBackend>(
         })
         .collect();
 
+    // Commit Log 行（原样导出/灌入；导入侧整表替换）
+    data.commit_log_entries = commit_log_rows
+        .into_iter()
+        .map(|(internal_key, value)| SnapshotRawEntry {
+            internal_key,
+            value,
+        })
+        .collect();
+
     Ok(data)
 }
 
@@ -341,6 +361,15 @@ pub fn import_snapshot_data<B: StorageBackend>(
             "unsupported snapshot version: {} (expected {})",
             data.version,
             SnapshotData::CURRENT_VERSION
+        )));
+    }
+
+    // D11.2：装快照不得让 current revision 倒退（旧备份装到新库必须 fail-closed）。
+    let current = storage.current_revision();
+    if data.current_revision < current {
+        return Err(Error::Storage(format!(
+            "snapshot revision {} regresses current revision {current}",
+            data.current_revision
         )));
     }
 
@@ -377,6 +406,16 @@ pub fn import_snapshot_data<B: StorageBackend>(
             .collect();
         for key in &existing_changelog {
             tx.remove(TABLE_CHANGELOG, key)?;
+        }
+
+        // 清空本地 Commit Log 表：与 changelog 同理，装快照是整体替换。
+        let existing_commit_log: Vec<Vec<u8>> = tx
+            .iter_prefix(TABLE_COMMIT_LOG, COMMIT_LOG_PREFIX)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        for key in &existing_commit_log {
+            tx.remove(TABLE_COMMIT_LOG, key)?;
         }
 
         // 写入 KV 数据
@@ -420,6 +459,10 @@ pub fn import_snapshot_data<B: StorageBackend>(
         // 快照为空窗口，此时旧条目已在上面清空、compacted 水位已抬到 applied）。
         for entry in &data.changelog_entries {
             tx.insert(TABLE_CHANGELOG, &entry.internal_key, &entry.value)?;
+        }
+
+        for entry in &data.commit_log_entries {
+            tx.insert(TABLE_COMMIT_LOG, &entry.internal_key, &entry.value)?;
         }
 
         // R-RFT-06：持久化 applied 状态（完整 term/node_id，来自快照导出时的真实 LogId）
@@ -687,6 +730,80 @@ mod tests {
             "装快照后不得复用旧批次：next=[{}, {})",
             next.start_ts,
             next.end_ts
+        );
+    }
+
+    /// #169：Commit Log 行随状态机快照往返。shard 组装快照/整节点备份后，
+    /// Watch 从 cursor 继续读历史不得出现空洞；导入必须整体替换本地 shard 行。
+    #[test]
+    fn test_snapshot_preserves_commit_log_records() {
+        use crate::storage::commit_log::{CommitChange, CommitRecord};
+
+        let (_tmp, storage) = setup_storage();
+        let record = CommitRecord {
+            shard_id: 1,
+            commit_ts: 10,
+            txn_id: b"txn-10".to_vec(),
+            start_ts: 5,
+            region_id: 7,
+            txn_bytes: 1,
+            changes: vec![CommitChange {
+                key: b"aa".to_vec(),
+                value: Some(b"v".to_vec()),
+                prev: None,
+            }],
+        };
+        storage
+            .append_commit_record(&record, 4 * 1024 * 1024)
+            .unwrap();
+
+        let data = export_snapshot_data(&storage, 1, 1).unwrap();
+        assert_eq!(
+            data.commit_log_entries.len(),
+            1,
+            "Commit Log 行必须进快照（#169）"
+        );
+
+        // 目标已有旧记录：导入必须整体替换，不得留下快照之外的 shard 行。
+        let (_tmp2, storage2) = setup_storage();
+        storage2
+            .append_commit_record(
+                &CommitRecord {
+                    commit_ts: 99,
+                    ..record.clone()
+                },
+                4 * 1024 * 1024,
+            )
+            .unwrap();
+        import_snapshot_data(&storage2, &data).unwrap();
+
+        assert_eq!(storage2.commit_records_at(1, 10).unwrap(), vec![record]);
+        assert!(
+            storage2.commit_records_at(1, 99).unwrap().is_empty(),
+            "装快照是整体替换，旧 shard 行不得残留"
+        );
+    }
+
+    /// #169 / D11.2：装快照不得让 `current_revision` 倒退。
+    #[test]
+    fn test_import_snapshot_rejects_revision_regression() {
+        let (_tmp, storage) = setup_commit_ts_storage();
+        storage
+            .put_at_commit_ts(b"/k", b"v", None, 100, AppliedLogId::standalone(1))
+            .unwrap();
+        let data = export_snapshot_data(&storage, 1, 1).unwrap();
+
+        let (_tmp2, newer) = setup_commit_ts_storage();
+        newer
+            .put_at_commit_ts(b"/k", b"v", None, 200, AppliedLogId::standalone(1))
+            .unwrap();
+
+        let err = import_snapshot_data(&newer, &data).expect_err("不得把 revision 装回去");
+        assert!(matches!(err, Error::Storage(_)));
+        assert_eq!(
+            newer.current_revision(),
+            200,
+            "失败的导入不得改动目标 revision"
         );
     }
 
@@ -1112,7 +1229,7 @@ mod tests {
         data
     }
 
-    /// V2 行（postcard，唯一格式，仅承载 v6）⇒ 解码成功。
+    /// V2 行（postcard，唯一格式，仅承载 v7）⇒ 解码成功。
     /// 负控制：删除 V2 读腿 ⇒ 本用例必红。
     #[test]
     fn test_snapshot_v2_row_decodes() {
@@ -1127,7 +1244,7 @@ mod tests {
         assert_eq!(restored.applied_term, 3);
     }
 
-    /// V2 行版本不是 v6 ⇒ 显式报错（无迁移阶梯，不得按旧结构试解）。
+    /// V2 行版本不是 v7 ⇒ 显式报错（无迁移阶梯，不得按旧结构试解）。
     /// 负控制：去掉 `version == CURRENT_VERSION` 检查 ⇒ 本用例必红。
     #[test]
     fn test_snapshot_v2_wrong_version_rejected() {
@@ -1135,7 +1252,7 @@ mod tests {
         data.version = 4;
         let bytes = envelope::encode(&data).unwrap();
 
-        let err = SnapshotData::from_bytes(&bytes).expect_err("version != 6 必须显式报错");
+        let err = SnapshotData::from_bytes(&bytes).expect_err("version != 7 必须显式报错");
         assert!(
             format!("{err:?}").contains("unsupported snapshot version"),
             "错误必须是版本不受支持，实际：{err:?}"
