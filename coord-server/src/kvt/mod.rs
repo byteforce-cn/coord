@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn v1_gate_rejects_on_a_v2_cluster() {
-        let state = KvTState::new(true, KvTRuntimeConfig::default())
-            .with_implemented([KvTCapability::Kv]);
+        let state =
+            KvTState::new(true, KvTRuntimeConfig::default()).with_implemented([KvTCapability::Kv]);
         let status = state.v1_gate().expect_err("v2 clusters must freeze v1");
         assert_eq!(status.code(), Code::FailedPrecondition);
         assert!(

@@ -18,15 +18,15 @@ use coord_proto::kv::{DeleteRequest, PutRequest, RangeRequest};
 use coord_proto::lease::lease_client::LeaseClient;
 use coord_proto::lease::lease_server::LeaseServer;
 use coord_proto::lease::{LeaseGrantRequest, LeaseKeepAliveRequest, LeaseRevokeRequest};
+use coord_proto::storage::storage_client::StorageClient;
+use coord_proto::storage::storage_server::StorageServer;
+use coord_proto::storage::StatRequest;
 use coord_proto::txn::txn_client::TxnClient;
 use coord_proto::txn::txn_server::TxnServer;
 use coord_proto::txn::TxnRequest;
 use coord_proto::watch::watch_client::WatchClient;
 use coord_proto::watch::watch_server::WatchServer;
 use coord_proto::watch::{WatchCreateRequest, WatchRequest};
-use coord_proto::storage::storage_client::StorageClient;
-use coord_proto::storage::storage_server::StorageServer;
-use coord_proto::storage::StatRequest;
 use coord_server::kvt::{KvTRuntimeConfig, KvTState};
 use coord_server::server::CoordNode;
 use coord_server::storage::mvcc::MvccStorage;
@@ -134,7 +134,9 @@ async fn test_v2_cluster_rejects_v1_txn_lease_watch() {
             .expect_err("v1 Txn must be frozen"),
     );
 
-    let mut lease = LeaseClient::connect(format!("http://{addr}")).await.unwrap();
+    let mut lease = LeaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
     assert_frozen(
         &lease
             .lease_grant(LeaseGrantRequest { ttl: 30, id: 0 })
@@ -157,7 +159,9 @@ async fn test_v2_cluster_rejects_v1_txn_lease_watch() {
             .expect_err("v1 LeaseKeepAlive must be frozen"),
     );
 
-    let mut watch = WatchClient::connect(format!("http://{addr}")).await.unwrap();
+    let mut watch = WatchClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     tx.send(WatchRequest {
         request: Some(coord_proto::watch::watch_request::Request::Create(
