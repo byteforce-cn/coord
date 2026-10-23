@@ -214,6 +214,6 @@ D6 两处 `**仍 open**：跨协调节点会话 drain` 改为已落地描述：s
 
 `cargo fmt --all -- --check`；`cargo clippy --workspace --lib --bins -- -D warnings`；`bash scripts/check-panics.sh`；`cargo audit`；`cargo deny check`。
 
-- [ ] **Step 4: 交付**
+- [x] **Step 4: 交付**
 
-分支 → PR → CI 全绿 → merge → 删分支；#167 回填进展与残余（仅余多节点双写/双读故障注入）。`[kv_t].enabled=false` 的 v1 回归由 workspace tests 覆盖。
+PR #229 → CI 全绿 → merge → 删分支；#167 回填进展与残余（仅余多节点双写/双读故障注入）。`[kv_t].enabled=false` 的 v1 回归由 workspace tests 覆盖。
