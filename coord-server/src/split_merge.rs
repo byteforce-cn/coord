@@ -796,8 +796,8 @@ impl SplitMergeMigrator for RangeImportMigrator {
 /// 生产接线：源 = `RegionManager` 本节点运行时 MVCC；目标 = `RegionLifecycle`
 /// 的 pending/已接管运行时（搬迁经目标 Region 自己的 raft）。
 ///
-/// `drain` 由接线层传入（`main.rs` = 本节点 `TxnSessions` 句柄）。只覆盖本节点
-/// 协调的会话；跨协调节点会话的 drain 属 #167 连续性验收。
+/// `drain` 由接线层传入（`main.rs` = `ClusterSplitDrain`：本节点 `TxnSessions`
+/// + region 0 成员的远程 drain 扇出）；单节点/单测可直接传本地会话表端口。
 pub fn range_import_migrator(
     manager: &Arc<RegionManager>,
     lifecycle: &Arc<RegionLifecycle>,
