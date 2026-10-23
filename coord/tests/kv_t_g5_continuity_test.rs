@@ -8,13 +8,22 @@
 #[path = "support/kv_t_watch_node.rs"]
 mod watch_node;
 
+use std::str::FromStr;
 use std::sync::Arc;
 
+use coord_core::error_code::error_code_of;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta};
+use coord_proto::kv::v2::kv_server::Kv as KvV2;
+use coord_proto::kv::v2::{PutRequest, RangeRequest};
 use coord_server::kvt::decision_apply::apply_pending_decisions;
 use coord_server::kvt::watch::{WatchCoordinator, WatchFilter, WatchStart};
 use coord_server::storage::region_table::RegionTable;
+use tonic::metadata::MetadataValue;
+use tonic::{Code, Request};
 use watch_node::WatchNode;
+
+/// v2 数据面入口的 Region 表版本 metadata（ADR-0015 D12.5）。
+const ROUTING_EPOCH: &str = "coord-routing-epoch";
 
 fn region(region_id: u64, start: &[u8], end: &[u8]) -> RegionMeta {
     RegionMeta {
@@ -49,6 +58,39 @@ fn merged_table(version: u64) -> RegionTable {
         version,
         regions: vec![region(1, b"", b"m"), region(2, b"m", b"")],
     }
+}
+
+fn initial_table(version: u64) -> RegionTable {
+    RegionTable {
+        version,
+        regions: vec![region(1, b"", b"m"), region(2, b"m", b"")],
+    }
+}
+
+fn with_epoch<T>(message: T, epoch: u64) -> Request<T> {
+    let mut request = Request::new(message);
+    request.metadata_mut().insert(
+        ROUTING_EPOCH,
+        MetadataValue::from_str(&epoch.to_string()).expect("ascii epoch"),
+    );
+    request
+}
+
+fn assert_epoch_stale<T: std::fmt::Debug>(result: Result<T, tonic::Status>, current: u64) {
+    let status = result.expect_err("expected EPOCH_STALE");
+    assert_eq!(status.code(), Code::Aborted, "{}", status.message());
+    assert_eq!(
+        error_code_of(&status).as_deref(),
+        Some("EPOCH_STALE"),
+        "structured code"
+    );
+    let epoch = status
+        .metadata()
+        .get(ROUTING_EPOCH)
+        .expect("trailer carries the current epoch")
+        .to_str()
+        .expect("ascii");
+    assert_eq!(epoch, current.to_string(), "trailer epoch");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -139,4 +181,101 @@ async fn test_watch_survives_split_merge() {
         .find(|event| event.commit_ts == ts2)
         .expect("resubscribe starts at the replayed revision");
     assert_eq!(resumed_event.changes.len(), 1);
+}
+
+/// cutover 之后同一 key 只能由一个表版本服务：旧 epoch 的读/写都 `EPOCH_STALE`，
+/// 当前 epoch 的写只落新 Region——旧 Region 保留 cutover 前那行，不接收新写。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_split_merge_no_double_serve() {
+    let fx = WatchNode::start().await;
+    fx.apply_region_table_and_spawn(initial_table(1)).await;
+    let tso = fx.node.tso_client().expect("tso client").clone();
+
+    let before = tso.get_ts().await.expect("tso");
+    KvV2::put(
+        &*fx.node,
+        with_epoch(
+            PutRequest {
+                key: b"nn".to_vec(),
+                value: b"old".to_vec(),
+                commit_ts: before as i64,
+                ..Default::default()
+            },
+            1,
+        ),
+    )
+    .await
+    .expect("the pre-cutover write is served by the old table");
+
+    // cutover：Region 2 在 `n` 处 split，Region 3 接管 [n, ..)。
+    fx.apply_region_table_and_spawn(split_table(2)).await;
+
+    assert_epoch_stale(
+        KvV2::put(
+            &*fx.node,
+            with_epoch(
+                PutRequest {
+                    key: b"nn".to_vec(),
+                    value: b"stale".to_vec(),
+                    commit_ts: tso.get_ts().await.expect("tso") as i64,
+                    ..Default::default()
+                },
+                1,
+            ),
+        )
+        .await,
+        2,
+    );
+    assert_epoch_stale(
+        KvV2::range(
+            &*fx.node,
+            with_epoch(
+                RangeRequest {
+                    key: b"nn".to_vec(),
+                    ..Default::default()
+                },
+                1,
+            ),
+        )
+        .await,
+        2,
+    );
+
+    let after = tso.get_ts().await.expect("tso");
+    KvV2::put(
+        &*fx.node,
+        with_epoch(
+            PutRequest {
+                key: b"nn".to_vec(),
+                value: b"new".to_vec(),
+                commit_ts: after as i64,
+                ..Default::default()
+            },
+            2,
+        ),
+    )
+    .await
+    .expect("the current table version serves the key");
+
+    assert_eq!(
+        fx.manager
+            .runtime(3)
+            .expect("new region")
+            .mvcc
+            .get(b"nn")
+            .expect("new region read")
+            .as_deref(),
+        Some(&b"new"[..])
+    );
+    assert_eq!(
+        fx.manager
+            .runtime(2)
+            .expect("old region")
+            .mvcc
+            .get(b"nn")
+            .expect("old region read")
+            .as_deref(),
+        Some(&b"old"[..]),
+        "the old region keeps the pre-cutover row and must not receive the new write"
+    );
 }
