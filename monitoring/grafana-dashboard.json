@@ -184,6 +184,90 @@
           "legendFormat": "nodes online {{instance}}"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "KV-T: TSO / Sequencer",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "coord_tso_batch_remaining{instance=~\"$instance\"}",
+          "legendFormat": "tso batch remaining {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(coord_tso_refill_failures_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "tso refill failures/s {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(coord_tso_leader_changes_total{instance=~\"$instance\"}[10m])",
+          "legendFormat": "tso leader changes/s {{instance}}"
+        },
+        {
+          "refId": "D",
+          "expr": "rate(coord_kvt_sequencer_txns_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "sequencer txns/s {{instance}}"
+        },
+        {
+          "refId": "E",
+          "expr": "rate(coord_kvt_sequencer_conflicts_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "sequencer conflicts/s {{instance}}"
+        },
+        {
+          "refId": "F",
+          "expr": "rate(coord_kvt_sequencer_validation_us_total{instance=~\"$instance\"}[5m]) / clamp_min(rate(coord_kvt_sequencer_txns_total{instance=~\"$instance\"}[5m]), 0.001)",
+          "legendFormat": "validation us/txn {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "KV-T: Commit Log / Watch",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "coord_kv_t_commit_watermark{instance=~\"$instance\"}",
+          "legendFormat": "commit watermark {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "coord_kv_t_commit_in_flight{instance=~\"$instance\"}",
+          "legendFormat": "in-flight commits {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(coord_kv_t_commit_watermark_stalls_total{instance=~\"$instance\"}[10m])",
+          "legendFormat": "watermark stalls/s {{instance}}"
+        },
+        {
+          "refId": "D",
+          "expr": "coord_kv_t_commit_log_seal_lag_seconds{instance=~\"$instance\"}",
+          "legendFormat": "seal lag s {{instance}}"
+        },
+        {
+          "refId": "E",
+          "expr": "coord_kv_t_commit_log_shards{instance=~\"$instance\"}",
+          "legendFormat": "shards {{instance}}"
+        },
+        {
+          "refId": "F",
+          "expr": "coord_kv_t_commit_log_shards_sealed{instance=~\"$instance\"}",
+          "legendFormat": "sealed {{instance}}"
+        },
+        {
+          "refId": "G",
+          "expr": "coord_kv_t_watch_lag_commit_ts{instance=~\"$instance\"}",
+          "legendFormat": "watch lag (commit_ts) {{instance}}"
+        },
+        {
+          "refId": "H",
+          "expr": "rate(coord_kv_t_watch_history_unavailable_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "history unavailable/s {{instance}}"
+        }
+      ]
     }
   ],
   "refresh": "30s",

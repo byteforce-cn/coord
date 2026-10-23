@@ -444,7 +444,101 @@ auto-resolve 语义，处置是人工的。
   滚动验签。
 - 若计数长期不降：确认轮换确实执行（换新会改变 active serial）。
 
-## 7. KV-T v2 Watch 排障（无独立告警）
+### `CoordKvTTsoRefillFailures` — TSO 批次补发失败
+
+- 指标：`coord_tso_refill_failures_total`、`coord_tso_batch_remaining`、
+  `coord_tso_leader_changes_total`。
+- 语义：本地 TSO 批次用尽后向 region 0 取新批失败（非 leader / 不可达）。
+  v2 `GetTs` 与 `Txn.Begin(start_ts=0)` 走同一来源，写路径会拿不到 `commit_ts`。
+- 处置：先确认 region 0 有 leader 且本节点可达（`raft_leader_id`）；等待选主
+  完成后客户端自动补发。**不要**手工复用旧批次或回退到 v1 取号——`commit_ts`
+  必须全局唯一、单调（ADR-0015 D11.1）。
+
+### `CoordKvTTsoLeaderChurn` — TSO leader 频繁切换
+
+- 指标：`coord_tso_leader_changes_total`（客户端观察到的领导权丢失次数）。
+- 影响：换主会丢弃本地未用完批次（只产生空洞，不复用）；已发放但未提交的
+  `commit_ts` 会被新 leader 的 safe-ts fence 以 `CommitRejected` 拒绝。
+- 处置：与 `CoordLeaderChurn` 同一套排查（时钟/网络/CPU 饥饿）；选主未稳定前
+  不要做成员变更，也不要重启整个 region 0 组。
+
+### `CoordKvTSequencerValidationSlow` — Sequencer 单事务校验 > 50ms
+
+- 指标：`coord_kvt_sequencer_validation_us_total / coord_kvt_sequencer_txns_total`
+  （5 分钟 rate 的商，即单事务平均校验耗时）。
+- 原因：Commit Sequencer 是**单 Raft 组**（ADR-0015 D4），校验含 OCC 读集/区间
+  查询；大读集、大范围扫描、热 key 冲突都会抬高成本，直接压低全局提交吞吐。
+- 处置：先看 `CoordKvTSequencerConflictStorm` 与事务读集上限
+  （`[kv_t].max_read_set` / `max_range`）；让客户端缩小事务、避免全表范围读。
+  这是协议串行化点，**不要**用扩 Region 或加副本解决。
+
+### `CoordKvTSequencerConflictStorm` — OCC 冲突率 > 50%
+
+- 指标：`coord_kvt_sequencer_conflicts_total / coord_kvt_sequencer_txns_total`。
+- 语义：冲突是正常业务结果（`TXN_CONFLICT`，不写决策、不重试）；持续高冲突
+  说明访问模式在争同一批 key，客户端重试会放大负载。
+- 处置：定位热 key / write skew（应用侧拆分计数键、缩短事务）；确认客户端用
+  **新 `start_ts`** 重跑整个事务，而不是原样重放。**不要**把冲突映射成服务端
+  错误或关闭 OCC。
+
+### `CoordKvTWatermarkStall` — Commit Watermark 停滞
+
+- 指标：`coord_kv_t_commit_watermark`、`coord_kv_t_commit_in_flight`、
+  `coord_kv_t_commit_watermark_stalls_total`、`coord_kv_t_commit_log_seal_lag_seconds`。
+- 语义：`watermark = min(in-flight commit_ts) - 1`（D9）。只要有一个提交在
+  in-flight，shard 就不能 seal，Watch 只能看到 watermark 之前的事件。
+- 处置：
+  1. 看 `commit_in_flight` 是否长期 > 0；定位卡住的 Region/事务（sequencer
+     apply、租约清理、迁移 fence）。
+  2. 事务 TTL（`[kv_t].txn_ttl_secs`，默认 60s）会回收会话，但**已提交决策**
+     仍要 apply 到所有 Region 才会推进水位。
+  3. **不要**手工 seal shard、推进 watermark 或删除 Commit Log 文件——那会让
+     Watch 永久跳过未 apply 的事件。
+
+### `CoordKvTShardSealLag` — Shard seal 超时
+
+- 指标：`coord_kv_t_commit_log_seal_lag_seconds`、`coord_kv_t_commit_log_shards`、
+  `coord_kv_t_commit_log_shards_sealed`、`coord_kv_t_commit_log_shards_gc_total`。
+- 语义：未 seal 的 shard 不进入 GC，其 watermark 之后的数据也不会被 Watch 读到；
+  超过 5 分钟（D9）会记一次 stall。
+- 处置：按上一条检查 in-flight 提交与 Region apply 进度；确认 commit log shard
+  组的 leader 存活。**不要**强制 GC 未 seal 的 shard。
+
+### `CoordKvTSplitMergeStuck` — Split/Merge operator 卡住
+
+- 指标：`coord_pd_queue_running`、`coord_pd_queue_pending`、
+  `coord_pd_operator_requeued_total`。
+- 语义：operator 在 `Running` 超过 15 分钟；常见原因是 drain 等活跃事务
+  （会话 TTL 上限 60s）、目标 Region 组未选出 leader、或迁移 fence 未被清除。
+- 处置：
+  1. 看 `requeued_total` 是否持续增长（超时重认领会保留 intent，不会回滚已
+     cutover 的表）。
+  2. 查 Region 0 intent（`Prepared`）、目标 Region leader、以及 `DrainRange`
+     扇出的不可达节点。
+  3. **不要**手工把 operator 标成功/失败或删除 intent；恢复由 executor 在下一
+     拍重试（ADR-0015 D6）。
+
+### `CoordKvTWatchHistoryUnavailable` — Watch 历史窗口不足
+
+- 指标：`coord_kv_t_watch_history_unavailable_total`、
+  `coord_kv_t_watch_lag_commit_ts`、`coord_kv_t_commit_log_gc_before`。
+- 语义：客户端游标早于 `watch_retention`（默认 24h，可配 1h–7d），事件已被 GC；
+  这是客户端起点问题，**不是**服务端丢事件。
+- 处置：让客户端用 `Range` 重建快照并从新 revision 重新订阅（§7）；
+  **不要**调大保留窗口掩盖消费停滞——先修消费端的断线/积压。
+
+### `CoordKvTCommitLogShardsHigh` — Commit Log shard 数量异常
+
+- 指标：`coord_kv_t_commit_log_shards` / `_sealed` / `_gc_total`、
+  `coord_kv_t_commit_watermark`、`coord_kv_t_commit_log_seal_lag_seconds`。
+- 语义：shard 按 1M 条 / 1h 先到先 seal；24h 保留窗口下稳态约 24 个。长期远高于
+  此值 = 老 shard 未被回收（GC 以整 shard 为单位，未 seal 或 watermark 未越过
+  `end_ts` 的一律保留），会累积磁盘与内存开销。
+- 处置：先修 `CoordKvTWatermarkStall` / `CoordKvTShardSealLag`；确认
+  `watch_retention` 没有被误调大。**不要**手工删 Commit Log 文件或强制回收
+  未 seal 的 shard——那会让 Watch 永久跳过这些事件。
+
+## 7. KV-T v2 Watch 订阅排障
 
 ### 订阅无事件 / 背压 / 历史不足
 
@@ -459,7 +553,7 @@ auto-resolve 语义，处置是人工的。
 - `lag_commit_ts` 长期高：先看 `coord_kv_t_commit_watermark` 与
   `coord_kv_t_commit_log_*` 是否推进；本地 watermark 不走，watch 只能看到它之前的事件。
 - 排障期间可用 `Range` 读当前值校对：“watch 没收到”与“写入没提交”是两类问题
-  （后者看 `COMMIT_REJECTED` / sequencer 指标）。
+  （后者看 `COMMIT_REJECTED` 与 §6 的 `CoordKvTSequencer*` 告警）。
 
 ---
 

@@ -230,3 +230,135 @@ groups:
             coord_agent_pki_certs_active。到期 = 换新触发：调 RotateCert/RenewCert
             换新即可（见 runbook 小节）。
 
+  - name: coord-kv-t
+    rules:
+      # TSO 客户端补发失败：本地批次耗尽后向 region 0 取新批失败（非 leader /
+      # 不可达）。v2 写/事务拿不到时间戳。
+      - alert: CoordKvTTsoRefillFailures
+        expr: |
+          increase(coord_tso_refill_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} TSO 批次补发失败（5m 增加 {{ $value }} 次）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvttsorefillfailures--tso-批次补发失败"
+          description: |
+            TSO 客户端只在本地批次耗尽时补发；失败说明 region 0 raft 不是 leader
+            或不可达。看 coord_tso_batch_remaining 与 region 0 leader。
+
+      # TSO leader 抖动：客户端观察到 region 0 领导权反复丢失。
+      - alert: CoordKvTTsoLeaderChurn
+        expr: |
+          increase(coord_tso_leader_changes_total[10m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} 10 分钟内 TSO leader 变化 {{ $value }} 次"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvttsoleaderchurn--tso-leader-频繁切换"
+          description: |
+            region 0 是 TSO 与 Region 元数据的权威组；持续换主会让批次补发停顿、
+            已发放但未提交的时间戳被新 leader 的 fence 拒绝。
+
+      # Sequencer 单事务校验成本：validation_us / txns > 50ms（5m rate）。
+      - alert: CoordKvTSequencerValidationSlow
+        expr: |
+          rate(coord_kvt_sequencer_validation_us_total[5m])
+            / clamp_min(rate(coord_kvt_sequencer_txns_total[5m]), 0.001) > 50000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} 单事务校验耗时 {{ $value | humanize }}us"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvtsequencervalidationslow--sequencer-单事务校验--50ms"
+          description: |
+            Commit Sequencer 是单 Raft 组（ADR-0015 D4）：校验成本上升直接压低
+            全局提交吞吐。先看冲突率与读集大小，不要把它当成分片扩容问题。
+
+      # OCC 冲突率 > 50%：热 key / write skew / 大范围读集。
+      - alert: CoordKvTSequencerConflictStorm
+        expr: |
+          rate(coord_kvt_sequencer_conflicts_total[5m])
+            / clamp_min(rate(coord_kvt_sequencer_txns_total[5m]), 0.001) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} OCC 冲突率 {{ $value | humanizePercentage }}"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvtsequencerconflictstorm--occ-冲突率--50"
+          description: |
+            冲突是 TXN_CONFLICT 业务结果（不是服务端错误）；持续高冲突说明
+            访问模式在争同一批 key，客户端重试会进一步放大。
+
+      # Commit Watermark 停滞：shard 在 seal 超时窗口内仍未被 watermark 越过。
+      - alert: CoordKvTWatermarkStall
+        expr: |
+          increase(coord_kv_t_commit_watermark_stalls_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} Commit Watermark 停滞（10m 内 {{ $value }} 次 seal 超时）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvtwatermarkstall--commit-watermark-停滞"
+          description: |
+            watermark = min(in-flight commit_ts) - 1（D9）。有 in-flight 提交迟迟
+            不结束，shard 就无法 seal，Watch 只能看到 watermark 之前的事件。
+
+      # Commit Log shard 数量异常：默认 1M 条 / 1h 先到先 seal，24h 保留窗口下
+      # 稳态约 24 个 shard；长期远高于此说明 GC/回收停滞（容量风险）。
+      - alert: CoordKvTCommitLogShardsHigh
+        expr: |
+          coord_kv_t_commit_log_shards > 100
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} Commit Log shard 达 {{ $value }} 个（GC 可能停滞）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvtcommitlogshardshigh--commit-log-shard-数量异常"
+          description: |
+            shard 只按整 shard 回收（未 seal 或 watermark < end_ts 不回收）。
+            先看 seal lag 与 watermark，再确认 watch_retention 是否被调大；
+            不要手工删除 Commit Log 文件。
+
+      # Shard seal 延迟 > 300s（D9 seal 超时）。
+      - alert: CoordKvTShardSealLag
+        expr: |
+          coord_kv_t_commit_log_seal_lag_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} Commit Log shard 已等待 seal {{ $value }}s"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvtshardseallag--shard-seal-超时"
+          description: |
+            未 seal 的 shard 不进入 GC，也不会被 Watch 读到其 watermark 之后的部分。
+
+      # Split/Merge operator 在 Running 状态超过 15m（仅 v2 节点）。
+      - alert: CoordKvTSplitMergeStuck
+        expr: |
+          coord_pd_queue_running > 0
+            and on(instance) (coord_kv_t_enabled == 1)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} 有 {{ $value }} 个 Split/Merge operator 卡在 Running"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvtsplitmergestuck--splitmerge-operator-卡住"
+          description: |
+            operator 超时会被 requeue（coord_pd_operator_requeued_total）；持续
+            Running 通常是被 drain 的活跃事务/目标 Region leader 挡住。
+
+      # Watch 历史窗口不足：客户端游标早于保留窗口（HISTORY_UNAVAILABLE）。
+      - alert: CoordKvTWatchHistoryUnavailable
+        expr: |
+          increase(coord_kv_t_watch_history_unavailable_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} Watch 订阅起点早于保留窗口（10m 内 {{ $value }} 次）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordkvtwatchhistoryunavailable--watch-历史窗口不足"
+          description: |
+            这是客户端游标过旧，不是服务端丢事件：让客户端用 Range 重建快照后
+            从新 revision 订阅；不要用调大 watch_retention 掩盖。
