@@ -5,20 +5,28 @@
 //! - 非法区间批在 leader 被拒，三个副本的表版本与内容都不变（确定性）；
 //! - 各节点 `CoordNode::refresh_region_table` 把表收敛进 `RegionManager`，
 //!   key 路由按新区间生效；
+//! - 表版本也是 v2 入口的 `coord-routing-epoch`（#161）：每个节点用本地已
+//!   apply 的版本判定，split 前的 epoch 在新表上被拒绝并回传本地新版本；
 //! - `[kv_t]` 关闭时不读表、不刷新（v1 静态装配不变）。
 
 mod common;
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::bind_listener;
 
+use coord_core::error_code::error_code_of;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta};
-use coord_server::kvt::{KvTRuntimeConfig, KvTState};
+use coord_proto::kv::v2::kv_client::KvClient;
+use coord_proto::kv::v2::kv_server::KvServer;
+use coord_proto::kv::v2::PutRequest;
+use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
 use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 use coord_server::raft::region::RegionManager;
@@ -32,7 +40,8 @@ use coord_server::storage::region_table::{RegionChange, RegionTable};
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::Server;
+use tonic::metadata::MetadataValue;
+use tonic::transport::{Channel, Server};
 
 const NODE_IDS: [u64; 3] = [1, 2, 3];
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -153,6 +162,50 @@ impl ClusterNode {
         node.set_kvt_state(KvTState::new(true, KvTRuntimeConfig::default()));
         node.refresh_region_table().expect("refresh region table")
     }
+
+    /// v2 入口只用本节点的已 apply 表与存储；raft 组不参与 epoch 判据。
+    fn v2_node(&self) -> Arc<CoordNode> {
+        let mut node = CoordNode::new(Arc::clone(&self.mvcc));
+        node.node_id = self.id;
+        node.region_manager = Some(Arc::clone(&self.manager));
+        node.set_kvt_state(
+            KvTState::new(true, KvTRuntimeConfig::default()).with_implemented([KvTCapability::Kv]),
+        );
+        Arc::new(node)
+    }
+}
+
+/// 在独立端口上挂 `coord.kv.v2`（只用于观察入口判据）。
+async fn serve_v2_kv(node: Arc<CoordNode>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind kv v2");
+    let addr = listener.local_addr().expect("kv v2 addr");
+    let handle = tokio::spawn(async move {
+        let _ = Server::builder()
+            .add_service(KvServer::from_arc(node))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await;
+    });
+    (addr, handle)
+}
+
+/// `commit_ts=0` 让守卫放行的请求停在参数校验（`INVALID_ARGUMENT`），
+/// 与路由/raft 运行时状态无关。
+fn put_with_epoch(epoch: Option<&str>) -> tonic::Request<PutRequest> {
+    let mut request = tonic::Request::new(PutRequest {
+        key: b"k".to_vec(),
+        value: b"v".to_vec(),
+        commit_ts: 0,
+        ..Default::default()
+    });
+    if let Some(epoch) = epoch {
+        request.metadata_mut().insert(
+            "coord-routing-epoch",
+            MetadataValue::from_str(epoch).expect("ascii metadata"),
+        );
+    }
+    request
 }
 
 struct RegionTableCluster {
@@ -306,6 +359,91 @@ async fn test_region_table_converges_and_routes_split() {
         assert_eq!(node.manager.route(b"a").unwrap().region_id(), 1);
         assert_eq!(node.manager.route(b"z").unwrap().region_id(), 2);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_routing_epoch_converges_on_every_node() {
+    let cluster = RegionTableCluster::start().await;
+    cluster
+        .propose(RegionMetaOp::Init {
+            regions: vec![region(1, b"", b"", 1, 1)],
+        })
+        .await;
+    cluster.wait_table(1).await;
+    for node in &cluster.nodes {
+        assert!(node.refresh(), "node {} refresh", node.id);
+        assert_eq!(node.manager.table_version(), 1);
+    }
+
+    let split = RegionMetaOp::Apply {
+        changes: vec![
+            RegionChange::Update {
+                meta: region(1, b"", b"m", 1, 2),
+            },
+            RegionChange::Add {
+                meta: region(2, b"m", b"", 1, 1),
+            },
+        ],
+    };
+    assert_eq!(
+        cluster.propose(split).await,
+        RegionMetaOutcome::Applied { version: 2 }
+    );
+    // 只等存储里的权威表收敛；各节点 `RegionManager` 仍是 split 前的版本，
+    // 由首个请求的入口刷新推进——这正是本用例要覆盖的路径。
+    cluster.wait_table(2).await;
+
+    let mut served = Vec::new();
+    for node in &cluster.nodes {
+        let (addr, handle) = serve_v2_kv(node.v2_node()).await;
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect kv v2");
+        let mut kv = KvClient::new(channel);
+
+        // 客户端仍带 split 前的 epoch：节点按本地已 apply 的新表拒绝，
+        // trailing metadata 回传的是**本节点**版本。
+        let status = kv
+            .put(put_with_epoch(Some("1")))
+            .await
+            .expect_err("stale epoch must be rejected");
+        assert_eq!(status.code(), tonic::Code::Aborted, "{}", status.message());
+        assert_eq!(error_code_of(&status).as_deref(), Some("EPOCH_STALE"));
+        assert_eq!(
+            status
+                .metadata()
+                .get("coord-routing-epoch")
+                .and_then(|value| value.to_str().ok()),
+            Some("2"),
+            "trailer epoch"
+        );
+
+        // 当前版本与缺失 metadata 都通过守卫，停在 handler 的参数校验。
+        for epoch in [Some("2"), None] {
+            let status = kv
+                .put(put_with_epoch(epoch))
+                .await
+                .expect_err("commit_ts=0 must reach the parameter check");
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "epoch {epoch:?}: {}",
+                status.message()
+            );
+            assert_ne!(error_code_of(&status).as_deref(), Some("EPOCH_STALE"));
+        }
+
+        assert_eq!(
+            node.manager.table_version(),
+            2,
+            "node {} converged",
+            node.id
+        );
+        served.push(handle);
+    }
+    served.iter().for_each(|handle| handle.abort());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
