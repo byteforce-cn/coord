@@ -181,7 +181,7 @@ async fn wait_for_leader(raft: &Arc<CoordRaft>, node_id: u64, timeout: Duration)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_sequencer_conflict_order_and_retry() {
+async fn test_commit_sequencer_orders_conflicting_txns() {
     let node = SingleNode::start().await;
 
     let start1 = node.tso.get_ts().await.unwrap();
