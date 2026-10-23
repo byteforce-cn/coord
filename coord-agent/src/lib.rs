@@ -48,6 +48,7 @@ use coord_proto::maintenance::maintenance_server::MaintenanceServer;
 use coord_proto::storage::storage_server::StorageServer;
 use coord_proto::tso::v2::tso_server::TsoServer as TsoV2Server;
 use coord_proto::txn::txn_server::TxnServer;
+use coord_proto::txn::v2::txn_server::TxnServer as TxnV2Server;
 use coord_proto::watch::watch_server::WatchServer;
 
 // 重新导出公共类型
@@ -66,7 +67,7 @@ pub use pki_store::{
 pub use proxy::AgentInner;
 // v2 代理的构造入口与 `AgentInner` 同理：集成测试要能验证「真的转发」而不是
 // 只验证 gRPC 注册；生产装配仍只经 `build_agent_grpc_router` 使用。
-pub use proxy_v2::{KvV2Proxy, LeaseV2Proxy, TsoV2Proxy};
+pub use proxy_v2::{KvV2Proxy, LeaseV2Proxy, TsoV2Proxy, TxnV2Proxy};
 pub use service::{BaseService, ServiceConfig, ServiceResult, WorkflowDispatchConfig};
 pub use services::transit_store::{
     DekRecord, DekStoreError, KvTransitDekStore, MemoryTransitDekStore, TransitDekStore,
@@ -554,6 +555,9 @@ where
             svcs.inner.clone(),
         )))
         .add_service(LeaseV2Server::new(crate::proxy_v2::LeaseV2Proxy::new(
+            svcs.inner.clone(),
+        )))
+        .add_service(TxnV2Server::new(crate::proxy_v2::TxnV2Proxy::new(
             svcs.inner.clone(),
         )))
         .add_service(StorageServer::new(crate::proxy::StorageProxy::new(
@@ -2447,6 +2451,9 @@ impl AgentServer {
             .await;
         health_reporter
             .set_serving::<LeaseV2Server<crate::proxy_v2::LeaseV2Proxy>>()
+            .await;
+        health_reporter
+            .set_serving::<TxnV2Server<crate::proxy_v2::TxnV2Proxy>>()
             .await;
 
         // 注册 gRPC Server Reflection 服务
