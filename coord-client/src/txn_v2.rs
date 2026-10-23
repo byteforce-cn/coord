@@ -14,6 +14,7 @@ use coord_proto::txn::v2 as proto;
 
 use crate::client::{from_status, Client};
 use crate::credential::AuthedChannel;
+use crate::retry::RetryState;
 
 /// `Commit` 的结果：冲突是业务结果，不是传输失败。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,13 +43,14 @@ impl TxnV2Client {
     pub async fn begin(&self, start_ts: u64, ttl_ms: u32) -> Result<TxnV2Session> {
         let start_ts = ts_to_i64("start_ts", start_ts)?;
         let (endpoint, channel) = self.client.get_leader_channel().await?;
-        let mut stub = proto::txn_client::TxnClient::new(channel.clone());
-        let resp = stub
-            .begin(tonic::Request::new(proto::BeginRequest {
-                start_ts,
-                ttl_ms,
-            }))
-            .await;
+        let call_channel = channel.clone();
+        let resp = retry_epoch_stale(&self.client, move || {
+            let mut stub = proto::txn_client::TxnClient::new(call_channel.clone());
+            let mut request = tonic::Request::new(proto::BeginRequest { start_ts, ttl_ms });
+            self.client.attach_routing_epoch(&mut request);
+            async move { stub.begin(request).await }
+        })
+        .await;
         match resp {
             Ok(resp) => {
                 let inner = resp.into_inner();
@@ -101,18 +103,24 @@ impl TxnV2Session {
         keys_only: bool,
     ) -> Result<(Vec<kv_v2::KeyValue>, u64)> {
         let channel = self.channel()?.clone();
-        let mut stub = proto::txn_client::TxnClient::new(channel);
-        let resp = stub
-            .read(tonic::Request::new(proto::ReadRequest {
-                txn_id: self.txn_id.clone(),
-                key: key.to_vec(),
-                range_end: range_end.to_vec(),
+        let txn_id = self.txn_id.clone();
+        let key = key.to_vec();
+        let range_end = range_end.to_vec();
+        let resp = retry_epoch_stale(&self.client, move || {
+            let mut stub = proto::txn_client::TxnClient::new(channel.clone());
+            let mut request = tonic::Request::new(proto::ReadRequest {
+                txn_id: txn_id.clone(),
+                key: key.clone(),
+                range_end: range_end.clone(),
                 limit,
                 keys_only,
-            }))
-            .await
-            .map_err(txn_error)?
-            .into_inner();
+            });
+            self.client.attach_routing_epoch(&mut request);
+            async move { stub.read(request).await }
+        })
+        .await
+        .map_err(txn_error)?
+        .into_inner();
         let read_ts = u64::try_from(resp.read_ts)
             .map_err(|_| Error::Internal("negative read_ts in response".into()))?;
         Ok((resp.kvs, read_ts))
@@ -127,14 +135,21 @@ impl TxnV2Session {
         request_id: &[u8],
     ) -> Result<TxnCommit> {
         let channel = self.channel()?.clone();
-        let mut stub = proto::txn_client::TxnClient::new(channel);
-        let resp = stub
-            .commit(tonic::Request::new(proto::CommitRequest {
-                txn_id: self.txn_id.clone(),
-                mutations,
-                request_id: request_id.to_vec(),
-            }))
-            .await;
+        let txn_id = self.txn_id.clone();
+        let request_id = request_id.to_vec();
+        let client = self.client.clone();
+        let call_client = client.clone();
+        let resp = retry_epoch_stale(&client, move || {
+            let mut stub = proto::txn_client::TxnClient::new(channel.clone());
+            let mut request = tonic::Request::new(proto::CommitRequest {
+                txn_id: txn_id.clone(),
+                mutations: mutations.clone(),
+                request_id: request_id.clone(),
+            });
+            call_client.attach_routing_epoch(&mut request);
+            async move { stub.commit(request).await }
+        })
+        .await;
         match resp {
             Ok(resp) => {
                 let commit_ts = u64::try_from(resp.into_inner().commit_ts)
@@ -149,10 +164,17 @@ impl TxnV2Session {
     /// 幂等放弃会话；未知/已过期会话返回 `Ok`。
     pub async fn abort(self) -> Result<()> {
         let channel = self.channel()?.clone();
-        let mut stub = proto::txn_client::TxnClient::new(channel);
-        stub.abort(tonic::Request::new(proto::AbortRequest {
-            txn_id: self.txn_id.clone(),
-        }))
+        let txn_id = self.txn_id.clone();
+        let client = self.client.clone();
+        let call_client = client.clone();
+        retry_epoch_stale(&client, move || {
+            let mut stub = proto::txn_client::TxnClient::new(channel.clone());
+            let mut request = tonic::Request::new(proto::AbortRequest {
+                txn_id: txn_id.clone(),
+            });
+            call_client.attach_routing_epoch(&mut request);
+            async move { stub.abort(request).await }
+        })
         .await
         .map_err(txn_error)?;
         Ok(())
@@ -169,6 +191,35 @@ impl Drop for TxnV2Session {
     fn drop(&mut self) {
         if let Some(channel) = self.channel.take() {
             self.client.return_channel(&self.endpoint, channel);
+        }
+    }
+}
+
+/// 只在 `EPOCH_STALE` 上重试：入口守卫拒绝的请求没有副作用，学到服务端回传的
+/// 新版本后重放同一请求；其它错误原样交给调用方映射（`TXN_CONFLICT` 等业务结果
+/// 不能被吞进重试）。
+async fn retry_epoch_stale<T, F, Fut>(
+    client: &Client,
+    mut attempt: F,
+) -> std::result::Result<T, tonic::Status>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+{
+    let mut retry = RetryState::new(client.retry_config());
+    loop {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(status) => {
+                client.learn_routing_epoch(&status);
+                if error_code_of(&status).as_deref() != Some(CoordErrorCode::EpochStale.as_str()) {
+                    return Err(status);
+                }
+                match retry.next_attempt() {
+                    Some(wait) => tokio::time::sleep(wait).await,
+                    None => return Err(status),
+                }
+            }
         }
     }
 }

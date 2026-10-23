@@ -3,6 +3,8 @@
 // 封装 gRPC 连接管理、Leader 发现、重试逻辑，提供类型安全的 KV/Lease/Watch/Txn API。
 // 定义完整的 Client SDK 行为。
 
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -10,6 +12,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
 use coord_core::error::{Error, Result};
+use coord_core::error_code::{error_code_of, CoordErrorCode};
 use coord_proto::kv::v2 as kv_v2;
 use coord_proto::kv::{kv_client::KvClient as KvStub, DeleteRequest, PutRequest, RangeRequest};
 use coord_proto::lease::{
@@ -55,6 +58,11 @@ use crate::retry::{classify_error, RetryDecision, RetryState};
 /// R-SVC-08：服务端 follower 返回 leader 地址 hint 的 gRPC metadata key
 /// （与 coord-server::server::LEADER_HINT_METADATA_KEY 保持一致）
 pub const LEADER_HINT_METADATA_KEY: &str = "coord-leader-hint";
+
+/// ADR-0015 D12.5：v2 请求携带的权威 Region 表版本（`RegionTable::version`）。
+/// 服务端在 `EPOCH_STALE` 的 trailing metadata 回传本节点当前版本，客户端据此
+/// 刷新后重试。
+pub const ROUTING_EPOCH_METADATA_KEY: &str = "coord-routing-epoch";
 
 // ──── Error conversion ────
 
@@ -127,6 +135,8 @@ struct ClientInner {
     leader: LeaderDiscovery,
     /// gRPC connection pool
     pool: ConnectionPool,
+    /// 最近学到的 Region 表版本；0 = 未知（请求不带 metadata，服务端不校验）。
+    routing_epoch: AtomicU64,
 }
 
 impl Client {
@@ -168,6 +178,7 @@ impl Client {
                 config,
                 leader,
                 pool,
+                routing_epoch: AtomicU64::new(0),
             }),
         };
 
@@ -198,6 +209,7 @@ impl Client {
                 config,
                 leader,
                 pool,
+                routing_epoch: AtomicU64::new(0),
             }),
         })
     }
@@ -220,6 +232,44 @@ impl Client {
     /// 客户端 retry 参数（长连接订阅复用同一份配置）。
     pub(crate) fn retry_config(&self) -> &Config {
         &self.inner.config
+    }
+
+    /// 已学到的 Region 表版本；0 = 未知（请求不带 metadata）。
+    pub(crate) fn routing_epoch(&self) -> u64 {
+        self.inner.routing_epoch.load(Ordering::Relaxed)
+    }
+
+    /// 把已学到的版本附到 v2 请求。未知时不发：服务端对缺失 metadata 不校验，
+    /// 单 Region / 启动期客户端因此不会凭空失败。
+    pub(crate) fn attach_routing_epoch<T>(&self, request: &mut tonic::Request<T>) {
+        let epoch = self.routing_epoch();
+        if epoch == 0 {
+            return;
+        }
+        if let Ok(value) = tonic::metadata::MetadataValue::from_str(&epoch.to_string()) {
+            request
+                .metadata_mut()
+                .insert(ROUTING_EPOCH_METADATA_KEY, value);
+        }
+    }
+
+    /// 只有 `EPOCH_STALE` 的 trailer 才是版本来源；`fetch_max` 防止被落后节点
+    /// 降级——降级会让请求按旧表通过守卫，正是服务端要禁止的双写/双读窗口。
+    pub(crate) fn learn_routing_epoch(&self, status: &tonic::Status) {
+        if error_code_of(status).as_deref() != Some(CoordErrorCode::EpochStale.as_str()) {
+            return;
+        }
+        let Some(server) = status
+            .metadata()
+            .get(ROUTING_EPOCH_METADATA_KEY)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+        else {
+            return;
+        };
+        self.inner
+            .routing_epoch
+            .fetch_max(server, Ordering::Relaxed);
     }
 
     /// 返回 KV v2 客户端（KV-T G1 最小面：显式 commit_ts / read_ts）。
@@ -393,6 +443,7 @@ impl Client {
                     return Ok(v);
                 }
                 Err(status) => {
+                    self.learn_routing_epoch(&status);
                     // 解析 leader hint：follower 返回 UNAVAILABLE + coord-leader-hint
                     let hint = status
                         .metadata()
@@ -767,10 +818,11 @@ impl KvV2Client {
         let key = key.to_vec();
         let value = value.to_vec();
         let request_id = request_id.to_vec();
+        let client = self.client.clone();
         self.client
             .execute_write_with_retry(move |channel| {
                 let mut stub = kv_v2::kv_client::KvClient::new(channel);
-                let request = tonic::Request::new(kv_v2::PutRequest {
+                let mut request = tonic::Request::new(kv_v2::PutRequest {
                     key: key.clone(),
                     value: value.clone(),
                     lease_id: 0,
@@ -778,6 +830,7 @@ impl KvV2Client {
                     request_id: request_id.clone(),
                     commit_ts,
                 });
+                client.attach_routing_epoch(&mut request);
                 async move {
                     let resp = stub.put(request).await?.into_inner();
                     let ts = u64::try_from(resp.commit_ts)
@@ -799,25 +852,43 @@ impl KvV2Client {
         count_only: bool,
     ) -> Result<(Vec<kv_v2::KeyValue>, i64, u64)> {
         let read_ts = Self::ts_to_i64("read_ts", read_ts)?;
-        let (endpoint, channel) = self.client.get_leader_channel().await?;
-        let mut stub = kv_v2::kv_client::KvClient::new(channel.clone());
-        let request = tonic::Request::new(kv_v2::RangeRequest {
-            key: key.to_vec(),
-            range_end: range_end.to_vec(),
-            limit,
-            read_ts,
-            keys_only,
-            count_only,
-        });
-        match stub.range(request).await {
-            Ok(resp) => {
-                self.client.return_channel(&endpoint, channel);
-                let inner = resp.into_inner();
-                let read_ts = u64::try_from(inner.read_ts)
-                    .map_err(|_| Error::Internal("negative read_ts in response".into()))?;
-                Ok((inner.kvs, inner.count, read_ts))
+        let key = key.to_vec();
+        let range_end = range_end.to_vec();
+        let mut retry = RetryState::new(self.client.retry_config());
+        loop {
+            let (endpoint, channel) = self.client.get_leader_channel().await?;
+            let mut stub = kv_v2::kv_client::KvClient::new(channel.clone());
+            let mut request = tonic::Request::new(kv_v2::RangeRequest {
+                key: key.clone(),
+                range_end: range_end.clone(),
+                limit,
+                read_ts,
+                keys_only,
+                count_only,
+            });
+            self.client.attach_routing_epoch(&mut request);
+            match stub.range(request).await {
+                Ok(resp) => {
+                    self.client.return_channel(&endpoint, channel);
+                    let inner = resp.into_inner();
+                    let read_ts = u64::try_from(inner.read_ts)
+                        .map_err(|_| Error::Internal("negative read_ts in response".into()))?;
+                    return Ok((inner.kvs, inner.count, read_ts));
+                }
+                Err(status) => {
+                    self.client.return_channel(&endpoint, channel);
+                    self.client.learn_routing_epoch(&status);
+                    if error_code_of(&status).as_deref()
+                        == Some(CoordErrorCode::EpochStale.as_str())
+                    {
+                        if let Some(wait) = retry.next_attempt() {
+                            tokio::time::sleep(wait).await;
+                            continue;
+                        }
+                    }
+                    return Err(from_status(status));
+                }
             }
-            Err(status) => Err(from_status(status)),
         }
     }
 
@@ -834,16 +905,18 @@ impl KvV2Client {
         let key = key.to_vec();
         let range_end = range_end.to_vec();
         let request_id = request_id.to_vec();
+        let client = self.client.clone();
         self.client
             .execute_write_with_retry(move |channel| {
                 let mut stub = kv_v2::kv_client::KvClient::new(channel);
-                let request = tonic::Request::new(kv_v2::DeleteRequest {
+                let mut request = tonic::Request::new(kv_v2::DeleteRequest {
                     key: key.clone(),
                     range_end: range_end.clone(),
                     prev_kv,
                     request_id: request_id.clone(),
                     commit_ts,
                 });
+                client.attach_routing_epoch(&mut request);
                 async move {
                     let resp = stub.delete(request).await?.into_inner();
                     let ts = u64::try_from(resp.commit_ts)

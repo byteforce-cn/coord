@@ -1,6 +1,6 @@
 # KV-T G5 (#161) 多节点 routing epoch 收敛验收 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 补上 #161 最后一条验收缺口——`coord-routing-epoch` 的取值在**每个节点**上跟随权威 Region 表收敛：3 节点 region 0 raft 把表从 v1 改到 v2 后，任一节点的 v2 数据面入口都用本地已 apply 的 v2 拒绝携带 v1 的请求，并在 trailing metadata 回传 v2。
 
@@ -33,11 +33,11 @@
 
 ### Task 1: 多节点 epoch 收敛用例
 
-- [ ] **Step 1: 装配每节点 v2 KV 服务**
+- [x] **Step 1: 装配每节点 v2 KV 服务**
 
 在 `ClusterNode` 上增加 `v2_node()`（共享 `mvcc`/`manager`，`node_id`、`KvTState::new(true, ..).with_implemented([Kv])`）与起服务的辅助；测试里为每个节点绑定独立 listener。
 
-- [ ] **Step 2: 断言入口判据**
+- [x] **Step 2: 断言入口判据**
 
 表 v1 收敛后每个节点 refresh 到 1；leader 提交 split 批到 v2 并等三副本收敛。**不主动 refresh**，对每个节点：
 - `epoch=1` 的 Put（`commit_ts=0`）→ `ABORTED` + `EPOCH_STALE`，trailer `2`；
@@ -45,25 +45,25 @@
 - 不带 epoch → `INVALID_ARGUMENT`；
 - 服务后 `manager.table_version() == 2`。
 
-- [ ] **Step 3: 相关套件**
+- [x] **Step 3: 相关套件**
 
 `cargo test -p coord-server --test kv_t_g5_region_table_test`（3 用例）；`cargo test -p coord --test kv_t_g5_routing_epoch_test`。
 
 ### Task 2: 文档与门禁
 
-- [ ] **Step 1: ADR / consumer-contract**
+- [x] **Step 1: ADR / consumer-contract**
 
 若 D12.5 未写「每个节点用本地已 apply 版本判定；比较前按表刷新」，补一句，不复制实现细节。
 
-- [ ] **Step 2: 文档引用**
+- [x] **Step 2: 文档引用**
 
 `bash scripts/check-doc-refs.sh`（悬空 0）。
 
-- [ ] **Step 3: 门禁**
+- [x] **Step 3: 门禁**
 
 `cargo fmt --all -- --check`；`cargo clippy --workspace --lib --bins -- -D warnings`；`bash scripts/check-panics.sh`；`cargo audit`；`cargo deny check`。
 
-- [ ] **Step 4: 交付**
+- [x] **Step 4: 交付**
 
 PR → CI 全绿 → merge → 删分支；#161 回填证据并关闭（客户端刷新重试指向 #172）；#167 回填「仅余多节点 live 故障注入，归 #175」并关闭。
 
