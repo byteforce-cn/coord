@@ -1,6 +1,6 @@
 # 消费方契约页（Consumer Contract）
 
-> Owner: maintainers ｜ Last verified: 2026-10-18
+> Owner: maintainers ｜ Last verified: 2026-10-23
 
 面向**接入方**的聚合页：按服务给出「一致性 / 路由 / 失败语义 + 推荐消费范式」，
 并把每 RPC 的能力名与已接受的边界汇总为可检索的表。
@@ -139,7 +139,7 @@
   `commit_ts` 合并为一个原子事件；记录含完整 key/value 与 `prev_kv`（不依赖
   Region 历史），zstd 压缩，写集 4MiB 上限在 Commit 阶段强制；记录值与 MVCC
   同信封（保留 `key_id`），DEK 轮换窗口须 ≥ `watch_retention`（默认 24h，最大
-  7d），否则超出窗口的旧事件不可解密。Commit Log 随快照/备份恢复归 #169。
+  7d），否则超出窗口的旧事件不可解密。Commit Log 行随状态机快照（`SnapshotData.commit_log_entries`，格式 v7）与整节点备份恢复；shard 组恢复后窗口内历史仍可续读。整节点备份 = `coord backup`（停机整目录复制，见 runbook §3.3），不是 `coord snapshot` 的单 Region 状态机快照。
 - **Commit Log 分片**：shard 是 `commit_ts` 的半开区间 `[start_ts,end_ts)`
   （`end_ts=0` 表示未定界，仅最后一个 shard），由 region 0 权威元数据唯一
   定义、按前一 shard 的 `end_ts` 首尾相接（无重叠/空洞）；第一个 shard 从
