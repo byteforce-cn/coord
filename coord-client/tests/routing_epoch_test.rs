@@ -8,15 +8,17 @@
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use coord_client::{Client, TxnCommit};
+use coord_client::{Client, TxnCommit, WatchV2Cursor, WatchV2Options};
 use coord_core::error_code::{attach, CoordErrorCode};
 use coord_proto::kv::v2 as kv;
 use coord_proto::txn::v2 as txn;
+use coord_proto::watch::v2 as watch;
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, Streaming};
 
 const EPOCH: &str = "coord-routing-epoch";
 
@@ -34,6 +36,8 @@ struct Calls {
     txn_read_stale: usize,
     txn_commit_stale: usize,
     txn_commit_conflict: bool,
+    watch_open: Vec<Option<u64>>,
+    watch_stale: usize,
 }
 
 fn epoch_of<T>(request: &Request<T>) -> Option<u64> {
@@ -200,11 +204,15 @@ async fn start_server(calls: Arc<Mutex<Calls>>) -> String {
     let kv = kv::kv_server::KvServer::new(Mock {
         calls: Arc::clone(&calls),
     });
-    let txn = txn::txn_server::TxnServer::new(Mock { calls });
+    let txn = txn::txn_server::TxnServer::new(Mock {
+        calls: Arc::clone(&calls),
+    });
+    let watch = watch::watch_server::WatchServer::new(Mock { calls });
     tokio::spawn(async move {
         Server::builder()
             .add_service(kv)
             .add_service(txn)
+            .add_service(watch)
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .expect("serve");
@@ -323,4 +331,95 @@ async fn txn_commit_conflict_is_not_retried_as_epoch_stale() {
         1,
         "TXN_CONFLICT is a business result, not an epoch retry"
     );
+}
+
+#[tonic::async_trait]
+impl watch::watch_server::Watch for Mock {
+    type WatchStream = ReceiverStream<Result<watch::WatchResponse, Status>>;
+
+    async fn watch(
+        &self,
+        request: Request<Streaming<watch::WatchRequest>>,
+    ) -> Result<Response<Self::WatchStream>, Status> {
+        let epoch = epoch_of(&request);
+        {
+            let mut calls = self.calls.lock().expect("calls");
+            calls.watch_open.push(epoch);
+            if calls.watch_stale > 0 {
+                calls.watch_stale -= 1;
+                return Err(stale_epoch("3"));
+            }
+        }
+        let mut stream = request.into_inner();
+        let create = match stream.message().await? {
+            Some(watch::WatchRequest {
+                request: Some(watch::watch_request::Request::Create(create)),
+            }) => create,
+            _ => return Err(Status::invalid_argument("missing create frame")),
+        };
+        if create.key != b"k" {
+            return Err(Status::invalid_argument("unexpected watch key"));
+        }
+        let (tx, rx) = mpsc::channel(2);
+        let _ = tx.try_send(Ok(watch::WatchResponse {
+            watch_id: 1,
+            events: vec![watch::WatchEvent {
+                commit_ts: 5,
+                changes: vec![watch::Change {
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                    prev_kv: None,
+                    r#type: watch::change::Type::Put as i32,
+                }],
+            }],
+            cursor: Some(watch::WatchCursor {
+                shard_id: 1,
+                commit_ts: 5,
+            }),
+            watermark: 5,
+            sealed: false,
+        }));
+        // 保持流开启：订阅由 cancel() 结束，不靠 EOF（否则客户端会立刻重连）。
+        tokio::spawn(async move {
+            let _held = tx;
+            std::future::pending::<()>().await;
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+#[tokio::test]
+async fn watch_v2_attaches_the_learned_epoch_and_retries_a_stale_open() {
+    let calls = Arc::new(Mutex::new(Calls {
+        watch_stale: 1,
+        ..Default::default()
+    }));
+    let addr = start_server(Arc::clone(&calls)).await;
+    let client = Client::connect_via_agent(addr).await.expect("client");
+
+    let mut subscription = client
+        .watch_v2()
+        .watch(WatchV2Options::new(b"k"))
+        .await
+        .expect("watch");
+    let batch = subscription
+        .recv()
+        .await
+        .expect("a batch reaches the subscriber")
+        .expect("the retried open succeeds");
+    assert_eq!(batch.events.len(), 1);
+    assert_eq!(batch.events[0].commit_ts, 5);
+    assert_eq!(
+        subscription.cursor(),
+        Some(WatchV2Cursor {
+            shard_id: 1,
+            commit_ts: 5
+        })
+    );
+    assert_eq!(
+        calls.lock().expect("calls").watch_open,
+        vec![None, Some(3)],
+        "first open has no epoch; the reopen after EPOCH_STALE carries the learned one"
+    );
+    subscription.cancel().await;
 }

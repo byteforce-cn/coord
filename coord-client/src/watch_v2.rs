@@ -7,6 +7,9 @@
 //!
 //! `HISTORY_UNAVAILABLE` 是终点：保留窗口已回收请求位点，重连只会永远失败，
 //! 所以直接映射成 `Error::HistoryUnavailable` 并结束订阅（调用方全量重同步）。
+//!
+//! 每次重开流都带已学到的 routing epoch（0 = 未知不发）；`EPOCH_STALE` 先学
+//! 新版本再有界重连，避免 split 窗口里用旧表反复被拒。
 
 use coord_core::error::{Error, Result};
 use coord_core::error_code::error_code_of;
@@ -280,8 +283,12 @@ async fn run(
                         }
                     }
                     Ok(None) => break,
-                    Err(status) if retryable(&status) => break,
+                    Err(status) if retryable(&status) => {
+                        client.learn_routing_epoch(&status);
+                        break;
+                    }
                     Err(status) => {
+                        client.learn_routing_epoch(&status);
                         let _ = tokio::select! {
                             _ = &mut stop => return,
                             sent = tx.send(Err(watch_error(status))) => sent,
@@ -290,8 +297,9 @@ async fn run(
                     }
                 }
             },
-            Err(status) if retryable(&status) => {}
+            Err(status) if retryable(&status) => client.learn_routing_epoch(&status),
             Err(status) => {
+                client.learn_routing_epoch(&status);
                 let _ = tokio::select! {
                     _ = &mut stop => return,
                     sent = tx.send(Err(watch_error(status))) => sent,
@@ -339,11 +347,13 @@ async fn open_stream(
     // 收端由服务端 first-frame 驱动；create 已入队后即可关闭请求侧（服务端在
     // half-close 后继续推事件）。保持 req_tx 存活只会多占一条空流。
     drop(req_tx);
-    stub.watch(tonic::Request::new(
-        tokio_stream::wrappers::ReceiverStream::new(req_rx),
-    ))
-    .await
-    .map(|response| response.into_inner())
+    let mut request = tonic::Request::new(tokio_stream::wrappers::ReceiverStream::new(req_rx));
+    // 每次重开流都读当前版本：EPOCH_STALE 后学到的版本必须随下一次 create 到达
+    // 服务端，否则重连会一直按旧表被拒。
+    client.attach_routing_epoch(&mut request);
+    stub.watch(request)
+        .await
+        .map(|response| response.into_inner())
 }
 
 fn event_from_proto(event: proto::WatchEvent) -> Result<WatchV2Event> {
@@ -379,10 +389,14 @@ fn watch_error(status: tonic::Status) -> Error {
     }
 }
 
-/// 可重连的失败：传输/流级别。`HISTORY_UNAVAILABLE` 与请求错误不在其中。
+/// 可重连的失败：传输/流级别，加上 `EPOCH_STALE`。后者是 `ABORTED`，与
+/// `UNAVAILABLE` 不同码；只按 gRPC code 判断会把「路由表刚变过」当成硬错误，
+/// 而它恰恰是重开流就能恢复的场景。`HISTORY_UNAVAILABLE` 与请求错误不在其中。
 fn retryable(status: &tonic::Status) -> bool {
-    if error_code_of(status).as_deref() == Some("HISTORY_UNAVAILABLE") {
-        return false;
+    match error_code_of(status).as_deref() {
+        Some("HISTORY_UNAVAILABLE") => return false,
+        Some("EPOCH_STALE") => return true,
+        _ => {}
     }
     matches!(
         status.code(),
