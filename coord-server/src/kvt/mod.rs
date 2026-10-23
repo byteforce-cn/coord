@@ -153,6 +153,29 @@ impl KvTState {
         self.implemented.contains(&capability)
     }
 
+    /// v1 数据面冻结闸（ADR-0015 D7/D13）：`[kv_t].enabled=true` 的集群只服务
+    /// `coord.<domain>.v2`，不得继续服务 v1 KV/Txn/Watch/Lease/Storage。
+    ///
+    /// 只看 `enabled`、不看 `implemented`：v1 冻结从第一个 v2 集群起成立，
+    /// 不能因为某个 v2 能力尚未交付而回退成 v1。
+    ///
+    /// 用 `FAILED_PRECONDITION` 而不是 `UNIMPLEMENTED`/`UNAVAILABLE`：v1 包在
+    /// v2 集群里是策略拒绝（不得按旧 revision 语义重试），不是「走错地址」或
+    /// 「稍后重试」。
+    pub fn v1_gate(&self) -> Result<(), Status> {
+        if !self.enabled {
+            return Ok(());
+        }
+        Err(attach(
+            Status::new(
+                Code::FailedPrecondition,
+                "v1 data plane is frozen on a v2 cluster: use coord.<domain>.v2 \
+                 (ADR-0015 D7/D13)",
+            ),
+            CoordErrorCode::FailedPrecondition,
+        ))
+    }
+
     /// 门禁：关闭 → `FAILED_PRECONDITION`；开启但能力未交付 → 同样
     /// `FAILED_PRECONDITION`（消息点名能力，便于运维判断是"没开"还是"还没到
     /// 那个 gate"）。用户级拒绝不得变成 `INTERNAL`/`UNAVAILABLE`。
@@ -240,5 +263,36 @@ mod tests {
             KvTState::new(true, KvTRuntimeConfig::default()).with_implemented([KvTCapability::Kv]);
         assert!(state.gate(KvTCapability::Kv).is_ok());
         assert!(state.gate(KvTCapability::Txn).is_err());
+    }
+
+    #[test]
+    fn v1_gate_is_open_when_disabled() {
+        assert!(KvTState::disabled().v1_gate().is_ok());
+    }
+
+    #[test]
+    fn v1_gate_rejects_on_a_v2_cluster() {
+        let state =
+            KvTState::new(true, KvTRuntimeConfig::default()).with_implemented([KvTCapability::Kv]);
+        let status = state.v1_gate().expect_err("v2 clusters must freeze v1");
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert!(
+            status
+                .message()
+                .contains("v1 data plane is frozen on a v2 cluster"),
+            "稳定诊断锚点：{:?}",
+            status.message()
+        );
+        assert!(
+            status.message().contains("coord.<domain>.v2"),
+            "必须点名替代面：{:?}",
+            status.message()
+        );
+        assert_eq!(
+            error_code_of(&status).as_deref(),
+            Some("FAILED_PRECONDITION")
+        );
+        // v1 冻结不看能力集合：已交付的 v2 能力不改变 v1 面的判定。
+        assert!(state.gate(KvTCapability::Kv).is_ok());
     }
 }

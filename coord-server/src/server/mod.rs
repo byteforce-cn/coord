@@ -2113,6 +2113,8 @@ impl Kv for CoordNode {
         &self,
         request: tonic::Request<PutRequest>,
     ) -> Result<tonic::Response<PutResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         // 磁盘水位只读闸
         self.ensure_writable()?;
 
@@ -2215,6 +2217,8 @@ impl Kv for CoordNode {
         &self,
         request: tonic::Request<RangeRequest>,
     ) -> Result<tonic::Response<RangeResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         let req = request.into_inner();
         // 规模上限——客户端显式 limit 超过 max_range_limit 直接拒绝；
         // 未指定 limit（0）时以 max_range_limit 兜底（**不得**无上限）。
@@ -2360,6 +2364,8 @@ impl Kv for CoordNode {
         &self,
         request: tonic::Request<DeleteRequest>,
     ) -> Result<tonic::Response<DeleteResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         // 磁盘水位只读闸
         self.ensure_writable()?;
 
@@ -2621,6 +2627,8 @@ impl Txn for CoordNode {
         &self,
         request: tonic::Request<TxnRequest>,
     ) -> Result<tonic::Response<TxnResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         // 磁盘水位只读闸
         self.ensure_writable()?;
 
@@ -2826,6 +2834,8 @@ impl Lease for CoordNode {
         &self,
         request: tonic::Request<LeaseGrantRequest>,
     ) -> Result<tonic::Response<LeaseGrantResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         // 磁盘水位只读闸
         self.ensure_writable()?;
 
@@ -2910,6 +2920,8 @@ impl Lease for CoordNode {
         &self,
         request: tonic::Request<LeaseRevokeRequest>,
     ) -> Result<tonic::Response<LeaseRevokeResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         // 磁盘水位只读闸
         self.ensure_writable()?;
 
@@ -2939,6 +2951,8 @@ impl Lease for CoordNode {
         &self,
         request: tonic::Request<tonic::Streaming<LeaseKeepAliveRequest>>,
     ) -> Result<tonic::Response<Self::LeaseKeepAliveStream>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         let lease_mgr = self
             .lease_manager
             .as_ref()
@@ -3086,6 +3100,8 @@ impl Watch for CoordNode {
         &self,
         request: tonic::Request<tonic::Streaming<WatchRequest>>,
     ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         // 延后 scope 判定（#210）：鉴权层看不到流首帧，只把授权快照放进扩展；
         // 这里必须真的用它判定，否则"放行但没人判"就是越权订阅。
         let grants = request

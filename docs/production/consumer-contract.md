@@ -83,7 +83,9 @@
 - Watch 断线重连的 resync 纪律见 §0.3（WHITEPAPER「watch resync rules」）。
 - Region 模式下的 watch 前缀限制与跨 region 拒绝见 `boundaries.md` B-RG-2。
 - **v1 数据面在 v2 集群不服务**（ADR-0015 D13）：v1 包冻结，不做 facade/迁移；
-  v2 见 §1.1。
+  每个 v1 数据面 RPC 返回 `FAILED_PRECONDITION`（文案 `v1 data plane is frozen
+  on a v2 cluster`，先于参数/leader/写闸判定），health 报 `NOT_SERVING`，
+  v1 `coord.storage` 不注册；v2 见 §1.1。
 
 ### 1.1 KV-T v2（`coord.<domain>.v2`，默认关闭）
 

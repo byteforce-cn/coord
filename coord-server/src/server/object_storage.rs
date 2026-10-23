@@ -71,6 +71,8 @@ impl Storage for CoordNode {
         &self,
         request: tonic::Request<tonic::Streaming<PutRequest>>,
     ) -> Result<tonic::Response<PutResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         // 磁盘水位只读闸（可用 <5% 时 RESOURCE_EXHAUSTED）
         self.ensure_writable()?;
         // 对象存储未启用 → 服务未注册，防御性拒绝
@@ -255,6 +257,8 @@ impl Storage for CoordNode {
         &self,
         request: tonic::Request<GetRequest>,
     ) -> Result<tonic::Response<Self::GetStream>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         let req = request.into_inner();
         let bucket = req.bucket;
         let object_id = req.object_id;
@@ -357,6 +361,8 @@ impl Storage for CoordNode {
         &self,
         request: tonic::Request<StatRequest>,
     ) -> Result<tonic::Response<StatResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         let req = request.into_inner();
         let bucket = req.bucket;
         let object_id = req.object_id;
@@ -375,6 +381,8 @@ impl Storage for CoordNode {
         &self,
         request: tonic::Request<DeleteRequest>,
     ) -> Result<tonic::Response<DeleteResponse>, tonic::Status> {
+        self.kvt().v1_gate()?;
+
         self.ensure_writable()?;
         let req = request.into_inner();
         let bucket = req.bucket;

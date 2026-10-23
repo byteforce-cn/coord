@@ -3375,6 +3375,10 @@ async fn run_server(
     let node_for_seal = Arc::clone(&node);
     let health_reporter_for_task = health_reporter.clone();
     let object_storage_enabled = cfg.object_storage.enabled;
+    // v2 集群不服务 v1 数据面（ADR-0015 D13）：v1 服务仍注册（reflection 可见），
+    // 但 handler 一律 FAILED_PRECONDITION，health 必须同步报 NOT_SERVING——否则
+    // 编排/负载均衡会把流量继续送到已冻结的服务上。
+    let kv_t_enabled = cfg.kv_t.enabled;
     // R-OBS-10：storage 磁盘大小 / key 数采样
     let mvcc_for_metrics = Arc::clone(&mvcc);
     tokio::spawn(async move {
@@ -3431,18 +3435,20 @@ async fn run_server(
 
             // 健康检查真实语义 —— raft 就绪前 NOT_SERVING，随状态更新
             if ready {
-                health_reporter_for_task
-                    .set_serving::<KvServer<Arc<CoordNode>>>()
-                    .await;
-                health_reporter_for_task
-                    .set_serving::<TxnServer<Arc<CoordNode>>>()
-                    .await;
-                health_reporter_for_task
-                    .set_serving::<LeaseServer<Arc<CoordNode>>>()
-                    .await;
-                health_reporter_for_task
-                    .set_serving::<WatchServer<Arc<CoordNode>>>()
-                    .await;
+                if !kv_t_enabled {
+                    health_reporter_for_task
+                        .set_serving::<KvServer<Arc<CoordNode>>>()
+                        .await;
+                    health_reporter_for_task
+                        .set_serving::<TxnServer<Arc<CoordNode>>>()
+                        .await;
+                    health_reporter_for_task
+                        .set_serving::<LeaseServer<Arc<CoordNode>>>()
+                        .await;
+                    health_reporter_for_task
+                        .set_serving::<WatchServer<Arc<CoordNode>>>()
+                        .await;
+                }
                 health_reporter_for_task
                     .set_serving::<MaintenanceServer<Arc<CoordNode>>>()
                     .await;
