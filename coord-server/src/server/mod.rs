@@ -546,7 +546,8 @@ impl CoordNode {
 
     /// split 数据搬迁的区间 drain 端口（本节点 `coord.txn.v2` 会话表）。
     ///
-    /// 只覆盖本节点协调的会话；跨协调节点会话的 drain 属 #167 连续性验收。
+    /// 这是**节点本地**端口：生产装配再经 `ClusterSplitDrain` 把它与 region 0
+    /// 成员的远程 drain 扇出组合起来（#167）；单测/单节点直接用它。
     pub fn split_drain(&self) -> Arc<dyn crate::split_merge::SplitDrain> {
         let drain: Arc<dyn crate::split_merge::SplitDrain> = self.txn_sessions.clone();
         drain

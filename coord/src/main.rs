@@ -3695,6 +3695,9 @@ async fn run_server(
             Some(raft) => raft.as_ref().clone(),
             None => return Err("multi-raft region manager requires region 0 raft".into()),
         };
+        // drain 的 peer 集合来自 region 0 成员表（voter + learner）；闭包
+        // 每次 drain 现读，成员变更后自动跟上。
+        let drain_region0_raft = region0_raft.clone();
         let lifecycle = Arc::new(coord_server::raft::region_lifecycle::RegionLifecycle::new(
             coord_server::raft::region_lifecycle::RegionLifecycleSpec {
                 node_id,
@@ -3723,17 +3726,41 @@ async fn run_server(
             // 生产装配（#163）：executor 在 PD 启动时已跑起来，搬迁器只能在
             // Region lifecycle 与节点会话表就绪后晚装；未装前 split/merge
             // 一律 fail-closed。源 = RegionManager 运行时 MVCC；目标 =
-            // lifecycle 的 pending/已接管运行时；drain = 本节点 TxnSessions
-            // （跨协调节点会话的 drain 属 #167）。
+            // lifecycle 的 pending/已接管运行时；drain = 本地会话表 + region 0
+            // 成员的跨协调节点扇出（#167）。
             if let Some(pd) = embedded_pd.as_ref() {
+                let drain: Arc<dyn coord_server::split_merge::SplitDrain> =
+                    Arc::new(coord_server::split_merge::ClusterSplitDrain::new(
+                        node.split_drain(),
+                        node_id,
+                        Arc::new({
+                            // 动态 join 的节点未必在静态 `initial_nodes` 里，但
+                            // 地址随 region 0 membership 复制；每次 drain 先把
+                            // 成员地址灌进工厂，扇出不会因缺地址而漏节点。
+                            let factory = region_shared_factory.clone();
+                            move || {
+                                let metrics = drain_region0_raft.metrics().borrow_watched().clone();
+                                metrics
+                                    .membership_config
+                                    .nodes()
+                                    .map(|(id, node)| {
+                                        if !node.addr.is_empty() {
+                                            factory.register_node(*id, node.addr.clone());
+                                        }
+                                        *id
+                                    })
+                                    .collect()
+                            }
+                        }),
+                        Arc::new(region_shared_factory.clone()),
+                    ));
                 pd.install_split_migrator(coord_server::split_merge::range_import_migrator(
-                    manager,
-                    &lifecycle,
-                    node.split_drain(),
+                    manager, &lifecycle, drain,
                 ));
                 tracing::info!(
                     "KV-T split data migration wired (source=RegionManager runtime, \
-                     target=RegionLifecycle pending/attached, drain=local TxnSessions)"
+                     target=RegionLifecycle pending/attached, drain=cluster \
+                     (local TxnSessions + region-0 members))"
                 );
             }
             lifecycle.start_reconcile_loop(
@@ -3835,6 +3862,10 @@ async fn run_server(
             raft_addr
         );
     }
+    // split/merge 的跨节点 drain handler：本节点会话表就绪后注入；未启用
+    // `[kv_t]` 的节点不注册（DrainRange 返回 FAILED_PRECONDITION）。
+    raft_rpc_service.set_split_drain(node.kvt().is_enabled().then(|| node.split_drain()));
+
     // raft RPC 解码上限显式设置（快照已分块 ≤2MiB；AppendEntries 批量大，
     // 上限 16MiB 避免合法批量复制被默认 4MiB 拒绝）
     const RAFT_MAX_DECODING_MSG: usize = 16 * 1024 * 1024;

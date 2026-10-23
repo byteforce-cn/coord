@@ -1004,6 +1004,7 @@ mod tests {
         "/coord.auth.Auth/Bootstrap",
         "/coord.auth.Auth/GetRevocationDelta",
         "/coord.raft.Raft/AppendEntries",
+        "/coord.raft.Raft/DrainRange",
         "/coord.raft.Raft/InstallSnapshot",
         "/coord.raft.Raft/InstallSnapshotStreaming",
         "/coord.raft.Raft/SubmitPdOp",

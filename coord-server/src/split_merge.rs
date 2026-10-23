@@ -16,6 +16,7 @@ use std::time::Duration;
 use coord_core::types::{NodeID, RegionId};
 
 use crate::pd::executor::SplitMergeMigrator;
+use crate::raft::network::{DrainRpcOutcome, RaftNetworkFactoryImpl};
 use crate::raft::region::RegionManager;
 use crate::raft::region_lifecycle::RegionLifecycle;
 use crate::raft::region_runtime::CoordRangeImportTarget;
@@ -87,6 +88,107 @@ pub trait SplitDrain: Send + Sync {
         end: &[u8],
         timeout: Duration,
     ) -> std::result::Result<(), String>;
+}
+
+/// 把 drain 扇出到其他节点的传输端口。
+///
+/// `Err` 表示节点不可达（连接/协议失败）；`Ok(Blocked)` 表示节点可达但
+/// 区间内仍有活跃会话——两者对迁移的含义不同（D12.2：会话不复制，节点
+/// 失联即其会话失效；可达节点必须真正排空）。
+#[async_trait::async_trait]
+pub trait DrainTransport: Send + Sync {
+    async fn drain_peer(
+        &self,
+        node_id: NodeID,
+        start: &[u8],
+        end: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<DrainRpcOutcome, String>;
+}
+
+#[async_trait::async_trait]
+impl DrainTransport for RaftNetworkFactoryImpl {
+    async fn drain_peer(
+        &self,
+        node_id: NodeID,
+        start: &[u8],
+        end: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<DrainRpcOutcome, String> {
+        self.drain_range(node_id, start, end, timeout).await
+    }
+}
+
+/// split/merge 执行器所在节点的 drain 端口：本地会话表 + region 0 成员扇出。
+///
+/// 每个 peer 的 drain 与本地 drain 并发执行，上界都是同一个 `timeout`；不
+/// 可达节点按会话失效跳过（记 warning），可达节点的 `Blocked` 直接让整次
+/// 迁移失败重试。
+pub struct ClusterSplitDrain {
+    local: Arc<dyn SplitDrain>,
+    node_id: NodeID,
+    peers: Arc<dyn Fn() -> Vec<NodeID> + Send + Sync>,
+    transport: Arc<dyn DrainTransport>,
+}
+
+impl ClusterSplitDrain {
+    pub fn new(
+        local: Arc<dyn SplitDrain>,
+        node_id: NodeID,
+        peers: Arc<dyn Fn() -> Vec<NodeID> + Send + Sync>,
+        transport: Arc<dyn DrainTransport>,
+    ) -> Self {
+        Self {
+            local,
+            node_id,
+            peers,
+            transport,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SplitDrain for ClusterSplitDrain {
+    async fn drain(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<(), String> {
+        let peers: Vec<NodeID> = (self.peers)()
+            .into_iter()
+            .filter(|node_id| *node_id != self.node_id)
+            .collect();
+        let remote = peers.iter().map(|node_id| {
+            let transport = Arc::clone(&self.transport);
+            async move {
+                (
+                    *node_id,
+                    transport.drain_peer(*node_id, start, end, timeout).await,
+                )
+            }
+        });
+        let (local, remote) = futures::future::join(
+            self.local.drain(start, end, timeout),
+            futures::future::join_all(remote),
+        )
+        .await;
+        local.map_err(|reason| format!("local drain failed: {reason}"))?;
+        for (node_id, outcome) in remote {
+            match outcome {
+                Ok(DrainRpcOutcome::Drained) => {}
+                Ok(DrainRpcOutcome::Blocked(reason)) => {
+                    return Err(format!("node {node_id} drain failed: {reason}"));
+                }
+                Err(reason) => tracing::warn!(
+                    node_id,
+                    reason,
+                    "split drain: node unreachable; treating its sessions as lost"
+                ),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 每页导出的行数上界（0 = 一页取尽）。
@@ -921,5 +1023,175 @@ mod tests {
             .await
             .expect_err("another attempt's fence is not this barrier");
         assert!(err.contains("did not apply fence op 10"), "err: {err}");
+    }
+
+    struct FixedDrain(std::result::Result<(), String>);
+
+    #[async_trait::async_trait]
+    impl SplitDrain for FixedDrain {
+        async fn drain(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+            _timeout: Duration,
+        ) -> std::result::Result<(), String> {
+            self.0.clone()
+        }
+    }
+
+    /// 按节点返回 drain 结果；不在表里的节点模拟连接失败（不可达）。
+    #[derive(Default)]
+    struct FakeTransport {
+        calls: std::sync::Mutex<Vec<(NodeID, Vec<u8>, Vec<u8>, Duration)>>,
+        outcomes: std::collections::BTreeMap<NodeID, std::result::Result<(), String>>,
+    }
+
+    impl FakeTransport {
+        fn calls(&self) -> Vec<(NodeID, Vec<u8>, Vec<u8>)> {
+            self.calls
+                .lock()
+                .expect("transport calls lock")
+                .iter()
+                .map(|(node_id, start, end, _)| (*node_id, start.clone(), end.clone()))
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DrainTransport for FakeTransport {
+        async fn drain_peer(
+            &self,
+            node_id: NodeID,
+            start: &[u8],
+            end: &[u8],
+            timeout: Duration,
+        ) -> std::result::Result<DrainRpcOutcome, String> {
+            self.calls.lock().expect("transport calls lock").push((
+                node_id,
+                start.to_vec(),
+                end.to_vec(),
+                timeout,
+            ));
+            match self.outcomes.get(&node_id) {
+                Some(Ok(())) => Ok(DrainRpcOutcome::Drained),
+                Some(Err(reason)) => Ok(DrainRpcOutcome::Blocked(reason.clone())),
+                None => Err(format!("unreachable node {node_id}")),
+            }
+        }
+    }
+
+    fn cluster_drain(
+        local: std::result::Result<(), String>,
+        peers: Vec<NodeID>,
+        outcomes: &[(NodeID, std::result::Result<(), String>)],
+    ) -> (ClusterSplitDrain, Arc<FakeTransport>) {
+        let transport = Arc::new(FakeTransport {
+            calls: std::sync::Mutex::new(Vec::new()),
+            outcomes: outcomes.iter().cloned().collect(),
+        });
+        let drain = ClusterSplitDrain::new(
+            Arc::new(FixedDrain(local)),
+            1,
+            Arc::new(move || peers.clone()),
+            Arc::clone(&transport) as Arc<dyn DrainTransport>,
+        );
+        (drain, transport)
+    }
+
+    #[tokio::test]
+    async fn test_cluster_drain_waits_on_every_peer_including_learners() {
+        let (drain, transport) = cluster_drain(Ok(()), vec![1, 2, 3], &[(2, Ok(())), (3, Ok(()))]);
+        drain
+            .drain(b"m", b"z", Duration::from_millis(250))
+            .await
+            .expect("all peers drained");
+        assert_eq!(
+            transport.calls(),
+            vec![
+                (2, b"m".to_vec(), b"z".to_vec()),
+                (3, b"m".to_vec(), b"z".to_vec()),
+            ],
+            "self is drained locally; every other member is contacted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cluster_drain_fails_when_a_reachable_peer_times_out() {
+        let (drain, _transport) = cluster_drain(
+            Ok(()),
+            vec![1, 2, 3],
+            &[(2, Ok(())), (3, Err("1 active transaction(s)".to_string()))],
+        );
+        let err = drain
+            .drain(b"m", b"z", Duration::from_millis(50))
+            .await
+            .expect_err("a reachable blocked peer must fail the drain");
+        assert!(err.contains("node 3 drain failed"), "err: {err}");
+        assert!(err.contains("1 active transaction(s)"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_cluster_drain_skips_unreachable_peers() {
+        // 节点 3 不在 outcomes 表 → 传输层不可达；它的会话按失效处理。
+        let (drain, transport) = cluster_drain(Ok(()), vec![1, 2, 3], &[(2, Ok(()))]);
+        drain
+            .drain(b"m", b"z", Duration::from_millis(50))
+            .await
+            .expect("an unreachable node must not block migration");
+        assert_eq!(transport.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_cluster_drain_fails_when_local_sessions_remain() {
+        let (drain, _transport) = cluster_drain(
+            Err("2 active transaction(s)".to_string()),
+            vec![1, 2],
+            &[(2, Ok(()))],
+        );
+        let err = drain
+            .drain(b"m", b"z", Duration::from_millis(50))
+            .await
+            .expect_err("the local session table must gate the drain");
+        assert!(err.contains("local drain failed"), "err: {err}");
+        assert!(err.contains("2 active transaction(s)"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_cluster_drain_single_node_uses_local_only() {
+        let (drain, transport) = cluster_drain(Ok(()), vec![1], &[]);
+        drain
+            .drain(b"", b"", Duration::from_millis(50))
+            .await
+            .expect("single-node drain is local only");
+        assert!(transport.calls().is_empty());
+    }
+
+    /// 本地侧接真实会话表：相交会话未收尾时 cluster drain 必须超时失败。
+    #[tokio::test]
+    async fn test_cluster_drain_gates_on_the_real_local_session_table() {
+        let sessions = Arc::new(crate::kvt::txn::TxnSessions::new());
+        let txn = sessions.begin(10, Duration::from_secs(5));
+        sessions
+            .record_read(&txn, crate::kvt::txn::ReadIntent::Point(b"m"), 4096)
+            .expect("record an overlapping read");
+        let transport = Arc::new(FakeTransport::default());
+        let drain = ClusterSplitDrain::new(
+            Arc::clone(&sessions) as Arc<dyn SplitDrain>,
+            1,
+            Arc::new(|| vec![1]),
+            Arc::clone(&transport) as Arc<dyn DrainTransport>,
+        );
+
+        let err = drain
+            .drain(b"m", b"z", Duration::from_millis(20))
+            .await
+            .expect_err("an active transaction must block the drain");
+        assert!(err.contains("local drain failed"), "err: {err}");
+
+        sessions.abort(&txn);
+        drain
+            .drain(b"m", b"z", Duration::from_millis(50))
+            .await
+            .expect("aborting the transaction releases the drain");
     }
 }

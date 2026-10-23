@@ -12,6 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use openraft::error::{RPCError, ReplicationClosed, StreamingError};
 use openraft::network::RPCOption;
@@ -443,6 +444,67 @@ impl RaftNetworkFactoryImpl {
         }
         Ok(reply.index)
     }
+
+    /// DrainRange：请 `target` 节点的本地会话表 drain 一段区间。
+    ///
+    /// 返回 `Ok(Drained)` / `Ok(Blocked)` 区分「对端可达但仍有会话」与
+    /// 连接失败——调用方对前者 fail-closed，对后者按节点失联处理。
+    pub async fn drain_range(
+        &self,
+        target: u64,
+        start: &[u8],
+        end: &[u8],
+        timeout: Duration,
+    ) -> Result<DrainRpcOutcome, String> {
+        if self.is_blocked(target) {
+            return Err(format!("node {target} is blocked by the test partition"));
+        }
+        let addr = self
+            .node_addrs
+            .read()
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| format!("no known raft address for node {target}"))?;
+        let client_slot = self.get_or_create_client_slot(target).await;
+        let net = RaftNetworkImpl {
+            target_id: target,
+            target_addr: addr,
+            client_slot,
+            tls_config: self.raft_tls_config.clone(),
+            shared_secret: self.shared_secret.clone(),
+            snapshot_rate_limiter: None,
+            region_id: 0,
+        };
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let req_payload = serialize_payload(&DrainRangePayload {
+            start_key: start.to_vec(),
+            end_key: end.to_vec(),
+            timeout_ms,
+        })
+        .map_err(|e| format!("serialize drain range: {e}"))?;
+        let req = tonic::Request::new(
+            net.build_authed_message(req_payload)
+                .map_err(|e| format!("auth drain range: {e}"))?,
+        );
+        let mut client = net
+            .get_client()
+            .await
+            .map_err(|e| format!("connect to node {target}: {e}"))?;
+        // 对端自己的 drain 有同一个 timeout；多留 1s 给应用/网络开销。
+        let rpc_wait = timeout.saturating_add(Duration::from_secs(1));
+        let resp = tokio::time::timeout(rpc_wait, client.drain_range(req))
+            .await
+            .map_err(|_| format!("drain_range to node {target} timed out after {rpc_wait:?}"))?
+            .map_err(|e| format!("drain_range to node {target}: {e}"))?
+            .into_inner();
+        let reply: DrainRangeReply =
+            decode_message_payload(&resp).map_err(|e| format!("decode drain range reply: {e}"))?;
+        if reply.drained {
+            Ok(DrainRpcOutcome::Drained)
+        } else {
+            Ok(DrainRpcOutcome::Blocked(reply.error))
+        }
+    }
 }
 
 /// 到单个目标节点的 Raft 网络客户端（实现 RaftNetworkV2）
@@ -807,6 +869,37 @@ pub struct PdSubmitReply {
     pub error: String,
 }
 
+// ──── / DrainRange（split/merge 区间 drain 扇出）────
+
+/// DrainRange 请求载荷：半开区间 `[start_key, end_key)`（`end_key` 空 = +∞）
+/// 与等待上界。接收方在 RPC 生命周期内持有本地 drain 标记。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct DrainRangePayload {
+    pub start_key: Vec<u8>,
+    pub end_key: Vec<u8>,
+    pub timeout_ms: u64,
+}
+
+/// DrainRange 响应：`drained=false` 时 `error` 是接收方的 drain 失败原因
+/// （仍有相交会话 / 本地校验失败），与传输层错误区分。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct DrainRangeReply {
+    pub drained: bool,
+    pub error: String,
+}
+
+/// 单次对端 drain 的结果：`Err` 是连接/协议失败（节点不可达），
+/// `Blocked` 是节点可达但区间仍有活跃会话（迁移必须失败重试）。
+#[derive(Debug)]
+pub enum DrainRpcOutcome {
+    Drained,
+    Blocked(String),
+}
+
+/// 接收方对 drain 等待上界的硬上限：节点间 RPC 的调用方不可信，一个超大
+/// timeout 不得把一段区间长期变成不可读。执行器默认 30s，留一倍余量。
+const MAX_REMOTE_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
     type SnapshotData = super::RaftSnapshotData;
 
@@ -1108,6 +1201,9 @@ pub struct RaftRpcService {
     rafts: Arc<RwLock<HashMap<u64, CoordRaft>>>,
     /// 共享密钥（配置后强制验签，无标签拒绝）
     shared_secret: Option<Arc<Vec<u8>>>,
+    /// split/merge 区间 drain 端口（本节点 `coord.txn.v2` 会话表）。
+    /// `None` = `[kv_t]` 未启用/未装配：DrainRange RPC 返回 FAILED_PRECONDITION。
+    split_drain: Arc<RwLock<Option<Arc<dyn crate::split_merge::SplitDrain>>>>,
 }
 
 impl Default for RaftRpcService {
@@ -1121,6 +1217,7 @@ impl RaftRpcService {
         Self {
             rafts: Arc::new(RwLock::new(HashMap::new())),
             shared_secret: None,
+            split_drain: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -1138,6 +1235,15 @@ impl RaftRpcService {
     /// Multi-Raft：注册某 Region 的 Raft 实例（解复用）。
     pub fn set_region_raft(&self, region_id: u64, raft: CoordRaft) {
         self.rafts.write().insert(region_id, raft);
+    }
+
+    /// 注册 split/merge 区间 drain 端口（本节点会话表；`None` = 未启用）。
+    ///
+    /// handler 在 RPC 生命周期内持有 drain guard，所以一个节点可以同时
+    /// 响应多个区间/多个执行器的 drain；同区间重复登记是幂等的（本地
+    /// `TxnSessions` 按 guard 计数）。
+    pub fn set_split_drain(&self, drain: Option<Arc<dyn crate::split_merge::SplitDrain>>) {
+        *self.split_drain.write() = drain;
     }
 
     /// 移除某 Region 的 Raft 实例（Region 下线/注销时）。
@@ -1366,6 +1472,39 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
                 index: 0,
                 error: format!("region0 raft pd propose failed: {e}"),
             },
+        };
+        let resp_payload = serialize_payload(&reply)?;
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            resp_payload,
+            0,
+        )))
+    }
+
+    /// DrainRange：在本节点用 `SplitDrain` 等待区间内会话收尾。
+    ///
+    /// `drained=false` 是应用级失败（仍有相交会话），用响应载荷回传给
+    /// 调用方；未启用 `[kv_t]` 的节点没有会话表，返回 FAILED_PRECONDITION。
+    async fn drain_range(
+        &self,
+        request: tonic::Request<RaftMessageProto>,
+    ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
+        let msg = request.into_inner();
+        inject_received_trace_context(&msg);
+        self.verify_incoming(&msg)?;
+        let payload: DrainRangePayload = decode_message_payload(&msg)?;
+        let drain = self.split_drain.read().clone().ok_or_else(|| {
+            tonic::Status::failed_precondition("split drain is not assembled on this node")
+        })?;
+        let result = drain
+            .drain(
+                &payload.start_key,
+                &payload.end_key,
+                Duration::from_millis(payload.timeout_ms).min(MAX_REMOTE_DRAIN_TIMEOUT),
+            )
+            .await;
+        let reply = DrainRangeReply {
+            drained: result.is_ok(),
+            error: result.err().unwrap_or_default(),
         };
         let resp_payload = serialize_payload(&reply)?;
         Ok(tonic::Response::new(make_raft_message_for_region(

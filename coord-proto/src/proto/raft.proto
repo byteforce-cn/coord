@@ -50,4 +50,14 @@ service Raft {
   // 响应 payload = bincode(PdSubmitReply{index,error})。节点间认证（共享密钥
   // HMAC / mTLS）与其他 Raft RPC 同口径。
   rpc SubmitPdOp(RaftMessage) returns (RaftMessage);
+
+  // DrainRange: split/merge 搬迁前把区间 drain 扇出到每个协调节点。
+  //
+  // 会话只活在协调节点内存，drain 不需要复制状态：接收方在本 RPC 的
+  // 生命周期内用本地 `TxnSessions` 等待与区间相交的事务收尾，超时/断连即
+  // 释放 drain 标记。请求 region_id = 0；payload = postcard(
+  // DrainRangePayload{start_key,end_key,timeout_ms})，响应 payload =
+  // postcard(DrainRangeReply{drained,error})。节点间认证（共享密钥 HMAC /
+  // mTLS）与其他 Raft RPC 同口径。
+  rpc DrainRange(RaftMessage) returns (RaftMessage);
 }
