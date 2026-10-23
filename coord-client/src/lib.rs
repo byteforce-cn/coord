@@ -11,6 +11,8 @@
 //                + 高级 Lock API
 // - txn_v2:      coord.txn.v2 事务会话（Begin/Read/Commit/Abort，绑定协调节点）
 // - watch_v2:    coord.watch.v2 订阅（cursor 续订 + 断线重连，至少一次投递）
+// - lease_v2:    coord.lease.v2 租约（全局 lease_id、跨 Region revoke）
+// - storage_v2:  coord.storage.v2 对象面（manifest 用全局 commit_ts/read_ts）
 // - tls:         TLS/mTLS Channel 构建（Config.tls，供连接池与 Leader 发现共用）
 // （R-AGT-20：route_cache 死代码已移除——单连接直连模式无需 Leader 路由缓存）
 
@@ -19,9 +21,11 @@ pub mod client;
 pub mod config;
 pub mod credential;
 pub mod leader;
+pub mod lease_v2;
 pub mod pool;
 pub mod refresh;
 pub mod retry;
+pub mod storage_v2;
 mod tls;
 pub mod txn_v2;
 pub mod watch_v2;
@@ -40,8 +44,10 @@ pub use credential::{
     NoopTokenProvider, RequestScopedTokenProvider, TokenProvider,
 };
 pub use leader::LeaderDiscovery;
+pub use lease_v2::{LeaseV2Client, LeaseV2Grant, LeaseV2State};
 pub use refresh::{spawn_session_refresher, SessionGateway, SessionTokens, REFRESH_LEAD_SECS};
 pub use retry::{classify_error, RetryDecision, RetryState};
+pub use storage_v2::{ObjectDataV2, PutObjectV2Result, StorageV2Client};
 pub use txn_v2::{delete_mutation, put_mutation, TxnCommit, TxnV2Client, TxnV2Session};
 pub use watch_v2::{
     WatchV2Batch, WatchV2Change, WatchV2Client, WatchV2Cursor, WatchV2Event, WatchV2Filter,

@@ -88,6 +88,13 @@ pub(crate) fn from_status(status: tonic::Status) -> Error {
     }
 }
 
+/// v2 时间戳上 wire 前先校验：`commit_ts`/`read_ts` 是 u64 语义，但 proto 字段是
+/// int64；越界直接拒绝，不能把回绕后的负值交给服务端当「旧时间戳」。
+pub(crate) fn ts_to_i64(name: &str, ts: u64) -> Result<i64> {
+    i64::try_from(ts)
+        .map_err(|_| Error::InvalidArgument(format!("{name} {ts} exceeds i64 wire range")))
+}
+
 /// R-SVC-08：按 gRPC 状态码分类错误，决定是否重试
 fn classify_tonic(status: &tonic::Status) -> RetryDecision {
     let msg = status.message().to_lowercase();
@@ -282,6 +289,11 @@ impl Client {
         LeaseClient::new(self.clone())
     }
 
+    /// 返回 v2 Lease 客户端（`coord.lease.v2`：全局租约、跨 Region revoke）。
+    pub fn lease_v2(&self) -> crate::lease_v2::LeaseV2Client {
+        crate::lease_v2::LeaseV2Client::new(self.clone())
+    }
+
     /// 返回 Watch 客户端（变更监听）
     pub fn watch(&self) -> WatchClient {
         WatchClient::new(self.clone())
@@ -300,6 +312,11 @@ impl Client {
     /// 返回对象存储客户端（coord.storage）
     pub fn storage(&self) -> StorageClient {
         StorageClient::new(self.clone())
+    }
+
+    /// 返回 v2 对象存储客户端（`coord.storage.v2`：manifest 用全局 `commit_ts`）。
+    pub fn storage_v2(&self) -> crate::storage_v2::StorageV2Client {
+        crate::storage_v2::StorageV2Client::new(self.clone())
     }
 
     /// 返回 Auth 客户端（认证 / refresh / 用户角色能力管理）
@@ -475,6 +492,43 @@ impl Client {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// v2 读调用/流开启的有界重试：只把 `EPOCH_STALE` 当「表刚变过」重试，其他
+    /// 错误立即返回（`NOT_FOUND`/`TXN_CONFLICT` 等业务结果不能被重试掩盖）。
+    /// `attempt` 每次都要重建请求：流不能重放，重试时附到 metadata 的必须是
+    /// 刚学到的版本。
+    pub(crate) async fn execute_v2_call_with_epoch_retry<T, Fut, F>(
+        &self,
+        mut attempt: F,
+    ) -> Result<T>
+    where
+        F: FnMut(AuthedChannel) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let mut retry = RetryState::new(&self.inner.config);
+        loop {
+            let (endpoint, channel) = self.get_leader_channel().await?;
+            match attempt(channel.clone()).await {
+                Ok(value) => {
+                    self.return_channel(&endpoint, channel);
+                    return Ok(value);
+                }
+                Err(status) => {
+                    self.return_channel(&endpoint, channel);
+                    self.learn_routing_epoch(&status);
+                    if error_code_of(&status).as_deref()
+                        == Some(CoordErrorCode::EpochStale.as_str())
+                    {
+                        if let Some(wait) = retry.next_attempt() {
+                            tokio::time::sleep(wait).await;
+                            continue;
+                        }
+                    }
+                    return Err(from_status(status));
                 }
             }
         }
@@ -785,11 +839,6 @@ impl KvV2Client {
         Self { client }
     }
 
-    fn ts_to_i64(name: &str, ts: u64) -> Result<i64> {
-        i64::try_from(ts)
-            .map_err(|_| Error::InvalidArgument(format!("{name} {ts} exceeds i64 wire range")))
-    }
-
     /// 从 `coord.tso.v2.GetTs` 取一个全局单调时间戳。
     pub async fn get_commit_ts(&self) -> Result<u64> {
         let (endpoint, channel) = self.client.get_leader_channel().await?;
@@ -814,7 +863,7 @@ impl KvV2Client {
         prev_kv: bool,
         request_id: &[u8],
     ) -> Result<(Option<kv_v2::KeyValue>, u64)> {
-        let commit_ts = Self::ts_to_i64("commit_ts", commit_ts)?;
+        let commit_ts = ts_to_i64("commit_ts", commit_ts)?;
         let key = key.to_vec();
         let value = value.to_vec();
         let request_id = request_id.to_vec();
@@ -851,7 +900,7 @@ impl KvV2Client {
         keys_only: bool,
         count_only: bool,
     ) -> Result<(Vec<kv_v2::KeyValue>, i64, u64)> {
-        let read_ts = Self::ts_to_i64("read_ts", read_ts)?;
+        let read_ts = ts_to_i64("read_ts", read_ts)?;
         let key = key.to_vec();
         let range_end = range_end.to_vec();
         let mut retry = RetryState::new(self.client.retry_config());
@@ -901,7 +950,7 @@ impl KvV2Client {
         prev_kv: bool,
         request_id: &[u8],
     ) -> Result<(i64, Vec<kv_v2::KeyValue>, u64)> {
-        let commit_ts = Self::ts_to_i64("commit_ts", commit_ts)?;
+        let commit_ts = ts_to_i64("commit_ts", commit_ts)?;
         let key = key.to_vec();
         let range_end = range_end.to_vec();
         let request_id = request_id.to_vec();
@@ -1872,7 +1921,7 @@ pub const DEFAULT_OBJECT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// 单消息解码上限：单 chunk 4MiB 的 protobuf 编码消息（字段头 + varint 长度
 /// 前缀）略超 4MiB → 客户端解码上限留余量（服务端 chunk ≤ 4MiB 恒满足）。
-const STORAGE_DECODE_LIMIT: usize = 8 * 1024 * 1024;
+pub(crate) const STORAGE_DECODE_LIMIT: usize = 8 * 1024 * 1024;
 
 /// 对象上传结果
 #[derive(Debug, Clone, PartialEq, Eq)]
