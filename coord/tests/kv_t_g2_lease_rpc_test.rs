@@ -184,7 +184,10 @@ mod tests {
                 KvTState::new(
                     true,
                     KvTRuntimeConfig {
-                        read_ts_wait_ms: 50,
+                        // 租约用例验证的是「清理/直写是否越过 pending 决策」，
+                        // 不是 fence 发布延迟；50ms 在 CI 并发负载下会偶发
+                        // SAFE_TS_LAG 超时（put 本身应该成功）。
+                        read_ts_wait_ms: 5_000,
                         ..KvTRuntimeConfig::default()
                     },
                 )
@@ -354,7 +357,9 @@ mod tests {
     }
 
     async fn wait_gone(h: &G2Node, key: &[u8]) {
-        for _ in 0..120 {
+        // 守卫每拍最多等 `read_ts_wait_ms`（5s）才轮到下一个 Region 的清理；
+        // 这里只验证最终被清理，不用 6s 的紧上限赌调度。
+        for _ in 0..600 {
             if !h.key_live(key) {
                 return;
             }
