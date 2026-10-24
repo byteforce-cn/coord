@@ -103,16 +103,20 @@ class KvTV2ClusterIntegrationTest {
                 .isGreaterThanOrEqualTo(batch.endTs());
 
         byte[] key = runKey("tso-kv");
-        KvClient.PutResult put = client.kvV2().put(key, utf8("v1"), first);
-        assertThat(put.commitTs()).isEqualTo(first);
+        // 取号后立刻写：safe-point fence 随 TSO 分配高水位前进，越过已发放但未使用的
+        // 值后写入只能 COMMIT_REJECTED（ADR-0015 D12.3）。中间再插 Allocate/其它 RPC
+        // 会把这个窗口撑到一个 advancer 周期。
+        long writeTs = client.tsoV2().getTimestamp();
+        KvClient.PutResult put = client.kvV2().put(key, utf8("v1"), writeTs);
+        assertThat(put.commitTs()).isEqualTo(writeTs);
 
         KvClient.RangeResult atCommit = client.kvV2()
-                .range(key, new byte[0], 0, first, false, false);
-        assertThat(atCommit.readTs()).isEqualTo(first);
+                .range(key, new byte[0], 0, writeTs, false, false);
+        assertThat(atCommit.readTs()).isEqualTo(writeTs);
         assertThat(atCommit.kvs()).hasSize(1);
         KvClient.KeyValue stored = atCommit.kvs().get(0);
         assertThat(text(stored.value())).isEqualTo("v1");
-        assertThat(stored.modRevision()).isEqualTo(first);
+        assertThat(stored.modRevision()).isEqualTo(writeTs);
         assertThat(stored.version()).isEqualTo(1);
 
         long overwriteTs = client.tsoV2().getTimestamp();

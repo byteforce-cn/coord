@@ -23,6 +23,9 @@ package coord.kv.v2;
 //     游标越过更早的决策再提案；追不上返回 `UNAVAILABLE` + `SAFE_TS_LAG`
 //     （可重试），不静默放行（否则那条决策会被高 revision 永久挡住，`safe_ts`
 //     也跟着卡死）；
+//   - `commit_ts` 应在取号后尽快使用：safe-point fence 随 TSO 分配高水位前进，
+//     越过该值后写入返回 `FAILED_PRECONDITION` + `COMMIT_REJECTED`（换新号重试，
+//     不要复用旧值）；
 //   - `commit_ts` 落后于已 compact 水位 ⇒ `OUT_OF_RANGE`。
 //
 // 读路径：
