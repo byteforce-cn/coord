@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use crate::raft::type_config::{
     Command, Response, SequencerMutation, SequencerOp, SequencerReadRange, SequencerTxn,
     SequencerTxnWithRanges, SequencerValidationLimits,
 };
-use crate::raft::CoordRaft;
+use crate::raft::{CoordRaft, WatchReceiver};
 use crate::storage::mvcc::MvccStorage;
 use crate::storage::redb_backend::RedbBackend;
 
@@ -126,6 +127,12 @@ pub struct CommitSequencer {
     /// 串行化「取 TSO → 提案」：否则并发提案可能让 `commit_ts` 顺序与日志顺序
     /// 不一致，OCC 校验会漏掉本应冲突的事务。等待锁即背压：并发调用串行排队。
     propose: tokio::sync::Mutex<()>,
+    /// 最近一次在本任期确认「region 0 本地 apply 已追平提交位」的任期（0 = 未确认）。
+    ///
+    /// 换 leader 后 applied 状态可能落后于旧 leader 已发布的 fence；直接取号会
+    /// 分配出 `commit_ts <= 已发布 fence` 的决策，破坏 [`Self::publish_fence`]
+    /// 的「决策恒大于已发布 fence」不变量。
+    linearized_term: AtomicU64,
 }
 
 impl CommitSequencer {
@@ -150,16 +157,81 @@ impl CommitSequencer {
             limits,
             propose_timeout,
             propose: tokio::sync::Mutex::new(()),
+            linearized_term: AtomicU64::new(0),
         }
     }
 
-    /// 持有期间不取 TSO、不提案（safe_ts 发布 fence 时使用）。
+    /// 在 propose 锁内发布 safe-point fence（region 0 raft），返回有效 fence。
     ///
-    /// fence 发布与「取 TSO → 提案」共用同一把锁：发布瞬间没有 in-flight
-    /// 决策，且之后 `get_ts_above(fence)` 只会分配更大的 `commit_ts`，因此
-    /// 不会出现 fence 越过未落盘决策的窗口。
-    pub async fn lock_fence_publication(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.propose.lock().await
+    /// 调用方保证 `fence_ts` 的所有 `commit_ts` 都已发放（例如直写自己的
+    /// `commit_ts - 1`）。发布与取号共用 [`Self::propose`]，因此：
+    /// - 发布瞬间没有 in-flight 决策；
+    /// - 之后的决策 `commit_ts` 必然大于该 fence。
+    ///
+    /// 两件事合起来给出直写次序守卫需要的判据：本地 apply 到 `F` 的节点看得到
+    /// 所有 `commit_ts <= F` 的决策，且之后不会再有 `commit_ts <= F` 的决策。
+    pub async fn publish_fence(&self, fence_ts: u64) -> Result<u64> {
+        let _guard = self.propose.lock().await;
+        self.publish_fence_locked(fence_ts).await
+    }
+
+    /// 在 propose 锁内把 **TSO 分配高水位**发布为 fence（safe_ts 推进器使用）。
+    ///
+    /// 高水位必须在锁内读取：锁外读到的高水位可能低于随后（锁内）取号得到的
+    /// `commit_ts`，那会让已发布 fence 越过一条刚落盘的决策。
+    pub async fn publish_high_water_fence(&self) -> Result<u64> {
+        let _guard = self.propose.lock().await;
+        let high_water = self.storage.tso_high_water()?;
+        self.publish_fence_locked(high_water).await
+    }
+
+    async fn publish_fence_locked(&self, fence_ts: u64) -> Result<u64> {
+        let published = self.storage.safe_ts_fence()?;
+        // fence 只前进：已经发布到更高值时无需再写一条 raft 日志。
+        if fence_ts <= published {
+            return Ok(published);
+        }
+        let response = self
+            .raft
+            .client_write(Command::PublishSafeTs { fence_ts })
+            .await
+            .map_err(|err| Error::ClusterUnavailable(format!("publish safe-ts fence: {err}")))?;
+        match response.response() {
+            Response::SafeTsPublished {
+                fence_ts: effective,
+            } if *effective >= fence_ts => Ok(*effective),
+            other => Err(Error::Internal(format!(
+                "unexpected PublishSafeTs response for {fence_ts}: {other:?}"
+            ))),
+        }
+    }
+
+    /// 换任期后先确认本节点 region 0 apply 追平提交位，再读 fence 取号。
+    ///
+    /// `client_write` 返回时本地 apply 已包含该条目（响应来自状态机），因此同一
+    /// 任期内的 fence 读取是新鲜的；唯一可能滞后的是「刚换 leader、尚未写过任何
+    /// 条目」的窗口。ReadIndex + `applied_index_at_least` 正好覆盖这一段。
+    async fn ensure_region0_applied(&self) -> Result<()> {
+        let term = self.raft.metrics().borrow_watched().current_term;
+        if term > 0 && self.linearized_term.load(Ordering::Acquire) == term {
+            return Ok(());
+        }
+        if let Err(status) = crate::server::ensure_linearizable_barrier(
+            self.node_id,
+            self.propose_timeout,
+            Some(&self.raft),
+            None,
+            0,
+        )
+        .await
+        {
+            return Err(match self.raft.current_leader().await {
+                Some(leader) if leader != self.node_id => Error::NotLeader { leader_addr: None },
+                _ => Error::ClusterUnavailable(format!("region0 apply barrier failed: {status}")),
+            });
+        }
+        self.linearized_term.store(term, Ordering::Release);
+        Ok(())
     }
 
     /// 校验并提交一批事务；返回与输入一一对应、顺序一致的结果。
@@ -187,6 +259,9 @@ impl CommitSequencer {
         candidates: &[CommitCandidate],
     ) -> Result<Vec<crate::raft::type_config::SequencerOutcome>> {
         let _guard = self.propose.lock().await;
+        // fence 读取必须晚于「apply 追平提交位」：否则新 leader 可能用旧 fence
+        // 取号，发出 `commit_ts <= 已发布 fence` 的决策。
+        self.ensure_region0_applied().await?;
         let fence = self.storage.safe_ts_fence()?;
         let mut txns = Vec::with_capacity(candidates.len());
         for candidate in candidates {

@@ -49,33 +49,40 @@ pub async fn advance_once(node: &CoordNode) -> Result<usize, String> {
     // 高水位是「下一未发放值」：fence 之后 GetTs 只会发放更大的值。
     if let Some(raft) = node.raft.as_ref() {
         if raft.current_leader().await == Some(node.node_id) {
-            // 锁必须覆盖「读高水位 → 提案」：sequencer 在锁内取 TSO，因此
-            // fence 发布时不可能有已分配但未落盘的 commit_ts。
-            let _fence_gate = match node.commit_sequencer() {
-                Some(sequencer) => Some(sequencer.lock_fence_publication().await),
-                None => None,
-            };
-            let high_water = node
-                .storage
-                .tso_high_water()
-                .map_err(|e| format!("read TSO high-water: {e}"))?;
-            let published = node
-                .storage
-                .safe_ts_fence()
-                .map_err(|e| format!("read safe-ts fence: {e}"))?;
-            if high_water > published {
-                let resp = raft
-                    .client_write(Command::PublishSafeTs {
-                        fence_ts: high_water,
-                    })
-                    .await
-                    .map_err(|e| format!("publish safe-ts fence {high_water}: {e}"))?;
-                match resp.response() {
-                    Response::SafeTsPublished { fence_ts } if *fence_ts >= high_water => {}
-                    other => {
-                        return Err(format!(
-                            "unexpected PublishSafeTs response for {high_water}: {other:?}"
-                        ))
+            match node.commit_sequencer() {
+                // 锁与高水位读取都在 sequencer 内完成：fence 发布与「取 TSO →
+                // 提案」共用一把锁，发布瞬间不可能有已分配但未落盘的 commit_ts。
+                Some(sequencer) => {
+                    sequencer
+                        .publish_high_water_fence()
+                        .await
+                        .map_err(|e| format!("publish safe-ts fence: {e}"))?;
+                }
+                // 没有 sequencer 就没有决策写入，无需与取号串行。
+                None => {
+                    let high_water = node
+                        .storage
+                        .tso_high_water()
+                        .map_err(|e| format!("read TSO high-water: {e}"))?;
+                    let published = node
+                        .storage
+                        .safe_ts_fence()
+                        .map_err(|e| format!("read safe-ts fence: {e}"))?;
+                    if high_water > published {
+                        let resp = raft
+                            .client_write(Command::PublishSafeTs {
+                                fence_ts: high_water,
+                            })
+                            .await
+                            .map_err(|e| format!("publish safe-ts fence {high_water}: {e}"))?;
+                        match resp.response() {
+                            Response::SafeTsPublished { fence_ts } if *fence_ts >= high_water => {}
+                            other => {
+                                return Err(format!(
+                                    "unexpected PublishSafeTs response for {high_water}: {other:?}"
+                                ))
+                            }
+                        }
                     }
                 }
             }

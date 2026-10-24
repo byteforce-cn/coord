@@ -423,6 +423,9 @@ impl kv_v2::kv_server::Kv for CoordNode {
 
         let target = self.kv_target_for_key(&req.key)?;
         self.guard_key_in_target(&target, &req.key)?;
+        // #244：直写不得越过尚未 apply 的 CommitDecision（先等它 apply 完）。
+        self.guard_direct_write_commit_ts(target.region_id, &target.mvcc, commit_ts)
+            .await?;
 
         let prev_kv = if req.prev_kv {
             // prev_kv 必须来自已 apply 到 commit index 的视图；否则 leader 本地
@@ -674,6 +677,9 @@ impl kv_v2::kv_server::Kv for CoordNode {
         } else {
             self.guard_key_in_target(&target, &req.key)?;
         }
+        // #244：直写不得越过尚未 apply 的 CommitDecision（先等它 apply 完）。
+        self.guard_direct_write_commit_ts(target.region_id, &target.mvcc, commit_ts)
+            .await?;
 
         // deleted/prev_kvs 由本地视图计算，必须先确认本地 apply 已覆盖已提交日志。
         self.ensure_linearizable_on(

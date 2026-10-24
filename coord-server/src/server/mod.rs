@@ -459,6 +459,131 @@ impl CoordNode {
         fence
     }
 
+    /// 直写（调用方自带 `commit_ts`）与 CommitDecision 的次序守卫（#244）。
+    ///
+    /// 若 Region 先 apply 一条 `commit_ts` 更大的直写，`current_revision` 就越过了
+    /// 尚未 apply 的、`commit_ts` 更小的 CommitDecision；
+    /// `apply_commit_decisions_core` 没有 changelog 就不能回退 revision，该决策
+    /// 永久卡住，`safe_ts` 也跟着卡死（`SAFE_TS_LAG` 不会自愈）。
+    ///
+    /// 判据（ADR-0015 D11/D12）：
+    /// 1. 已发布 fence `F >= commit_ts - 1`：发布与 sequencer 取号共用锁，因此
+    ///    `commit_ts <= F` 的决策都排在 `F` 之前，且之后不会再有 `commit_ts <= F`
+    ///    的决策；本节点 apply 到 `F` 后即看得到全部更早的决策。
+    /// 2. 本 Region 的决策游标越过这些决策之后，直写不可能越过 pending 决策。
+    ///
+    /// 等待上限 `[kv_t].read_ts_wait_ms`；没追上返回 `UNAVAILABLE + SAFE_TS_LAG`
+    /// （可重试），不静默放行。`[kv_t].enabled=false`、未交付 Txn 能力或没有
+    /// Commit Sequencer（不会产生决策）时不做任何事（v1 行为不变）。
+    pub(crate) async fn guard_direct_write_commit_ts(
+        &self,
+        region_id: RegionId,
+        mvcc: &MvccStorage<RedbBackend>,
+        commit_ts: u64,
+    ) -> Result<(), tonic::Status> {
+        if !self.kvt().is_enabled()
+            || !self.kvt().is_implemented(crate::kvt::KvTCapability::Txn)
+            || self.commit_sequencer().is_none()
+        {
+            return Ok(());
+        }
+
+        let started = tokio::time::Instant::now();
+        let poll = std::time::Duration::from_millis(10);
+        let deadline =
+            started + std::time::Duration::from_millis(self.kvt().config().read_ts_wait_ms.max(1));
+        let mut waited = false;
+        let lag_error = |detail: String| {
+            if let Some(metrics) = &self.metrics {
+                metrics.inc_kv_v2_safe_ts_lag();
+            }
+            coord_core::error_code::attach(
+                tonic::Status::unavailable(format!(
+                    "direct write commit_ts {commit_ts} on region {region_id} must stay ordered \
+                     behind earlier commit decisions: {detail}; retry later"
+                )),
+                coord_core::error_code::CoordErrorCode::SafeTsLag,
+            )
+        };
+
+        // 1. 已发布的 fence 必须越过 `commit_ts - 1`：它保证更早的决策都已在
+        //    region 0 日志里，且不会再出现更早的新决策。
+        let required_fence = commit_ts.saturating_sub(1);
+        let mut attempted: u64 = 0;
+        loop {
+            let fence = self.storage.safe_ts_fence().map_err(map_err)?;
+            if required_fence == 0 || fence >= required_fence {
+                break;
+            }
+            // 只发布 TSO 已发放范围内的值：调用方自带的 `commit_ts` 不能把 fence 推到
+            // 高水位之上，否则一个非法时间戳会把全局 `safe_ts` 钉在凭空的值上。
+            // 本地 region 0 副本可能落后于分配点：高水位前进后再补一次发布。
+            let high_water = self.storage.tso_high_water().map_err(map_err)?;
+            let publish_to = required_fence.min(high_water);
+            if publish_to > attempted {
+                attempted = publish_to;
+                if let Some(sequencer) = self.commit_sequencer() {
+                    // region 0 leader 现场补发布；follower 立即拿到 NotLeader，退回
+                    // 等待周期性广播（advancer）。发布本身受剩余预算约束。
+                    waited = true;
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    match tokio::time::timeout(remaining, sequencer.publish_fence(publish_to)).await
+                    {
+                        Ok(Ok(_)) => continue,
+                        Ok(Err(err)) => tracing::debug!(
+                            region_id,
+                            commit_ts,
+                            error = %err,
+                            "direct write fence publish skipped; waiting for the periodic fence"
+                        ),
+                        Err(_) => {
+                            return Err(lag_error(
+                                "timed out publishing the safe-ts fence".to_string(),
+                            ))
+                        }
+                    }
+                }
+            }
+            waited = true;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(lag_error(format!(
+                    "safe-ts fence {fence} / TSO high-water {high_water} has not passed \
+                     commit_ts - 1; the commit_ts must come from this cluster's TSO"
+                )));
+            }
+            tokio::time::sleep((deadline - now).min(poll)).await;
+        }
+
+        // 2. 等本 Region 把更早的决策 apply 完（applier 周期 50ms；这里只等，
+        //    不替 applier 提案，避免与它的批边界竞争）。
+        loop {
+            let cursor = mvcc.last_applied_decision_ts().map_err(map_err)?;
+            match self
+                .storage
+                .next_sequencer_decision_ts(cursor)
+                .map_err(map_err)?
+            {
+                Some(next) if next <= commit_ts => {
+                    waited = true;
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        return Err(lag_error(format!("commit decision {next} is not applied")));
+                    }
+                    tokio::time::sleep((deadline - now).min(poll)).await;
+                }
+                _ => break,
+            }
+        }
+
+        if waited {
+            if let Some(metrics) = &self.metrics {
+                metrics.inc_kv_v2_safe_ts_wait(started.elapsed().as_millis() as u64);
+            }
+        }
+        Ok(())
+    }
+
     /// 注入 KV-T 运行时状态（`[kv_t]`）。
     ///
     /// 默认是 disabled：不注入时 v2 服务仍然注册，但每个 RPC 返回

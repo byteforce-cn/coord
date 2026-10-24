@@ -9,11 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use tokio::sync::oneshot;
 use tonic::transport::Server;
 
-use coord_core::error::Result as CoordResult;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta, StorageConfig};
 use coord_proto::maintenance::maintenance_server::MaintenanceServer;
@@ -32,7 +30,7 @@ use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
 use coord_server::raft::region::RegionManager;
 use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
 use coord_server::raft::state_machine::StateMachineStore;
-use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
+use coord_server::raft::tso::{TsoAllocator, TsoClient};
 use coord_server::raft::type_config::{SequencerMutation, SequencerValidationLimits};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
@@ -44,6 +42,10 @@ use tempfile::TempDir;
 
 /// 种子数据用的 commit_ts（低于后续事务的分配值）。
 pub const SEED_TS: u64 = 100;
+
+/// 直写用例在 `SEED_TS` 之上手工取 `commit_ts`（最大 offset 22）；TSO 高水位
+/// 必须覆盖这些值，否则直写次序守卫会把它们当作「未由 TSO 发放」拒绝。
+const SEED_HEADROOM: u64 = 64;
 
 pub fn find_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -59,36 +61,6 @@ pub fn raft_config() -> RaftConfig {
         election_timeout_min: 800,
         election_timeout_max: 1_500,
         ..Default::default()
-    }
-}
-
-/// 进程内 TSO 源：只验证决策与记录落盘，不启动真实 allocator。
-pub struct FakeTso {
-    high_water: std::sync::atomic::AtomicU64,
-}
-
-impl FakeTso {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            high_water: std::sync::atomic::AtomicU64::new(SEED_TS + 10),
-        })
-    }
-}
-
-#[async_trait]
-impl TsoSource for FakeTso {
-    async fn is_leader(&self) -> bool {
-        true
-    }
-
-    async fn allocate(&self, batch_size: u32) -> CoordResult<TsoBatch> {
-        let start = self
-            .high_water
-            .fetch_add(u64::from(batch_size), std::sync::atomic::Ordering::SeqCst);
-        Ok(TsoBatch {
-            start_ts: start,
-            end_ts: start + u64::from(batch_size),
-        })
     }
 }
 
@@ -222,7 +194,11 @@ impl WatchNode {
             ]),
         );
         node.set_metrics(Arc::clone(&metrics));
-        let tso = TsoClient::new(FakeTso::new(), 1024, None);
+        let tso = TsoClient::new(
+            Arc::new(TsoAllocator::new(root_raft.as_ref().clone(), 1)),
+            1024,
+            None,
+        );
         node.set_tso_client(Arc::clone(&tso));
         node.set_commit_sequencer(Arc::new(CommitSequencer::new(
             root_raft.as_ref().clone(),
@@ -260,6 +236,18 @@ impl WatchNode {
 
         let node = Arc::new(node);
         wait_for_leaders(&node, &manager).await;
+        // 种子数据占 `SEED_TS`，TSO 必须从它之上起发：把高水位推到 `SEED_TS+10`
+        // （经 region 0 raft apply，与生产 allocator 一致；直写次序守卫用高水位
+        // 给 safe-ts fence 封顶）。
+        let allocator = TsoAllocator::new(root_raft.as_ref().clone(), 1);
+        let primed = allocator
+            .allocate((SEED_TS + SEED_HEADROOM) as u32)
+            .await
+            .expect("prime TSO high-water");
+        assert!(
+            primed.start_ts <= SEED_TS && primed.end_ts > SEED_TS,
+            "primed batch must cover the seed revision: {primed:?}"
+        );
         // 种子数据：两个 Region 各有已提交值，prev 值可用于校验完整记录。
         let fixture = Self {
             node,
