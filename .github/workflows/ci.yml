@@ -593,8 +593,9 @@ jobs:
   # 孤儿 `coord server`/`coord agent` 会抢 CPU/端口，让**后面的**套件出现
   # 「像产品 bug」的假红（本地实测：残留孤儿 → plugin_real_process_test 红；
   # `kill-stray-coord-procs.sh` 清一次 → 同一条命令、同一提交绿）。
-  # 两个 job 仍共用一份 target 缓存（`shared-key: tests`），避免各编译一遍；
-  # 每个 job 内部的套件仍逐步清孤儿，失败信息按 suite 独立可读。
+  # 两个 job 与 test job 共用一份 target 缓存（`shared-key: tests`）：
+  # 库/依赖构建相同，只有各自的 test target 不同；每个 job 内部的套件仍逐步
+  # 清孤儿，失败信息按 suite 独立可读。
   chaos-kill9-soak:
     name: chaos (kill9 + soak, real processes)
     runs-on: ubuntu-latest
@@ -613,8 +614,11 @@ jobs:
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
+      # 只构建本 job 要跑的 test target：`--workspace --tests` 会把整个 workspace
+      # 的 ~100 个集成测试二进制全部链接一遍（每个都链 tonic/openraft），
+      # 是 build 时间的主成本。库/二进制依赖仍会完整构建。
       - name: Build tests
-        run: cargo build --workspace --tests
+        run: cargo build -p coord --test chaos_real
       # 失败必须**自描述**：间歇红曾因日志不可得而无法判定「真缺陷 vs 假红」。
       # 失败测试名/panic 以注解带出（见 scripts/ci-annotate-test-failures.sh）。
       - name: Run real-process chaos suites
@@ -652,8 +656,18 @@ jobs:
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
+      # 只构建本 job 要跑的 test target（理由见 chaos-kill9-soak 的同名注释）。
       - name: Build tests
-        run: cargo build --workspace --tests
+        run: |
+          cargo build -p coord \
+            --test multi_raft_process_test \
+            --test plugin_auth_process_test \
+            --test plugin_auth_multinode_process_test \
+            --test plugin_credentials_process_test \
+            --test plugin_real_process_test \
+            --test object_storage_process_test \
+            --test agent_auth_process_test \
+            --test dos_rss_peak_test
       # 每个 step 前清孤儿：只清理数据目录（或 `--agent-config` 路径）位于
       # `/tmp/.tmp*` 的进程，不碰真实集群。`if: always()` 保证一次 run 能给出
       # 全部套件结论，而不是前一步失败就跳过后续、失去执行记录。
