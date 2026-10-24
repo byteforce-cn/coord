@@ -192,9 +192,8 @@ class KvTV2ClusterIntegrationTest {
         TxnClient.CommitResult written = writer.commit(
                 List.of(TxnClient.Mutation.put(key, utf8("new"))));
         assertThat(written.committed()).isTrue();
-        // Await visibility before any later direct v2 write: a direct write whose
-        // commit_ts is above this pending decision would advance the Region
-        // revision past it (see the direct-write/pending-decision issue).
+        // read_ts = commit_ts waits for safe_ts, so the snapshot is served after the
+        // decision applied (the server also orders direct writes behind it, #244).
         KvClient.RangeResult visible = client.kvV2()
                 .range(key, new byte[0], 0, written.commitTs(), false, false);
         assertThat(visible.kvs()).hasSize(1);
@@ -276,6 +275,40 @@ class KvTV2ClusterIntegrationTest {
         KvClient.RangeResult ranged = client.kvV2()
                 .range(utf8("a/"), utf8("z0"), 0, rightTs, false, false);
         assertThat(keys(ranged.kvs())).contains(text(left), text(right));
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("a direct write right after a txn commit keeps the decision applyable (#244)")
+    void directWriteRightAfterTxnCommitKeepsTheDecisionApplyable() {
+        byte[] txnKey = runKey("a/order-txn");
+        byte[] directKey = runKey("a/order-direct");
+
+        TxnClient.Session txn = client.txnV2().begin();
+        TxnClient.CommitResult committed = txn.commit(
+                List.of(TxnClient.Mutation.put(txnKey, utf8("txn"))));
+        assertThat(committed.committed()).isTrue();
+        long commitTs = committed.commitTs();
+
+        // 不等决策 apply：立刻用更大的 commit_ts 直写同一 Region。服务端必须先把该
+        // 决策 apply（或返回可重试的 SAFE_TS_LAG），不能把 Region revision 推过它
+        // —— 那会让决策永久无法 apply，safe_ts 卡死且不自愈。
+        long directTs = client.tsoV2().getTimestamp();
+        assertThat(directTs).isGreaterThan(commitTs);
+        KvClient.PutResult direct = client.kvV2().put(directKey, utf8("direct"), directTs);
+        assertThat(direct.commitTs()).isEqualTo(directTs);
+
+        // safe_ts 追过两者：同一 read_ts 的快照同时看到事务与直写（无部分可见）。
+        KvClient.RangeResult snapshot = client.kvV2().range(
+                runKey("a/order"), runKey("a/order~"), 0, directTs, false, false);
+        assertThat(keys(snapshot.kvs())).containsExactlyInAnyOrder(text(txnKey), text(directKey));
+
+        // 决策没有卡住：后续事务仍能在更高 commit_ts 上提交。
+        TxnClient.CommitResult next = client.txnV2()
+                .begin()
+                .commit(List.of(TxnClient.Mutation.put(runKey("a/order-next"), utf8("next"))));
+        assertThat(next.committed()).isTrue();
+        assertThat(next.commitTs()).isGreaterThan(directTs);
     }
 
     private static WatchClient.Event awaitEvent(

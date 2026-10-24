@@ -17,7 +17,7 @@ use coord_core::error_code::error_code_of;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta, StorageConfig};
 use coord_proto::kv::v2::kv_server::Kv as KvV2;
-use coord_proto::kv::v2::RangeRequest as RangeRequestV2;
+use coord_proto::kv::v2::{PutRequest as PutRequestV2, RangeRequest as RangeRequestV2};
 use coord_server::kvt::decision_apply::apply_pending_decisions;
 use coord_server::kvt::sequencer::{CommitCandidate, CommitSequencer};
 use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
@@ -274,6 +274,17 @@ async fn wait_for_leaders(node: &CoordNode, manager: &RegionManager) {
     }
 }
 
+fn put_req(key: &[u8], value: &[u8], commit_ts: u64) -> PutRequestV2 {
+    PutRequestV2 {
+        key: key.to_vec(),
+        value: value.to_vec(),
+        lease_id: 0,
+        prev_kv: false,
+        request_id: Vec::new(),
+        commit_ts: commit_ts as i64,
+    }
+}
+
 fn range_req(key: &[u8], range_end: &[u8], read_ts: i64) -> RangeRequestV2 {
     RangeRequestV2 {
         key: key.to_vec(),
@@ -386,6 +397,114 @@ async fn test_commit_decision_applies_two_regions_atomically() {
             .unwrap()
             .version,
         1
+    );
+}
+
+/// #244：直写的 fence 发布不得超出 TSO 高水位。
+///
+/// `commit_ts` 由调用方自带；若把 `commit_ts - 1` 原样发布为 fence，一个非法
+/// 时间戳就能把全局 `safe_ts` 钉在凭空的值上（后续合法写入全部被
+/// `COMMIT_REJECTED`）。守卫只能发布到高水位，其余情况返回可重试的
+/// `SAFE_TS_LAG`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_direct_write_cannot_push_the_fence_past_the_tso_high_water() {
+    let g3 = G3Node::start().await;
+    let high_water = g3.node.storage.tso_high_water().unwrap();
+
+    let err = g3
+        .node
+        .put(tonic::Request::new(put_req(
+            b"apricot",
+            b"b",
+            high_water + 1_000_000,
+        )))
+        .await
+        .expect_err("a commit_ts above the TSO high-water must not be accepted");
+    assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+    assert_eq!(
+        error_code_of(&err).as_deref(),
+        Some("SAFE_TS_LAG"),
+        "{err:?}"
+    );
+    assert!(
+        g3.node.safe_ts_fence() <= high_water,
+        "fence {} must stay at or below the TSO high-water {high_water}",
+        g3.node.safe_ts_fence()
+    );
+    assert_eq!(
+        g3.runtime(b"apricot").mvcc.current_revision(),
+        0,
+        "the rejected direct write must not advance the region watermark"
+    );
+}
+
+/// #244：直写（`coord.kv.v2` Put）不得越过尚未 apply 的 CommitDecision。
+///
+/// 事务 commit 后立刻用更大的 `commit_ts` 直写同一 Region：直写若先 apply，
+/// Region 的 `current_revision` 会越过决策的 `commit_ts`，决策随后只能停在该
+/// 决策之前（没有 changelog 可作重放证据），`safe_ts` 永久卡住。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_direct_write_does_not_pass_a_pending_decision() {
+    let g3 = G3Node::start().await;
+    // 决策已写入 region 0，但还没 apply 到两个数据 Region。
+    let commit_ts = g3.commit(&[(b"apple", b"a"), (b"melon", b"m")]).await;
+    let direct_ts = commit_ts + 1;
+
+    let err = g3
+        .node
+        .put(tonic::Request::new(put_req(b"apricot", b"b", direct_ts)))
+        .await
+        .expect_err("a direct write must not pass a pending commit decision");
+    assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+    assert_eq!(
+        error_code_of(&err).as_deref(),
+        Some("SAFE_TS_LAG"),
+        "{err:?}"
+    );
+    assert_eq!(
+        g3.runtime(b"apricot").mvcc.current_revision(),
+        0,
+        "the deferred direct write must not advance the region watermark"
+    );
+    assert_eq!(
+        g3.runtime(b"apricot").mvcc.get(b"apricot").unwrap(),
+        None,
+        "the deferred direct write must not be visible"
+    );
+
+    // 决策照常 apply；之后同一 commit_ts 的直写成功，safe_ts 追过决策。
+    assert_eq!(
+        apply_pending_decisions(&g3.node, 16)
+            .await
+            .expect("apply decisions"),
+        2
+    );
+    let resp = g3
+        .node
+        .put(tonic::Request::new(put_req(b"apricot", b"b", direct_ts)))
+        .await
+        .expect("direct write after the decision applied")
+        .into_inner();
+    assert_eq!(resp.commit_ts, direct_ts as i64);
+    assert!(
+        g3.node.safe_ts() >= commit_ts,
+        "safe_ts must catch up with the applied decision, got {}",
+        g3.node.safe_ts()
+    );
+    assert_eq!(
+        g3.runtime(b"apricot")
+            .mvcc
+            .last_applied_decision_ts()
+            .unwrap(),
+        commit_ts
+    );
+    assert_eq!(
+        g3.node
+            .storage
+            .next_sequencer_decision_ts(commit_ts)
+            .unwrap(),
+        None,
+        "no decision may be left unapplied"
     );
 }
 

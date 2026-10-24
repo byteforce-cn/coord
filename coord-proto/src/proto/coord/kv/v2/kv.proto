@@ -18,6 +18,11 @@ package coord.kv.v2;
 //     changelog、不重复推进 revision（D11.6）；
 //   - `commit_ts <= current_revision` 且该 `commit_ts` 未命中已有写入 ⇒
 //     `FAILED_PRECONDITION` + `COMMIT_REJECTED`（D11.4，禁止静默写）；
+//   - 次序：直写不得越过尚未 apply 的 CommitDecision。服务端先把 `commit_ts - 1`
+//     （不超过 TSO 已发放高水位）发布为 safe-point fence，等本地 Region 的决策
+//     游标越过更早的决策再提案；追不上返回 `UNAVAILABLE` + `SAFE_TS_LAG`
+//     （可重试），不静默放行（否则那条决策会被高 revision 永久挡住，`safe_ts`
+//     也跟着卡死）；
 //   - `commit_ts` 落后于已 compact 水位 ⇒ `OUT_OF_RANGE`。
 //
 // 读路径：
