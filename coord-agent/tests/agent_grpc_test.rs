@@ -33,9 +33,22 @@ use coord_proto::watch::watch_client::WatchClient;
 
 /// Find an available TCP port on localhost
 fn find_port() -> u16 {
+    use std::collections::HashSet;
     use std::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+    use std::sync::{Mutex, OnceLock};
+    // bind(0) 后立刻释放：同一 test binary 里并发跑的另一个用例可能拿到同一个
+    // 端口，随后 `serve()` 绑定时 `AddrInUse`（CI 实测）。进程内去重保证每个
+    // 用例拿到不同端口；跨进程的极小窗口仍交给 `connect_ready` 的有界重试。
+    static RESERVED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let reserved = RESERVED.get_or_init(|| Mutex::new(HashSet::new()));
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        if reserved.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
 }
 
 fn test_config(port: u16) -> AgentConfig {
