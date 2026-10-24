@@ -75,7 +75,7 @@ public final class RetryTemplate {
         throw lastException;
     }
 
-    private boolean isRetryable(ErrorCode code) {
+    static boolean isRetryable(ErrorCode code) {
         return code == ErrorCode.NOT_LEADER
                 || code == ErrorCode.UNAVAILABLE
                 || code == ErrorCode.AGENT_UNAVAILABLE
