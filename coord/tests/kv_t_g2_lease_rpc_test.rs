@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -27,6 +27,8 @@ mod tests {
     use coord_proto::lease::v2::{
         LeaseGrantRequest, LeaseKeepAliveRequest, LeaseRevokeRequest, LeaseTimeToLiveRequest,
     };
+    use coord_server::kvt::decision_apply::apply_pending_decisions;
+    use coord_server::kvt::sequencer::{CommitCandidate, CommitSequencer};
     use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
     use coord_server::raft::log_store::LogStore;
     use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
@@ -34,9 +36,13 @@ mod tests {
     use coord_server::raft::region_runtime::{region_data_dir, RegionRuntimeSpec};
     use coord_server::raft::state_machine::StateMachineStore;
     use coord_server::raft::tso::{TsoBatch, TsoClient, TsoSource};
-    use coord_server::raft::type_config::{Command, LeaseV2Op, Response};
+    use coord_server::raft::type_config::{
+        Command, CommitDecisionApplyLog, LeaseV2Op, Response, SequencerMutation, SequencerOutcome,
+        SequencerValidationLimits,
+    };
     use coord_server::raft::{new_basic_node, new_raft, RaftConfig};
     use coord_server::server::CoordNode;
+    use coord_server::storage::commit_log::COMMIT_LOG_STAGING_SHARD_ID;
     use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
     use coord_server::storage::redb_backend::RedbBackend;
     use coord_server::storage::snapshot::SnapshotTracker;
@@ -125,6 +131,12 @@ mod tests {
                 .initialize(BTreeMap::from([(1u64, new_basic_node(&raft_addr))]))
                 .await
                 .expect("initialize region 0 raft");
+            // 直写次序守卫只把 `commit_ts - 1` 发布到 TSO 已发放高水位之内；
+            // 进程内 TSO 不落高水位，这里（`initialize` 之后，否则 applied 标记会让
+            // raft 拒绝初始化）给足发放空间，否则守卫会把合法直写判成「时间戳高于
+            // 本集群已发放范围」。
+            mvcc.apply_tso_allocate(1024, 1, AppliedLogId::standalone(0))
+                .expect("raise TSO high water");
 
             let factory = RaftNetworkFactoryImpl::new(1);
             factory.register_node(1, raft_addr);
@@ -179,16 +191,33 @@ mod tests {
                 .with_implemented([
                     KvTCapability::Kv,
                     KvTCapability::Tso,
+                    KvTCapability::Txn,
                     KvTCapability::Lease,
                 ]),
             );
-            node.set_tso_client(TsoClient::new(
+            // sequencer 与租约 RPC 共用同一个 TSO 客户端：`commit_ts` 顺序决定
+            // 「清理是否越过未 apply 的决策」。
+            let tso = TsoClient::new(
                 Arc::new(FakeTso {
                     high_water: AtomicU64::new(1),
                 }),
                 8,
                 None,
-            ));
+            );
+            node.set_tso_client(Arc::clone(&tso));
+            node.set_commit_sequencer(Arc::new(CommitSequencer::new(
+                root_raft.as_ref().clone(),
+                1,
+                tso,
+                Arc::clone(&mvcc),
+                256,
+                4 * 1024 * 1024,
+                SequencerValidationLimits {
+                    max_read_set: 4_096,
+                    max_range: 10_000,
+                },
+                Duration::from_secs(5),
+            )));
             let node = Arc::new(node);
             wait_for_leaders(&node, &manager).await;
             node.start_kvt_lease_expiry_worker();
@@ -257,6 +286,52 @@ mod tests {
         fn key_live(&self, key: &[u8]) -> bool {
             let rt = self.manager.route_runtime(key).expect("route key");
             rt.mvcc.get(key).unwrap().is_some()
+        }
+
+        /// 写一条事务决策到 region 0，但**不** apply 到数据 Region。
+        async fn commit(&self, txn: &[u8], writes: &[(&[u8], &[u8])]) -> u64 {
+            let sequencer = self.node.commit_sequencer().expect("commit sequencer");
+            let outcomes = sequencer
+                .validate_and_commit(vec![CommitCandidate {
+                    txn_id: txn.to_vec(),
+                    start_ts: 0,
+                    request_id: txn.to_vec(),
+                    read_set: BTreeSet::new(),
+                    read_ranges: Vec::new(),
+                    mutations: writes
+                        .iter()
+                        .map(|(key, value)| SequencerMutation::Put {
+                            key: key.to_vec(),
+                            value: value.to_vec(),
+                            lease_id: None,
+                        })
+                        .collect(),
+                }])
+                .await
+                .expect("validate and commit");
+            match outcomes.into_iter().next() {
+                Some(SequencerOutcome::Committed { commit_ts }) => commit_ts,
+                other => panic!("expected Committed, got {other:?}"),
+            }
+        }
+
+        /// 把一条决策只 apply 到某个 Region（决策逐 Region 到达，不同步）。
+        async fn apply_decision_on(&self, region_id: u64, commit_ts: u64, txn: &[u8]) {
+            let rt = self.manager.runtime(region_id).expect("region runtime");
+            rt.raft
+                .client_write(Command::ApplyCommitDecisionsWithLog {
+                    max_txn_bytes: 4 * 1024 * 1024,
+                    decisions: vec![CommitDecisionApplyLog {
+                        shard_id: COMMIT_LOG_STAGING_SHARD_ID,
+                        region_id,
+                        commit_ts,
+                        txn_id: txn.to_vec(),
+                        start_ts: 0,
+                        mutations: Vec::new(),
+                    }],
+                })
+                .await
+                .expect("apply decision on one region");
         }
     }
 
@@ -535,11 +610,10 @@ mod tests {
                     request_id: Vec::new(),
                 },
                 10_000,
-                AppliedLogId {
-                    term: 1,
-                    node_id: 1,
-                    index: 10_000,
-                },
+                // applied 标记不能假装在 raft 日志前面：`applied_contains` 按
+                // index 判定「已应用」，提前记 10_000 会让 region 0 后续的
+                // raft 条目全被当成重放（fence 不再发布）。
+                AppliedLogId::standalone(0),
             )
             .unwrap();
         assert!(h.key_live(b"resume-key"));
@@ -629,6 +703,191 @@ mod tests {
             .await
             .expect("clear migration fence");
         wait_gone(&h, b"m-fenced").await;
+    }
+
+    /// lease revoke 也是「调用方自带 `commit_ts` 的直写」：事务 commit 后立刻
+    /// revoke，清理若先落盘，Region 的 `current_revision` 会越过尚未 apply 的
+    /// 决策 ⇒ 决策永久无法 apply、`safe_ts` 卡死。守卫必须把这个 Region 留在
+    /// pending，下一拍用**同一** `commit_ts` 重试。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_lease_revoke_does_not_pass_a_pending_decision() {
+        let h = G2Node::start().await;
+        let mut lease = h.lease().await;
+
+        let grant = lease
+            .lease_grant(LeaseGrantRequest {
+                ttl_seconds: 60,
+                lease_id: 0,
+                request_id: b"revoke-behind-decision".to_vec(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let put_ts = h.put_bound(b"apple", b"a", grant.lease_id).await;
+        // 决策已落 region 0，但还没 apply 到数据 Region。
+        let decision_ts = h.commit(b"txn-behind-decision", &[(b"apple2", b"b")]).await;
+        assert!(
+            decision_ts > put_ts,
+            "the decision must commit after the direct write: {decision_ts} vs {put_ts}"
+        );
+
+        let revoked = lease
+            .lease_revoke(LeaseRevokeRequest {
+                lease_id: grant.lease_id,
+                request_id: Vec::new(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let revoke_ts = u64::try_from(revoked.commit_ts).expect("positive revoke ts");
+        assert!(
+            revoke_ts > decision_ts,
+            "the revoke must be ordered after the decision: {revoke_ts} vs {decision_ts}"
+        );
+
+        // 清理停在决策之后：不推 Region 水位、不删 key、不重取时间戳。
+        let region = h.manager.runtime(1).expect("region 1 runtime");
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(
+                h.key_live(b"apple"),
+                "lease cleanup must wait for the pending decision"
+            );
+            assert_eq!(
+                region.mvcc.current_revision(),
+                put_ts,
+                "the deferred cleanup must not push the region watermark"
+            );
+        }
+        assert_eq!(
+            region.mvcc.last_applied_decision_ts().unwrap(),
+            0,
+            "the decision is still pending"
+        );
+
+        // 决策照常 apply；之后清理用同一 `commit_ts` 追上，key 最终删除。
+        assert_eq!(
+            apply_pending_decisions(&h.node, 16)
+                .await
+                .expect("apply decisions"),
+            2,
+            "one apply command per region"
+        );
+        assert_eq!(
+            region.mvcc.last_applied_decision_ts().unwrap(),
+            decision_ts,
+            "the decision applied once the cleanup stopped blocking it"
+        );
+        wait_gone(&h, b"apple").await;
+        assert!(h.key_live(b"apple2"), "the committed row must stay");
+        assert!(
+            h.node.safe_ts() >= decision_ts,
+            "safe_ts must catch up with the applied decision, got {}",
+            h.node.safe_ts()
+        );
+        assert_eq!(
+            h.node
+                .storage
+                .get_lease_v2_record(grant.lease_id)
+                .unwrap()
+                .expect("revoke record")
+                .revoked_commit_ts,
+            revoke_ts,
+            "the deferred cleanup must keep its commit_ts",
+        );
+    }
+
+    /// 跨 Region 扇出时逐 Region 互不阻塞：Region 1 的清理被 pending 决策挡住
+    /// 不能拖住 Region 2 的清理。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_lease_cleanup_is_per_region() {
+        let h = G2Node::start().await;
+        let mut lease = h.lease().await;
+
+        let blocked = lease
+            .lease_grant(LeaseGrantRequest {
+                ttl_seconds: 60,
+                lease_id: 0,
+                request_id: b"per-region-blocked".to_vec(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let free = lease
+            .lease_grant(LeaseGrantRequest {
+                ttl_seconds: 60,
+                lease_id: 0,
+                request_id: b"per-region-free".to_vec(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let blocked_ts = h.put_bound(b"apple", b"a", blocked.lease_id).await;
+        h.put_bound(b"melon", b"m", free.lease_id).await;
+        // 只有 Region 1 有未 apply 的决策。
+        let decision_ts = h.commit(b"txn-per-region", &[(b"apple2", b"b")]).await;
+        assert!(
+            decision_ts > blocked_ts,
+            "the decision must commit after the bound put: {decision_ts} vs {blocked_ts}"
+        );
+        // 决策先到 Region 2（没有本 Region key，只推游标）；Region 1 还停在它之前。
+        h.apply_decision_on(2, decision_ts, b"txn-per-region").await;
+
+        for (lease_id, request_id) in [
+            (blocked.lease_id, b"revoke-blocked".to_vec()),
+            (free.lease_id, b"revoke-free".to_vec()),
+        ] {
+            lease
+                .lease_revoke(LeaseRevokeRequest {
+                    lease_id,
+                    request_id,
+                })
+                .await
+                .unwrap();
+        }
+        let blocked_revoke_ts = h
+            .node
+            .storage
+            .get_lease_v2_record(blocked.lease_id)
+            .unwrap()
+            .expect("blocked record")
+            .revoked_commit_ts;
+
+        // Region 2 的清理照常完成，Region 1 继续等决策 apply。
+        wait_gone(&h, b"melon").await;
+        assert!(
+            h.key_live(b"apple"),
+            "a pending decision on one region must not block another region's cleanup"
+        );
+        assert_eq!(
+            h.manager
+                .runtime(1)
+                .expect("region 1 runtime")
+                .mvcc
+                .current_revision(),
+            blocked_ts,
+            "region 1 must stay behind its pending decision"
+        );
+
+        assert_eq!(
+            apply_pending_decisions(&h.node, 16)
+                .await
+                .expect("apply decisions"),
+            1,
+            "only region 1 still has the decision to apply"
+        );
+        wait_gone(&h, b"apple").await;
+        assert_eq!(
+            h.node
+                .storage
+                .get_lease_v2_record(blocked.lease_id)
+                .unwrap()
+                .expect("blocked record")
+                .revoked_commit_ts,
+            blocked_revoke_ts,
+            "waiting must not re-allocate the cleanup commit_ts",
+        );
+        assert!(h.node.safe_ts() >= decision_ts);
     }
 
     #[tokio::test]
