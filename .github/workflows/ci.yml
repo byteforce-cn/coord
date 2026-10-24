@@ -8,7 +8,8 @@ name: CI
 #   m0_recovery_suite 真实二进制套件）
 # - 前端 lint（coord-ui）
 # - proto 契约（buf lint + 格式 + 对 main 的 breaking 检查）
-# - nightly 真实故障注入（chaos_real）
+# - 真实故障注入（chaos_real / multi-raft / auth / plugin）：拆成两个并行 job，
+#   由一个汇总 check 统一给出红/绿
 # - 每周性能基准（perf_bench + 劣化 >20% 校验）
 # - 定时 cargo audit / cargo deny（安全依赖治理）
 #
@@ -449,6 +450,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          # 与拆分后的 chaos jobs 共用 target：三者都只做
+          # `cargo build --workspace --tests` 的默认 feature 构建，
+          # 共享后只维护一份 ~750MB 缓存（原先 3 份各自约 700MB，且都计入
+          # 10GB 上限、互相驱逐）。
+          shared-key: tests
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
@@ -579,16 +586,25 @@ jobs:
       - name: cargo deny (advisories/licenses/bans/sources) — blocking gate
         uses: EmbarkStudios/cargo-deny-action@v2
 
-  chaos-nightly:
-    name: real-process chaos (nightly + PR gate)
-    # 真实故障注入套件：PR + push + schedule/手动均执行
-    # （只挂 schedule/手动会让"验证过"在 PR 层没有证据）。
+  # 真实故障注入套件：PR + push + schedule/手动均执行
+  # （只挂 schedule/手动会让"验证过"在 PR 层没有证据）。
+  #
+  # 拆成两个 job（各自独立 VM）而不是一个 job 里串行：串行时 kill9/soak 留下的
+  # 孤儿 `coord server`/`coord agent` 会抢 CPU/端口，让**后面的**套件出现
+  # 「像产品 bug」的假红（本地实测：残留孤儿 → plugin_real_process_test 红；
+  # `kill-stray-coord-procs.sh` 清一次 → 同一条命令、同一提交绿）。
+  # 两个 job 仍共用一份 target 缓存（`shared-key: tests`），避免各编译一遍；
+  # 每个 job 内部的套件仍逐步清孤儿，失败信息按 suite 独立可读。
+  chaos-kill9-soak:
+    name: chaos (kill9 + soak, real processes)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
@@ -599,33 +615,13 @@ jobs:
             apt-get install -y protobuf-compiler
       - name: Build tests
         run: cargo build --workspace --tests
-      # 每个进程级套件之前都要清一次孤儿进程（而不只是 job 开头清一次）。
-      #
-      # 事故（已在本地复现并 A/B 定位）：本 job 里各套件**串行但相互污染**。
-      # `chaos_real`（kill9）、soak、multi-raft、plugin_auth×3 都会在超时/中断时
-      # 留下常驻孤儿 `coord server`/`coord agent`，它们继续抢 CPU/端口，于是**后面的**
-      # 套件开始“看起来像产品 bug”的假红。本地实测：
-      #   · 连跑一遍后残留孤儿 → `plugin_real_process_test` 红
-      #     （`bootstrap-role ... raft auth write timed out (no quorum?)`）
-      #   · `kill-stray-coord-procs.sh` 清一次 → 同一条命令、同一提交 **绿（4.03s）**
-      # CI 上同一提交的不同表现（`missing CCT token`）是同一根因的另一种表现：
-      # 负载下 agent 自举插件的 `Authenticate` 失败 → 插件降级为无凭据客户端。
-      #
-      # 脚本只清理数据目录（或 `--agent-config` 配置路径）位于 `/tmp/.tmp*` 的进程
-      # ——即测试临时目录；不会碰真实集群。
-      # 每个套件 step 加 `if: always()`：job 的红/绿语义不变（任一失败即红），
-      # 但一次 run 能给出**全部套件**的结论——前一步失败而跳过后续 step，会让
-      # 后面的套件没有任何执行记录（无法判定"假红 vs 真缺陷"）。
-      # 每步开头仍清孤儿进程（见下方说明）。
+      # 失败必须**自描述**：间歇红曾因日志不可得而无法判定「真缺陷 vs 假红」。
+      # 失败测试名/panic 以注解带出（见 scripts/ci-annotate-test-failures.sh）。
       - name: Run real-process chaos suites
         if: always()
         env:
           CHAOS_REAL: "1"
-        # 串行：kill9 与 soak 两个套件各起 3 个真实进程 + 6 个代理，
-        # 并行互扰会导致节点就绪超时（实测）
-        #
-        # 失败必须**自描述**：间歇红曾因日志不可得而无法判定「真缺陷 vs 假红」。
-        # 失败测试名/panic 以注解带出（见 scripts/ci-annotate-test-failures.sh）。
+        # kill9 与 soak 各自起 3 个真实进程 + 6 个代理；二者串行执行避免同机互扰。
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-kill9.log cargo test -p coord --test chaos_real -- --ignored --nocapture --test-threads=1
@@ -637,9 +633,32 @@ jobs:
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-soak.log cargo test -p coord --test chaos_real chaos_soak_distributed -- --ignored --nocapture
-      # Multi-Raft 进程级套件：3 节点 × 3 Region 真实进程 + kill/重启收敛
-      # （MULTI_RAFT_REAL=1）。与 chaos 套件同 job 串行执行（同 host 真实进程
-      # 互扰规避：kill9 会误伤对端节点导致就绪超时）。
+
+  chaos-raft-auth:
+    name: chaos (multi-raft + auth/plugin/object/dos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+      - name: Install protoc (coord-proto build dependency)
+        run: |
+          set -euo pipefail
+          timeout --kill-after=10 600 sudo apt-get update \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y protobuf-compiler
+      - name: Build tests
+        run: cargo build --workspace --tests
+      # 每个 step 前清孤儿：只清理数据目录（或 `--agent-config` 路径）位于
+      # `/tmp/.tmp*` 的进程，不碰真实集群。`if: always()` 保证一次 run 能给出
+      # 全部套件结论，而不是前一步失败就跳过后续、失去执行记录。
+      #
+      # Multi-Raft 进程级套件：3 节点 × 3 Region 真实进程 + kill/重启收敛。
       - name: Run multi-raft real-process suite
         if: always()
         env:
@@ -648,13 +667,10 @@ jobs:
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-multi-raft.log cargo test -p coord --test multi_raft_process_test -- --ignored --nocapture --test-threads=1
       # 鉴权 + 插件账户进程套件——单节点重启存续（Bootstrap 引导）
-      # + 双节点 raft 复制存续。同为 spawn 真实 `coord server` 的重型套件，与上述
-      # 步骤同 job 串行执行（真实进程互扰规避）。
-      # + CLI 凭据文件套件（登录落盘 → 自动携带 → 到期自动续期 → 登出）。
+      # + 双节点 raft 复制存续 + CLI 凭据文件（登录落盘 → 自动携带 → 续期 → 登出）。
+      # 三条套件在同一 step：`bash -e` 下第一条失败会跳过其余两条 ⇒ 用 rc 累积。
       - name: Run auth/plugin process suites (single + multi-node + CLI credentials)
         if: always()
-        # 三条套件在同一 step：`bash -e` 下**第一条失败会跳过其余两条** ⇒ 与 job 级的
-        # `if: always()` 是同一形态的信息丢失。用 rc 累积：全跑完，但任一失败 ⇒ step 红。
         run: |
           bash scripts/kill-stray-coord-procs.sh
           rc=0
@@ -662,11 +678,9 @@ jobs:
           bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-auth-multinode.log cargo test -p coord --test plugin_auth_multinode_process_test -- --ignored --nocapture --test-threads=1 || rc=1
           bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-credentials.log cargo test -p coord --test plugin_credentials_process_test -- --ignored --nocapture --test-threads=1 || rc=1
           exit $rc
-      # 插件引擎**进程级**端到端（真实 server + 真实 agent 进程 + 磁盘 JS 插件）：
-      # 插件身份开通 → 服务端 capability/scope 强制 → SIGHUP 内容级热重载 →
-      # agent kill/重启（一次性引导令牌已消费，靠持久化账户续跑）。
-      # + **运行中新增插件**（SIGHUP 加入第二个插件，此时已无可用引导 CCT，
-      # 靠自举的 provisioner 会话新建 `plugin/counter2` 账户并成功写 KV）。
+      # 插件引擎**进程级**端到端（真实 server + agent + 磁盘 JS 插件）：
+      # 身份开通 → capability/scope 强制 → SIGHUP 热重载 → agent kill/重启续跑；
+      # + 运行中新增插件（一次性引导令牌已消费，靠持久化账户继续写 KV）。
       - name: Run plugin engine real-process e2e (PLUGIN_REAL=1)
         if: always()
         env:
@@ -674,9 +688,7 @@ jobs:
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-real.log cargo test -p coord --test plugin_real_process_test -- --ignored --nocapture --test-threads=1
-      # coord-client **流式会话**（ObjectWriter / ObjectReader）真实进程验证
-      # ——客户端自选块边界逐块发送（与服务端 4MiB 默认分帧不同）+ 服务端流逐块取回，
-      # 跨 4MiB chunk 边界往返一致；含本地越界拒绝 / abort / 缺失对象。
+      # coord-client **流式会话**（ObjectWriter / ObjectReader）真实进程验证。
       - name: Run object-storage streaming sessions (OBJECT_STORAGE_REAL=1)
         if: always()
         env:
@@ -684,10 +696,7 @@ jobs:
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-object-storage.log cargo test -p coord --test object_storage_process_test object_storage_real_streaming_sessions -- --ignored --nocapture --test-threads=1
-      # **「应用 → agent → server」在 auth_enabled=true 下的全链路**：本套件是
-      # 鉴权链路唯一的进程级回归保障——要求 agent 转发 CCT、scope 提取器在生产
-      # 路径可用、能力表命中 `/coord.kv.KV/*`（经 agent 的旧进程测试一律关鉴权、
-      # 开鉴权的测试一律直连 server，两者都不覆盖这条组合）。
+      # 「应用 → agent → server」在 auth_enabled=true 下的全链路。
       - name: Run agent+auth real-process suite (AGENT_AUTH_REAL=1)
         if: always()
         env:
@@ -695,15 +704,34 @@ jobs:
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-agent-auth.log cargo test -p coord --test agent_auth_process_test -- --ignored --nocapture --test-threads=1
-      # DoS 的 **RSS 峰值实测口径**：100 × 8 MiB 超大请求（累计 800 MiB，在飞并发
-      # 25）必须全部被拒（RESOURCE_EXHAUSTED）且**服务端进程 VmHWM 增长有界**
-      # （阈值写死在测试里）。它是 spawn 真实 `coord server` 的进程级套件，
-      # 与其它进程套件同 job 串行执行。
+      # DoS 的 RSS 峰值实测口径：100 × 8 MiB 超大请求全部被拒且 VmHWM 增长有界。
       - name: Run DoS/RSS peak drill
         if: always()
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-dos-rss.log cargo test -p coord --test dos_rss_peak_test -- --ignored --nocapture --test-threads=1
+
+  # 汇总 check：branch protection 的 required context 仍是这个名字，拆分后由它
+  # 统一给出红/绿（两个 suite job 任一失败即红；`if: always()` 保证依赖失败时
+  # 也运行并显式失败，而不是变成 skipped）。
+  chaos-nightly:
+    name: real-process chaos (nightly + PR gate)
+    needs: [chaos-kill9-soak, chaos-raft-auth]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate chaos suite results
+        run: |
+          set -euo pipefail
+          failed=0
+          for result in "${{ needs.chaos-kill9-soak.result }}" "${{ needs.chaos-raft-auth.result }}"; do
+            if [ "$result" != "success" ]; then
+              echo "chaos suite job failed (result: $result)" >&2
+              failed=1
+            fi
+          done
+          exit $failed
 
   perf-bench:
     name: weekly perf baseline (regression gate)
