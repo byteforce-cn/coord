@@ -818,6 +818,13 @@ pub enum Command {
     /// **末尾追加**；cutover 已应用或本次搬迁放弃后提出，避免卡住的 split 把
     /// 一段区间变成永久只读。
     ClearDirectWriteFence { op_id: u64 },
+    /// 数据 Region 裁剪 Commit Log staging outbox（#174）。
+    ///
+    /// **末尾追加**；只由数据 Region 自己的 raft 提出。`through_ts` 来自
+    /// region 0 的 `gc_before_ts`（整 shard 边界）：低于它的 shard 已回收，
+    /// 记录不再被 ship/Watch 读取。删除必须与 apply 同序，否则副本的 outbox
+    /// 会分叉；`max_rows` 随命令携带，重放节点不读本地配置。
+    TrimCommitLogOutbox { through_ts: u64, max_rows: u32 },
 }
 
 impl std::fmt::Display for Command {
@@ -963,6 +970,13 @@ impl std::fmt::Display for Command {
             Command::ClearDirectWriteFence { op_id } => {
                 write!(f, "ClearDirectWriteFence(op_id={op_id})")
             }
+            Command::TrimCommitLogOutbox {
+                through_ts,
+                max_rows,
+            } => write!(
+                f,
+                "TrimCommitLogOutbox(through_ts={through_ts}, max_rows={max_rows})"
+            ),
         }
     }
 }
@@ -1093,6 +1107,12 @@ pub enum Response {
     DirectWriteFenceCleared {
         op_id: u64,
     },
+    /// outbox 裁剪结果（#174）：`trimmed_before` 是新的删除下界，
+    /// `removed` 是本次实际删除的行数（0 且水位未到说明没有剩余）。
+    CommitLogOutboxTrimmed {
+        trimmed_before: u64,
+        removed: u64,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -1183,6 +1203,13 @@ impl std::fmt::Display for Response {
             Response::DirectWriteFenceCleared { op_id } => {
                 write!(f, "DirectWriteFenceCleared(op_id={op_id})")
             }
+            Response::CommitLogOutboxTrimmed {
+                trimmed_before,
+                removed,
+            } => write!(
+                f,
+                "CommitLogOutboxTrimmed(trimmed_before={trimmed_before}, removed={removed})"
+            ),
         }
     }
 }

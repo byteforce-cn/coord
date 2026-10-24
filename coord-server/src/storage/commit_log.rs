@@ -242,6 +242,15 @@ pub struct CommitLogAppendResult {
     pub cursor_ts: u64,
 }
 
+/// 一次 outbox 裁剪的结果（#174）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitLogTrimResult {
+    /// 所有 `commit_ts < trimmed_before` 的行已删除。
+    pub trimmed_before: u64,
+    /// 本次实际删除的行数。
+    pub removed: u64,
+}
+
 /// 一个 shard 的键前缀（`commit_records_after` 的扫描边界）。
 pub(crate) fn commit_log_shard_prefix(shard_id: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(COMMIT_LOG_PREFIX.len() + 8);
@@ -257,6 +266,17 @@ pub(crate) fn encode_commit_log_key(shard_id: u64, commit_ts: u64, region_id: u6
     key.extend_from_slice(&commit_ts.to_be_bytes());
     key.extend_from_slice(&region_id.to_be_bytes());
     key
+}
+
+/// 从 Commit Log 行键中取出 `commit_ts`（布局见 [`encode_commit_log_key`]）。
+///
+/// 裁剪按 key 序推进水位时需要它：调用的扫描已经限定在 staging shard 前缀内，
+/// 只需再解读出下一个仍存在的 ts。
+pub(crate) fn commit_log_key_ts(key: &[u8]) -> Option<u64> {
+    let start = COMMIT_LOG_PREFIX.len() + 8;
+    let end = start + 8;
+    let bytes: [u8; 8] = key.get(start..end)?.try_into().ok()?;
+    Some(u64::from_be_bytes(bytes))
 }
 
 /// 幂等写入：同键同内容 = `Duplicate`，同键不同内容 = fail-closed。
