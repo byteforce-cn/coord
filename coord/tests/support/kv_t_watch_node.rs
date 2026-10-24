@@ -178,7 +178,10 @@ impl WatchNode {
             KvTState::new(
                 true,
                 KvTRuntimeConfig {
-                    read_ts_wait_ms: 50,
+                    // 直写守卫要经 region 0 raft 发布 safe-ts fence；50ms 在
+                    // 并发跑全量套件时会超时成 SAFE_TS_LAG（CI 实测）。这些用例
+                    // 验证的是次序/可见性，不是延迟，给足上限。
+                    read_ts_wait_ms: 5_000,
                     // 一条记录即触发定界/预创建，让测试真正跨 shard 读取。
                     commit_log_shard_records: 1,
                     // 回收窗口用测试时钟推进，不需要真的等 24h。

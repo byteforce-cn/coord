@@ -24,11 +24,24 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn find_free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    use std::collections::HashSet;
+    use std::net::TcpListener;
+    use std::sync::{Mutex, OnceLock};
+    // 先 bind(0) 再释放：同一 test binary 里并发跑的用例可能拿到同一个端口，
+    // spawn 的真实 server 随后 `Address already in use`（CI 实测）。进程内
+    // 去重保证每个用例拿到不同端口；跨进程的极小窗口由 gRPC 就绪超时兜底。
+    static RESERVED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let reserved = RESERVED.get_or_init(|| Mutex::new(HashSet::new()));
+    loop {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if reserved.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
 }
 
 /// 写最小可启动配置；`extra_security` 追加到 `[security]` 段（逃生阀 / TLS 路径）。
