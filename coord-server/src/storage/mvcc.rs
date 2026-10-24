@@ -74,6 +74,12 @@ pub(crate) const META_MEMBERSHIP: &[u8] = b"/_meta/membership";
 /// 小于等于它的 changelog/tombstone 已被物理删除）
 pub(crate) const META_COMPACT_REVISION: &[u8] = b"/_meta/compacted_revision";
 
+/// 数据 Region 的 staging outbox 裁剪水位（u64 BE；`0` = 尚未裁剪）。
+///
+/// 语义是「所有 `commit_ts < 它的 outbox 行已删除」；由 raft apply 写，
+/// 只前进。装 Raft 快照会整体替换 outbox，该水位随之作废（导入时清除）。
+pub(crate) const META_COMMIT_LOG_TRIMMED_BEFORE: &[u8] = b"/_meta/commit_log_trimmed_before";
+
 /// Seal 状态：0=Unsealed, 1=Sealed, 2=Unsealing（阶段使用）
 #[allow(dead_code)]
 const META_SEAL_STATUS: &[u8] = b"/_meta/seal_status";
@@ -4765,6 +4771,85 @@ impl<B: StorageBackend> MvccStorage<B> {
                 .get(TABLE_KV, SEQUENCER_LAST_COMMIT_TS)?
                 .and_then(|b| decode_u64(&b))
                 .unwrap_or(0))
+        })
+    }
+
+    /// 当前 outbox 裁剪水位（`0` = 尚未裁剪）。
+    pub fn commit_log_trimmed_before(&self) -> Result<u64> {
+        self.backend
+            .read(|tx| Self::commit_log_trimmed_before_in_tx(tx))
+    }
+
+    fn commit_log_trimmed_before_in_tx(tx: &dyn ReadTx) -> Result<u64> {
+        Ok(tx
+            .get(TABLE_META, META_COMMIT_LOG_TRIMMED_BEFORE)?
+            .and_then(|bytes| decode_u64(&bytes))
+            .unwrap_or(0))
+    }
+
+    /// 裁剪 staging outbox 中 `commit_ts < through_ts` 的记录（#174）。
+    ///
+    /// 只在数据 Region 自己的 raft 提出：删除必须与 apply 同序，否则重启/
+    /// 快照后的副本会出现 outbox 分叉。`through_ts` 是 region 0 的 Commit Log
+    /// 回收水位（`gc_before_ts`）——低于它的 shard 已整体回收，记录不再被
+    /// ship/Watch 读取。
+    ///
+    /// 单批最多删 `max_rows` 行（至少 1）；未删完时水位落到下一个仍存在的
+    /// `commit_ts`（同 ts 的其它 Region 分片还没删完时水位不变），调用方据
+    /// `removed > 0` 继续提案。同 applied 重放直接返回已生效水位。
+    pub fn trim_commit_log_outbox(
+        &self,
+        through_ts: u64,
+        max_rows: usize,
+        applied: AppliedLogId,
+    ) -> Result<crate::storage::commit_log::CommitLogTrimResult> {
+        use crate::storage::commit_log::{
+            commit_log_key_ts, commit_log_shard_prefix, encode_commit_log_key, CommitLogTrimResult,
+            COMMIT_LOG_STAGING_SHARD_ID,
+        };
+
+        self.backend.write(|tx| {
+            if Self::applied_contains(tx, applied)? {
+                return Ok(CommitLogTrimResult {
+                    trimmed_before: Self::commit_log_trimmed_before_in_tx(tx)?,
+                    removed: 0,
+                });
+            }
+            let previous = Self::commit_log_trimmed_before_in_tx(tx)?;
+            let target = through_ts.max(previous);
+            let mut trimmed_before = previous;
+            let mut removed = 0u64;
+            if target > previous {
+                let limit = max_rows.max(1);
+                let start = commit_log_shard_prefix(COMMIT_LOG_STAGING_SHARD_ID);
+                let end = encode_commit_log_key(COMMIT_LOG_STAGING_SHARD_ID, target, 0);
+                let rows = tx.iter_range_limited(TABLE_COMMIT_LOG, &start, &end, limit + 1)?;
+                let remove = rows.len().min(limit);
+                for (key, _) in &rows[..remove] {
+                    tx.remove(TABLE_COMMIT_LOG, key)?;
+                }
+                removed = remove as u64;
+                trimmed_before = match rows.get(remove) {
+                    Some((key, _)) => commit_log_key_ts(key).ok_or_else(|| {
+                        Error::Storage("malformed commit log row key".to_string())
+                    })?,
+                    None => target,
+                }
+                .max(previous);
+                if trimmed_before > previous {
+                    tx.insert(
+                        TABLE_META,
+                        META_COMMIT_LOG_TRIMMED_BEFORE,
+                        &trimmed_before.to_be_bytes(),
+                    )?;
+                }
+            }
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            self.note_log_index_revision(tx, applied.index)?;
+            Ok(CommitLogTrimResult {
+                trimmed_before,
+                removed,
+            })
         })
     }
 
@@ -11265,6 +11350,105 @@ mod tests {
         );
         assert_eq!(storage.commit_log_cursor().unwrap(), 150);
         assert_eq!(storage.commit_records_after(2, 0, 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_trim_commit_log_outbox_is_monotonic_and_idempotent() {
+        let (_dir, storage) = create_commit_ts_storage();
+        for ts in [10u64, 20, 30] {
+            storage
+                .append_commit_record(&commit_record(ts, 1, b"v"), 4 * 1024 * 1024)
+                .unwrap();
+        }
+
+        let first = storage
+            .trim_commit_log_outbox(20, 100, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            (first.trimmed_before, first.removed),
+            (20, 1),
+            "rows below the boundary are gone"
+        );
+        assert_eq!(storage.commit_log_trimmed_before().unwrap(), 20);
+        let rows = commit_log_rows(&storage);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            crate::storage::commit_log::CommitRecord::decode(&rows[0].1)
+                .unwrap()
+                .commit_ts,
+            20
+        );
+
+        let replay = storage
+            .trim_commit_log_outbox(20, 100, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            (replay.trimmed_before, replay.removed),
+            (20, 0),
+            "replaying the same applied entry must not delete more"
+        );
+        assert_eq!(commit_log_rows(&storage).len(), 2);
+
+        let lower = storage
+            .trim_commit_log_outbox(15, 100, applied_for(2))
+            .unwrap();
+        assert_eq!(
+            (lower.trimmed_before, lower.removed),
+            (20, 0),
+            "a lower boundary is a no-op, never a rollback"
+        );
+        assert_eq!(commit_log_rows(&storage).len(), 2);
+
+        let all = storage
+            .trim_commit_log_outbox(40, 100, applied_for(3))
+            .unwrap();
+        assert_eq!((all.trimmed_before, all.removed), (40, 2));
+        assert!(commit_log_rows(&storage).is_empty());
+    }
+
+    #[test]
+    fn test_trim_commit_log_outbox_stops_at_max_rows_and_reports_the_next_ts() {
+        let (_dir, storage) = create_commit_ts_storage();
+        // 同一 commit_ts 的多个 Region 分片必须整组处理：按行数截断时
+        // 水位只能落到下一个仍存在的 ts。
+        for (ts, region) in [(10u64, 1u64), (10, 2), (20, 1), (30, 1)] {
+            storage
+                .append_commit_record(&commit_record(ts, region, b"v"), 4 * 1024 * 1024)
+                .unwrap();
+        }
+
+        let first = storage
+            .trim_commit_log_outbox(30, 2, applied_for(1))
+            .unwrap();
+        assert_eq!(
+            (first.trimmed_before, first.removed),
+            (20, 2),
+            "two rows of ts=10 are removed; the next remaining ts is 20"
+        );
+        assert_eq!(commit_log_rows(&storage).len(), 2);
+
+        let second = storage
+            .trim_commit_log_outbox(30, 1, applied_for(2))
+            .unwrap();
+        assert_eq!((second.trimmed_before, second.removed), (30, 1));
+        assert_eq!(commit_log_rows(&storage).len(), 1);
+
+        let noop = storage
+            .trim_commit_log_outbox(30, 1, applied_for(3))
+            .unwrap();
+        assert_eq!(
+            (noop.trimmed_before, noop.removed),
+            (30, 0),
+            "nothing is left below the boundary"
+        );
+        let rows = commit_log_rows(&storage);
+        assert_eq!(rows.len(), 1, "the row at ts=30 is outside the boundary");
+        assert_eq!(
+            crate::storage::commit_log::CommitRecord::decode(&rows[0].1)
+                .unwrap()
+                .commit_ts,
+            30
+        );
     }
 
     #[test]

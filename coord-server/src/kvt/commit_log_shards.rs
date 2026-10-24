@@ -427,6 +427,8 @@ impl CommitLogShardManager {
             .map_err(|err| format!("read commit log shard table: {err}"))?;
         tick.gc_shards += self.gc_local(&table).await?;
         tick.gc_before_ts = table.gc_before_ts;
+        // 容量优化：失败只告警，下一拍重试；不能影响 seal/ship/watermark 的可用性。
+        tick.trimmed = self.trim_outboxes(table.gc_before_ts).await;
         tick.seal_lag_secs = table
             .shards
             .iter()
@@ -577,6 +579,77 @@ impl CommitLogShardManager {
         Ok(())
     }
 
+    /// 裁剪本节点领导的数据 Region 的 staging outbox。
+    ///
+    /// `through_ts` 是 region 0 的 `gc_before_ts`：低于它的 shard 已整体回收，
+    /// 记录不再被 ship/Watch 读取。删除必须经数据 Region 自己的 raft（每个副本
+    /// 确定性 apply），因此只在本节点是该 Region leader 时提案；其他节点跳过，
+    /// 由各自的 leader 副本推进同一水位。
+    async fn trim_outboxes(&self, through_ts: u64) -> u64 {
+        if through_ts == 0 {
+            return 0;
+        }
+        let mut removed = 0u64;
+        for rt in self.manager.list_runtimes() {
+            if rt.raft.current_leader().await != Some(self.node_id) {
+                continue;
+            }
+            let region_id = rt.region_id();
+            let mut trimmed = match rt.mvcc.commit_log_trimmed_before() {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        region_id,
+                        error = %err,
+                        "read commit log outbox trim watermark failed; retry next tick"
+                    );
+                    continue;
+                }
+            };
+            for _ in 0..TRIM_BATCHES_PER_TICK {
+                if trimmed >= through_ts {
+                    break;
+                }
+                let command = crate::raft::type_config::Command::TrimCommitLogOutbox {
+                    through_ts,
+                    max_rows: TRIM_BATCH_RECORDS,
+                };
+                let response = match rt.raft.client_write(command).await {
+                    Ok(response) => response,
+                    Err(err) => {
+                        tracing::warn!(
+                            region_id,
+                            error = %err,
+                            "trim commit log outbox failed; retry next tick"
+                        );
+                        break;
+                    }
+                };
+                match response.response() {
+                    crate::raft::type_config::Response::CommitLogOutboxTrimmed {
+                        trimmed_before,
+                        removed: batch_removed,
+                    } => {
+                        removed += batch_removed;
+                        if *trimmed_before <= trimmed && *batch_removed == 0 {
+                            break;
+                        }
+                        trimmed = *trimmed_before;
+                    }
+                    other => {
+                        tracing::warn!(
+                            region_id,
+                            response = ?other,
+                            "unexpected trim commit log outbox response"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        removed
+    }
+
     /// 回收本地已不可读的 shard 组（每个节点按本地已 apply 的表各自执行）。
     ///
     /// 先 shutdown 再移除运行时并删除数据目录：openraft 任务停止后 redb 句柄
@@ -716,6 +789,8 @@ pub struct CommitLogShardTick {
     pub gc_before_ts: u64,
     /// 本轮在本节点实际回收的 shard 组数。
     pub gc_shards: u64,
+    /// 本轮在本节点删除的 outbox 行数（只删 `< gc_before_ts` 的记录）。
+    pub trimmed: u64,
 }
 
 /// 单批记录条数上限（与 sequencer 批同量级；raft 负载由字节预算再切）。
@@ -726,6 +801,18 @@ pub const SHARD_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 单批写集字节预算（记录已压缩，实际帧更小；上限防止 256×4MiB 的 raft 负载）。
 const SHIP_BATCH_TXN_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 单条 outbox 裁剪命令最多删除的行数。
+///
+/// 删除本身不搬运 value，但区间扫描仍会物化每行的压缩帧；按 4MiB 事务上界
+/// 估算，32 行把单条命令的峰值控制在 ~128MiB，避免 raft apply 被单批撑爆。
+const TRIM_BATCH_RECORDS: u32 = 32;
+
+/// 每个 tick 对单个数据 Region 最多提案的裁剪批次数。
+///
+/// 1M 行/小时的写入速率下，16×32 行/500ms（约 1000 行/s）高于写入速率；
+/// 滞后时下一拍继续，不把 shard 协调器的 tick 拖成无界循环。
+const TRIM_BATCHES_PER_TICK: usize = 16;
 
 /// 按写集字节预算切片；首条无论多大都保留（绝不丢记录）。
 fn split_ship_batches(records: Vec<CommitRecord>) -> Vec<Vec<CommitRecord>> {
@@ -783,6 +870,9 @@ pub fn start_shard_manager(
                         metrics.set_kv_t_commit_log_gc_before(tick.gc_before_ts);
                         if tick.gc_shards > 0 {
                             metrics.add_kv_t_commit_log_shards_gc(tick.gc_shards);
+                        }
+                        if tick.trimmed > 0 {
+                            metrics.add_kv_t_commit_log_outbox_rows_trimmed(tick.trimmed);
                         }
                         for _ in 0..tick.stalls {
                             metrics.inc_kv_t_commit_watermark_stall();
@@ -1449,6 +1539,73 @@ mod tests {
         assert!(fx.manager.runtime(1).is_none());
         assert!(tick.watermark >= 11);
         assert!(fx.manager.table().unwrap().validate().is_ok());
+    }
+
+    /// 回收水位以下的 outbox 行必须被裁剪；水位以上的记录仍留给 live shard。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gc_trims_outbox_rows_below_the_reclaimed_boundary_once() {
+        let config = KvTRuntimeConfig {
+            watch_retention: 60,
+            ..KvTRuntimeConfig::default()
+        };
+        let fx = ShardFixture::start_with(config, 1_000_000).await;
+        fx.manager.tick().await.unwrap(); // open shard 1
+        fx.write_decisions(&[10, 11]);
+        fx.apply_decisions(&[10, 11]);
+        fx.manager.tick().await.unwrap(); // ship both, watermark = 11
+        assert_eq!(fx.data.mvcc.commit_records_after(1, 0, 0).unwrap().len(), 2);
+
+        fx.manager
+            .propose(CommitLogShardOp::SetEnd {
+                shard_id: 1,
+                end_ts: 11,
+                now_ms: 1_000_000,
+            })
+            .await
+            .unwrap();
+        fx.open_shard(11, 1_000_001).await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let tick = fx.manager.tick().await.unwrap();
+            if tick.sealed == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shard did not seal after the watermark reached 11: {tick:?}"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
+        fx.manager.tick().await.unwrap(); // open shard 2 + ship ts=11
+        let sealed_at = fx.manager.table().unwrap().shards[0].sealed_at_ms;
+        fx.set_now(sealed_at + 60_000);
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let tick = loop {
+            let tick = fx.manager.tick().await.unwrap();
+            if fx.manager.table().unwrap().gc_before_ts == 11 {
+                break tick;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gc did not advance when the retention window elapsed"
+            );
+            sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(tick.gc_before_ts, 11);
+        assert_eq!(
+            tick.trimmed, 1,
+            "only the row below gc_before_ts is removed"
+        );
+        assert_eq!(fx.data.mvcc.commit_log_trimmed_before().unwrap(), 11);
+        let remaining = fx.data.mvcc.commit_records_after(1, 0, 0).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].commit_ts, 11, "rows at the boundary stay");
+        assert_eq!(fx.manager.records_at(2, 11).await.unwrap().len(), 1);
+
+        let again = fx.manager.tick().await.unwrap();
+        assert_eq!(again.trimmed, 0, "the watermark prevents re-trimming");
+        assert_eq!(fx.data.mvcc.commit_records_after(1, 0, 0).unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

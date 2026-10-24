@@ -107,6 +107,8 @@ struct MetricsInner {
     pub kv_t_commit_log_gc_before: AtomicU64,
     /// 本节点实际回收的 Commit Log shard 组数
     pub kv_t_commit_log_shards_gc_total: AtomicU64,
+    /// 本节点从数据 Region staging outbox 删除的记录数（#174）
+    pub kv_t_commit_log_outbox_rows_trimmed_total: AtomicU64,
     /// 当前打开的 `coord.watch.v2` 流数
     pub kv_t_watch_streams: AtomicI64,
     /// 已下发的 v2 watch 批数
@@ -296,6 +298,7 @@ impl Default for MetricsInner {
             kv_t_commit_watermark_stalls_total: AtomicU64::new(0),
             kv_t_commit_log_gc_before: AtomicU64::new(0),
             kv_t_commit_log_shards_gc_total: AtomicU64::new(0),
+            kv_t_commit_log_outbox_rows_trimmed_total: AtomicU64::new(0),
             kv_t_watch_streams: AtomicI64::new(0),
             kv_t_watch_batches_total: AtomicU64::new(0),
             kv_t_watch_events_total: AtomicU64::new(0),
@@ -767,6 +770,13 @@ impl Metrics {
             .fetch_add(shards, Ordering::Relaxed);
     }
 
+    /// 本节点裁剪的 staging outbox 行数（counter）。
+    pub fn add_kv_t_commit_log_outbox_rows_trimmed(&self, rows: u64) {
+        self.inner
+            .kv_t_commit_log_outbox_rows_trimmed_total
+            .fetch_add(rows, Ordering::Relaxed);
+    }
+
     /// 一条 `coord.watch.v2` 流建立（gauge +1）。
     pub fn inc_kv_t_watch_streams(&self) {
         self.inner
@@ -1126,6 +1136,15 @@ impl Metrics {
             "coord_kv_t_commit_log_shards_gc_total {}\n",
             inner
                 .kv_t_commit_log_shards_gc_total
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_kv_t_commit_log_outbox_rows_trimmed_total Commit Log staging outbox rows trimmed on this node\n");
+        out.push_str("# TYPE coord_kv_t_commit_log_outbox_rows_trimmed_total counter\n");
+        out.push_str(&format!(
+            "coord_kv_t_commit_log_outbox_rows_trimmed_total {}\n",
+            inner
+                .kv_t_commit_log_outbox_rows_trimmed_total
                 .load(Ordering::Relaxed)
         ));
 
@@ -1879,10 +1898,12 @@ mod tests {
         let m = Metrics::new();
         m.set_kv_t_commit_log_gc_before(101);
         m.add_kv_t_commit_log_shards_gc(2);
+        m.add_kv_t_commit_log_outbox_rows_trimmed(5);
 
         let output = m.render_prometheus_text();
         assert!(output.contains("coord_kv_t_commit_log_gc_before 101"));
         assert!(output.contains("coord_kv_t_commit_log_shards_gc_total 2"));
+        assert!(output.contains("coord_kv_t_commit_log_outbox_rows_trimmed_total 5"));
     }
 
     #[test]
