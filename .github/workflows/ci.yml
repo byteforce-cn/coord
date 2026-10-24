@@ -372,28 +372,38 @@ jobs:
           cache: maven
       - name: Build coord binaries
         run: cargo build --workspace --bins
-      - name: Start dev cluster (real server + agent)
-        run: scripts/ci-java-it-cluster.sh start
+      - name: Start dev clusters (v1 + v2, real server + agent)
+        # v1：现有 java-example / SDK v1 套件。v2：multi-raft + [kv_t]，只服务
+        # coord.*.v2，供 SDK 的 KvTV2ClusterIntegrationTest 使用。两套端口/目录独立。
+        run: |
+          scripts/ci-java-it-cluster.sh start v1
+          scripts/ci-java-it-cluster.sh start v2
       - name: Java example — integration suites
         working-directory: java-example
         run: mvn -B verify -Pit
-      - name: Java SDK — integration suite (real cluster, -Pit)
-        # SDK 的 CoordClientIntegrationTest 不得靠 assumeThat 静默跳过（那样永远
-        # 不产生证据）：它只在 -Pit 下执行，由本 job 提供真实集群（硬失败即真校验）。
+      - name: Java SDK — integration suites (v1 + v2, -Pit)
+        # SDK 的 *IntegrationTest 不得靠 assumeThat 静默跳过（那样永远不产生证据）：
+        # 它们只在 -Pit 下执行，由本 job 提供真实集群（硬失败即真校验）。
         working-directory: coord-java-sdk
+        env:
+          COORD_V2_AGENT_PORT: '19637'
         run: mvn -B verify -Pit
       - name: Dump cluster logs (always)
         if: always()
         run: |
-          echo "::group::coord server log"
-          tail -200 .coord-dev-cluster/server.log 2>/dev/null || true
-          echo "::endgroup::"
-          echo "::group::coord agent log"
-          tail -200 .coord-dev-cluster/agent.log 2>/dev/null || true
-          echo "::endgroup::"
-      - name: Stop dev cluster
+          for name in server agent; do
+            echo "::group::v1 coord ${name} log"
+            tail -200 ".coord-dev-cluster/${name}.log" 2>/dev/null || true
+            echo "::endgroup::"
+            echo "::group::v2 coord ${name} log"
+            tail -200 "/tmp/coord-dev-cluster-v2/${name}.log" 2>/dev/null || true
+            echo "::endgroup::"
+          done
+      - name: Stop dev clusters
         if: always()
-        run: scripts/ci-java-it-cluster.sh stop
+        run: |
+          scripts/ci-java-it-cluster.sh stop v1 || true
+          scripts/ci-java-it-cluster.sh stop v2 || true
 
   proto-lint:
     name: proto contract (buf lint + breaking)
