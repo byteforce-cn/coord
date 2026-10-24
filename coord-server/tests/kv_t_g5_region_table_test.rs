@@ -32,7 +32,9 @@ use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpc
 use coord_server::raft::region::RegionManager;
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::type_config::{Command, RegionMetaOp, RegionMetaOutcome, Response};
-use coord_server::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode};
+use coord_server::raft::{
+    new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, WatchReceiver,
+};
 use coord_server::server::CoordNode;
 use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
@@ -255,10 +257,9 @@ impl RegionTableCluster {
         self.nodes.iter().find(|node| node.id == id).expect("node")
     }
 
-    fn leader_node(&self) -> &ClusterNode {
-        self.node(self.leader)
-    }
-
+    /// 等到三节点对 leader 达成一致 **且** leader 拿到 quorum ack（leader
+    /// lease）。openraft 的 `current_leader` 就绪早于可写窗口：只等前者时
+    /// `client_write` 会在选举后收到 `ForwardToLeader(leader_id: None)`。
     async fn wait_leader(&self) -> u64 {
         let stop = tokio::time::Instant::now() + DEADLINE;
         loop {
@@ -268,7 +269,11 @@ impl RegionTableCluster {
             }
             if let Some(leader) = views[0] {
                 if NODE_IDS.contains(&leader) && views.iter().all(|view| *view == Some(leader)) {
-                    return leader;
+                    let metrics = self.node(leader).raft.metrics();
+                    let metrics = metrics.borrow_watched();
+                    if metrics.last_quorum_acked.is_some() {
+                        return leader;
+                    }
                 }
             }
             assert!(
@@ -279,16 +284,31 @@ impl RegionTableCluster {
         }
     }
 
+    /// 提案允许跨过换届窗口：`wait_leader` 与 `client_write` 之间仍可能发生
+    /// 选举，`ForwardToLeader` 只说明这一拍没被接受（不会重复写入），重解析
+    /// leader 后重试。
     async fn propose(&self, op: RegionMetaOp) -> RegionMetaOutcome {
-        let response = self
-            .leader_node()
-            .raft
-            .client_write(Command::RegionMeta(op))
-            .await
-            .expect("propose region meta op");
-        match response.response() {
-            Response::RegionMeta { outcome } => outcome.clone(),
-            other => panic!("unexpected response: {other}"),
+        let stop = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            let leader = self.wait_leader().await;
+            match self
+                .node(leader)
+                .raft
+                .client_write(Command::RegionMeta(op.clone()))
+                .await
+            {
+                Ok(response) => match response.response() {
+                    Response::RegionMeta { outcome } => return outcome.clone(),
+                    other => panic!("unexpected response: {other}"),
+                },
+                Err(err) => {
+                    assert!(
+                        tokio::time::Instant::now() < stop,
+                        "propose region meta op kept failing: {err}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
         }
     }
 
