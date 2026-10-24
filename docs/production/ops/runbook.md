@@ -578,6 +578,10 @@ auto-resolve 语义，处置是人工的。
 - 处置：先修 `CoordKvTWatermarkStall` / `CoordKvTShardSealLag`；确认
   `watch_retention` 没有被误调大。**不要**手工删 Commit Log 文件或强制回收
   未 seal 的 shard——那会让 Watch 永久跳过这些事件。
+- outbox 容量：回收水位以下的 staging 行由数据 Region 自己的 raft 自动裁剪
+  （`coord_kv_t_commit_log_outbox_rows_trimmed_total`）。该计数不涨而磁盘持续
+  增长时，查 `trim commit log outbox failed` 日志与数据 Region 的 leader；裁剪
+  是尽力而为的容量优化，不影响 Watch 可读窗口。
 
 ## 7. KV-T v2 Watch 订阅排障
 

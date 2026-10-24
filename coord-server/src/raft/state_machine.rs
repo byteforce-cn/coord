@@ -790,6 +790,22 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::TrimCommitLogOutbox {
+                through_ts,
+                max_rows,
+            } => {
+                // 裁剪不写 changelog、不推 revision；记录已随 shard 回收不可读。
+                let result = sm
+                    .trim_commit_log_outbox(*through_ts, *max_rows as usize, applied)
+                    .map_err(io_err)?;
+                Ok((
+                    Response::CommitLogOutboxTrimmed {
+                        trimmed_before: result.trimmed_before,
+                        removed: result.removed,
+                    },
+                    None,
+                ))
+            }
             Command::RegionMeta(op) => {
                 // 表级拒绝随 outcome 返回（不失败 apply）；region 0 元数据记录，
                 // 不上 Watch、不推进业务 revision。
@@ -2186,6 +2202,73 @@ mod tests {
             .expect("publish replay must not fail raft");
         match resp {
             Response::CommitWatermarkPublished { watermark } => assert_eq!(watermark, 2_000),
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    /// outbox 裁剪是幂等的 raft 命令：重放同一 applied 不再删除，且不产生 Watch 事件。
+    #[test]
+    fn test_apply_trim_commit_log_outbox_is_idempotent_and_eventless() {
+        use crate::storage::commit_log::{CommitChange, CommitRecord, COMMIT_LOG_STAGING_SHARD_ID};
+        let (_tmp, store) = setup_store_with_mode(RevisionMode::CommitTs);
+        let record = |ts: u64| CommitRecord {
+            shard_id: COMMIT_LOG_STAGING_SHARD_ID,
+            commit_ts: ts,
+            txn_id: format!("txn-{ts}").into_bytes(),
+            start_ts: ts.saturating_sub(1),
+            region_id: 1,
+            txn_bytes: 16,
+            changes: vec![CommitChange {
+                key: b"k".to_vec(),
+                value: Some(b"v".to_vec()),
+                prev: None,
+            }],
+        };
+        for ts in [10u64, 20] {
+            store
+                .state_machine
+                .append_commit_record(&record(ts), 4 * 1024 * 1024)
+                .unwrap();
+        }
+
+        let (resp, event) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::TrimCommitLogOutbox {
+                    through_ts: 20,
+                    max_rows: 16,
+                },
+                5,
+                applied_at(5),
+            )
+            .expect("trim apply");
+        match resp {
+            Response::CommitLogOutboxTrimmed {
+                trimmed_before,
+                removed,
+            } => assert_eq!((trimmed_before, removed), (20, 1)),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(event.is_none(), "裁剪不得产生 Watch 事件");
+        assert_eq!(store.state_machine.commit_log_trimmed_before().unwrap(), 20);
+
+        // 同一 applied 重放：返回已生效水位，不重复删除。
+        let (resp, _) = store
+            .execute_command(
+                store.state_machine.as_ref(),
+                &Command::TrimCommitLogOutbox {
+                    through_ts: 20,
+                    max_rows: 16,
+                },
+                5,
+                applied_at(5),
+            )
+            .expect("trim replay must not fail raft");
+        match resp {
+            Response::CommitLogOutboxTrimmed {
+                trimmed_before,
+                removed,
+            } => assert_eq!((trimmed_before, removed), (20, 0)),
             other => panic!("unexpected response: {other:?}"),
         }
     }

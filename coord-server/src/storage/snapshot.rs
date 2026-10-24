@@ -20,8 +20,8 @@ use super::commit_log::COMMIT_LOG_PREFIX;
 use super::envelope;
 use super::mvcc::{
     encode_kv_key, encode_kv_meta_key, AppliedLogId, KvMetadata, MvccStorage, RevisionMode,
-    CHANGELOG_PREFIX, META_COMPACT_REVISION, META_CURRENT_REVISION, META_LAST_APPLIED,
-    TABLE_CHANGELOG, TABLE_COMMIT_LOG, TABLE_KV, TABLE_KV_META, TABLE_META,
+    CHANGELOG_PREFIX, META_COMMIT_LOG_TRIMMED_BEFORE, META_COMPACT_REVISION, META_CURRENT_REVISION,
+    META_LAST_APPLIED, TABLE_CHANGELOG, TABLE_COMMIT_LOG, TABLE_KV, TABLE_KV_META, TABLE_META,
 };
 
 // ──── Snapshot 数据结构 ────
@@ -464,6 +464,9 @@ pub fn import_snapshot_data<B: StorageBackend>(
         for entry in &data.commit_log_entries {
             tx.insert(TABLE_COMMIT_LOG, &entry.internal_key, &entry.value)?;
         }
+        // 快照整体替换了 outbox：旧的裁剪水位不再描述新状态（保留它会让
+        // 快照带回来的低位行永久不删）。下一次 tick 从 region 0 的回收水位重建。
+        tx.remove(TABLE_META, META_COMMIT_LOG_TRIMMED_BEFORE)?;
 
         // R-RFT-06：持久化 applied 状态（完整 term/node_id，来自快照导出时的真实 LogId）
         tx.insert(
@@ -600,6 +603,52 @@ mod tests {
         assert_eq!(
             storage2.get_at_revision(b"a", 20).unwrap().as_deref(),
             Some(&b"left"[..])
+        );
+    }
+
+    /// 快照整体替换 outbox：旧的 outbox 裁剪水位不能跟着保留（否则快照带回来
+    /// 的低位行会被当成已删，永久占容量）。
+    #[test]
+    fn test_snapshot_import_resets_outbox_trim_watermark() {
+        use crate::storage::commit_log::{CommitChange, CommitRecord, COMMIT_LOG_STAGING_SHARD_ID};
+        let (_tmp, storage) = setup_commit_ts_storage();
+        let record = CommitRecord {
+            shard_id: COMMIT_LOG_STAGING_SHARD_ID,
+            commit_ts: 10,
+            txn_id: b"txn".to_vec(),
+            start_ts: 9,
+            region_id: 1,
+            txn_bytes: 16,
+            changes: vec![CommitChange {
+                key: b"k".to_vec(),
+                value: Some(b"v".to_vec()),
+                prev: None,
+            }],
+        };
+        storage
+            .append_commit_record(&record, 4 * 1024 * 1024)
+            .unwrap();
+        let trimmed = storage
+            .trim_commit_log_outbox(5, 16, AppliedLogId::standalone(1))
+            .unwrap();
+        assert_eq!(trimmed.trimmed_before, 5);
+
+        let data = export_snapshot_data(&storage, 1, 1).unwrap();
+        let (_tmp2, storage2) = setup_commit_ts_storage();
+        import_snapshot_data(&storage2, &data).unwrap();
+
+        assert_eq!(
+            storage2.commit_log_trimmed_before().unwrap(),
+            0,
+            "a snapshot replaces the outbox; the stale watermark must not survive"
+        );
+        assert_eq!(
+            storage2
+                .commit_records_at(COMMIT_LOG_STAGING_SHARD_ID, 10)
+                .unwrap()
+                .len(),
+            1,
+            "rows carried by the snapshot stay readable"
         );
     }
 
