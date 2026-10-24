@@ -194,5 +194,20 @@ consumer-facing view per service. A missing capability fails with
 - Unit tests: `mvn test`.
 - Integration suites (real server + agent): `mvn -Pit` — see
   `.github/workflows/ci.yml` for the authoritative invocation.
+- KV-T v2 real-cluster e2e (`KvTV2ClusterIntegrationTest`) needs the v2
+  dev cluster (multi-raft + PD + object storage + `[kv_t]`):
+
+  ```bash
+  cargo build --workspace --bins
+  bash scripts/ci-java-it-cluster.sh start v2
+  (cd coord-java-sdk && mvn -B verify -Pit)
+  bash scripts/ci-java-it-cluster.sh stop v2
+  ```
+
+  The suite targets `COORD_V2_AGENT_HOST` / `COORD_V2_AGENT_PORT` (default
+  `localhost:19637`) and fails hard when the cluster is missing — start the
+  cluster first, or the run is not evidence. `start v2` wipes its data dirs on
+  each start (a disposable fixture); set `COORD_KEEP_DATA=1` to keep them for
+  debugging. The v1 suites keep using the v1 cluster (`start v1`, port 19527).
 - Note: local runs require a JDK the test stack supports (the repo CI uses
   Java 21; Mockito-based suites may not run on much newer JDKs).
