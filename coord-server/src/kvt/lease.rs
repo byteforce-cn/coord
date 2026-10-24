@@ -21,7 +21,8 @@ use coord_proto::lease::v2 as lease_v2;
 use crate::lease::wall_clock_now_ms;
 use crate::raft::type_config::{Command, LeaseV2Op, Response as RaftResponse};
 use crate::server::{map_err, CoordNode};
-use crate::storage::mvcc::LeaseV2Record;
+use crate::storage::mvcc::{LeaseV2Record, MvccStorage};
+use crate::storage::redb_backend::RedbBackend;
 
 use super::services::tso_status;
 
@@ -497,6 +498,35 @@ fn region_fenced(node: &CoordNode, region_id: RegionId) -> bool {
         .unwrap_or(false)
 }
 
+/// revoke 扇出的数据面删除也是「调用方自带 `commit_ts` 的直写」：目标 Region
+/// 上还有 `commit_ts` 更小的未 apply 决策时，删除会把 `current_revision` 推过它，
+/// 决策永久无法 apply、`safe_ts` 卡死。返回 `false` = 本拍不提案（留在 pending，
+/// 下一拍用**同一** `commit_ts` 重试，不重取时间戳、不丢清理）。
+async fn cleanup_ordered_behind_decisions(
+    node: &CoordNode,
+    region_id: RegionId,
+    mvcc: &MvccStorage<RedbBackend>,
+    lease_id: i64,
+    commit_ts: u64,
+) -> bool {
+    match node
+        .guard_direct_write_commit_ts(region_id, mvcc, commit_ts)
+        .await
+    {
+        Ok(()) => true,
+        Err(status) => {
+            tracing::debug!(
+                region_id,
+                lease_id,
+                commit_ts,
+                error = %status,
+                "lease.v2 cleanup stays pending behind earlier commit decisions"
+            );
+            false
+        }
+    }
+}
+
 impl CoordNode {
     /// 到期清理 worker：region 0 leader 扫描过期租约并写入 Revoke 决策。
     ///
@@ -607,6 +637,17 @@ impl CoordNode {
                         if raft.current_leader().await != Some(node.node_id) {
                             continue;
                         }
+                        if !cleanup_ordered_behind_decisions(
+                            &node,
+                            region_id,
+                            &node.storage,
+                            lease_id,
+                            commit_ts,
+                        )
+                        .await
+                        {
+                            continue;
+                        }
                         let cmd = Command::DeleteKeysByLeaseV2 {
                             lease_id,
                             commit_ts,
@@ -644,6 +685,13 @@ impl CoordNode {
                                     .1
                                     .insert(region_id);
                                 done.push((region_id, lease_id, commit_ts));
+                                continue;
+                            }
+                            if !cleanup_ordered_behind_decisions(
+                                &node, region_id, &rt.mvcc, lease_id, commit_ts,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             let cmd = Command::DeleteKeysByLeaseV2 {
