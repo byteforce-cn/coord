@@ -3,8 +3,8 @@
 Java SDK for the Coord platform — the agent-side service surfaces (registry,
 config, lock, election, idgen, event, cache, MQ, scheduler, workflow, policy,
 PKI, transit, circuit breaker, rate limiter, feature flags, object store) plus
-the KV-T v2 TSO/KV/Lease data plane (requires `[kv_t].enabled=true` and an agent
-that forwards the v2 services).
+the KV-T v2 data plane (TSO/KV/Lease/Txn/Watch/Storage; requires
+`[kv_t].enabled=true` and an agent that forwards the v2 services).
 Maven coordinates: `cn.byteforce:coord-java-sdk` (Java 21+).
 
 > This README is a starting point only. The **normative consumer semantics**
@@ -96,15 +96,51 @@ try (CoordClient client = CoordClient.create(config)) {
     long commitTs = client.tsoV2().getTimestamp();
     client.kvV2().put("/app/k".getBytes(), "v".getBytes(), commitTs, false, new byte[0]);
     var ranged = client.kvV2().range("/app/k".getBytes());
+
+    // Serializable transaction: a conflict is a result, not an error.
+    var session = client.txnV2().begin();                       // server-allocated start_ts
+    var read = session.read("/app/k".getBytes());
+    var commit = session.commit(java.util.List.of(
+            cn.byteforce.coord.sdk.txn.v2.TxnClient.Mutation.put(
+                    "/app/k".getBytes(), "v2".getBytes())), new byte[0]);
+    if (!commit.committed()) {
+        // OCC conflict: replay the whole transaction with a new start_ts.
+        session.abort();
+    }
+
+    // Watch is at-least-once and resumes from the cursor after a reconnect;
+    // HISTORY_UNAVAILABLE is terminal (resync the key space).
+    var subscription = client.watchV2().watch(
+            cn.byteforce.coord.sdk.watch.v2.WatchClient.Options
+                    .key("/app/".getBytes()).fromRevision(0),
+            new cn.byteforce.coord.sdk.watch.v2.WatchClient.Listener() {
+                public void onBatch(cn.byteforce.coord.sdk.watch.v2.WatchClient.Batch batch) {
+                    // apply events idempotently by commitTs
+                }
+
+                public void onError(cn.byteforce.coord.sdk.CoordException error) {
+                    // terminal: resync when error.getErrorCode() == HISTORY_UNAVAILABLE
+                }
+            });
+
+    // Objects: the server allocates the manifest commit_ts; readTs=0 = safe_ts.
+    var put = client.storageV2().put("bucket", "obj".getBytes(), "data".getBytes());
+    var object = client.storageV2().get("bucket", "obj".getBytes(), 0);
+    subscription.close();
 }
 ```
 
 ## Client surfaces
 
-The SDK covers the **agent-side service surfaces**. The KV-T v2 data plane is
-available as `client.tsoV2()` / `client.kvV2()` / `client.leaseV2()`; the agent
-currently forwards TSO/KV/Lease v2 only. Txn/Watch/Storage v2 (and direct
-server access) are not part of this SDK surface yet.
+The SDK covers the **agent-side service surfaces**. The complete KV-T v2 data
+plane is available as `client.tsoV2()` / `client.kvV2()` / `client.leaseV2()` /
+`client.txnV2()` / `client.watchV2()` / `client.storageV2()`; the agent forwards
+all six v2 services (direct server access is not part of this SDK surface).
+Transactions are server-side sessions pinned to one coordinator: a coordinator
+restart loses the session (`TXN_NOT_FOUND`) and the transaction must be
+replayed, while an OCC conflict comes back as `commit(...).committed() == false`.
+Watch delivery is at-least-once with cursor-based resume; `HISTORY_UNAVAILABLE`
+is terminal.
 
 | Surface | Entry point | Notes |
 |:--|:--|:--|
@@ -119,7 +155,7 @@ server access) are not part of this SDK surface yet.
 | Transit | `client.transit()` | envelope encryption + purpose-bound HMAC (`hmacSignWithPurpose` / `hmacVerifyWithPurpose`; persist the returned `keyId`); `rewrap` migrates DEKs during KEK rotation |
 | CircuitBreaker / RateLimiter / FeatureFlags | `client.circuitBreaker()`, `client.rateLimiter()`, `client.featureFlags()` | breaker/limiter are local (per-agent); feature flags live in the shared KV — `putFlag` / `putPercentageFlag` / `deleteFlag` / `listFlags` (management plane; takes effect immediately) |
 | ObjectStore | `client.objectStore()` | see `docs/production/volume-object-storage.md` |
-| KV-T v2 | `client.tsoV2()`, `client.kvV2()`, `client.leaseV2()` | `[kv_t].enabled=true`; writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; Txn/Watch/Storage v2 are not proxied yet |
+| KV-T v2 | `client.tsoV2()`, `client.kvV2()`, `client.leaseV2()`, `client.txnV2()`, `client.watchV2()`, `client.storageV2()` | `[kv_t].enabled=true`; writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; txn conflicts are results (replay with a new `startTs`); watch is at-least-once with cursor resume; storage buffers up to 256 MiB |
 | Health | `client.healthCheck()` | agent health check |
 
 ## Errors

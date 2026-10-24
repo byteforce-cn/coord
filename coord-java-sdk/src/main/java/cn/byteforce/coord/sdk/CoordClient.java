@@ -11,7 +11,10 @@ import cn.byteforce.coord.sdk.idgen.IdGenClient;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
 import cn.byteforce.coord.sdk.kv.v2.KvClient;
 import cn.byteforce.coord.sdk.lease.v2.LeaseClient;
+import cn.byteforce.coord.sdk.storage.v2.StorageClient;
 import cn.byteforce.coord.sdk.tso.v2.TsoClient;
+import cn.byteforce.coord.sdk.txn.v2.TxnClient;
+import cn.byteforce.coord.sdk.watch.v2.WatchClient;
 import cn.byteforce.coord.sdk.internal.proto.HealthCheckRequest;
 import cn.byteforce.coord.sdk.internal.proto.HealthCheckResponse;
 import cn.byteforce.coord.sdk.internal.proto.HealthGrpc;
@@ -57,9 +60,9 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@link #circuitBreaker()} — Agent-local circuit breaker state</li>
  *   <li>{@link #rateLimiter()} — Agent-local token-bucket rate limiting</li>
  *   <li>{@link #featureFlags()} — Feature flag evaluation (read-only wire)</li>
- *   <li>{@link #tsoV2()}, {@link #kvV2()}, {@link #leaseV2()} — KV-T v2
- *       timestamp/KV/lease data plane (requires a v2 cluster and an agent that
- *       forwards the v2 services)</li>
+ *   <li>{@link #tsoV2()}, {@link #kvV2()}, {@link #leaseV2()}, {@link #txnV2()},
+ *       {@link #watchV2()}, {@link #storageV2()} — KV-T v2 data plane (requires
+ *       a v2 cluster and an agent that forwards the v2 services)</li>
  * </ul>
  * Must be closed via {@link #close()} to release resources gracefully.
  *
@@ -100,6 +103,9 @@ public final class CoordClient implements Closeable {
     private final TsoV2ClientImpl tsoV2Client;
     private final KvV2ClientImpl kvV2Client;
     private final LeaseV2ClientImpl leaseV2Client;
+    private final TxnV2ClientImpl txnV2Client;
+    private final WatchV2ClientImpl watchV2Client;
+    private final StorageV2ClientImpl storageV2Client;
     private final LeaderElectionClientImpl electionClient;
     private final EventClientImpl eventClient;
     private final SchedulerClientImpl schedulerClient;
@@ -155,6 +161,14 @@ public final class CoordClient implements Closeable {
         this.kvV2Client = new KvV2ClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config, tsoV2Client);
         this.leaseV2Client = new LeaseV2ClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.txnV2Client = new TxnV2ClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        // watch 的流循环跑在受管理的虚拟线程执行器上：close() 才能中断它。
+        this.watchV2Client = new WatchV2ClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(),
+                threadPoolManager.getVirtualThreadExecutor());
+        this.storageV2Client = new StorageV2ClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
         this.electionClient = new LeaderElectionClientImpl(channelManager, errorMapper,
                 retryTemplate, config.getObservabilityProvider(), config);
@@ -299,6 +313,40 @@ public final class CoordClient implements Closeable {
      */
     public LeaseClient leaseV2() {
         return leaseV2Client;
+    }
+
+    /**
+     * Returns the KV-T v2 transaction client ({@code coord.txn.v2}).
+     * <p>
+     * {@link TxnClient.Session#commit} reports an OCC conflict as
+     * {@code committed() == false}; replay the transaction with a new
+     * {@code startTs}. Sessions are pinned to one coordinator and are lost on
+     * a coordinator restart ({@code TXN_NOT_FOUND}).
+     */
+    public TxnClient txnV2() {
+        return txnV2Client;
+    }
+
+    /**
+     * Returns the KV-T v2 change subscription client ({@code coord.watch.v2}).
+     * <p>
+     * Delivery is at-least-once and resumes from the last cursor after a
+     * transport failure; {@code HISTORY_UNAVAILABLE} is terminal (resync the
+     * key space).
+     */
+    public WatchClient watchV2() {
+        return watchV2Client;
+    }
+
+    /**
+     * Returns the KV-T v2 object storage client ({@code coord.storage.v2}).
+     * <p>
+     * The server allocates the manifest {@code commitTs}; {@code readTs = 0}
+     * means its local {@code safe_ts}. Objects are buffered client-side up to
+     * 256 MiB.
+     */
+    public StorageClient storageV2() {
+        return storageV2Client;
     }
 
     /**
