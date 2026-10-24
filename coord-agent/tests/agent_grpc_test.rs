@@ -19,12 +19,16 @@ use coord_proto::lease::v2::LeaseGrantRequest as LeaseGrantRequestV2;
 use coord_proto::lease::LeaseGrantRequest;
 use coord_proto::maintenance::maintenance_client::MaintenanceClient;
 use coord_proto::maintenance::StatusRequest;
+use coord_proto::storage::v2 as storage_v2;
+use coord_proto::storage::v2::storage_client::StorageClient as StorageV2Client;
 use coord_proto::tso::v2::tso_client::TsoClient as TsoV2Client;
 use coord_proto::tso::v2::GetTsRequest;
 use coord_proto::txn::txn_client::TxnClient;
 use coord_proto::txn::v2::txn_client::TxnClient as TxnV2Client;
 use coord_proto::txn::v2::BeginRequest as BeginRequestV2;
 use coord_proto::txn::TxnRequest;
+use coord_proto::watch::v2 as watch_v2;
+use coord_proto::watch::v2::watch_client::WatchClient as WatchV2Client;
 use coord_proto::watch::watch_client::WatchClient;
 
 /// Find an available TCP port on localhost
@@ -121,8 +125,8 @@ async fn test_agent_grpc_server_starts_and_listens() {
     handle.abort();
 }
 
-/// KV-T v2 服务（TSO/KV/Lease/Txn）已注册；骨架模式下 fail-closed（UNAVAILABLE），
-/// 不是 `UNIMPLEMENTED`（未注册）也不是假成功。
+/// KV-T v2 服务（TSO/KV/Lease/Txn/Watch/Storage）已注册；骨架模式下 fail-closed
+/// （`UNAVAILABLE`），不是 `UNIMPLEMENTED`（未注册）也不是假成功。
 #[tokio::test]
 async fn test_agent_registers_kvt_v2_services_fail_closed() {
     let port = find_port();
@@ -162,13 +166,55 @@ async fn test_agent_registers_kvt_v2_services_fail_closed() {
         .expect_err("skeleton v2 Lease must fail closed");
     assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
 
-    let err = TxnV2Client::new(channel)
+    let err = TxnV2Client::new(channel.clone())
         .begin(BeginRequestV2 {
             start_ts: 0,
             ttl_ms: 0,
         })
         .await
         .expect_err("skeleton v2 Txn must fail closed");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+    assert_eq!(error_code_of(&err).as_deref(), Some("UNAVAILABLE"));
+
+    // 双流 RPC 的首帧错误可能以 RPC 错误或流首帧错误到达，两者都必须是
+    // `UNAVAILABLE`（未注册时会是 `UNIMPLEMENTED`）。
+    let watch = WatchV2Client::new(channel.clone())
+        .watch(tokio_stream::iter(vec![watch_v2::WatchRequest {
+            request: Some(watch_v2::watch_request::Request::Create(
+                watch_v2::WatchCreateRequest {
+                    key: b"k".to_vec(),
+                    ..Default::default()
+                },
+            )),
+        }]))
+        .await;
+    match watch {
+        Ok(response) => {
+            let err = response
+                .into_inner()
+                .message()
+                .await
+                .expect_err("skeleton v2 Watch must fail closed");
+            assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+        }
+        Err(err) => assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}"),
+    }
+
+    let err = StorageV2Client::new(channel)
+        .put(tokio_stream::iter(vec![
+            storage_v2::PutRequest {
+                part: Some(storage_v2::put_request::Part::Meta(storage_v2::PutMeta {
+                    bucket: "bucket".to_string(),
+                    object_id: b"obj".to_vec(),
+                    total_size: 1,
+                })),
+            },
+            storage_v2::PutRequest {
+                part: Some(storage_v2::put_request::Part::Chunk(b"v".to_vec())),
+            },
+        ]))
+        .await
+        .expect_err("skeleton v2 Storage must fail closed");
     assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
     assert_eq!(error_code_of(&err).as_deref(), Some("UNAVAILABLE"));
 
