@@ -515,15 +515,19 @@ jobs:
         # 落到下面的 run step 里，既看不出耗时也不好归因。
         run: |
           set -euo pipefail
-          mapfile -t sel < <(bash scripts/ci-shard.sh selectors --shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }})
+          mapfile -t groups < <(bash scripts/ci-shard.sh groups --shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }})
           # 选择符为空 ⇒ cargo 会把 `--no-run` 当成「构建全部 test target」，静默退回
           # 串行时代的行为；必须显式红。
-          if [ "${#sel[@]}" -eq 0 ]; then
+          if [ "${#groups[@]}" -eq 0 ]; then
             echo "::error::分片 ${{ matrix.shard }} 的选择符为空"
             exit 1
           fi
           echo "shard ${{ matrix.shard }}: $(bash scripts/ci-shard.sh count --shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }}) 个单元"
-          cargo test --no-run "${sel[@]}"
+          for spec in "${groups[@]}"; do
+            read -r -a args <<< "$spec"
+            echo "+ cargo test --no-run ${args[*]}"
+            cargo test --no-run "${args[@]}"
+          done
       - name: Pre-clean leaked test processes
         # 进程级套件在超时/中断时会留下孤儿 `coord server`（本地实测可积累 30+ 个、
         # 最久 11 小时），它们抢 CPU/端口 → 后续套件出现假红
@@ -537,14 +541,23 @@ jobs:
         # 失败必须**自描述**：间歇红（同一 SHA 定时跑绿、push 跑红）曾因日志不可取
         # 而无法定位测试。现经包装脚本落盘 + 注解：失败测试名与 panic 位置会以
         # **check-run 注解**（匿名可取）带出。
+        # 分组执行（库单测 / 集成测试各一条命令，见 ci-shard.sh groups）：一组失败不
+        # 跳过其余组（`|| rc=1` 累积），每组独立日志 ⇒ 注解里的失败测试名照旧可定位。
         run: |
           set -euo pipefail
-          mapfile -t sel < <(bash scripts/ci-shard.sh selectors --shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }})
-          if [ "${#sel[@]}" -eq 0 ]; then
+          mapfile -t groups < <(bash scripts/ci-shard.sh groups --shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }})
+          if [ "${#groups[@]}" -eq 0 ]; then
             echo "::error::分片 ${{ matrix.shard }} 的选择符为空"
             exit 1
           fi
-          bash scripts/ci-run-with-annotations.sh "/tmp/ci-workspace-tests-shard-${{ matrix.shard }}.log" cargo test --no-fail-fast "${sel[@]}"
+          rc=0
+          i=0
+          for spec in "${groups[@]}"; do
+            i=$((i + 1))
+            read -r -a args <<< "$spec"
+            bash scripts/ci-run-with-annotations.sh "/tmp/ci-workspace-tests-shard-${{ matrix.shard }}-$i.log" cargo test --no-fail-fast "${args[@]}" || rc=1
+          done
+          exit $rc
       - name: Run deterministic simulation suites (gated, shard 1)
         # sim_jepsen/sim_chaos 是**自建模型**而非系统级证据，用
         # `required-features = ["sim-tests"]` 移出默认套件（避免测试数量虚高）；

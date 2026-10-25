@@ -123,8 +123,11 @@ sccache 缓存的是**单次编译**（rustc 产物），不缓存链接；而 r
   三处会漂，漂了就是某个分片永远不跑而没人发现。
 - **子命令**
   - `plan` → 输出 `{"matrix": {"shard": [1..N]}, "shards": N}`（供 `fromJSON` 与汇总 job 用）。
-  - `selectors --shard I/N` → 打印该分片的 cargo 选择符（`-p PKG --test NAME` / `--lib` / `--bin NAME`），
-    供 `cargo build` 与 `cargo test` 复用同一组选择符。
+  - `groups --shard I/N` → 打印该分片的 cargo 选择符，**一行一组**：库单测一组
+    （`--lib -p A -p B`）、集成测试/二进制单测一组（`--test X --test Y --bin Z`）。
+    分两组是被 cargo 的口径逼的：`--lib` 是布尔开关，写两次直接报
+    `the argument '--lib' cannot be used multiple times`；而同一条命令里一旦带了 `-p`，
+    `--test NAME` 的匹配范围也会被这些 `-p` 收窄（target 名全局唯一，不需要收窄）。
   - `count --shard I/N` → 单元数（job 用它断言「非空」，避免分片静默跑 0 个）。
   - `verify --shards N` → **覆盖性门禁**（fail-closed）：
     1. 每个 `cargo metadata` 单元恰好落在一个分片；

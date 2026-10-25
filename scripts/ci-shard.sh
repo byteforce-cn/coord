@@ -15,7 +15,7 @@
 #
 # 用法：
 #   ci-shard.sh plan                       # {"matrix":{"shard":[1..N]},"shards":N}（给 fromJSON）
-#   ci-shard.sh selectors --shard I/N      # 该片的 cargo 选择符，**每行一个 token**（供 mapfile 直接用）
+#   ci-shard.sh groups --shard I/N         # 该片的 cargo 选择符，**一行一组**（空格分隔，供 read -a 直接用）
 #   ci-shard.sh count --shard I/N          # 该片的单元数
 #   ci-shard.sh units                      # 全部单元（人读，调试用）
 #   ci-shard.sh verify --shards N          # 覆盖性门禁（fail-closed）：跑在汇总 job 里
@@ -177,17 +177,36 @@ def _parse_shard(args):
     return index, total
 
 
-def cmd_selectors(args):
+def cmd_groups(args):
+    """输出该分片的 cargo 选择符，一行一组。
+
+    为什么要分两组：`cargo test` 的 `--lib` 是布尔开关，写两次就是
+    `the argument '--lib' cannot be used multiple times`；而一旦同一条命令里带了
+    `-p`，`--test NAME` 的匹配范围也会被这些 `-p` 缩小（目标名是全局唯一的，
+    不需要也不应该被 `-p` 收窄）。所以：
+      · 库单测：`--lib -p A -p B`（一组，`--lib` 只出现一次）
+      · 集成测试/二进制单测：`--test X --test Y --bin Z`（不带 `-p`）
+    """
     index, total = _parse_shard(args)
-    all_units = units(metadata())
-    picked = [u for u in all_units if shard_of(u[0], total) == index]
+    picked = [u for u in units(metadata()) if shard_of(u[0], total) == index]
     if not picked:
         die(f"分片 {index}/{total} 没有任何单元——分组或分片数错了")
-    # 每行一个 token：调用方用 `mapfile -t args < <(...)` 拿到就能直接
-    # `cargo build "${args[@]}"`，不需要再做一层分词。
-    for _unit, sel, _size, _dir in picked:
-        for token in sel:
-            print(token)
+
+    lib_pkgs = [u[0].split("::")[0] for u in picked if u[0].endswith("::lib")]
+    target_args = []
+    for unit, _sel, _size, _dir in picked:
+        if unit.endswith("::lib"):
+            continue
+        _pkg, kind, name = unit.split("::", 2)
+        target_args.append(f"--{kind} {name}")
+
+    if lib_pkgs:
+        tokens = ["--lib"]
+        for pkg in lib_pkgs:
+            tokens += ["-p", pkg]
+        print(" ".join(tokens))
+    if target_args:
+        print(" ".join(target_args))
 
 
 def cmd_count(args):
@@ -283,7 +302,7 @@ def cmd_verify(args):
 
 COMMANDS = {
     "plan": cmd_plan,
-    "selectors": cmd_selectors,
+    "groups": cmd_groups,
     "count": cmd_count,
     "units": cmd_units,
     "verify": cmd_verify,
