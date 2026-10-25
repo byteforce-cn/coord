@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 mod common;
 
 use common::v2_cluster::{
-    commit_txn, direct_put, runtime, V2Cluster,
+    commit_txn, runtime, V2Cluster,
 };
 
 /// 证书/权限门禁：没有 `PERF_GATE=1` 就当「未跑」，直接失败而不是静默跳过。
@@ -84,7 +84,7 @@ fn percentile(sorted: &[u128], p: f64) -> u128 {
 }
 
 /// 一次「不重试」的提交：冲突/故障原样返回，供 OCC 冲突统计与重试封装使用。
-fn try_commit_value(
+async fn try_commit_value(
     addrs: &[String],
     left: &[u8],
     right: &[u8],
@@ -99,24 +99,23 @@ fn try_commit_value(
         else {
             continue;
         };
-        let Ok(channel) = runtime().block_on(
-            endpoint
-                .connect_timeout(Duration::from_secs(2))
-                .connect(),
-        ) else {
+        let Ok(channel) = endpoint
+            .connect_timeout(Duration::from_secs(2))
+            .connect()
+            .await
+        else {
             continue;
         };
         let mut txn = TxnClient::new(channel);
-        let begin = match runtime().block_on(async {
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                txn.begin(BeginRequest {
-                    start_ts: 0,
-                    ttl_ms: 0,
-                }),
-            )
-            .await
-        }) {
+        let begin = match tokio::time::timeout(
+            Duration::from_secs(5),
+            txn.begin(BeginRequest {
+                start_ts: 0,
+                ttl_ms: 0,
+            }),
+        )
+        .await
+        {
             Ok(Ok(resp)) => resp.into_inner(),
             Ok(Err(status)) => {
                 last = status.to_string();
@@ -127,22 +126,19 @@ fn try_commit_value(
                 continue;
             }
         };
-        let read = runtime()
-            .block_on(async {
-                tokio::time::timeout(
-                    Duration::from_secs(5),
-                    txn.read(ReadRequest {
-                        txn_id: begin.txn_id.clone(),
-                        key: left.to_vec(),
-                        range_end: Vec::new(),
-                        limit: 0,
-                        keys_only: false,
-                    }),
-                )
-                .await
-            })
-            .ok()
-            .and_then(|r| r.ok());
+        let read = tokio::time::timeout(
+            Duration::from_secs(5),
+            txn.read(ReadRequest {
+                txn_id: begin.txn_id.clone(),
+                key: left.to_vec(),
+                range_end: Vec::new(),
+                limit: 0,
+                keys_only: false,
+            }),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok());
         if read.is_none() {
             last = "read failed".to_string();
             continue;
@@ -157,17 +153,16 @@ fn try_commit_value(
                 lease_id: 0,
             })
             .collect();
-        return match runtime().block_on(async {
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                txn.commit(CommitRequest {
-                    txn_id: begin.txn_id.clone(),
-                    mutations,
-                    request_id: Vec::new(),
-                }),
-            )
-            .await
-        }) {
+        return match tokio::time::timeout(
+            Duration::from_secs(5),
+            txn.commit(CommitRequest {
+                txn_id: begin.txn_id.clone(),
+                mutations,
+                request_id: Vec::new(),
+            }),
+        )
+        .await
+        {
             Ok(Ok(resp)) => Ok(resp.into_inner().commit_ts),
             Ok(Err(status)) => Err(status.to_string()),
             Err(_) => Err("commit timed out".to_string()),
@@ -177,14 +172,19 @@ fn try_commit_value(
 }
 
 fn try_commit(addrs: &[String], left: &[u8], right: &[u8], tag: u64) -> Result<i64, String> {
-    try_commit_value(addrs, left, right, format!("occ-{tag}").as_bytes())
+    runtime().block_on(try_commit_value(
+        addrs,
+        left,
+        right,
+        format!("occ-{tag}").as_bytes(),
+    ))
 }
 
 /// 冲突/换届可重试的提交封装（限时；其它错误直接失败）。
 fn commit_pair_value(addrs: &[String], left: &[u8], right: &[u8], value: &[u8]) -> i64 {
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        match try_commit_value(addrs, left, right, value) {
+        match runtime().block_on(try_commit_value(addrs, left, right, value)) {
             Ok(ts) => return ts,
             Err(err) => {
                 let retryable = err.contains("TXN_CONFLICT")
@@ -300,21 +300,21 @@ fn perf_occ_conflict_rate() {
             let attempts = Arc::clone(&attempts);
             let conflicts = Arc::clone(&conflicts);
             scope.spawn(move || {
-                runtime().block_on(async {
-                    for tag in 0..ATTEMPTS {
-                        attempts.fetch_add(1, Ordering::Relaxed);
-                        if let Err(err) =
-                            try_commit(&addrs, hot, other, tag as u64 + 1_000_000)
-                        {
-                            if err.contains("TXN_CONFLICT") || err.to_lowercase().contains("conflict")
-                            {
+                for tag in 0..ATTEMPTS {
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                    match try_commit(&addrs, hot, other, tag as u64 + 1_000_000) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            let conflict = err.contains("TXN_CONFLICT")
+                                || err.to_lowercase().contains("conflict");
+                            if conflict {
                                 conflicts.fetch_add(1, Ordering::Relaxed);
                             } else {
                                 panic!("unexpected commit error under contention: {err}");
                             }
                         }
                     }
-                });
+                }
             });
         }
     });
@@ -347,12 +347,13 @@ fn perf_watch_end_to_end_lag() {
     let addrs = cluster.addrs();
     let addr = addrs[0].clone();
 
-    // 订阅 `/perf/watch/` 前缀；起点取当前 watermark+1（=0）不可控，因此先写
-    // 一笔拿到 revision R，再从 R+1 起订，逐笔测「commit 返回 → 事件到手」。
-    let start_rev = runtime().block_on(direct_put(&addrs, b"/perf/watch/start", b"v"));
+    // watch.v2 消费 Commit Log（事务决策）：直写（`kv.v2` + 显式 commit_ts）不写
+    // CommitRecord，不会出现在 v2 watch 流里（ADR D12.1 的内部/高级路径）。因此
+    // 这里用事务提交测「commit 返回 → 客户端收到同 commit_ts 事件」的延迟。
+    let start_rev = runtime().block_on(commit_txn(&addrs, b"/perf/watch/start", b"zz-perf/watch/start", 0));
     let create = WatchCreateRequest {
-        key: b"/perf/watch/".to_vec(),
-        range_end: b"/perf/watch0".to_vec(),
+        key: Vec::new(),   // 空 key = 全 keyspace
+        range_end: Vec::new(),
         start_revision: start_rev + 1,
         start_cursor: None,
         prev_kv: false,
@@ -381,8 +382,9 @@ fn perf_watch_end_to_end_lag() {
 
             let mut lags = Vec::with_capacity(EVENTS);
             for index in 0..EVENTS {
-                let key = format!("/perf/watch/{index:04}").into_bytes();
-                let commit_ts = direct_put(&addrs, &key, b"v").await;
+                let left = format!("/perf/watch/{index:04}").into_bytes();
+                let right = format!("zz-perf/watch/{index:04}").into_bytes();
+                let commit_ts = commit_txn(&addrs, &left, &right, index as u64).await;
                 let committed_at = Instant::now();
                 loop {
                     let response =

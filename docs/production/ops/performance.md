@@ -69,17 +69,69 @@ Region 数增加**不劣化**（每个 Region 独立 raft/mvcc，写放大只在
 扇出成本近似线性；单条事件 ≈ 2–3 µs × 订阅者。**这是进程内 fanout 成本**，不含
 客户端网络与 Commit Log 读盘。
 
-## 6. 未覆盖项（#174 仍未完成的部分）
+## 6. 事务面实测（#174 收口）
 
-以下项**没有**本机实测数字，验收前必须补：
+环境同 §1（8 vCPU、loopback、无跨机网络）。测量时 72h 浸泡同时在跑（约 0.3
+txn/s），单次数字偏保守；下表是 release 构建的实测值，命令：
 
-1. **Commit Sequencer 吞吐/批边界**（D9 默认 256/批）——需要真实并发事务负载，不是存储层基准。
-2. **OCC 冲突率与重试放大**（write skew / range 幻读负载）。
-3. **Commit Log 写放大**（完整 value 在 MVCC 与 Commit Log 各存一份）与 24h 保留窗口的磁盘估算。
-4. **Watch lag**（watermark/sealed 推进在持续写下的端到端延迟）。
-5. **Split/Merge 停顿**（迁移期间的写停顿/请求失败率）。
-6. **ValidationIndex 内存占用**（key 哈希 + range 区间索引，`max_range` 生命周期累计）。
-7. **72h soak** —— 见 §7，当前只跑过 CI 的 120s 冒烟。
+```bash
+PERF_GATE=1 cargo test -p coord --release --test kv_t_g6_perf_v2_test \
+  -- --ignored --nocapture --test-threads=1
+```
+
+### 6.1 Commit Sequencer 吞吐 / 批边界
+
+| 客户端 | 事务 | 墙钟 | 吞吐 | 平均批大小 | 冲突 | p50 | p95 |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 32 | 800 | 5.2 s | 152 txn/s | 1.0 | 0 | 171 ms | 219 ms |
+| 32 | 800 | 7.0 s | 115 txn/s | 1.0 | 0 | 177 ms | 1103 ms |
+
+**上限是串行提案率**：RPC 路径每次 `Commit` 只提交 1 个候选
+（`validate_and_commit(vec![candidate])`），D9 的 `commit_sequencer_batch=256`
+在这条路径上不生效（`sequencer_txns / sequencer_batches` 恒为 1.0）。把批真正
+用起来需要「多事务合并提案」的入口（新增契约/延迟权衡），G6 只记录现状。
+
+### 6.2 OCC 冲突率与重试放大
+
+| 客户端 | 尝试 | 冲突 | 冲突率 | 成功 | 耗时 |
+|--:|--:|--:|--:|--:|--:|
+| 16 | 192 | 180 | 93.8% | 12 | 12.0 s |
+
+热 key 写冲突按设计不写决策（客户端换 `start_ts` 重跑）：一次成功的重试放大
+≈ 8 倍尝试；冲突率由 key 争用决定，不是服务端瓶颈。
+
+### 6.3 Watch 端到端延迟
+
+25 个事务，从 `Commit` 返回到客户端收到同 `commit_ts` 事件：
+
+| p50 | p95 | max |
+|--:|--:|--:|
+| 540 ms | 578 ms | 579 ms |
+
+延迟由 CommitWatermark/批下发节拍主导（实测分布很窄），不是网络 RTT。
+注意：`coord.kv.v2` 直写不产生 CommitRecord，**不进入** v2 watch 流（B-KVT-13）。
+
+### 6.4 写放大（稳态，3 副本合计）
+
+300 事务 × 2 key × 256 B = 153,600 B 用户字节 → **11.1 MB** 磁盘增量：
+
+| 用户字节 | 磁盘字节 | 放大 | 每事务磁盘 |
+|--:|--:|--:|--:|
+| 153,600 B | 11,124,736 B | **72.4×** | 37 KB |
+
+小 value 下固定开销主导（Region raft 日志 + region 0 决策日志 + CommitRecord +
+redb 页）；24h 容量按「事务数 × 37 KB ÷ 3（单副本）」估算，不要用用户字节直接估。
+
+### 6.5 ValidationIndex / 决策日志容量
+
+没有 GC（`/_sys/seq/{ridx,iidx,decision}/` 只增不减）：容量随「不同 key 数 /
+不同区间数 / 决策数」单调增长；`catch_up_sequencer_index` 能从决策日志重建索引，
+但没有回收路径。上界、排除项与后续条件见 `boundaries.md` B-KVT-13。
+
+### 6.6 Split/Merge 停顿
+
+**未测**：语义由 g5 连续性/搬迁套件覆盖（不丢不重、`HISTORY_UNAVAILABLE` 边界），
+但「迁移窗口内的写停顿/失败率」没有实测数字 ⇒ 不写「达标」。
 
 ## 7. Soak
 
@@ -87,7 +139,7 @@ Region 数增加**不劣化**（每个 Region 独立 raft/mvcc，写放大只在
 |:--|:--|
 | CI 冒烟（120s，真实 3 进程，v1） | 每个 PR 的 `chaos (kill9 + soak, real processes)` job 执行 `chaos_soak_distributed`；`scripts/collect-evidence.sh soak-smoke` 可产出证据目录 |
 | v2 冒烟（45s + 2 次 region 0 leader kill，真实 3 进程） | `KVT_SOAK_SECS=45 KVT_SOAK_FAULT_SECS=15 cargo test -p coord --release --test kv_t_g6_soak_v2_test soak_v2_mixed_workload_stays_consistent -- --ignored --nocapture --test-threads=1`（每次 PR 的混沌 job 同时跑 v2 决策面故障套件；本行是长窗口冒烟命令） |
-| **72h 生产浸泡（v2）** | **未执行**（需隔离环境；命令如下） |
+| **72h 生产浸泡（v2）** | **运行中**（start 2026-10-25T07:44:11Z，commit `4633507`；结果以证据目录的 `soak-report.md` 为准，完成前不算达标） |
 
 ```bash
 # KV-T GA 的证据口径是 v2 数据面的 72h 浸泡：
