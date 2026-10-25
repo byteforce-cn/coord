@@ -12,7 +12,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use async_trait::async_trait;
 
@@ -858,8 +858,17 @@ mod tests {
             .expect("blocked record")
             .revoked_commit_ts;
 
-        // Region 2 的清理照常完成，Region 1 继续等决策 apply。
+        // Region 2 的清理照常完成，Region 1 继续等决策 apply。Region 1 的守卫
+        // 在 `read_ts_wait_ms` 内不会放行；清理 worker 必须只把该 Region 留在
+        // pending，不能把同批其它 Region 串行拖到同一个等待预算上（一个 Region
+        // 的 pending 决策不该延迟另一个 Region 的清理）。
+        let started = Instant::now();
         wait_gone(&h, b"melon").await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a pending decision on region 1 must not delay region 2's cleanup; took {:?}",
+            started.elapsed()
+        );
         assert!(
             h.key_live(b"apple"),
             "a pending decision on one region must not block another region's cleanup"
