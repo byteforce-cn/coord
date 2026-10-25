@@ -2026,10 +2026,17 @@ async fn snapshot_restore(
 /// 经 region 0 raft 种入权威 Region 表（幂等：已有表时 `Init` no-op）。
 ///
 /// v2 集群没有 Region 表就无法执行 split/merge，种子失败使启动失败
-/// （fail-closed）。leader 未就绪时在 30s 内重试；每个节点都提交同一条
-/// `Init`，避免 bootstrap 节点重启/后来加入时丢失种子。
+/// （fail-closed）。
+///
+/// **只有 region 0 leader 提案**：`client_write` 不跨节点转发（follower 只会
+/// 拿到 `ForwardToLeader`）。每个节点都在启动时无条件提案，会让 3 节点集群里
+/// 的两个 follower 在 30s 后自杀（重启节点永远起不来）。因此非 leader 节点改为
+/// **等 leader 种入的表经 raft 复制到本地**；leader 换届后新 leader 会补种
+/// （`Init` 对已初始化的表是幂等 no-op）。
 async fn seed_region_table(
     raft: &coord_server::raft::CoordRaft,
+    storage: &std::sync::Arc<MvccStorage<RedbBackend>>,
+    node_id: u64,
     regions: Vec<RegionMeta>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use coord_server::raft::type_config::{Command, RegionMetaOp, RegionMetaOutcome, Response};
@@ -2037,6 +2044,24 @@ async fn seed_region_table(
     let cmd = Command::RegionMeta(RegionMetaOp::Init { regions });
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
+        // 表已经可见（本地已 apply）：不需要再提案，也覆盖「重启节点本地已有表」。
+        if storage
+            .region_table()
+            .map(|table| table.version != 0)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        // 非 leader 不得提案（见函数注释）；等 leader 复制过来。
+        if raft.current_leader().await != Some(node_id) {
+            if tokio::time::Instant::now() > deadline {
+                return Err("region table never became visible on this node \
+                            (no leader seeded it within 30s)"
+                    .into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
+        }
         match raft.client_write(cmd.clone()).await {
             Ok(resp) => match resp.response() {
                 Response::RegionMeta {
@@ -3070,6 +3095,103 @@ async fn run_server(
     metrics.set_kv_t_enabled(cfg.kv_t.enabled);
     node.set_metrics(Arc::clone(&metrics));
 
+    // split/merge 的跨节点 drain handler：本节点会话表就绪后注入；未启用
+    // `[kv_t]` 的节点不注册（DrainRange 返回 FAILED_PRECONDITION）。Raft RPC
+    // 服务此时已在监听（见 5h.1）：注入的只是共享服务上的一个选项，客户端
+    // 在 gRPC 数据面就绪前不会发起 drain。
+    raft_rpc_service.set_split_drain(node.kvt().is_enabled().then(|| node.split_drain()));
+
+    // 6.6 启动 Raft RPC gRPC Server（内部节点间通信，raft 端口，可选 TLS）
+    //
+    // 位置很关键，两个方向都要满足：
+    //   - **早于**任何依赖 leader 的集群级提案（v2 的权威 Region 表种子；
+    //     bootstrap 节点的 `initialize` 也要等对端应答）。放到步骤 9（数据面
+    //     gRPC 之前）会让 ≥3 节点 v2 集群形成「种子等 leader、leader 等 quorum、
+    //     quorum 等传输」的循环，启动永远不完成（单节点因 quorum=1 不暴露）；
+    //   - **晚于**各 Region raft 组的装配。对端可能在组刚创建时发来
+    //     AppendEntries；openraft 的日志状态此时尚未完成恢复（debug 构建下
+    //     `has_log_id` 断言会 panic，RaftCore 死掉、该 Region 之后再也选不出
+    //     leader）。
+    //
+    // raft 端口 mTLS fail-closed —— TLS 配置存在但构建失败/
+    // 缺 CA 时拒绝启动（删除明文降级分支）。
+    // 监听地址 = raft_bind_addr（非空时），对外通告仍为 raft_addr
+    // （bind/advertise 分离，支撑 TCP 代理分区注入等场景）。
+    //    raft 端口 mTLS fail-closed —— TLS 配置存在但构建失败/
+    //    缺 CA 时拒绝启动（删除明文降级分支）。
+    //    监听地址 = raft_bind_addr（非空时），对外通告仍为 raft_addr
+    //    （bind/advertise 分离，支撑 TCP 代理分区注入等场景）。
+    let raft_socket_addr: std::net::SocketAddr = cfg.resolve_raft_bind_addr().parse()?;
+    if !cfg.network.raft_bind_addr.is_empty() {
+        tracing::info!(
+            "Raft bind/advertise split: listen on {}, advertise {}",
+            raft_socket_addr,
+            raft_addr
+        );
+    }
+    // raft RPC 解码上限显式设置（快照已分块 ≤2MiB；AppendEntries 批量大，
+    // 上限 16MiB 避免合法批量复制被默认 4MiB 拒绝）
+    const RAFT_MAX_DECODING_MSG: usize = 16 * 1024 * 1024;
+    let raft_rpc_svc = RaftRpcServer::new(raft_rpc_service.clone())
+        .max_decoding_message_size(RAFT_MAX_DECODING_MSG);
+    let raft_tls_for_server = raft_tls_config.clone();
+    if let Some(ref tls_cfg) = raft_tls_for_server {
+        if tls_cfg.ca_path.is_none() {
+            return Err(
+                "Raft inter-node TLS requires a client CA (security.tls_ca) for mTLS; \
+                 refusing to start without raft-port mutual authentication (fail-closed)"
+                    .to_string()
+                    .into(),
+            );
+        }
+    }
+    let raft_server_tls = match raft_tls_for_server {
+        Some(tls_cfg) => match tls::build_server_tls(&tls_cfg) {
+            Ok(server_tls) => Some(server_tls),
+            Err(e) => {
+                return Err(format!(
+                    "Raft RPC TLS build failed (fail-closed, no plaintext fallback): {e}"
+                )
+                .into())
+            }
+        },
+        None => None,
+    };
+    let raft_handle = tokio::spawn(async move {
+        // raft RPC 单连接并发流上限
+        let mut builder = tonic::transport::Server::builder().max_concurrent_streams(256);
+
+        let serve_result = match raft_server_tls {
+            Some(server_tls) => match builder.tls_config(server_tls) {
+                Ok(mut tls_builder) => {
+                    tracing::info!("Raft RPC server TLS (mTLS) enabled on {}", raft_socket_addr);
+                    tls_builder
+                        .add_service(raft_rpc_svc)
+                        .serve(raft_socket_addr)
+                        .await
+                }
+                Err(e) => {
+                    tracing::error!("Raft RPC TLS config error: {e}");
+                    return;
+                }
+            },
+            None => {
+                tracing::info!(
+                    "Raft RPC server on {} WITHOUT TLS (inter-node auth disabled)",
+                    raft_socket_addr
+                );
+                builder
+                    .add_service(raft_rpc_svc)
+                    .serve(raft_socket_addr)
+                    .await
+            }
+        };
+
+        if let Err(e) = serve_result {
+            tracing::error!("Raft RPC server error: {e}");
+        }
+    });
+
     // 6.6a 权威 Region 表（#159）：region 0 是元数据权威，各节点本地 apply 后
     //      通过 `refresh_region_table` 收敛路由。`[kv_t]` 关闭时不写表。
     if cfg.kv_t.enabled {
@@ -3086,7 +3208,7 @@ async fn run_server(
             })
             .collect();
         if let Some(raft) = node.raft.as_ref() {
-            seed_region_table(raft.as_ref(), regions).await?;
+            seed_region_table(raft.as_ref(), &node.storage, node_id, regions).await?;
         }
         if let Err(err) = node.refresh_region_table() {
             tracing::warn!(error = %err, "initial region table refresh failed");
@@ -3918,86 +4040,6 @@ async fn run_server(
         "Snapshot scheduler started: interval=1h, retention=7d, dir={}",
         auto_snapshot_dir.display()
     );
-
-    // 9. 启动 Raft RPC gRPC Server（内部节点间通信，raft 端口，可选 TLS）
-    //    raft 端口 mTLS fail-closed —— TLS 配置存在但构建失败/
-    //    缺 CA 时拒绝启动（删除明文降级分支）。
-    //    监听地址 = raft_bind_addr（非空时），对外通告仍为 raft_addr
-    //    （bind/advertise 分离，支撑 TCP 代理分区注入等场景）。
-    let raft_socket_addr: std::net::SocketAddr = cfg.resolve_raft_bind_addr().parse()?;
-    if !cfg.network.raft_bind_addr.is_empty() {
-        tracing::info!(
-            "Raft bind/advertise split: listen on {}, advertise {}",
-            raft_socket_addr,
-            raft_addr
-        );
-    }
-    // split/merge 的跨节点 drain handler：本节点会话表就绪后注入；未启用
-    // `[kv_t]` 的节点不注册（DrainRange 返回 FAILED_PRECONDITION）。
-    raft_rpc_service.set_split_drain(node.kvt().is_enabled().then(|| node.split_drain()));
-
-    // raft RPC 解码上限显式设置（快照已分块 ≤2MiB；AppendEntries 批量大，
-    // 上限 16MiB 避免合法批量复制被默认 4MiB 拒绝）
-    const RAFT_MAX_DECODING_MSG: usize = 16 * 1024 * 1024;
-    let raft_rpc_svc =
-        RaftRpcServer::new(raft_rpc_service).max_decoding_message_size(RAFT_MAX_DECODING_MSG);
-    let raft_tls_for_server = raft_tls_config.clone();
-    if let Some(ref tls_cfg) = raft_tls_for_server {
-        if tls_cfg.ca_path.is_none() {
-            return Err(
-                "Raft inter-node TLS requires a client CA (security.tls_ca) for mTLS; \
-                 refusing to start without raft-port mutual authentication (fail-closed)"
-                    .to_string()
-                    .into(),
-            );
-        }
-    }
-    let raft_server_tls = match raft_tls_for_server {
-        Some(tls_cfg) => match tls::build_server_tls(&tls_cfg) {
-            Ok(server_tls) => Some(server_tls),
-            Err(e) => {
-                return Err(format!(
-                    "Raft RPC TLS build failed (fail-closed, no plaintext fallback): {e}"
-                )
-                .into())
-            }
-        },
-        None => None,
-    };
-    let raft_handle = tokio::spawn(async move {
-        // raft RPC 单连接并发流上限
-        let mut builder = tonic::transport::Server::builder().max_concurrent_streams(256);
-
-        let serve_result = match raft_server_tls {
-            Some(server_tls) => match builder.tls_config(server_tls) {
-                Ok(mut tls_builder) => {
-                    tracing::info!("Raft RPC server TLS (mTLS) enabled on {}", raft_socket_addr);
-                    tls_builder
-                        .add_service(raft_rpc_svc)
-                        .serve(raft_socket_addr)
-                        .await
-                }
-                Err(e) => {
-                    tracing::error!("Raft RPC TLS config error: {e}");
-                    return;
-                }
-            },
-            None => {
-                tracing::info!(
-                    "Raft RPC server on {} WITHOUT TLS (inter-node auth disabled)",
-                    raft_socket_addr
-                );
-                builder
-                    .add_service(raft_rpc_svc)
-                    .serve(raft_socket_addr)
-                    .await
-            }
-        };
-
-        if let Err(e) = serve_result {
-            tracing::error!("Raft RPC server error: {e}");
-        }
-    });
 
     // 10. 启动客户端 gRPC Server（grpc_addr 端口，可选 TLS；端口已在步骤 1.5 预绑定）
 
