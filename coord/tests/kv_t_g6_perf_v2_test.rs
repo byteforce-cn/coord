@@ -24,9 +24,7 @@ use std::time::{Duration, Instant};
 #[path = "common/mod.rs"]
 mod common;
 
-use common::v2_cluster::{
-    commit_txn, runtime, V2Cluster,
-};
+use common::v2_cluster::{commit_txn, runtime, V2Cluster};
 
 /// 证书/权限门禁：没有 `PERF_GATE=1` 就当「未跑」，直接失败而不是静默跳过。
 fn require_gate() {
@@ -95,8 +93,7 @@ async fn try_commit_value(
 
     let mut last = String::from("no node");
     for addr in addrs {
-        let Ok(endpoint) = tonic::transport::Channel::from_shared(format!("http://{addr}"))
-        else {
+        let Ok(endpoint) = tonic::transport::Channel::from_shared(format!("http://{addr}")) else {
             continue;
         };
         let Ok(channel) = endpoint
@@ -230,8 +227,9 @@ fn perf_sequencer_throughput() {
         metric_value(&before, "coord_kvt_sequencer_conflicts_total").unwrap_or(0);
 
     let started = Instant::now();
-    let latencies: Arc<std::sync::Mutex<Vec<u128>>> =
-        Arc::new(std::sync::Mutex::new(Vec::with_capacity(CLIENTS * TXNS_PER_CLIENT)));
+    let latencies: Arc<std::sync::Mutex<Vec<u128>>> = Arc::new(std::sync::Mutex::new(
+        Vec::with_capacity(CLIENTS * TXNS_PER_CLIENT),
+    ));
     let tag = Arc::new(AtomicU64::new(10_000));
     std::thread::scope(|scope| {
         for _ in 0..CLIENTS {
@@ -246,7 +244,10 @@ fn perf_sequencer_throughput() {
                         let right = format!("zz-perf/t/{id:08}").into_bytes();
                         let started = Instant::now();
                         let _ = commit_txn(&addrs, &left, &right, id).await;
-                        latencies.lock().unwrap().push(started.elapsed().as_micros());
+                        latencies
+                            .lock()
+                            .unwrap()
+                            .push(started.elapsed().as_micros());
                     }
                 });
             });
@@ -350,9 +351,14 @@ fn perf_watch_end_to_end_lag() {
     // watch.v2 消费 Commit Log（事务决策）：直写（`kv.v2` + 显式 commit_ts）不写
     // CommitRecord，不会出现在 v2 watch 流里（ADR D12.1 的内部/高级路径）。因此
     // 这里用事务提交测「commit 返回 → 客户端收到同 commit_ts 事件」的延迟。
-    let start_rev = runtime().block_on(commit_txn(&addrs, b"/perf/watch/start", b"zz-perf/watch/start", 0));
+    let start_rev = runtime().block_on(commit_txn(
+        &addrs,
+        b"/perf/watch/start",
+        b"zz-perf/watch/start",
+        0,
+    ));
     let create = WatchCreateRequest {
-        key: Vec::new(),   // 空 key = 全 keyspace
+        key: Vec::new(), // 空 key = 全 keyspace
         range_end: Vec::new(),
         start_revision: start_rev + 1,
         start_cursor: None,
@@ -387,13 +393,16 @@ fn perf_watch_end_to_end_lag() {
                 let commit_ts = commit_txn(&addrs, &left, &right, index as u64).await;
                 let committed_at = Instant::now();
                 loop {
-                    let response =
-                        tokio::time::timeout(Duration::from_secs(20), stream.message())
-                            .await
-                            .expect("watch response timed out")
-                            .expect("watch stream error")
-                            .expect("watch stream closed early");
-                    if response.events.iter().any(|event| event.commit_ts == commit_ts) {
+                    let response = tokio::time::timeout(Duration::from_secs(20), stream.message())
+                        .await
+                        .expect("watch response timed out")
+                        .expect("watch stream error")
+                        .expect("watch stream closed early");
+                    if response
+                        .events
+                        .iter()
+                        .any(|event| event.commit_ts == commit_ts)
+                    {
                         lags.push(committed_at.elapsed().as_micros());
                         break;
                     }
