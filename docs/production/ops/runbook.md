@@ -22,6 +22,10 @@
 
 ## 0. 通用前置
 
+> KV-T 的 GA 状态、逐 gate 证据与未达标项以
+> `docs/production/ops/kv-t-ga-gate.md` 为准；性能/容量数字见
+> `docs/production/ops/performance.md`。
+
 - **二进制**：`coord`（`Cargo.toml` 的 `workspace.package.version` 为准，当前 `0.3.5`）。
   版本自检：`coord --version` 必须与 `Cargo.toml:18` 一致。
 - **配置文件**：全局 `--config <path>`；CLI 参数覆盖配置文件同名字段。
