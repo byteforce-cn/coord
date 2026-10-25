@@ -1220,8 +1220,8 @@ impl LeaseClient {
                 ),
                 std::time::Duration::from_secs(1),
             );
-            let stop_tx =
-                crate::v2_compat::spawn_keep_alive(self.client.clone(), lease_id, interval);
+            let (stop_tx, _task) =
+                crate::lease_v2::spawn_keep_alive(self.client.clone(), lease_id, interval);
             return Ok(LeaseKeeper {
                 lease_id,
                 stop_tx: Some(stop_tx),

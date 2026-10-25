@@ -13,7 +13,6 @@
 //! 换新 `start_ts` 重跑即可（等价于 v1 的串行执行）。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 
 use coord_core::error::{Error, Result};
 use coord_core::error_code::CoordErrorCode;
@@ -630,35 +629,6 @@ fn v1_events(event: crate::watch_v2::WatchV2Event, prev_kv: bool) -> Vec<WatchEv
         prev_kv: None,
         revision: event.commit_ts as i64,
     }]
-}
-
-/// v1 后台续期：v2 没有长流 KeepAlive，按固定间隔发单次续期。
-pub(crate) fn spawn_keep_alive(
-    client: Client,
-    lease_id: i64,
-    interval: Duration,
-) -> mpsc::Sender<()> {
-    let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(interval) => {
-                    match client.lease_v2().keep_alive(lease_id).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::debug!(
-                                lease_id,
-                                "v2 keep-alive failed; retrying next tick: {e}"
-                            );
-                        }
-                    }
-                }
-                Some(_) = stop_rx.recv() => break,
-                else => break,
-            }
-        }
-    });
-    stop_tx
 }
 
 #[cfg(test)]

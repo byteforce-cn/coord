@@ -526,3 +526,57 @@ async fn storage_v2_delete_carries_request_id_and_commit_ts() {
         vec![(None, b"delete-1".to_vec())]
     );
 }
+
+#[tokio::test]
+async fn lease_v2_background_keep_alive_renews_and_stops() {
+    let (client, calls) = client_and_calls(Calls::default()).await;
+    let keeper = client.lease_v2().keep_alive_background(7, 3);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let before = calls.lock().expect("calls").keep_alive.len();
+    assert!(before >= 1, "keeper must renew at least once");
+
+    keeper.release().await.expect("release");
+    assert_eq!(calls.lock().expect("calls").revoke.len(), 1);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    assert_eq!(
+        calls.lock().expect("calls").keep_alive.len(),
+        before,
+        "a released keeper must stop renewing"
+    );
+}
+
+#[tokio::test]
+async fn storage_v2_open_put_streams_unknown_size() {
+    let (client, calls) = client_and_calls(Calls::default()).await;
+    let mut writer = client
+        .storage_v2()
+        .open_put_unknown("bucket", b"obj-stream")
+        .await
+        .expect("open put");
+    assert_eq!(writer.total_size(), None);
+    assert_eq!(writer.write_chunk(b"he").await.expect("write"), 2);
+    assert_eq!(writer.write_chunk(b"llo").await.expect("write"), 5);
+
+    let result = writer.finish().await.expect("finish");
+    assert_eq!(result.size, 5);
+    assert_eq!(result.chunks, 2);
+
+    let calls = calls.lock().expect("calls");
+    assert_eq!(calls.put.len(), 1);
+    assert_eq!(calls.put[0].1, vec![2, 3]);
+    assert_eq!(calls.put[0].0.as_ref().expect("meta").total_size, -1);
+}
+
+#[tokio::test]
+async fn storage_v2_open_put_rejects_chunk_past_declared_size() {
+    let (client, _calls) = client_and_calls(Calls::default()).await;
+    let mut writer = client
+        .storage_v2()
+        .open_put("bucket", b"obj-known", 3)
+        .await
+        .expect("open put");
+    assert!(writer.write_chunk(b"abcd").await.is_err());
+    writer.abort();
+}

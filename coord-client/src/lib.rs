@@ -45,10 +45,10 @@ pub use credential::{
     NoopTokenProvider, RequestScopedTokenProvider, TokenProvider,
 };
 pub use leader::LeaderDiscovery;
-pub use lease_v2::{LeaseV2Client, LeaseV2Grant, LeaseV2State};
+pub use lease_v2::{LeaseV2Client, LeaseV2Grant, LeaseV2Keeper, LeaseV2State};
 pub use refresh::{spawn_session_refresher, SessionGateway, SessionTokens, REFRESH_LEAD_SECS};
 pub use retry::{classify_error, RetryDecision, RetryState};
-pub use storage_v2::{ObjectDataV2, PutObjectV2Result, StorageV2Client};
+pub use storage_v2::{ObjectDataV2, ObjectV2Writer, PutObjectV2Result, StorageV2Client};
 pub use txn_v2::{delete_mutation, put_mutation, TxnCommit, TxnV2Client, TxnV2Session};
 pub use watch_v2::{
     WatchV2Batch, WatchV2Change, WatchV2Client, WatchV2Cursor, WatchV2Event, WatchV2Filter,

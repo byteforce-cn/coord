@@ -12,8 +12,12 @@ use storage_v2::{
     get_response, put_request, DeleteRequest, GetRequest, ObjectStat, PutMeta, PutRequest,
     StatRequest,
 };
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
-use crate::client::{ts_to_i64, Client, DEFAULT_OBJECT_CHUNK_SIZE, STORAGE_DECODE_LIMIT};
+use crate::client::{
+    from_status_v2, ts_to_i64, Client, DEFAULT_OBJECT_CHUNK_SIZE, STORAGE_DECODE_LIMIT,
+};
 
 /// 对象上传结果（v2：`commit_ts` 是 manifest 的全局时间戳）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +114,98 @@ impl StorageV2Client {
                 .map_err(|_| Error::Internal("negative size in response".into()))?,
             chunks: u64::try_from(response.chunks)
                 .map_err(|_| Error::Internal("negative chunks in response".into()))?,
+        })
+    }
+
+    /// 打开**已知长度**的客户端流式上传会话。
+    ///
+    /// 与 [`Self::put_chunked`] 的区别：完整对象不需要先放进调用方内存——
+    /// 每次 [`ObjectV2Writer::write_chunk`] 直接推进线上流。`total_size` 必须
+    /// 与实际写入字节数一致（服务端在 Commit 时校验）。
+    pub async fn open_put(
+        &self,
+        bucket: &str,
+        object_id: &[u8],
+        total_size: u64,
+    ) -> Result<ObjectV2Writer> {
+        if total_size == 0 {
+            return Err(Error::InvalidArgument(
+                "total_size must be > 0; use open_put_unknown for a stream-determined size".into(),
+            ));
+        }
+        self.open_put_inner(bucket, object_id, total_size as i64, Some(total_size))
+            .await
+    }
+
+    /// 打开**未知长度**的客户端流式上传会话（`PutMeta.total_size = -1`）。
+    ///
+    /// 服务端按实际字节数在 `finish()` 时定长提交；本地不设上限，仅受服务端
+    /// `max_object_size` 约束。
+    pub async fn open_put_unknown(&self, bucket: &str, object_id: &[u8]) -> Result<ObjectV2Writer> {
+        self.open_put_inner(bucket, object_id, -1, None).await
+    }
+
+    async fn open_put_inner(
+        &self,
+        bucket: &str,
+        object_id: &[u8],
+        meta_total: i64,
+        bound: Option<u64>,
+    ) -> Result<ObjectV2Writer> {
+        if bucket.is_empty() || bucket.len() > 255 || bucket.contains('/') {
+            return Err(Error::InvalidArgument(
+                "bucket must be non-empty, <=255B and must not contain '/'".into(),
+            ));
+        }
+        if object_id.is_empty() || object_id.len() > 1024 {
+            return Err(Error::InvalidArgument(
+                "object_id must be non-empty and <=1024B".into(),
+            ));
+        }
+
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let (tx, rx) = mpsc::channel::<PutRequest>(UPLOAD_CHANNEL_CAPACITY);
+        tx.send(PutRequest {
+            part: Some(put_request::Part::Meta(PutMeta {
+                bucket: bucket.to_string(),
+                object_id: object_id.to_vec(),
+                total_size: meta_total,
+            })),
+        })
+        .await
+        .map_err(|_| Error::Internal("storage upload stream closed early".into()))?;
+
+        let client = self.client.clone();
+        let ep = endpoint.clone();
+        let task = tokio::spawn(async move {
+            let mut stub =
+                StorageV2Stub::new(channel.clone()).max_decoding_message_size(STORAGE_DECODE_LIMIT);
+            let mut request = tonic::Request::new(ReceiverStream::new(rx));
+            client.attach_routing_epoch(&mut request);
+            let result = match stub.put(request).await {
+                Ok(resp) => {
+                    let inner = resp.into_inner();
+                    Ok(PutObjectV2Result {
+                        commit_ts: u64::try_from(inner.commit_ts).map_err(|_| {
+                            Error::Internal("negative commit_ts in response".into())
+                        })?,
+                        size: u64::try_from(inner.size)
+                            .map_err(|_| Error::Internal("negative size in response".into()))?,
+                        chunks: u64::try_from(inner.chunks)
+                            .map_err(|_| Error::Internal("negative chunks in response".into()))?,
+                    })
+                }
+                Err(status) => Err(from_status_v2(status)),
+            };
+            client.return_channel(&ep, channel);
+            result
+        });
+
+        Ok(ObjectV2Writer {
+            tx: Some(tx),
+            task: Some(task),
+            written: 0,
+            total: bound,
         })
     }
 
@@ -227,3 +323,89 @@ impl StorageV2Client {
         Ok(self.delete_full(bucket, object_id, request_id).await?.0)
     }
 }
+
+/// 客户端流式上传会话。
+pub struct ObjectV2Writer {
+    tx: Option<mpsc::Sender<PutRequest>>,
+    task: Option<tokio::task::JoinHandle<Result<PutObjectV2Result>>>,
+    written: u64,
+    total: Option<u64>,
+}
+
+impl ObjectV2Writer {
+    /// 已写入字节数。
+    pub fn bytes_written(&self) -> u64 {
+        self.written
+    }
+
+    /// 声明的总字节数；未知长度上传返回 `None`。
+    pub fn total_size(&self) -> Option<u64> {
+        self.total
+    }
+
+    /// 追加一个 chunk（随写随发；声明模式下超过声明总量 → `InvalidArgument`）。
+    pub async fn write_chunk(&mut self, data: &[u8]) -> Result<u64> {
+        let Some(tx) = self.tx.as_ref() else {
+            return Err(Error::InvalidArgument(
+                "upload session is already finished".into(),
+            ));
+        };
+        if data.is_empty() {
+            return Err(Error::InvalidArgument("chunk must not be empty".into()));
+        }
+        let len = data.len() as u64;
+        if let Some(total) = self.total {
+            if self.written.saturating_add(len) > total {
+                return Err(Error::InvalidArgument(format!(
+                    "chunk overflows declared total_size ({} + {len} > {total})",
+                    self.written
+                )));
+            }
+        }
+        tx.send(PutRequest {
+            part: Some(put_request::Part::Chunk(data.to_vec())),
+        })
+        .await
+        .map_err(|_| Error::Internal("storage upload stream closed early".into()))?;
+        self.written += len;
+        Ok(self.written)
+    }
+
+    /// 结束上传并提交；返回服务端分配的 `commit_ts`。
+    pub async fn finish(mut self) -> Result<PutObjectV2Result> {
+        self.close_stream();
+        let Some(task) = self.task.take() else {
+            return Err(Error::InvalidArgument(
+                "upload session is already finished".into(),
+            ));
+        };
+        match task.await {
+            Ok(result) => result,
+            Err(e) => Err(Error::Internal(format!("upload task failed: {e}"))),
+        }
+    }
+
+    /// 放弃上传（幂等）：关闭流并中止任务；服务端按 upload_timeout 回收残留。
+    pub fn abort(mut self) {
+        self.close_stream();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+
+    fn close_stream(&mut self) {
+        self.tx = None;
+    }
+}
+
+impl Drop for ObjectV2Writer {
+    fn drop(&mut self) {
+        if self.tx.take().is_some() {
+            if let Some(task) = self.task.take() {
+                task.abort();
+            }
+        }
+    }
+}
+
+const UPLOAD_CHANNEL_CAPACITY: usize = 4;
