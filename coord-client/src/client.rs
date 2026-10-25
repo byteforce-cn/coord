@@ -163,6 +163,9 @@ struct ClientInner {
     pool: ConnectionPool,
     /// 最近学到的 Region 表版本；0 = 未知（请求不带 metadata，服务端不校验）。
     routing_epoch: AtomicU64,
+    /// 本客户端写过的最大 `commit_ts`：v2 模式下 `revision=0` 的读至少等到
+    /// 它被 apply（read-your-writes），避免提交后立刻读不到自己的写。
+    read_floor: AtomicU64,
 }
 
 impl Client {
@@ -172,15 +175,25 @@ impl Client {
     /// Agent 已处理 Leader 发现和请求路由，对应用完全透明。
     pub async fn connect_via_agent(agent_addr: impl Into<String>) -> Result<Self> {
         let addr = agent_addr.into();
+        let config = Config::new(vec![addr.clone()]);
+        Self::connect_via_agent_with(config, addr).await
+    }
+
+    /// 同 [`Self::connect_via_agent`]，但由调用方提供配置（数据面选择、
+    /// 出站凭据、TLS）。`config.endpoints` 会被忽略，只连 `agent_addr`。
+    pub async fn connect_via_agent_with(
+        config: Config,
+        agent_addr: impl Into<String>,
+    ) -> Result<Self> {
+        let addr = agent_addr.into();
         let endpoint_url = format!("http://{addr}");
         let channel = Channel::from_shared(endpoint_url)
             .map_err(|e| Error::InvalidArgument(format!("invalid agent address {addr}: {e}")))?
             .connect()
             .await
             .map_err(|e| Error::Internal(format!("failed to connect to agent at {addr}: {e}")))?;
-
-        // Agent 模式：使用虚拟配置（仅用于日志/调试）
-        let config = Config::new(vec![addr.clone()]);
+        let mut config = config;
+        config.endpoints = vec![addr];
         Self::new_with_channel(config, channel)
     }
 
@@ -205,6 +218,7 @@ impl Client {
                 leader,
                 pool,
                 routing_epoch: AtomicU64::new(0),
+                read_floor: AtomicU64::new(0),
             }),
         };
 
@@ -236,6 +250,7 @@ impl Client {
                 leader,
                 pool,
                 routing_epoch: AtomicU64::new(0),
+                read_floor: AtomicU64::new(0),
             }),
         })
     }
@@ -258,6 +273,21 @@ impl Client {
     /// 客户端 retry 参数（长连接订阅复用同一份配置）。
     pub(crate) fn retry_config(&self) -> &Config {
         &self.inner.config
+    }
+
+    /// 出站数据面选择（`V1` = 原始 v1 wire；`V2` = v1 形状适配到 `coord.*.v2`）。
+    pub(crate) fn data_plane(&self) -> crate::config::DataPlane {
+        self.inner.config.data_plane
+    }
+
+    /// 记录一次已提交的 v2 写；`revision=0` 的读会等到它 apply（read-your-writes）。
+    pub(crate) fn observe_commit_ts(&self, ts: u64) {
+        self.inner.read_floor.fetch_max(ts, Ordering::Relaxed);
+    }
+
+    /// v2 读的 `read_ts` 下限（0 = 还没写过）。
+    pub(crate) fn read_floor(&self) -> u64 {
+        self.inner.read_floor.load(Ordering::Relaxed)
     }
 
     /// 已学到的 Region 表版本；0 = 未知（请求不带 metadata）。
@@ -595,6 +625,9 @@ impl KvClient {
         lease_id: i64,
         request_id: &[u8],
     ) -> Result<u64> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            return crate::v2_compat::kv_put(&self.client, key, value, lease_id, request_id).await;
+        }
         // R-SVC-08：带 leader 重定向 + 指数退避重试
         let client = self.client.clone();
         let key = key.to_vec();
@@ -651,6 +684,20 @@ impl KvClient {
         keys_only: bool,
         count_only: bool,
     ) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, i64, i64)> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            let (kvs, count, revision) = crate::v2_compat::kv_range(
+                &self.client,
+                key,
+                range_end,
+                limit,
+                revision,
+                keys_only,
+                count_only,
+            )
+            .await?;
+            let kvs = kvs.into_iter().map(|kv| (kv.key, kv.value)).collect();
+            return Ok((kvs, count, revision));
+        }
         let (endpoint, channel) = self.client.get_leader_channel().await?;
         let mut stub = KvStub::new(channel.clone());
 
@@ -727,6 +774,23 @@ impl KvClient {
         keys_only: bool,
         count_only: bool,
     ) -> Result<(Vec<(Vec<u8>, Vec<u8>, i64, i64)>, i64, i64)> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            let (kvs, count, revision) = crate::v2_compat::kv_range(
+                &self.client,
+                key,
+                range_end,
+                limit,
+                revision,
+                keys_only,
+                count_only,
+            )
+            .await?;
+            let kvs = kvs
+                .into_iter()
+                .map(|kv| (kv.key, kv.value, kv.lease_id, kv.version))
+                .collect();
+            return Ok((kvs, count, revision));
+        }
         let (endpoint, channel) = self.client.get_leader_channel().await?;
         let mut stub = KvStub::new(channel.clone());
 
@@ -768,6 +832,22 @@ impl KvClient {
         limit: i64,
         revision: i64,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>, i64)>> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            let (kvs, _, _) = crate::v2_compat::kv_range(
+                &self.client,
+                key,
+                range_end,
+                limit,
+                revision,
+                false,
+                false,
+            )
+            .await?;
+            return Ok(kvs
+                .into_iter()
+                .map(|kv| (kv.key, kv.value, kv.mod_revision))
+                .collect());
+        }
         let (endpoint, channel) = self.client.get_leader_channel().await?;
         let mut stub = KvStub::new(channel.clone());
 
@@ -805,6 +885,13 @@ impl KvClient {
         prev_kv: bool,
         request_id: &[u8],
     ) -> Result<(i64, i64)> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            let (deleted, commit_ts) =
+                crate::v2_compat::kv_delete(&self.client, key, range_end, request_id).await?;
+            let commit_ts = i64::try_from(commit_ts)
+                .map_err(|_| Error::Internal("negative commit_ts in response".into()))?;
+            return Ok((deleted, commit_ts));
+        }
         // R-SVC-08：带 leader 重定向 + 指数退避重试
         let client = self.client.clone();
         let key = key.to_vec();
@@ -1052,6 +1139,9 @@ impl LeaseClient {
     /// # 返回
     /// 租约 ID
     pub async fn grant_with_id(&self, ttl: i64, id: i64) -> Result<i64> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            return Ok(self.client.lease_v2().grant(ttl, id, &[]).await?.lease_id);
+        }
         let (endpoint, channel) = self.client.get_leader_channel().await?;
         let mut stub = LeaseStub::new(channel.clone());
 
@@ -1073,6 +1163,10 @@ impl LeaseClient {
 
     /// 撤销租约。
     pub async fn revoke(&self, lease_id: i64) -> Result<()> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            self.client.lease_v2().revoke(lease_id, &[]).await?;
+            return Ok(());
+        }
         let (endpoint, channel) = self.client.get_leader_channel().await?;
         let mut stub = LeaseStub::new(channel.clone());
 
@@ -1090,6 +1184,9 @@ impl LeaseClient {
     /// 续约（KeepAlive），延长租约 TTL。
     /// 发送单次续约请求，返回续约后的 TTL。
     pub async fn keep_alive(&self, lease_id: i64) -> Result<i64> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            return self.client.lease_v2().keep_alive(lease_id).await;
+        }
         let (endpoint, channel) = self.client.get_leader_channel().await?;
         let mut stub = LeaseStub::new(channel.clone());
 
@@ -1116,6 +1213,21 @@ impl LeaseClient {
     ///
     /// 返回一个 `LeaseKeeper` 句柄，Drop 时自动停止续约并撤销租约。
     pub async fn keep_alive_background(&self, lease_id: i64) -> Result<LeaseKeeper> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            let interval = std::cmp::max(
+                std::time::Duration::from_secs(
+                    self.client.inner.config.request_timeout.as_secs() / 3,
+                ),
+                std::time::Duration::from_secs(1),
+            );
+            let stop_tx =
+                crate::v2_compat::spawn_keep_alive(self.client.clone(), lease_id, interval);
+            return Ok(LeaseKeeper {
+                lease_id,
+                stop_tx: Some(stop_tx),
+                client: self.client.clone(),
+            });
+        }
         let (_endpoint, channel) = self.client.get_leader_channel().await?;
         let mut stub = LeaseStub::new(channel);
 
@@ -1257,6 +1369,10 @@ impl WatchClient {
         start_revision: i64,
         prev_kv: bool,
     ) -> Result<mpsc::Receiver<Result<WatchEvent>>> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            return crate::v2_compat::watch(&self.client, key, range_end, start_revision, prev_kv)
+                .await;
+        }
         let (_endpoint, channel) = self.client.get_leader_watch_channel().await?;
         let mut stub = WatchStub::new(channel);
 
@@ -1388,6 +1504,16 @@ impl TxnClient {
         failure_ops: Vec<RequestOp>,
         request_id: Vec<u8>,
     ) -> Result<TxnResponse> {
+        if self.client.data_plane() == crate::config::DataPlane::V2 {
+            return crate::v2_compat::txn(
+                &self.client,
+                compares,
+                success_ops,
+                failure_ops,
+                request_id,
+            )
+            .await;
+        }
         // R-SVC-08：带 leader 重定向 + 指数退避重试
         let client = self.client.clone();
         client

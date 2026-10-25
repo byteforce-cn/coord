@@ -28,6 +28,7 @@ pub mod retry;
 pub mod storage_v2;
 mod tls;
 pub mod txn_v2;
+mod v2_compat;
 pub mod watch_v2;
 
 // 重新导出主要类型
@@ -37,7 +38,7 @@ pub use client::{
     MaintenanceClient, ObjectData, ObjectReader, ObjectWriter, PutObjectResult, StorageClient,
     TxnClient, WatchClient, DEFAULT_OBJECT_CHUNK_SIZE,
 };
-pub use config::{Config, TlsConfig};
+pub use config::{Config, DataPlane, TlsConfig};
 pub use credential::{
     current_request_token, in_proxy_context, scoped_proxied_request, scoped_request_token,
     AuthedChannel, CachedTokenProvider, CredentialInterceptor, FallbackTokenProvider,

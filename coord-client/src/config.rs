@@ -46,6 +46,19 @@ impl TlsConfig {
     }
 }
 
+/// 客户端出站数据面选择。
+///
+/// `V1`（默认）逐字保留 v1 语义；`V2` 把 v1 形状的 KV/Txn/Watch/Lease 调用
+/// 适配到 `coord.*.v2`（Agent 内部服务在 v2 集群上的迁移路径）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DataPlane {
+    /// v1 数据面（`coord.kv` / `coord.txn` / `coord.watch` / `coord.lease`）。
+    #[default]
+    V1,
+    /// v2 数据面（`coord.*.v2`）；只改 wire，不改调用方看到的 v1 形状。
+    V2,
+}
+
 /// 客户端配置
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -83,6 +96,9 @@ pub struct Config {
     ///
     /// 提供时，所有出站 gRPC 请求都会自动盖上 `authorization: Bearer <token>`。
     pub token_provider: Option<Arc<dyn TokenProvider>>,
+
+    /// 数据面选择（默认 v1）。
+    pub data_plane: DataPlane,
 }
 
 impl Config {
@@ -106,6 +122,7 @@ impl Config {
             connection_idle_timeout: Duration::from_secs(300),
             tls: None,
             token_provider: None,
+            data_plane: DataPlane::V1,
         }
     }
 
@@ -130,6 +147,15 @@ impl Config {
     /// 设置出站凭据提供者（Server 启用鉴权时必需）。
     pub fn with_token_provider(mut self, provider: Arc<dyn TokenProvider>) -> Self {
         self.token_provider = Some(provider);
+        self
+    }
+
+    /// 选择出站数据面。
+    ///
+    /// [`DataPlane::V2`] 把 v1 形状的 KV/Txn/Watch/Lease 调用适配到
+    /// `coord.*.v2`；调用方不变。
+    pub fn with_data_plane(mut self, data_plane: DataPlane) -> Self {
+        self.data_plane = data_plane;
         self
     }
 }
@@ -161,6 +187,16 @@ mod tests {
         assert_eq!(config.endpoints.len(), 2);
         assert_eq!(config.request_timeout, Duration::from_secs(10));
         assert_eq!(config.max_retries, 3);
+    }
+
+    #[test]
+    fn test_data_plane_defaults_to_v1() {
+        let config = Config::new(vec!["localhost:50051".into()]);
+        assert_eq!(config.data_plane, DataPlane::V1);
+        assert_eq!(
+            config.with_data_plane(DataPlane::V2).data_plane,
+            DataPlane::V2
+        );
     }
 
     #[test]
