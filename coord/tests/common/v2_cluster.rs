@@ -39,6 +39,8 @@ pub struct V2Node {
     pub id: u64,
     pub grpc_port: u16,
     pub raft_port: u16,
+    /// HTTP（health/BFF/`/metrics`）端口。
+    pub http_port: u16,
     pub data_dir: PathBuf,
     pub config_path: PathBuf,
     pub log_path: PathBuf,
@@ -80,7 +82,7 @@ impl V2Node {
              scheduler_paused = true\n\
              [kv_t]\nenabled = true\n",
             id = self.id,
-            http = find_port(),
+            http = self.http_port,
             // R-SEC-06：多节点集群需共享根密钥（测试用固定值）。
             root_key = "ab".repeat(32),
             bootstrap = bootstrap,
@@ -170,12 +172,12 @@ impl V2Cluster {
         };
         let mut ports = Vec::new();
         for _ in 0..NODES {
-            ports.push((find_port(), find_port()));
+            ports.push((find_port(), find_port(), find_port()));
         }
         let initial_nodes: Vec<(u64, String, String)> = ports
             .iter()
             .enumerate()
-            .map(|(i, (grpc, raft))| {
+            .map(|(i, (grpc, raft, _http))| {
                 (
                     i as u64 + 1,
                     format!("127.0.0.1:{grpc}"),
@@ -185,12 +187,13 @@ impl V2Cluster {
             .collect();
 
         let mut nodes = Vec::new();
-        for (i, (grpc, raft)) in ports.iter().enumerate() {
+        for (i, (grpc, raft, http)) in ports.iter().enumerate() {
             let id = i as u64 + 1;
             nodes.push(V2Node {
                 id,
                 grpc_port: *grpc,
                 raft_port: *raft,
+                http_port: *http,
                 data_dir: root.join(format!("node-{id}")),
                 config_path: root.join(format!("node-{id}.toml")),
                 log_path: root.join(format!("node-{id}.log")),
