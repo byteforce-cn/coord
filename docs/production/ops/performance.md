@@ -85,14 +85,18 @@ Region 数增加**不劣化**（每个 Region 独立 raft/mvcc，写放大只在
 
 | 口径 | 状态 |
 |:--|:--|
-| CI 冒烟（120s，真实 3 进程） | 每个 PR 的 `chaos (kill9 + soak, real processes)` job 执行 `chaos_soak_distributed`；`scripts/collect-evidence.sh soak-smoke` 可产出证据目录 |
-| **72h 生产浸泡** | **未执行**（需隔离生产环境；命令如下） |
+| CI 冒烟（120s，真实 3 进程，v1） | 每个 PR 的 `chaos (kill9 + soak, real processes)` job 执行 `chaos_soak_distributed`；`scripts/collect-evidence.sh soak-smoke` 可产出证据目录 |
+| v2 冒烟（45s + 2 次 region 0 leader kill，真实 3 进程） | `KVT_SOAK_SECS=45 KVT_SOAK_FAULT_SECS=15 cargo test -p coord --release --test kv_t_g6_soak_v2_test soak_v2_mixed_workload_stays_consistent -- --ignored --nocapture --test-threads=1`（每次 PR 的混沌 job 同时跑 v2 决策面故障套件；本行是长窗口冒烟命令） |
+| **72h 生产浸泡（v2）** | **未执行**（需隔离环境；命令如下） |
 
 ```bash
-# 验收标准：全程无线性一致性违规、无 leader 空窗超时、无数据丢失；
-# 报告落 ${COORD_EVIDENCE_DIR}/soak-report.md（运行产物不写仓库）。
-COORD_EVIDENCE_DIR=/path/to/artifact-store SOAK_DURATION_SECS=259200 \
+# KV-T GA 的证据口径是 v2 数据面的 72h 浸泡：
+#   TSO 单调 / 直写 safe_ts 可见 / 跨区事务 commit_ts 可读 / 每 300s kill -9 region 0 leader。
+# 验收标准：全程无一致性违规、无 leader 空窗超时、无数据丢失；
+# 报告落 ${COORD_EVIDENCE_DIR}/soak-report.md，节点日志落 ${COORD_EVIDENCE_DIR}/v2-nodes。
+COORD_EVIDENCE_DIR=/path/to/artifact-store SOAK_SUITE=v2 SOAK_DURATION_SECS=259200 \
   ./scripts/soak-72h.sh
+# v1 数据面浸泡（默认 SOAK_SUITE=v1）仍可单独跑；它不是 KV-T GA 的替代证据。
 ```
 
 在 72h 证据入库（或挂到发布工件）之前，任何「长稳已达标」的表述都不成立。

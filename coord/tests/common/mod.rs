@@ -238,6 +238,8 @@ pub async fn wait_tcp_ready(addr: &str, timeout: Duration) {
     }
 }
 
+pub mod v2_cluster;
+
 /// 有界轮询等待条件成立（替代固定 `sleep`：既快又不脆）。
 ///
 /// 超时即断言失败——**不得**静默通过（那会把"没等到"伪装成"通过"）。
