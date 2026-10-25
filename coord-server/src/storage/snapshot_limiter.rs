@@ -21,6 +21,12 @@ use std::time::{Duration, Instant};
 pub struct SnapshotRateLimiter {
     /// 最大发送带宽（字节/秒），0 表示不限速
     max_bytes_per_sec: AtomicU64,
+    /// 单次请求的突发上限（桶容量下限）。
+    ///
+    /// 桶容量必须 >= 最大单次请求：快照按 2MiB 分块，限速小于块大小时若容量
+    /// 只等于速率，`acquire(2MiB)` 永远攒不够 token ⇒ 发送方无限等待、follower
+    /// 永久追不上（且没有超时/告警）。
+    burst_bytes: u64,
     /// 当前可用 token 数（原子操作）
     token_bucket: AtomicU64,
     /// 上次补充 token 的时间
@@ -33,11 +39,27 @@ impl SnapshotRateLimiter {
     /// # Arguments
     /// * `max_bytes_per_sec` - 最大字节/秒，0 表示不限速
     pub fn new(max_bytes_per_sec: u64) -> Self {
+        Self::with_burst(max_bytes_per_sec, max_bytes_per_sec)
+    }
+
+    /// 指定突发上限（`burst_bytes` = 最大单次请求字节数）。
+    ///
+    /// 桶容量 = `max(rate, burst_bytes)`：否则大于速率的请求永远拿不到许可。
+    pub fn with_burst(max_bytes_per_sec: u64, burst_bytes: u64) -> Self {
+        let capacity = max_bytes_per_sec.max(burst_bytes);
         Self {
             max_bytes_per_sec: AtomicU64::new(max_bytes_per_sec),
-            token_bucket: AtomicU64::new(max_bytes_per_sec), // 初始满桶
+            burst_bytes,
+            token_bucket: AtomicU64::new(capacity), // 初始满桶
             last_refill: parking_lot::Mutex::new(Instant::now()),
         }
+    }
+
+    /// 桶容量（= max(速率, 突发上限)）。
+    pub fn capacity(&self) -> u64 {
+        self.max_bytes_per_sec
+            .load(Ordering::Relaxed)
+            .max(self.burst_bytes)
     }
 
     /// 不限速的限速器
@@ -61,6 +83,7 @@ impl SnapshotRateLimiter {
         if max_rate == 0 {
             return; // 不限速
         }
+        let capacity = self.capacity();
 
         let mut last = self.last_refill.lock();
         let now = Instant::now();
@@ -75,7 +98,7 @@ impl SnapshotRateLimiter {
 
         if refill_tokens > 0 {
             let current = self.token_bucket.load(Ordering::Relaxed);
-            let new = (current + refill_tokens).min(max_rate);
+            let new = (current + refill_tokens).min(capacity);
             self.token_bucket.store(new, Ordering::Relaxed);
         }
 
@@ -135,8 +158,8 @@ impl SnapshotRateLimiter {
     pub fn set_rate(&self, max_bytes_per_sec: u64) {
         self.max_bytes_per_sec
             .store(max_bytes_per_sec, Ordering::SeqCst);
-        // 重置 token bucket
-        self.token_bucket.store(max_bytes_per_sec, Ordering::SeqCst);
+        // 重置 token bucket（容量跟着速率/突发上限走）
+        self.token_bucket.store(self.capacity(), Ordering::SeqCst);
     }
 }
 
@@ -196,6 +219,25 @@ mod tests {
         assert_eq!(limiter.max_rate(), 1024 * 1024);
         limiter.set_rate(10 * 1024 * 1024);
         assert_eq!(limiter.max_rate(), 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_burst_capacity_covers_large_requests() {
+        // 限速 64KiB/s、单请求 2MiB：桶容量必须抬到 2MiB，否则快照同步永久卡住。
+        let limiter = SnapshotRateLimiter::with_burst(64 * 1024, 2 * 1024 * 1024);
+        assert_eq!(limiter.capacity(), 2 * 1024 * 1024);
+        assert!(limiter.try_acquire(2 * 1024 * 1024)); // 初始满桶
+        assert!(limiter.available_tokens() < 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_acquire_larger_than_rate_eventually_returns() {
+        let limiter = SnapshotRateLimiter::with_burst(8 * 1024 * 1024, 2 * 1024 * 1024);
+        assert!(limiter.try_acquire(2 * 1024 * 1024));
+        // 桶空后仍必须能等到补充，不得无限自旋。
+        tokio::time::timeout(Duration::from_secs(5), limiter.acquire(2 * 1024 * 1024))
+            .await
+            .expect("a request larger than the rate must still be granted");
     }
 
     #[test]
