@@ -1,6 +1,6 @@
 # KV-T GA Gate（G0–G6 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-10-25
+> Owner: maintainers ｜ Last verified: 2026-10-25（本轮：故障矩阵 + #265）
 
 - **状态**：**NO-GO（未签）**。G0–G5 已交付；G6 有关闭项未清（见 §3）。
 - 本文是 GA 状态的**单一事实源**：gate 证据、未达标项、签字记录。语义口径仍以
@@ -36,7 +36,7 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
 | Workflow/MQ fail-closed（#171） | ✅ | `agent_workflow_durable_gate_test`（6 例：v2 拒绝 mq / workflow_durable，纯 KV workflow 可用）；`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
 | Rust client / Java SDK v2（#172） | ✅ | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；`java-example` v2 示例 `KvTV2Example`（`bash java-example/scripts/run-v2-example.sh`，非 v2 集群退出码 2，无 v1 降级）；跨语言互操作 `KvTInteropIntegrationTest` + `kvt_interop_peer`（`bash scripts/check-kvt-interop.sh`：Rust 写 → Java 按精确 `commit_ts` 读，再反向；对账 value/`mod_revision`/`create_revision` 与 Watch 批 `commit_ts`） |
 | 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§6，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**未达标**：split/merge 停顿未测；**72h soak 运行中**（server commit `4633507`，start 2026-10-25T07:44:11Z），完成前不算通过 |
-| 混沌/Jepsen（#175） | ⚠️ 部分 | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）；v2 决策面故障 `kv_t_g6_chaos_v2_test::chaos_v2_mixed_writes_survive_decision_leader_loss`（3 进程 + kill -9 / SIGSTOP region 0 leader + 混合事务/直写；断言 commit_ts 可读、`mod_revision==commit_ts`、safe_ts 追上、无内部不变量锚点）已接入 `chaos-kill9-soak` job，连续 37 次运行无失败。此前「约 1/10 读不到」的根因：**PD 在首个调度 tick 合并两个空 Region**，merge watermark 之后的旧 revision 按设计返回 `HISTORY_UNAVAILABLE`（B-KVT-10），旧夹具把错误吞成「不可读」。**未覆盖**：网络分区注入、split/merge 迁移中断、shard seal stall、快照恢复中断 |
+| 混沌/Jepsen（#175） | ✅ | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）。v2 3 进程矩阵 `kv_t_g6_chaos_v2_test`（CI `chaos-kill9-soak` job，整文件跑）：`chaos_v2_mixed_writes_survive_decision_leader_loss`（kill -9 / SIGSTOP region 0 leader + 混合事务/直写，37 次连续绿）；`chaos_v2_partitioned_region0_leader_keeps_invariants`（对称网络分区隔离 region 0 leader：debug 构建的 `COORD_TEST_RAFT_PARTITION_FILE` 钩子在 raft RPC 层双向阻断，多数派换主、分区窗口内写入、heal 后收敛）；`chaos_v2_shard_seal_stall_keeps_watch_continuous`（`commit_log_shard_records=8` / `shard_secs=1` 下 SIGSTOP region 0 leader ⇒ TSO/sequencer/shard seal 停摆；恢复后 Watch 从 baseline+1 严格递增、无重无丢，sealed shard 指标增长）；`chaos_v2_interrupted_snapshot_install_recovers`（follower 落后 → 快照安装途中冻结 + kill -9 → 重启追平、全部 `commit_ts` 可读）。本轮矩阵抓出并修复两个 GA 阻塞缺陷（见 §3.5），`test_lease_cleanup_is_per_region` 的 CI 间歇超时也一并修掉（PR #268）。**仍未做**：split/merge 迁移中断的进程级注入（§3.3 的 D10 裁定）。 |
 | Ops runbook/监控（#176） | ✅ | `monitoring/prometheus-rules.yml` + `docs/production/ops/runbook.md`；`bash scripts/check-gate-drills.sh`（每条告警必须有可达 runbook 锚点） |
 | ADR accepted / 文档一致 | ✅ | ADR-0015 状态 accepted；`scripts/check-doc-refs.sh` 0 悬空 |
 | 发布 sign-off | ⛔ | §4 未填 |
@@ -49,12 +49,32 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    leader 后恢复、节点日志无内部不变量锚点。
 2. #174：**split/merge 停顿未测**（语义已由 g5 套件覆盖；停顿/失败率没有数字，
    不写「达标」）。其余事务面数字已落在 `performance.md` §6。
-3. #175：**混沌矩阵未覆盖**：网络分区注入、split/merge 迁移中断、shard seal stall、
-   快照恢复中断。要么补实现，要么按 D10 走 ADR scope 裁定——不得用「已覆盖
-   kill/pause」代替整张矩阵。
+3. #175：**split/merge 迁移中断的进程级注入按 D10 明确停止**（不是「已覆盖」的
+   代称）：executor 级失败注入已覆盖「迁移失败 → 保留 intent、不动表、释放
+   write fence、不 cutover」（`kv_t_g5_split_merge_test::test_migration_failure_keeps_intent_for_recovery`、
+   `pd::executor` 的 `test_split_migration_failure_*`），split/merge 数据连续性由
+   g5 套件覆盖；要把「迁移进行中被 kill」做成进程级用例，必须在生产迁移路径上
+   加暂停开关（会随二进制发布），代价大于收益——因此不做，剩余的故障面由进程级
+   kill/pause/partition 覆盖控制面。网络分区、shard seal stall、快照恢复中断已补
+   （见 §2）。
 4. 容量无 GC 已在 `boundaries.md` B-KVT-13 明确停止（D10：停，不静默）；给
    `start_ts` 定下限后再做 GC 属后续版本。
 5. 本节 1–4 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
+
+## 3.5 本轮故障矩阵抓出的缺陷（已修，带回归用例）
+
+1. **快照限速让小快照永久卡住**：`SnapshotRateLimiter` 的桶容量 = 速率；
+   `transmit` 按 2MiB 分块申请，`rate < 2MiB` 时 `acquire(2MiB)` 永远攒不够
+   token ⇒ 发送方无限自旋、follower 永远收不到快照（无超时/告警）。修复：桶容量
+   = `max(rate, 块大小)`（`with_burst`），回归
+   `storage::snapshot_limiter::tests::test_burst_capacity_covers_large_requests` /
+   `test_acquire_larger_than_rate_eventually_returns`。
+2. **快照安装后重启被判 log store corrupted**：整段 purge 后日志表为空，
+   `get_log_state` 报 `last_log_id=None < last_purged=Some(..)` ⇒ openraft 拒绝
+   启动（节点无法重启）。修复：`last_log_id = last_entry.or(last_purged)`（与
+   openraft memstore 同口径），回归
+   `raft::log_store::tests::test_get_log_state_after_full_purge_survives_reopen`；
+   进程级回归 `chaos_v2_interrupted_snapshot_install_recovers`。
 
 ## 4. 签字记录
 
