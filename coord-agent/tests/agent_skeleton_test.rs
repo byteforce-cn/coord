@@ -13,6 +13,7 @@ fn test_public_api_exports() {
         http_addr: "127.0.0.1:19528".into(),
         data_dir: "/tmp/coord-agent-test".into(),
         discovery_mode: coord_agent::DiscoveryMode::Static,
+        data_plane: coord_agent::AgentDataPlane::V1,
         static_peers: vec!["127.0.0.1:50051".into()],
         cache_kv_max_entries: 1000,
         cache_kv_ttl_secs: 30,

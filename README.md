@@ -138,6 +138,11 @@ cargo run -p coord -- agent --static-peers <server1>:50051,<server2>:50051
 cargo run -p coord -- agent --agent-config agent.toml   # services / tls / auth / replication
 ```
 
+On a v2 cluster (`[kv_t].enabled=true`), set `data_plane = "v2"` in `agent.toml`: the
+agent freezes its v1 data-plane proxies with the same `FAILED_PRECONDITION` policy and
+routes internal services through `coord.*.v2`. The default `v1` is byte-for-byte
+unchanged for existing clusters.
+
 **From your application** — connect to the local agent. `java-example/` is a separate,
 self-contained gRPC demo (it does **not** use this SDK and has no README of its own); the
 snippet below is the SDK's own API:

@@ -108,6 +108,19 @@ pub(crate) async fn watch(client: &Client, key: &[u8], range_end: &[u8],
 - [x] Lease：grant/revoke/keep_alive/后台续期（短间隔）调用次数；
 - [x] V1 模式：现有 `integration_test` 不受影响（模式默认 V1）。
 
+### Task 5: Agent 装配与 v1 冻结
+
+**Files:** Modify `coord-agent/src/lib.rs`、`coord-agent/src/proxy.rs`、`scripts/ci-java-it-cluster.sh`、`coord-java-sdk/src/test/.../KvTV2ClusterIntegrationTest.java`；Create `coord-agent/src/frozen.rs`、`coord-agent/tests/agent_v2_mode_test.rs`
+
+- [x] `AgentConfig::data_plane`（`v1` 默认 / `v2`），`AgentInner::new_with_data_plane`；
+- [x] V2 模式下 v1 `Kv/Txn/Lease/Watch/Storage` 代理替换为本地冻结代理（与服务端
+  同一 `FAILED_PRECONDITION` 文案/码），v2 代理与 Maintenance 不变；
+- [x] readiness：V2 模式不再用 TCP 探针，改为 `coord.kv.v2.Range` 探测（v1-only
+  集群 → NOT_READY，不把「TCP 连上」误报成就绪）；
+- [x] 开发集群 v2 模式的 agent 配置切到 `data_plane = "v2"`、`idgen_mode = "segment"`；
+- [x] Java 真实集群用例补 v1 形状服务（registry/config/lock/idgen + config watch）；
+- [x] 修复号段模式 `allocate_segment` 未消费首个 ID 的重复 ID（Java 用例发现）。
+
 ## Verification Anchors
 
 | 行为 | 证据 |
@@ -118,12 +131,14 @@ pub(crate) async fn watch(client: &Client, key: &[u8], range_end: &[u8],
 | 冲突重跑 | `txn_retries_on_conflict` |
 | 前缀 Watch | `watch_empty_range_end_uses_prefix_successor` |
 | Lease 后台续期 | `v2_keep_alive_background_renews` |
-| 全量 | `cargo test -p coord-client`、workspace、CI |
+| Agent v1 冻结 | `agent_v2_mode_test::v1_data_plane_is_frozen_and_v2_stays_registered` |
+| v1 形状服务在 v2 集群可用 | `KvTV2ClusterIntegrationTest#v1ShapedServicesSurviveOnTheV2DataPlane`（真实 server+agent） |
+| 全量 | `cargo test -p coord-client`、`cargo test -p coord-agent`、workspace、CI |
 
 ## Residual（不在本切片）
 
-- Agent `AgentConfig::data_plane` 装配、v1 代理在 v2 模式冻结、health、16 服务冒烟
-  （#170 下一切片；依赖本层）。
+- 其余 11 个服务（workflow/approval/scheduler/pki/transit/event/policy/featureflags/
+  cache/scheduler/rate limiter）的逐服务 v2 冒烟；#170 仍 open 到 16 服务矩阵齐。
 - `Txn` 内 `RequestRange` 的历史 revision 读：fail-closed。
 - v1 `Put` 的全局 request_id 幂等在 v2 下退化为会话内幂等（会话丢失后可能重放一次写）；
   内部服务不依赖该弱保证，外部 SDK 直写请走 v2 KV/Txn。

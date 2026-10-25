@@ -129,6 +129,10 @@ cargo run -p coord -- agent --static-peers <server1>:50051,<server2>:50051
 cargo run -p coord -- agent --agent-config agent.toml   # services / tls / auth / replication
 ```
 
+v2 集群（`[kv_t].enabled=true`）的 `agent.toml` 必须设 `data_plane = "v2"`：Agent 对外
+v1 数据面按同一策略冻结（`FAILED_PRECONDITION`），内部服务改走 `coord.*.v2`。默认
+`v1` 对既有集群字节级不变。
+
 **从业务应用接入**——连接本机 Agent；下面片段是 SDK 自身的 API（[`java-example/`](java-example/) 是独立示例，不使用本 SDK）：
 
 ```java

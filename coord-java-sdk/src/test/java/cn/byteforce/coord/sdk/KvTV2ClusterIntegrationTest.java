@@ -1,7 +1,12 @@
 package cn.byteforce.coord.sdk;
 
+import cn.byteforce.coord.sdk.config.ConfigSnapshot;
+import cn.byteforce.coord.sdk.config.ConfigWatchSubscription;
 import cn.byteforce.coord.sdk.kv.v2.KvClient;
 import cn.byteforce.coord.sdk.lease.v2.LeaseClient;
+import cn.byteforce.coord.sdk.lock.LockInfo;
+import cn.byteforce.coord.sdk.registry.Registration;
+import cn.byteforce.coord.sdk.registry.ServiceInstance;
 import cn.byteforce.coord.sdk.storage.v2.StorageClient;
 import cn.byteforce.coord.sdk.tso.v2.TsoClient;
 import cn.byteforce.coord.sdk.txn.v2.TxnClient;
@@ -19,6 +24,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -313,6 +319,52 @@ class KvTV2ClusterIntegrationTest {
                 .commit(List.of(TxnClient.Mutation.put(runKey("a/order-next"), utf8("next"))));
         assertThat(next.committed()).isTrue();
         assertThat(next.commitTs()).isGreaterThan(directTs);
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("v1-shaped agent services survive on the v2 data plane (registry/config/lock/idgen)")
+    void v1ShapedServicesSurviveOnTheV2DataPlane() throws Exception {
+        String run = "svc/" + System.currentTimeMillis() + "/";
+
+        // Registry: Lease grant + lease-bound Put + Range; deregister on close.
+        try (Registration registration = client.registry()
+                .register(run + "catalog", "instance-1", "{\"addr\":\"127.0.0.1:1\"}", 30)) {
+            assertThat(client.registry().discover(run + "catalog"))
+                    .extracting(ServiceInstance::getInstanceId)
+                    .contains("instance-1");
+        }
+
+        // Config: snapshot (KV Range) + watch (KV Watch) + put (KV Put).
+        String prefix = "/it/" + run + "config/";
+        String key = prefix + "flag";
+        ConfigSnapshot snapshot = client.configClient().listWithRevision(prefix);
+        CompletableFuture<String> fanout = new CompletableFuture<>();
+        try (ConfigWatchSubscription ignored =
+                     client.configClient().watchFrom(prefix, snapshot.getRevision(), event -> {
+                         if (event.getKey().equals(key) && event.getNewValue().isPresent()) {
+                             fanout.complete(event.getNewValue().get());
+                         }
+                     })) {
+            client.configClient().put(key, "on");
+            assertThat(fanout.get(10, TimeUnit.SECONDS))
+                    .as("config watch must deliver the put through the v2 adapter")
+                    .isEqualTo("on");
+        }
+        assertThat(client.configClient().getString(key)).contains("on");
+
+        // Lock: Lease + Txn compare/put CAS.
+        String lockName = "lock-" + System.currentTimeMillis();
+        LockInfo lock = client.lock().acquire(lockName, "holder-1", 30);
+        assertThat(lock.isAcquired()).isTrue();
+        assertThat(lock.getLeaseId()).isPositive();
+        assertThat(client.lock().release(lockName, "holder-1", lock.getLeaseId())).isTrue();
+
+        // IdGen (segment mode on the v2 agent): Txn CAS segment allocation.
+        String name = "orders-" + System.currentTimeMillis();
+        long first = client.idgen().nextId(name);
+        long second = client.idgen().nextId(name);
+        assertThat(second).isGreaterThan(first);
     }
 
     private static WatchClient.Event awaitEvent(

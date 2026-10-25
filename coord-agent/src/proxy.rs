@@ -80,7 +80,28 @@ impl AgentInner {
         tls: Option<coord_client::config::TlsConfig>,
         self_identity: std::sync::Arc<coord_client::credential::CachedTokenProvider>,
     ) -> Result<Self, CoreError> {
-        let mut config = coord_client::Config::new(server_endpoints);
+        Self::new_with_data_plane(
+            server_endpoints,
+            cache,
+            tls,
+            self_identity,
+            coord_client::DataPlane::V1,
+        )
+        .await
+    }
+
+    /// 同 [`Self::new`]，但指定出站数据面。
+    ///
+    /// v2 集群必须用 `DataPlane::V2`：内部服务的 v1 形状调用会被适配到
+    /// `coord.*.v2`；对外 v1 代理在 router 层冻结，不经过这个客户端。
+    pub async fn new_with_data_plane(
+        server_endpoints: Vec<String>,
+        cache: AgentCache,
+        tls: Option<coord_client::config::TlsConfig>,
+        self_identity: std::sync::Arc<coord_client::credential::CachedTokenProvider>,
+        data_plane: coord_client::DataPlane,
+    ) -> Result<Self, CoreError> {
+        let mut config = coord_client::Config::new(server_endpoints).with_data_plane(data_plane);
         if let Some(t) = tls {
             config = config.with_tls(t);
         }

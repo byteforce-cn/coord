@@ -19,6 +19,7 @@ pub mod config_watcher;
 mod discovery;
 pub mod feature_flags;
 pub mod feature_flags_store;
+mod frozen;
 pub mod health;
 pub mod key_util;
 pub mod metrics;
@@ -93,6 +94,29 @@ pub enum DiscoveryMode {
 
 // ──── AgentConfig ────
 
+/// Agent 出站数据面选择。
+///
+/// `V1`（默认）保持 v1 wire 与既有行为；`V2` 把内部服务使用的 v1 形状调用
+/// 适配到 `coord.*.v2`（`[kv_t].enabled=true` 的集群），对外 v1 数据面同时冻结。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDataPlane {
+    /// v1 数据面（`coord.kv` / `coord.txn` / `coord.watch` / `coord.lease`）。
+    #[default]
+    V1,
+    /// v2 数据面（内部调用落到 `coord.*.v2`；v1 数据面对外冻结）。
+    V2,
+}
+
+impl AgentDataPlane {
+    fn to_client(self) -> coord_client::DataPlane {
+        match self {
+            Self::V1 => coord_client::DataPlane::V1,
+            Self::V2 => coord_client::DataPlane::V2,
+        }
+    }
+}
+
 /// Agent 配置结构体
 ///
 /// 可通过命令行参数或 TOML 配置文件加载。
@@ -110,6 +134,9 @@ pub struct AgentConfig {
     /// 成员发现模式
     #[serde(default)]
     pub discovery_mode: DiscoveryMode,
+    /// 出站数据面（默认 v1；v2 集群必须设为 v2，否则内部服务调用会被 v1 冻结门禁拒绝）。
+    #[serde(default)]
+    pub data_plane: AgentDataPlane,
     /// 静态配置的 Server 节点列表（discovery_mode = "static" 时使用）
     #[serde(default)]
     pub static_peers: Vec<String>,
@@ -450,6 +477,7 @@ impl Default for AgentConfig {
             http_addr: "127.0.0.1:19528".into(),
             data_dir: "/var/lib/coord-agent".into(),
             discovery_mode: DiscoveryMode::Static,
+            data_plane: AgentDataPlane::V1,
             static_peers: Vec::new(),
             cache_kv_max_entries: 10000,
             // 默认 **0 = 关闭本地 KV 读缓存**（与 `default_cache_kv_ttl_secs()` 一致）：
@@ -482,6 +510,8 @@ impl Default for AgentConfig {
 /// 不再有第二份硬编码清单。
 struct AgentGrpcSvcs {
     inner: Option<Arc<crate::proxy::AgentInner>>,
+    /// 出站数据面；V2 时对外 v1 数据面代理返回冻结错误（内部客户端已切到 v2）。
+    data_plane: AgentDataPlane,
     /// 通用插件调用面（coord.plugin.Plugin；Invoke/List）
     ///
     /// 刻意**不**做成插件：它是插件引擎自身的管理面，做成插件会与
@@ -534,47 +564,57 @@ fn build_agent_grpc_router<L>(
 where
     L: Clone,
 {
+    let inner = svcs.inner;
     let router = server
-        .add_service(KvServer::new(crate::proxy::KvProxy::new(
-            svcs.inner.clone(),
-        )))
-        .add_service(TxnServer::new(crate::proxy::TxnProxy::new(
-            svcs.inner.clone(),
-        )))
-        .add_service(LeaseServer::new(crate::proxy::LeaseProxy::new(
-            svcs.inner.clone(),
-        )))
-        .add_service(WatchServer::new(
-            crate::proxy::WatchProxy::new(svcs.inner.clone()).with_metrics(metrics),
-        ))
         .add_service(MaintenanceServer::new(crate::proxy::MaintenanceProxy::new(
-            svcs.inner.clone(),
+            inner.clone(),
         )))
         .add_service(KvV2Server::new(crate::proxy_v2::KvV2Proxy::new(
-            svcs.inner.clone(),
+            inner.clone(),
         )))
         .add_service(TsoV2Server::new(crate::proxy_v2::TsoV2Proxy::new(
-            svcs.inner.clone(),
+            inner.clone(),
         )))
         .add_service(LeaseV2Server::new(crate::proxy_v2::LeaseV2Proxy::new(
-            svcs.inner.clone(),
+            inner.clone(),
         )))
         .add_service(TxnV2Server::new(crate::proxy_v2::TxnV2Proxy::new(
-            svcs.inner.clone(),
+            inner.clone(),
         )))
         .add_service(WatchV2Server::new(crate::proxy_v2::WatchV2Proxy::new(
-            svcs.inner.clone(),
+            inner.clone(),
         )))
         .add_service(StorageV2Server::new(crate::proxy_v2::StorageV2Proxy::new(
-            svcs.inner.clone(),
-        )))
-        .add_service(StorageServer::new(crate::proxy::StorageProxy::new(
-            svcs.inner,
-        )))
-        .add_optional_service(
-            svcs.plugin
-                .map(coord_proto::plugin::plugin_server::PluginServer::from_arc),
-        );
+            inner.clone(),
+        )));
+
+    // v2 集群不服务 v1 数据面（ADR-0015 D7/D13）：服务仍注册（reflection 可见），
+    // 但 handler 在本地返回与服务端一致的 FAILED_PRECONDITION。内部服务走的是
+    // v2 适配客户端，不经过这些代理。
+    let router = match svcs.data_plane {
+        AgentDataPlane::V2 => router
+            .add_service(KvServer::new(crate::frozen::FrozenKv))
+            .add_service(TxnServer::new(crate::frozen::FrozenTxn))
+            .add_service(LeaseServer::new(crate::frozen::FrozenLease))
+            .add_service(WatchServer::new(crate::frozen::FrozenWatch))
+            .add_service(StorageServer::new(crate::frozen::FrozenStorage)),
+        AgentDataPlane::V1 => router
+            .add_service(KvServer::new(crate::proxy::KvProxy::new(inner.clone())))
+            .add_service(TxnServer::new(crate::proxy::TxnProxy::new(inner.clone())))
+            .add_service(LeaseServer::new(crate::proxy::LeaseProxy::new(
+                inner.clone(),
+            )))
+            .add_service(WatchServer::new(
+                crate::proxy::WatchProxy::new(inner.clone()).with_metrics(metrics),
+            ))
+            .add_service(StorageServer::new(crate::proxy::StorageProxy::new(
+                inner.clone(),
+            ))),
+    }
+    .add_optional_service(
+        svcs.plugin
+            .map(coord_proto::plugin::plugin_server::PluginServer::from_arc),
+    );
 
     // 原生服务 + 脚本插件：服务面由插件注册表动态给出（仅**已启动**的插件会被挂载，
     // 启动失败的插件不会暴露半死的 gRPC 接口）。
@@ -1074,11 +1114,12 @@ impl AgentServer {
                     500,
                     self.config.cache_catalog_ttl_secs,
                 );
-                match AgentInner::new(
+                match AgentInner::new_with_data_plane(
                     self.config.static_peers.clone(),
                     retry_cache,
                     client_tls.clone(),
                     Arc::clone(&agent_self_identity),
+                    self.config.data_plane.to_client(),
                 )
                 .await
                 {
@@ -1087,12 +1128,15 @@ impl AgentServer {
                             "coord-agent connected to server cluster (attempt {})",
                             attempt
                         );
-                        // 连接成功 → 就绪位 + 连接指标实时回写
-                        if let Some(ref flag) = self.ready_flag {
-                            flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        if let Some(ref metrics) = self.metrics {
-                            metrics.set_connected(true);
+                        // 连接成功 → 就绪位 + 连接指标实时回写。v2 模式下就绪
+                        // 还要求 coord.kv.v2 真的可用（由下面的探测任务回写）。
+                        if self.config.data_plane == AgentDataPlane::V1 {
+                            if let Some(ref flag) = self.ready_flag {
+                                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if let Some(ref metrics) = self.metrics {
+                                metrics.set_connected(true);
+                            }
                         }
                         break Some(Arc::new(inner));
                     }
@@ -1127,6 +1171,49 @@ impl AgentServer {
             tracing::warn!("coord-agent: no static_peers configured, running in skeleton mode");
             None
         };
+
+        // v2 数据面就绪探测：v1-only 的 Server 也会让连接成功（TCP/Status），
+        // 但 coord.kv.v2 会因 [kv_t].enabled=false 返回 FAILED_PRECONDITION。
+        // 不把 readiness 交给 TCP 探针：编排必须看到「v2 面真的可用」。
+        if self.config.data_plane == AgentDataPlane::V2 {
+            match inner.as_ref() {
+                Some(inner) => {
+                    let client = inner.client.clone();
+                    let flag = self.ready_flag.clone();
+                    let metrics = self.metrics.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            let ok = client
+                                .kv_v2()
+                                .range(b"/_lock/__probe__", b"", 1, 0, true, false)
+                                .await
+                                .is_ok();
+                            if let Some(flag) = &flag {
+                                flag.store(ok, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if let Some(metrics) = &metrics {
+                                metrics.set_connected(ok);
+                            }
+                            if !ok {
+                                tracing::warn!(
+                                    "coord-agent data_plane=v2: coord.kv.v2 is not served \
+                                     (v1-only cluster?); readiness stays false"
+                                );
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
+                    });
+                }
+                None => {
+                    if let Some(flag) = &self.ready_flag {
+                        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Some(metrics) = &self.metrics {
+                        metrics.set_connected(false);
+                    }
+                }
+            }
+        }
 
         // 插件身份开通用的出站凭据句柄（进程级）：一次性 bootstrap token 只能
         // 兑换一次，SIGHUP 重建插件加载器时复用同一引导 CCT，避免二次兑换失败。
@@ -2409,6 +2496,7 @@ impl AgentServer {
         let metrics_layer_value = self.metrics.clone().unwrap_or_default();
         let svcs = AgentGrpcSvcs {
             inner,
+            data_plane: self.config.data_plane,
             plugin: Some(Arc::new(crate::plugin::PluginService::new(Arc::clone(
                 &plugin_manager,
             )))),
@@ -2592,7 +2680,11 @@ async fn run_agent_inner(
     // 连接状态探针——每 5s 探测全部 static_peers（TCP connect，1s 超时），
     // 实时回写 ready 与 coord_agent_connected：has_peers 只是启动快照，
     // 连接成功与否必须实时反映到 readiness。
-    {
+    //
+    // v2 模式不用 TCP 探针：就绪语义是「coord.*.v2 可用」，由 AgentServer 内的
+    // 数据面探测回写（TCP 连上 v1-only Server 不等于可服务）。
+    let tcp_probe_enabled = config.data_plane == AgentDataPlane::V1;
+    if tcp_probe_enabled {
         let peers = config.static_peers.clone();
         let flag = Arc::clone(&ready_flag);
         let metrics_for_probe = metrics.clone();
