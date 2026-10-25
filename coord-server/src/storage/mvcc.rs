@@ -11516,21 +11516,27 @@ mod tests {
         let barrier = Barrier::new(Arc::new(keyring));
         storage.set_barrier(barrier.clone());
 
+        // 明文 marker 必须足够长：2–3 字节的值（如 "dv"）会在随机密文里偶然
+        // 出现，CI 实测把「已加密」误判成「含明文」。用长且唯一的 marker。
+        let old_value = b"plaintext-marker-old-7f3a";
+        let d_value = b"plaintext-marker-dv-91c2";
+        let e_value = b"plaintext-marker-ev-4b8d";
+        let c_value = b"plaintext-marker-cv-2e6f";
         storage
-            .put_at_commit_ts(b"a", b"old", None, 5, applied_for(1))
+            .put_at_commit_ts(b"a", old_value, None, 5, applied_for(1))
             .unwrap();
         storage
-            .put_at_commit_ts(b"d", b"dv", None, 6, applied_for(2))
+            .put_at_commit_ts(b"d", d_value, None, 6, applied_for(2))
             .unwrap();
         storage
-            .put_at_commit_ts(b"e", b"ev", None, 7, applied_for(3))
+            .put_at_commit_ts(b"e", e_value, None, 7, applied_for(3))
             .unwrap();
 
         let entry = logged_decision(
             10,
             7,
             b"txn-10",
-            vec![put(b"c", b"cv"), delete(b"a"), range_delete(b"d", b"f")],
+            vec![put(b"c", c_value), delete(b"a"), range_delete(b"d", b"f")],
         );
         let result = storage
             .apply_commit_decisions_with_log(&[entry], 4, applied_for(4), 4 * 1024 * 1024)
@@ -11551,10 +11557,10 @@ mod tests {
             .as_deref()
             .expect("put carries a value");
         assert_ne!(
-            put_value, b"cv",
+            put_value, c_value,
             "the record stores the same ciphertext as MVCC"
         );
-        assert_eq!(barrier.decrypt(put_value).unwrap(), b"cv");
+        assert_eq!(barrier.decrypt(put_value).unwrap(), c_value);
         assert!(record.changes[0].prev.is_none());
         assert!(record.changes[1].value.is_none(), "delete is a tombstone");
         assert_eq!(
@@ -11566,14 +11572,19 @@ mod tests {
             barrier
                 .decrypt(&record.changes[1].prev.as_ref().unwrap().value)
                 .unwrap(),
-            b"old"
+            old_value
         );
         assert_eq!(record.changes[2].prev.as_ref().unwrap().mod_revision, 6);
         assert_eq!(record.changes[3].prev.as_ref().unwrap().mod_revision, 7);
 
         let rows = commit_log_rows(&storage);
         assert_eq!(rows.len(), 1);
-        for plain in [b"cv".as_slice(), b"old", b"dv", b"ev"] {
+        for plain in [
+            c_value.as_slice(),
+            old_value.as_slice(),
+            d_value.as_slice(),
+            e_value.as_slice(),
+        ] {
             assert!(
                 !rows[0].1.windows(plain.len()).any(|window| window == plain),
                 "commit log row must not contain plaintext {:?}",
@@ -11581,7 +11592,7 @@ mod tests {
             );
         }
         assert!(storage.get(b"a").unwrap().is_none());
-        assert_eq!(storage.get(b"c").unwrap(), Some(b"cv".to_vec()));
+        assert_eq!(storage.get(b"c").unwrap(), Some(c_value.to_vec()));
         assert!(storage.get(b"d").unwrap().is_none());
         assert!(storage.get(b"e").unwrap().is_none());
     }
