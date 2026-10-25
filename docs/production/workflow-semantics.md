@@ -255,12 +255,14 @@ auth:
 - **公共语义不变**：接入方仍使用 `coord.workflow.v1`；Agent 在 `data_plane = "v2"` 时
   把内部 KV 持久化面（工作流存储、审批聚合、outbox）经 `coord-client` 适配层写到
   `coord.txn.v2` / 读 `coord.kv.v2`，业务状态机与审批语义不因集群形态改变。
-- **可用**：纯 KV/审批路径（`workflow = true`、`workflow_durable = false`）——真实 v2
+- **可用**：纯 KV 路径（`workflow = true`、`workflow_durable = false`）——真实 v2
   集群判据 `KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2`（inject → end
   在无 MQ 的 v2 集群上完成）。
-- **fail-closed**：MQ v1 在 v2 集群冻结（`boundaries.md` B-KVT-6）；`data_plane = "v2"`
-  时 `services.mq = true` 或 `services.workflow_durable = true` **启动期拒绝**，不静默
-  降级到非 durable/无投递面。判据：
+- **不可用（fail-closed）**：MQ v1 在 v2 集群冻结（`boundaries.md` B-KVT-6）；`data_plane =
+  "v2"` 时 `services.mq = true` 或 `services.workflow_durable = true` **启动期拒绝**，
+  不静默降级到非 durable/无投递面。判据：
   `agent_workflow_durable_gate_test::test_v2_data_plane_rejects_mq`、
   `test_v2_data_plane_rejects_workflow_durable`。
+- **审批面**：审批桥与聚合只在 durable 引擎装配时注入（见上一节）；v2 上 durable 被拒，
+  因此审批 RPC 保持非 durable 集群的 `FAILED_PRECONDITION` 口径，**不**承诺 v2 审批可用。
 - 能力矩阵见 ADR-0015 D13；MQ v2 属 G7（#178），KV-T GA 前不提供。
