@@ -294,6 +294,10 @@
             `-Pit`：只跑需要真实 coord-agent 的集成套件（此时**不**排除它们）。
             若 Agent 不可达，测试以明确原因**失败**——刻意不使用 `assumeTrue` 静默跳过。
             CI 由 `.github/workflows/ci.yml` 的 `java-example-it` job 提供真实集群。
+
+            跨语言互操作用例（`KvTInteropIntegrationTest`）不在这里：它还需要
+            `scripts/check-kvt-interop.sh` 产出的证据文件，本 profile 的 CI job 没有该
+            文件，纳入只会把「证据缺失」显示成红构建。用下方的 `-Pinterop`。
         -->
         <profile>
             <id>it</id>
@@ -303,9 +307,35 @@
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-surefire-plugin</artifactId>
                         <configuration>
-                            <excludes combine.self="override"/>
+                            <excludes combine.self="override">
+                                <exclude>**/KvTInteropIntegrationTest.java</exclude>
+                            </excludes>
                             <includes>
                                 <include>**/*IntegrationTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!--
+            `-Pinterop`：只跑跨语言互操作用例（Rust `coord-client` ↔ Java SDK，同一套
+            v2 集群）。由 `scripts/check-kvt-interop.sh` 驱动：它先跑 Rust 写侧，再跑本
+            profile，最后跑 Rust 读侧。单独执行会以「缺 COORD_INTEROP_EVIDENCE_DIR /
+            证据文件」失败——那是刻意的 fail-closed，不是可以跳过的场景。
+        -->
+        <profile>
+            <id>interop</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <excludes combine.self="override"/>
+                            <includes>
+                                <include>**/KvTInteropIntegrationTest.java</include>
                             </includes>
                         </configuration>
                     </plugin>
