@@ -500,7 +500,7 @@ jobs:
           # 但**只有 1 号片保存**：每个 job 都保存 = 至少 3 份同内容缓存，在 10GB
           # 上限下互相驱逐；驱逐一次就是 28 分钟冷编译（实测 push run 全量重编 432
           # 个依赖）。其余 job 只 Restore——它们要多链的只是自己的测试二进制（≈13–20s）。
-          save-if: ${{ matrix.shard == 1 }}
+          save-if: ${{ matrix.shard == 2 }}
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
@@ -568,38 +568,69 @@ jobs:
             bash scripts/ci-run-with-annotations.sh "/tmp/ci-workspace-tests-shard-${{ matrix.shard }}-$i.log" cargo test --no-fail-fast "${args[@]}" || rc=1
           done
           exit $rc
-      - name: Run deterministic simulation suites (gated, shard 1)
-        # sim_jepsen/sim_chaos 是**自建模型**而非系统级证据，用
-        # `required-features = ["sim-tests"]` 移出默认套件（避免测试数量虚高）；
-        # 这里显式跑它们，保证"移出默认"不等于"永不运行"。它们带 required-features，
-        # 不在任何分片里——`scripts/ci-shard.sh verify` 会断言这条命令真的存在。
-        if: matrix.shard == 1
-        run: bash scripts/ci-run-with-annotations.sh /tmp/ci-sim-suites.log cargo test -p coord-server --features sim-tests --test sim_jepsen_test --test sim_chaos_test
       - name: Doc tests (shard 1)
-        # doc-test 不属于任何分片单元（~5s，且要求每片都跑没有意义）。
+        # doc-test 不属于任何分片单元（每片都跑没有意义），~30s，留在分片里比单开
+        # 一个 job 便宜（分片已经把全部 crate 编好了）。
         if: matrix.shard == 1
         run: bash scripts/ci-run-with-annotations.sh /tmp/ci-doc-tests.log cargo test --workspace --doc
+
+  test-sim:
+    name: deterministic simulation suites
+    # sim_jepsen/sim_chaos 是**自建模型**而非系统级证据，用
+    # `required-features = ["sim-tests"]` 移出默认套件（避免测试数量虚高）；这里显式
+    # 跑它们，保证「移出默认」不等于「永不运行」。它们带 required-features，不在任何
+    # 分片里——`scripts/ci-shard.sh verify` 会断言这条命令真的存在。
+    # 独立 job 而不是挂在某个分片上：`--features sim-tests` 会重编 coord-server，
+    # 挂进分片就是给关键路径加 ~2 分钟。
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # 与 test-shard 一致（共用 target 缓存）。
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+          save-if: false
+      - name: Install protoc (coord-proto build dependency)
+        run: |
+          set -euo pipefail
+          timeout --kill-after=10 600 sudo apt-get update \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y protobuf-compiler
+      - name: Run deterministic simulation suites (gated)
+        run: bash scripts/ci-run-with-annotations.sh /tmp/ci-sim-suites.log cargo test -p coord-server --features sim-tests --test sim_jepsen_test --test sim_chaos_test
 
   test:
     name: workspace tests
     # 汇总 check：branch protection 的 required context 仍是这个名字。
     # `if: always()` 保证依赖失败时本 job 也运行并显式失败，而不是变成 skipped（
     # skipped 的 required check 会让 PR 永远等不到结论）。
-    needs: [test-plan, test-shard]
+    needs: [test-plan, test-shard, test-sim]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
-      - name: Assert every shard succeeded
+      - name: Assert every test job succeeded
         run: |
           set -euo pipefail
-          result='${{ needs.test-shard.result }}'
-          if [ "$result" != "success" ]; then
-            echo "::error::测试分片未全部通过（matrix 结果：$result）"
-            exit 1
-          fi
+          failed=0
+          for entry in "shards=${{ needs.test-shard.result }}" "sim=${{ needs.test-sim.result }}"; do
+            name="${entry%%=*}"
+            result="${entry#*=}"
+            if [ "$result" != "success" ]; then
+              echo "::error::测试 job 未通过（${name}: ${result}）"
+              failed=1
+            fi
+          done
+          exit $failed
       - name: Coverage gate (every test unit lands in exactly one shard)
         # 分片全绿 ≠ 覆盖完整：新 target 可能根本没被枚举到（autotests=false、
         # 自定义 [[test]] 路径、新 crate）。这条门禁把「合起来 == 全部单元」变成机器事实。

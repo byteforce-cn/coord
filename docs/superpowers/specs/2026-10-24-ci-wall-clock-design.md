@@ -115,9 +115,10 @@ sccache 缓存的是**单次编译**（rustc 产物），不缓存链接；而 r
 - **分配**：`shard = blake2b("<salt>:<unit>", 8 bytes) % N + 1`。hash 而不是轮询：新增一个
   单元只让**它自己**换片，已有单元的分组保持稳定（轮询会让后面全体移位）。salt 是脚本内常量
   （不读环境变量：分片归属必须对同一提交确定，否则重跑会在不同片上失败，反而更难定位）。
-  salt 的选法：拿一次冷构建的 `--timings` per-unit 耗时当权重，对候选 salt 求「每片时间和的
-  最大偏差」取最小。实测最优是 19.7 / 20.3 / 20.1 分钟（偏差 2.9%）；如果按“单元数 +
-  源码字节数”挑（最初的 71），三片是 18.3 / 25.1 / 16.6 分钟（偏差 43%）——差 7 分钟墙钟。
+  salt 的选法：把每个分片构建的 `--timings` 报告（job 作为 artifact 上传）按 unit 取耗时当
+  权重，对候选 salt 求「每片耗时和的最大偏差」取最小。**权重口径必须是 CI 自己的数据**：
+  按源码字节数挑（71）偏 43%，按本机冷构建挑（279）在 CI 上偏 35%（不同机器的并发与链接
+  串行化不同），用 CI 实测则 70 ⇒ 17.1 / 17.0 / 17.1 分钟（偏差 0.5%）。
 - **分片数只有一处**：`N` 是脚本里的常量，由 `plan` 子命令输出给矩阵（见 5.2）。
   workflow 里不写第二份 `[1, 2, 3]`——否则「矩阵 3 条腿 / `selectors I/N` / `verify N`」
   三处会漂，漂了就是某个分片永远不跑而没人发现。
@@ -154,7 +155,8 @@ sccache 缓存的是**单次编译**（rustc 产物），不缓存链接；而 r
 | `test plan`（新增，~10s） | 跑 `ci-shard.sh plan`，输出矩阵与分片数；无 Rust 依赖 |
 | `workspace tests`（required，保留） | **改为汇总 job**：`needs: [test-plan, test-shard]`、`if: always()`，断言每个分片都成功，跑 `ci-shard.sh verify <N>` 与负控制注入 |
 | `test shard I`（新增 matrix，来自 `needs.test-plan.outputs.matrix`） | 恢复共享缓存 → 装 protoc → `cargo build <selectors>` → `cargo test <selectors>`（带注解包装） |
-| shard 1 额外 step | doc-test（`cargo test --workspace --doc`，~5s）+ 两个 sim 套件（现 1m37s）|
+| shard 1 额外 step | doc-test（`cargo test --workspace --doc`，~30s；分片已经把 crate 编好了）|
+| `test-sim`（新增，~5m） | 两个 sim 套件独立成 job：`--features sim-tests` 会重编 coord-server，挂在分片上就是给关键路径 +2 分钟 |
 | `chaos (kill9 + soak)`（保持不变） | kill9 step 加 `--skip chaos_soak_distributed`（现在 `--ignored` 把 soak 也跑了一遍，300s，随后又用 120s 重跑一次） |
 | `plugin engine feature matrix`（required，保留） | **改为汇总 job** |
 | `feature matrix: checks + unit tests`（新增） | 3 个 feature check + 插件引擎/metrics 单测 |
@@ -165,7 +167,8 @@ sccache 缓存的是**单次编译**（rustc 产物），不缓存链接；而 r
 
 ### 5.3 缓存：每类构建只有一个 saver
 
-- 测试面（`shared-key: tests`）：只有 `test shard 1` 设 `save-if: ${{ matrix.shard == 1 }}`；
+- 测试面（`shared-key: tests`）：只有最轻的那个分片（salt=70 下是 `test shard 2`）设
+  `save-if: ${{ matrix.shard == 2 }}`，保存的 ~20s 不落在关键路径上；
   `chaos-*` 改成 `save-if: false`（它们 Restore 的正是同一份 deps + workspace 库，自己的
   测试二进制重链 ≈ 13–20 秒）。
 - feature-matrix 面（新增 `shared-key: plugin-matrix`）：只有 `checks + unit tests` 保存。
