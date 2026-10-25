@@ -311,7 +311,7 @@ impl RaftNetworkFactoryImpl {
         self.snapshot_rate_limiter = Some(Arc::new(if max_bytes_per_sec == 0 {
             SnapshotRateLimiter::unlimited()
         } else {
-            SnapshotRateLimiter::new(max_bytes_per_sec)
+            SnapshotRateLimiter::with_burst(max_bytes_per_sec, SNAPSHOT_CHUNK_SIZE as u64)
         }));
     }
 

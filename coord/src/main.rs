@@ -2640,6 +2640,11 @@ async fn run_server(
     // 5g. 创建 Raft 实例（门面：new_raft）
     //     读路径一致性校验（防陈旧读）需要访问本地日志，克隆一份 LogStore 句柄。
     let node_raft_log = log_store.clone();
+    // 测试专用（仅 debug 构建）：对称网络分区控制文件钩子。release 构建不编译，
+    // 生产二进制没有分区开关。
+    #[cfg(debug_assertions)]
+    install_test_raft_partition_hook(&network_factory, node_id);
+
     // Multi-Raft Region 装配需要共享的工厂与调优后的 RaftConfig——
     // 工厂的节点地址表/连接池/TLS 均为 Arc 共享，克隆后再把原工厂移入
     // 单 Raft（region 0）；装配发生在 bootstrap/join 之后、CoordNode 之前。
@@ -2919,6 +2924,12 @@ async fn run_server(
         tracing::debug!("Multi-Raft PD disabled (multi_raft.pd.enabled=false)");
         None
     };
+
+    // 测试专用（仅 debug 构建）：PD 调度暂停开关的控制文件钩子。
+    #[cfg(debug_assertions)]
+    if let Some(pd) = embedded_pd.as_ref() {
+        install_test_pd_scheduler_hook(pd);
+    }
 
     // 5.75 Legacy → Multi-Raft boot 迁移。
     //
@@ -5136,4 +5147,95 @@ mod startup_region_tests {
             "err: {err}"
         );
     }
+}
+
+/// 测试专用（仅 debug 构建）：从控制文件同步对称网络分区策略。
+///
+/// 文件每行 `<node_id>:<blocked_id,...>`，本节点只读自己的行；策略变化时对
+/// [[`RaftNetworkFactoryImpl`]] 的共享黑名单做增量更新（region 0 与所有数据
+/// Region 的 raft 组共用同一个祖先工厂）。路径来自
+/// `COORD_TEST_RAFT_PARTITION_FILE`；release 构建不编译本函数——生产二进制
+/// 没有分区开关（见 `coord/tests/common/v2_cluster.rs` 的 `V2Cluster::partition`）。
+#[cfg(debug_assertions)]
+fn install_test_raft_partition_hook(factory: &RaftNetworkFactoryImpl, node_id: u64) {
+    let Ok(path) = std::env::var("COORD_TEST_RAFT_PARTITION_FILE") else {
+        return;
+    };
+    let factory = factory.clone();
+    tokio::spawn(async move {
+        let mut applied: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            tick.tick().await;
+            let Ok(text) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let mut next = std::collections::BTreeSet::new();
+            for line in text.lines() {
+                let Some((id, peers)) = line.trim().split_once(':') else {
+                    continue;
+                };
+                if id.trim().parse::<u64>().ok() != Some(node_id) {
+                    continue;
+                }
+                for peer in peers.split(',') {
+                    if let Ok(peer) = peer.trim().parse::<u64>() {
+                        next.insert(peer);
+                    }
+                }
+            }
+            for peer in applied.difference(&next) {
+                factory.unblock_node(*peer);
+            }
+            for peer in next.difference(&applied) {
+                factory.block_node(*peer);
+            }
+            applied = next;
+        }
+    });
+}
+
+/// 测试专用（仅 debug 构建）：从控制文件切换 PD 调度暂停。
+///
+/// 文件内容 `paused` / `running`（或 `<node_id>:paused` 只对指定节点生效）；
+/// 路径来自 `COORD_TEST_PD_SCHEDULER_FILE`。release 构建不编译本函数——生产
+/// 二进制没有「运行时解冻调度」的旁路（见 `V2Cluster::resume_scheduler`）。
+#[cfg(debug_assertions)]
+fn install_test_pd_scheduler_hook(pd: &Arc<EmbeddedPd>) {
+    let Ok(path) = std::env::var("COORD_TEST_PD_SCHEDULER_FILE") else {
+        return;
+    };
+    let node_id = pd.node_id();
+    let driver = Arc::clone(&pd.driver);
+    tokio::spawn(async move {
+        let mut applied = driver.is_scheduler_paused();
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            tick.tick().await;
+            let Ok(text) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let mut desired: Option<bool> = None;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let (node, state) = match line.split_once(':') {
+                    Some((node, state)) => (node.trim(), state.trim()),
+                    None => ("", line),
+                };
+                if !node.is_empty() && node.parse::<u64>().ok() != Some(node_id) {
+                    continue;
+                }
+                desired = Some(state.eq_ignore_ascii_case("paused"));
+            }
+            if let Some(desired) = desired {
+                if desired != applied {
+                    driver.set_scheduler_paused(desired);
+                    applied = desired;
+                }
+            }
+        }
+    });
 }

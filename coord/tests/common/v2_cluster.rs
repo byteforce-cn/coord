@@ -9,6 +9,8 @@
 //! - 等待 leader 期间节点退出必须立刻失败（`assert_all_alive`），否则一次慢启动
 //!   会被误报成「60s 没选出 leader」。
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -47,6 +49,31 @@ pub struct V2Node {
     pub child: Option<Child>,
     pub initial_nodes: Vec<(u64, String, String)>,
     pub bootstrapped: bool,
+    partition_file: Option<PathBuf>,
+    pd_scheduler_file: Option<PathBuf>,
+    kvt_extra: String,
+    pd_extra: String,
+    toml_extra: String,
+}
+
+/// 集群装配选项：默认值与历史夹具逐字一致（不可分区、无额外配置）。
+#[derive(Clone, Copy, Default)]
+pub struct V2ClusterOptions {
+    /// 允许用 [`V2Cluster::partition`] 注入对称网络分区。
+    ///
+    /// 依赖 **debug 构建**的 `COORD_TEST_RAFT_PARTITION_FILE` 钩子（release 二进制
+    /// 不含该开关）：分区在 raft RPC 层阻断，进程、TSO、sequencer、shard 表都是
+    /// 真实的。非 debug 构建下该选项无效（夹具会因换主等待失败而暴露）。
+    pub partitionable: bool,
+    /// 追加到 `[kv_t]` 段的键（每行自带换行；空 = 默认值）。
+    pub kvt: &'static str,
+    /// 追加到配置末尾的其它段（例如 `[raft]` 调参）。
+    pub toml: &'static str,
+    /// 允许用 [`V2Cluster::resume_scheduler`] / [`V2Cluster::pause_scheduler`]
+    /// 运行时切换 PD 调度（debug 构建的 `COORD_TEST_PD_SCHEDULER_FILE` 钩子）。
+    pub pd_control: bool,
+    /// 追加到 `[multi_raft.pd]` 段的键（例如 split/merge 阈值）。
+    pub pd: &'static str,
 }
 
 impl V2Node {
@@ -79,13 +106,17 @@ impl V2Node {
              # 只注入决策面故障：split/merge 的 merge watermark 会让旧 revision 按\
              # 设计变成 HISTORY_UNAVAILABLE（属 split/merge 连续性套件），混进来\
              # 会被误判成数据丢失。\n\
-             scheduler_paused = true\n\
-             [kv_t]\nenabled = true\n",
+             scheduler_paused = true\n{pd}\
+             [kv_t]\nenabled = true\n{kvt}\
+{toml}",
             id = self.id,
             http = self.http_port,
             // R-SEC-06：多节点集群需共享根密钥（测试用固定值）。
             root_key = "ab".repeat(32),
             bootstrap = bootstrap,
+            kvt = self.kvt_extra,
+            pd = self.pd_extra,
+            toml = self.toml_extra,
         )
     }
 
@@ -108,10 +139,22 @@ impl V2Node {
             .arg(&self.data_dir)
             .arg("--config")
             .arg(&self.config_path)
-            .env("RUST_LOG", "coord=info")
+            // 失败现场排查可临时放大日志：KVT_NODE_LOG="coord=info,openraft=debug"。
+            .env(
+                "RUST_LOG",
+                std::env::var("KVT_NODE_LOG").unwrap_or_else(|_| "coord=info".to_string()),
+            )
             .env("RUST_BACKTRACE", "1")
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
+        if let Some(path) = &self.partition_file {
+            // debug 构建的 raft-RPC 分区钩子（release 二进制忽略该变量）。
+            cmd.env("COORD_TEST_RAFT_PARTITION_FILE", path);
+        }
+        if let Some(path) = &self.pd_scheduler_file {
+            // debug 构建的 PD 调度暂停开关（release 二进制忽略该变量）。
+            cmd.env("COORD_TEST_PD_SCHEDULER_FILE", path);
+        }
         if bootstrap {
             cmd.arg("--bootstrap");
         }
@@ -156,6 +199,10 @@ pub struct V2Cluster {
 
 impl V2Cluster {
     pub fn start() -> Self {
+        Self::start_with(V2ClusterOptions::default())
+    }
+
+    pub fn start_with(options: V2ClusterOptions) -> Self {
         // 失败现场必须能留证据：默认临时目录随 TempDir drop 清空（panic 时也一样），
         // 排查「偶发不可读」需要节点完整日志/数据目录时显式指定保留目录。
         let (root, dir) = match std::env::var("KVT_CHAOS_ARTIFACT_DIR") {
@@ -186,6 +233,10 @@ impl V2Cluster {
             })
             .collect();
 
+        let partition_file = options
+            .partitionable
+            .then(|| root.join("raft-partition.txt"));
+        let pd_scheduler_file = options.pd_control.then(|| root.join("pd-scheduler.txt"));
         let mut nodes = Vec::new();
         for (i, (grpc, raft, http)) in ports.iter().enumerate() {
             let id = i as u64 + 1;
@@ -200,6 +251,11 @@ impl V2Cluster {
                 child: None,
                 initial_nodes: initial_nodes.clone(),
                 bootstrapped: false,
+                partition_file: partition_file.clone(),
+                pd_scheduler_file: pd_scheduler_file.clone(),
+                kvt_extra: options.kvt.to_string(),
+                pd_extra: options.pd.to_string(),
+                toml_extra: options.toml.to_string(),
             });
         }
         for node in nodes.iter_mut() {
@@ -217,6 +273,52 @@ impl V2Cluster {
 
     pub fn addrs(&self) -> Vec<String> {
         self.nodes.iter().map(|n| n.addr()).collect()
+    }
+
+    /// 对称隔离一个节点：被隔离节点阻断全部 peer，其余节点阻断它。
+    ///
+    /// 策略经 `raft-partition.txt` 交给 debug 构建的钩子；文件每行
+    /// `<node_id>:<blocked_id,...>`。写入后 ~50ms 生效。
+    pub fn partition(&self, node_id: u64) {
+        let mut policy = String::new();
+        for node in &self.nodes {
+            let peers: Vec<String> = if node.id == node_id {
+                self.nodes
+                    .iter()
+                    .filter(|n| n.id != node_id)
+                    .map(|n| n.id.to_string())
+                    .collect()
+            } else {
+                vec![node_id.to_string()]
+            };
+            policy.push_str(&format!("{}:{}\n", node.id, peers.join(",")));
+        }
+        std::fs::write(self.partition_path(), policy).expect("write raft partition policy");
+    }
+
+    /// 解除全部分区；raft 重新握手后集群自动收敛。
+    pub fn heal(&self, _node_id: u64) {
+        let mut policy = String::new();
+        for node in &self.nodes {
+            policy.push_str(&format!("{}:\n", node.id));
+        }
+        std::fs::write(self.partition_path(), policy).expect("write raft partition policy");
+    }
+
+    fn partition_path(&self) -> PathBuf {
+        self.root.join("raft-partition.txt")
+    }
+
+    /// 运行时解冻 PD 调度（依赖 debug 构建的 `COORD_TEST_PD_SCHEDULER_FILE` 钩子）。
+    pub fn resume_scheduler(&self) {
+        std::fs::write(self.root.join("pd-scheduler.txt"), "running\n")
+            .expect("write PD scheduler control file");
+    }
+
+    /// 运行时冻结 PD 调度。
+    pub fn pause_scheduler(&self) {
+        std::fs::write(self.root.join("pd-scheduler.txt"), "paused\n")
+            .expect("write PD scheduler control file");
     }
 
     pub fn logs(&self) -> String {
@@ -306,10 +408,8 @@ impl V2Cluster {
         let deadline = Instant::now() + timeout;
         loop {
             let live: Vec<&V2Node> = self.nodes.iter().filter(|n| n.child.is_some()).collect();
-            if let Some(leader) = runtime().block_on(region0_leader(&live)) {
-                if exclude != Some(leader.as_str()) {
-                    return leader;
-                }
+            if let Some(leader) = runtime().block_on(region0_leader_not(&live, exclude)) {
+                return leader;
             }
             assert!(
                 Instant::now() < deadline,
@@ -336,9 +436,17 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
 
 /// 返回 region 0 leader 的节点 id（`Maintenance.Status.raft_leader`）。
 pub async fn region0_leader(nodes: &[&V2Node]) -> Option<String> {
+    region0_leader_not(nodes, None).await
+}
+
+/// 同 [`region0_leader`]，但跳过报告 `exclude` 的节点。
+///
+/// 分区场景下被隔离的旧 leader 仍会（在本地）报告自己是 leader；不跳过它就会
+/// 一直返回旧值，把「多数派已换主」误报成「没有新 leader」。
+async fn region0_leader_not(nodes: &[&V2Node], exclude: Option<&str>) -> Option<String> {
     for node in nodes {
         if let Some(status) = maintenance_status(&node.addr()).await {
-            if !status.raft_leader.is_empty() {
+            if !status.raft_leader.is_empty() && Some(status.raft_leader.as_str()) != exclude {
                 return Some(status.raft_leader);
             }
         }
@@ -628,4 +736,20 @@ pub fn assert_no_forbidden_anchors(cluster: &V2Cluster) {
             );
         }
     }
+}
+
+/// 读本机节点 `/metrics` 的一个 counter/gauge（简单 HTTP GET，避免引入客户端依赖）。
+pub fn metric_value(http_port: u16, name: &str) -> Option<u64> {
+    let mut stream = TcpStream::connect(("127.0.0.1", http_port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    write!(
+        stream,
+        "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut out = String::new();
+    stream.read_to_string(&mut out).ok()?;
+    out.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
