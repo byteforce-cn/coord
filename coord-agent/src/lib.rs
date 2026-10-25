@@ -1487,6 +1487,25 @@ impl AgentServer {
             }
         }
 
+        // v2 集群只服务 coord.*.v2：MQ v1 被策略冻结（ADR-0015 D13 / B-KVT-6），
+        // 依赖 MQ 投递面的 workflow_durable 必须在启动期拒绝——静默降级到
+        // 非 durable 路径会让「不丢/不重/一实例一驱动」的承诺失效而不报错。
+        // 纯 KV/审批路径的 workflow（durable=false）不受影响。
+        if self.config.data_plane == AgentDataPlane::V2 {
+            if self.config.services.mq {
+                return Err(
+                    "services.mq = true is not available on a v2 data plane: MQ v1 is                      frozen (ADR-0015 D13) and MQ v2 is not GA"
+                        .into(),
+                );
+            }
+            if self.config.services.workflow_durable {
+                return Err(
+                    "services.workflow_durable = true requires MQ, which is not available                      on a v2 data plane; disable workflow_durable"
+                        .into(),
+                );
+            }
+        }
+
         // durable 是 workflow 的持久化增强而非独立开关：workflow 未启用时该标记
         // 无装配目标，静默失效会掩盖配置错误（fail-closed）。
         if self.config.services.workflow_durable && !self.config.services.workflow {

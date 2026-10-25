@@ -121,6 +121,14 @@ pub(crate) async fn watch(client: &Client, key: &[u8], range_end: &[u8],
 - [x] Java 真实集群用例补 v1 形状服务（registry/config/lock/idgen + config watch）；
 - [x] 修复号段模式 `allocate_segment` 未消费首个 ID 的重复 ID（Java 用例发现）。
 
+### Task 6: workflow/MQ 在 v2 的 fail-closed（#171）
+
+**Files:** Modify `coord-agent/src/lib.rs`、`scripts/ci-java-it-cluster.sh`、Java `KvTV2ClusterIntegrationTest`、`docs/production/workflow-semantics.md`、`boundaries.md`；Modify `coord-agent/tests/agent_workflow_durable_gate_test.rs`
+
+- [x] `data_plane="v2"` 时 `services.mq=true` / `services.workflow_durable=true` 启动期拒绝（点名 v2/MQ）；
+- [x] 纯 KV/审批路径的 workflow 在 v2 集群可用（Java 真实集群 `inject → end`）；
+- [x] workflow-semantics / B-KVT-6 记录边界与判据。
+
 ## Verification Anchors
 
 | 行为 | 证据 |
@@ -133,12 +141,14 @@ pub(crate) async fn watch(client: &Client, key: &[u8], range_end: &[u8],
 | Lease 后台续期 | `v2_keep_alive_background_renews` |
 | Agent v1 冻结 | `agent_v2_mode_test::v1_data_plane_is_frozen_and_v2_stays_registered` |
 | v1 形状服务在 v2 集群可用 | `KvTV2ClusterIntegrationTest#v1ShapedServicesSurviveOnTheV2DataPlane`（真实 server+agent） |
+| v2 拒绝 MQ/durable | `agent_workflow_durable_gate_test::test_v2_data_plane_rejects_*` |
+| workflow 纯 KV 路径在 v2 | `KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
 | 全量 | `cargo test -p coord-client`、`cargo test -p coord-agent`、workspace、CI |
 
 ## Residual（不在本切片）
 
-- 其余 11 个服务（workflow/approval/scheduler/pki/transit/event/policy/featureflags/
-  cache/scheduler/rate limiter）的逐服务 v2 冒烟；#170 仍 open 到 16 服务矩阵齐。
+- 其余服务的逐服务 v2 冒烟（scheduler/pki/transit/event/policy/featureflags/cache/
+  rate limiter 等）；#170 仍 open 到 16 服务矩阵齐。
 - `Txn` 内 `RequestRange` 的历史 revision 读：fail-closed。
 - v1 `Put` 的全局 request_id 幂等在 v2 下退化为会话内幂等（会话丢失后可能重放一次写）；
   内部服务不依赖该弱保证，外部 SDK 直写请走 v2 KV/Txn。
