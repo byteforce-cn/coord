@@ -31,24 +31,26 @@ CI 基线：main 的 `workspace tests`、三片 test shard、两个 chaos job、
 | 备份/恢复（#169） | ⚠️ 部分 | `backup_cli_test`（save→restore：TSO 不复用/revision 不倒退/Commit Log 连续/清单 fail-closed）；**未做**：在线一致性备份、跨节点目录恢复、恢复后完整 Watch stream 的端到端用例 |
 | Agent 数据面 v2（#170） | ✅ | `kv_t_g6_agent_services_v2_test::test_v2_cluster_serves_all_builtin_services`（15 个非 MQ 内建服务在真实 v2 集群注册并各调一次；idgen 走 segment ⇒ v2 Txn CAS）；`agent_v2_*_proxy_test`、`agent_v2_mode_test` |
 | Workflow/MQ fail-closed（#171） | ✅ | `agent_workflow_durable_gate_test`（6 例：v2 拒绝 mq / workflow_durable，纯 KV workflow 可用）；`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
-| Rust client / Java SDK v2（#172） | ⚠️ 部分 | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；**未做**：`java-example` 的 v2 示例、Java↔Rust 同场景互操作脚本 |
-| 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§6，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 已按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**未达标**：split/merge 停顿未测；**72h soak 运行中**（commit `4633507`，start 2026-10-25T07:44:11Z），完成前不算通过 |
-| 混沌/Jepsen（#175） | ✅ | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）；v2 决策面故障矩阵 `kv_t_g6_chaos_v2_test::chaos_v2_mixed_writes_survive_decision_leader_loss`（3 进程 + kill -9 / SIGSTOP region 0 leader + 混合事务/直写）已接入 `chaos-kill9-soak` job。此前「约 1/10 读不到」的根因：**PD 在首个调度 tick 合并两个空 Region**，merge watermark 之后的旧 revision 按设计返回 `HISTORY_UNAVAILABLE`（B-KVT-10），旧夹具把错误吞成「不可读」。夹具已冻结 PD 调度（`scheduler_paused`）只注入决策面故障，连续 37 次运行无失败（31 次修复验证 + 6 次夹具重构后） |
+| Rust client / Java SDK v2（#172） | ✅ | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；`java-example` v2 示例 `KvTV2Example`（`bash java-example/scripts/run-v2-example.sh`，非 v2 集群退出码 2，无 v1 降级）；跨语言互操作 `KvTInteropIntegrationTest` + `kvt_interop_peer`（`bash scripts/check-kvt-interop.sh`：Rust 写 → Java 按精确 `commit_ts` 读，再反向；对账 value/`mod_revision`/`create_revision` 与 Watch 批 `commit_ts`） |
+| 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§6，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**未达标**：split/merge 停顿未测；**72h soak 运行中**（server commit `4633507`，start 2026-10-25T07:44:11Z），完成前不算通过 |
+| 混沌/Jepsen（#175） | ⚠️ 部分 | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）；v2 决策面故障 `kv_t_g6_chaos_v2_test::chaos_v2_mixed_writes_survive_decision_leader_loss`（3 进程 + kill -9 / SIGSTOP region 0 leader + 混合事务/直写；断言 commit_ts 可读、`mod_revision==commit_ts`、safe_ts 追上、无内部不变量锚点）已接入 `chaos-kill9-soak` job，连续 37 次运行无失败。此前「约 1/10 读不到」的根因：**PD 在首个调度 tick 合并两个空 Region**，merge watermark 之后的旧 revision 按设计返回 `HISTORY_UNAVAILABLE`（B-KVT-10），旧夹具把错误吞成「不可读」。**未覆盖**：网络分区注入、split/merge 迁移中断、shard seal stall、快照恢复中断 |
 | Ops runbook/监控（#176） | ✅ | `monitoring/prometheus-rules.yml` + `docs/production/ops/runbook.md`；`bash scripts/check-gate-drills.sh`（每条告警必须有可达 runbook 锚点） |
 | ADR accepted / 文档一致 | ✅ | ADR-0015 状态 accepted；`scripts/check-doc-refs.sh` 0 悬空 |
 | 发布 sign-off | ⛔ | §4 未填 |
 
 ## 3. 关闭 G6 的硬条件（当前未满足）
 
-1. #174：**72h v2 soak 仍在运行**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，commit
-   `4633507`）——完成且证据目录里 `soak-report.md` 为通过，才算这一条达标。
+1. #174：**72h v2 soak 仍在运行**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，server
+   commit `4633507`）——完成且证据目录里 `soak-report.md` 为通过，才算这一条达标。
 2. #174：**split/merge 停顿未测**（语义已由 g5 套件覆盖；停顿/失败率没有数字，
    不写「达标」）。其余事务面数字已落在 `performance.md` §6。
-3. 容量无 GC 已在 `boundaries.md` B-KVT-13 明确停止（D10：停，不静默）；给
+3. #175：**混沌矩阵未覆盖**：网络分区注入、split/merge 迁移中断、shard seal stall、
+   快照恢复中断。要么补实现，要么按 D10 走 ADR scope 裁定——不得用「已覆盖
+   kill/pause」代替整张矩阵。
+4. 容量无 GC 已在 `boundaries.md` B-KVT-13 明确停止（D10：停，不静默）；给
    `start_ts` 定下限后再做 GC 属后续版本。
-4. #169 残余（恢复后 Watch 连续/历史边界）由 PR #264 收口；#172 残余（java-example
-   v2 示例 + 跨语言互操作）由 PR #262 收口——合入并 CI 绿后本行删除。
-5. 本节 1–4 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
+5. #169 残余（恢复后 Watch 连续/历史边界）由 PR #264 收口——合入并 CI 绿后本行删除。
+6. 本节 1–5 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
 
 ## 4. 签字记录
 

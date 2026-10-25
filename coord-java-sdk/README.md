@@ -209,5 +209,11 @@ consumer-facing view per service. A missing capability fails with
   cluster first, or the run is not evidence. `start v2` wipes its data dirs on
   each start (a disposable fixture); set `COORD_KEEP_DATA=1` to keep them for
   debugging. The v1 suites keep using the v1 cluster (`start v1`, port 19527).
+- Cross-language interop with the Rust `coord-client` on one v2 cluster
+  (`KvTInteropIntegrationTest`, `-Pinterop`): run it through
+  `bash scripts/check-kvt-interop.sh` — the script also runs the Rust phase and
+  stages the `commit_ts` evidence between the two languages. The exact commands
+  and environment variables live in
+  [`java-example/README.md`](../java-example/README.md).
 - Note: local runs require a JDK the test stack supports (the repo CI uses
   Java 21; Mockito-based suites may not run on much newer JDKs).
