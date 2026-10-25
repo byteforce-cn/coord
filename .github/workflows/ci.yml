@@ -857,10 +857,11 @@ jobs:
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-kill9.log cargo test -p coord --test chaos_real -- --ignored --skip chaos_soak_distributed --nocapture --test-threads=1
-      # v2 决策面故障（3 进程 + kill -9 / SIGSTOP region 0 leader）。夹具冻结 PD
-      # 调度：split/merge 的 merge watermark 会让旧 revision 按设计不可读，那是
-      # split/merge 连续性套件的故障面，混进来会被误判成数据丢失。
-      - name: Run v2 chaos (decision leader loss)
+      # v2 故障矩阵（3 进程）：kill -9 / SIGSTOP region 0 leader、对称网络分区、
+      # shard seal stall + Watch 连续、快照安装中断。夹具冻结 PD 调度：split/merge
+      # 的 merge watermark 会让旧 revision 按设计不可读，那是 split/merge 连续性
+      # 套件的故障面，混进来会被误判成数据丢失。
+      - name: Run v2 chaos (fault matrix)
         if: always()
         run: |
           bash scripts/kill-stray-coord-procs.sh
