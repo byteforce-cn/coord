@@ -536,6 +536,24 @@ impl ServerAuthInterceptor {
         capability_id: &str,
         scope_key: Option<&str>,
     ) -> bool {
+        // `coord.txn.v2` 的 `Begin`/`Abort` 不携带 key（`needs_scope_extraction`
+        // 只覆盖 `Read`/`Commit`），但会话内的读写会逐 key 判定 scope。
+        // 只授予某个前缀的 `data:txn:execute` 也必须能建立/放弃会话，否则
+        // 受限调用方永远无法开始事务；数据边界仍在 `Read`/`Commit` 上。
+        if scope_key.is_none() && capability_id == "data:txn:execute" {
+            if payload.scope_overrides.contains_key(capability_id) {
+                return true;
+            }
+            if let Some(provider) = &self.role_provider {
+                if !provider
+                    .scopes_for_capability(&payload.roles, capability_id)
+                    .is_empty()
+                {
+                    return true;
+                }
+            }
+        }
+
         // Check scope_overrides first (per-token overrides)
         if let Some(allowed_scope) = payload.scope_overrides.get(capability_id) {
             if allowed_scope.is_empty() {
@@ -1363,6 +1381,85 @@ mod tests {
                 panic!("expected Allow but got Deny: {reason}");
             }
         }
+    }
+
+    /// `coord.txn.v2` 的 `Begin`/`Abort` 不携带 key：只授予某个前缀的
+    /// `data:txn:execute` 也必须能建立/放弃会话，范围边界由 `Read`/`Commit` 判定。
+    #[test]
+    fn test_scoped_txn_override_can_open_session_but_not_escape_scope() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("data:txn:execute".to_string(), "/app/a/".to_string());
+        let cct = make_test_cct(&keyring, vec![], overrides);
+        let auth_header = format!("Bearer {cct}");
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true);
+
+        assert!(
+            matches!(
+                interceptor.validate(Some(&auth_header), None, "data:txn:execute", None),
+                ServerAuthResult::Allow { .. }
+            ),
+            "keyless Begin/Abort must accept a scoped txn grant"
+        );
+        assert!(
+            matches!(
+                interceptor.validate_scope_access(
+                    Some(&auth_header),
+                    None,
+                    "data:txn:execute",
+                    &[ScopeAccess::point(b"/app/a/x".to_vec())],
+                ),
+                ServerAuthResult::Allow { .. }
+            ),
+            "in-scope key must still be allowed"
+        );
+        assert!(
+            matches!(
+                interceptor.validate_scope_access(
+                    Some(&auth_header),
+                    None,
+                    "data:txn:execute",
+                    &[ScopeAccess::point(b"/app/b/x".to_vec())],
+                ),
+                ServerAuthResult::Deny { .. }
+            ),
+            "out-of-scope key must stay denied"
+        );
+    }
+
+    /// 角色授权（非 override）同样适用；只放宽 keyless 会话建立，不放宽其它能力。
+    #[test]
+    fn test_scoped_txn_role_grant_can_open_session_but_not_other_capabilities() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("scoped").unwrap();
+        auth_manager
+            .role_grant_capability("scoped", "data:txn:execute", "/app/a/")
+            .unwrap_or(());
+        auth_manager
+            .role_grant_capability("scoped", "data:kv:read", "/app/a/")
+            .unwrap_or(());
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
+        let cct = make_test_cct(&keyring, vec!["scoped"], std::collections::HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        assert!(
+            matches!(
+                interceptor.validate(Some(&auth_header), None, "data:txn:execute", None),
+                ServerAuthResult::Allow { .. }
+            ),
+            "keyless Begin/Abort must accept a scoped txn role grant"
+        );
+        assert!(
+            matches!(
+                interceptor.validate(Some(&auth_header), None, "data:kv:read", None),
+                ServerAuthResult::Deny { .. }
+            ),
+            "only the txn keyless path is relaxed; other scoped caps stay fail-closed"
+        );
     }
 
     #[test]
