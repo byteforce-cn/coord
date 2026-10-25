@@ -1,6 +1,6 @@
 # CI 墙钟优化设计（test / chaos / feature-matrix 三者并行化）
 
-**Owner:** CI 维护者 · **Last verified:** 2026-10-24 · **状态:** 待评审
+**Owner:** CI 维护者 · **Last verified:** 2026-10-25（run 40150410738）· **状态:** 已落地
 
 ## 1. 意图与为什么
 
@@ -188,9 +188,13 @@ CI 里给测试面设 `CARGO_PROFILE_DEV_DEBUG=line-tables-only`、`CARGO_PROFIL
   target 缓存变小（对 10 GB 上限友好）。
 - 代价：失败时的 backtrace 有函数名 + 文件:行，但**没有局部变量**。panic 位置不受影响
   （来自 `panic!` 现场元数据，不是 DWARF）。
-- 口径：只在**测试面的 job**里设（`test-shard` + `chaos-*` 必须一致，否则共享缓存互相失效）；
-  首次落地用 `cargo build --timings` 的 JSON（上传为 artifact）核对：base 段与 test-target 段
-  各自降 ≥10% 才保留，否则回退成现状。
+- 口径：只在**测试面的 job**里设（`test-shard` / `test-sim` / `chaos-*` 必须一致，否则共享
+  target 缓存互相失效）。没有做「有/无 debug」的干净 A/B：切换 profile 本身会让整个依赖树
+  重编一次，公平比较要两轮（切过去一轮、切回来一轮），成本高于收益。保留它的理由是它**只减
+  不改语义**（debuginfo 不参与任何测试断言）：codegen 与链接都做更少的工作、target 缓存更小
+  —— 而缓存体积是硬约束（仓库曾用 8.5GB/10GB，驱逐一次就是全量重编）。失败诊断的代价有限：
+  backtrace 仍有函数名 + 文件:行，`panic!` 位置来自现场元数据不依赖 DWARF。
+  要回退只需删掉这几个 job 的 `CARGO_PROFILE_*_DEBUG`（会再触发一次全量重编）。
 
 ### 5.5 不做的「顺手优化」
 
@@ -220,4 +224,22 @@ CI 里给测试面设 `CARGO_PROFILE_DEV_DEBUG=line-tables-only`、`CARGO_PROFIL
 - 分片 1 里 doc-test 与 sim 套件的 step 顺序（sim 套件需要 `--features sim-tests`，会再编两个
   test target；放在 doc-test 之后，保证「先短后长」）。
 - feature-matrix 两个 job 之间的 step 分配细节（按实测单个 step 的耗时微调）。
-- 首次落地后按实测数据决定 5.4 是否保留，并把实测墙钟写回本文件的基线表。
+- 分片数是否从 3 加到 4：分片间已经很均匀（27 秒），再加一片的收益只是把
+  9–10 分钟的 build 再摊薄一点，但每片都要重付一次 workspace 库的 base ⇒ 暂不加。
+
+## 8. 落地结果（run 40150410738，PR #252）
+
+| 项 | 落地前 | 落地后 |
+|:--|--:|--:|
+| PR 全流程墙钟 | 25m28s | **12m15s** |
+| `workspace tests`（同名 required check） | 25m25s（单 job） | 11m49s（汇总 job 本体 15s） |
+| ├ 分片 1/2/3 | — | 11m49s / 11m41s / 11m22s（build 9m55 / 10m10 / 9m00） |
+| └ sim 套件 + doc-test | 含在上面的 job 里（1m37s + 5s） | sim 独立 job 2m08s；doc 留在分片 1（16s） |
+| `chaos (kill9 + soak)` | 16m06s | 8m02s |
+| `chaos (multi-raft + …)` | 10m45s | 6m03s |
+| `plugin engine feature matrix` | 12m39s | 9m04s（component+wasm）／7m05s（checks+单测） |
+| 缓存总量 | 8.5GB / 10GB | 4.3GB / 10GB（测试面 1 条 605MB） |
+
+分片间差异 27 秒（11m49 / 11m41 / 11m22），说明按 CI 实测耗时挑的盐是准的；关键路径现在
+是「分片的 build」（9–10 分钟），它的地板上限是**每次提交都要重编的 workspace 库 + 依赖
+链接**，再往下压需要改编译选项或合并测试二进制（见 5.5，属于另一个议题）。
