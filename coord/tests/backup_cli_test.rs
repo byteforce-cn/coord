@@ -378,7 +378,10 @@ async fn test_backup_restore_keeps_watch_stream_continuous() {
         .expect("open watch before backup");
     let (events, response) = watch.collect(1).await;
     assert_eq!(
-        events.iter().map(|e| e.commit_ts as u64).collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|e| e.commit_ts as u64)
+            .collect::<Vec<_>>(),
         vec![ts1],
         "备份前的流必须先给到起点事件"
     );
@@ -435,7 +438,10 @@ async fn test_backup_restore_keeps_watch_stream_continuous() {
     .expect("resume watch from the pre-backup cursor after restore");
     let (events, _) = resumed.collect(2).await;
     assert_eq!(
-        events.iter().map(|e| e.commit_ts as u64).collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|e| e.commit_ts as u64)
+            .collect::<Vec<_>>(),
         vec![ts2, ts3],
         "恢复后 cursor 续读必须无洞：先 pre-backup 历史，再新写"
     );
@@ -447,7 +453,10 @@ async fn test_backup_restore_keeps_watch_stream_continuous() {
         .expect("replay watch from start_revision after restore");
     let (events, _) = replay.collect(3).await;
     assert_eq!(
-        events.iter().map(|e| e.commit_ts as u64).collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|e| e.commit_ts as u64)
+            .collect::<Vec<_>>(),
         vec![ts1, ts2, ts3],
         "恢复后从 start_revision 重读不得丢任何已提交事务"
     );

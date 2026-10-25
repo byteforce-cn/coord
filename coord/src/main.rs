@@ -2684,7 +2684,9 @@ async fn run_server(
                         openraft::error::InitializeError::NotAllowed(_)
                     )
                 ) {
-                    tracing::info!("Raft cluster was initialized elsewhere; waiting for replication");
+                    tracing::info!(
+                        "Raft cluster was initialized elsewhere; waiting for replication"
+                    );
                 } else {
                     // 释放 store 锁，避免同进程重试撞 `Database already open`。
                     let _ = raft.shutdown().await;

@@ -16,15 +16,14 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Channel, Server};
 use tonic::{Request, Streaming};
 
-use coord_proto::watch::v2 as watch_v2;
-use coord_proto::watch::v2::watch_client::WatchClient;
-use watch_v2::watch_request::Request as WatchFrame;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta, StorageConfig};
 use coord_proto::maintenance::maintenance_server::MaintenanceServer;
 use coord_proto::txn::v2::mutation::Op;
 use coord_proto::txn::v2::txn_server::Txn as TxnV2;
 use coord_proto::txn::v2::{BeginRequest, CommitRequest, Mutation};
+use coord_proto::watch::v2 as watch_v2;
+use coord_proto::watch::v2::watch_client::WatchClient;
 use coord_proto::watch::v2::watch_server::WatchServer as WatchV2Server;
 use coord_server::kvt::commit_log_shards::CommitLogShardManager;
 use coord_server::kvt::decision_apply::apply_pending_decisions;
@@ -46,6 +45,7 @@ use coord_server::storage::redb_backend::RedbBackend;
 use coord_server::storage::region_table::RegionTable;
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
+use watch_v2::watch_request::Request as WatchFrame;
 
 /// 种子数据用的 commit_ts（低于后续事务的分配值）。
 pub const SEED_TS: u64 = 100;
