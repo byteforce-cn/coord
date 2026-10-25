@@ -20,7 +20,10 @@
 | **G6 GA** | e2e/备份/SDK/Agent/混沌/性能/文档全绿 + 签字 | ⛔ **未达标** | 见 §2、§3 |
 
 CI 基线：main 的 `workspace tests`、三片 test shard、两个 chaos job、`java example integration`、
-`cargo audit + deny`、`fmt + clippy`、`check-doc-refs` 全绿（run 40159844225）。
+`cargo audit + deny`、`fmt + clippy`、`check-doc-refs` 全绿（run 40180615805 重跑后；
+Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**：#265
+（`kv_t_g2_lease_rpc_test::test_lease_cleanup_is_per_region` 间歇 30s 超时，重跑可过）
+——签字前要么修掉、要么在签字记录里显式标注。
 
 ## 2. G6 分项
 
@@ -41,7 +44,9 @@ CI 基线：main 的 `workspace tests`、三片 test shard、两个 chaos job、
 ## 3. 关闭 G6 的硬条件（当前未满足）
 
 1. #174：**72h v2 soak 仍在运行**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，server
-   commit `4633507`）——完成且证据目录里 `soak-report.md` 为通过，才算这一条达标。
+   commit `4633507`，ETA 2026-10-28T07:57Z）——完成且证据目录里 `soak-report.md`
+   为通过，才算这一条达标。截至 2026-10-25T10:55Z：4300+ 轮、35 次 kill -9 region 0
+   leader 后恢复、节点日志无内部不变量锚点。
 2. #174：**split/merge 停顿未测**（语义已由 g5 套件覆盖；停顿/失败率没有数字，
    不写「达标」）。其余事务面数字已落在 `performance.md` §6。
 3. #175：**混沌矩阵未覆盖**：网络分区注入、split/merge 迁移中断、shard seal stall、

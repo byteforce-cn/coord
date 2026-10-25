@@ -139,7 +139,7 @@ redb 页）；24h 容量按「事务数 × 37 KB ÷ 3（单副本）」估算，
 |:--|:--|
 | CI 冒烟（120s，真实 3 进程，v1） | 每个 PR 的 `chaos (kill9 + soak, real processes)` job 执行 `chaos_soak_distributed`；`scripts/collect-evidence.sh soak-smoke` 可产出证据目录 |
 | v2 冒烟（45s + 2 次 region 0 leader kill，真实 3 进程） | `KVT_SOAK_SECS=45 KVT_SOAK_FAULT_SECS=15 cargo test -p coord --release --test kv_t_g6_soak_v2_test soak_v2_mixed_workload_stays_consistent -- --ignored --nocapture --test-threads=1`（每次 PR 的混沌 job 同时跑 v2 决策面故障套件；本行是长窗口冒烟命令） |
-| **72h 生产浸泡（v2）** | **运行中**（start 2026-10-25T07:44:11Z，commit `4633507`；结果以证据目录的 `soak-report.md` 为准，完成前不算达标） |
+| **72h 生产浸泡（v2）** | **运行中**（测试进程 start 2026-10-25T07:57Z，server commit `4633507`，ETA 2026-10-28T07:57Z；截至 2026-10-25T10:55Z 已 4300+ 轮、35 次 kill -9 region 0 leader 后恢复、日志无内部不变量锚点；结果以证据目录的 `soak-report.md` 为准，完成前不算达标）。看门狗（卡住 → 告警 → abort）见 PR #266，只影响后续浸泡 |
 
 ```bash
 # KV-T GA 的证据口径是 v2 数据面的 72h 浸泡：
