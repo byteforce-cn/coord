@@ -380,8 +380,15 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                 .transpose()?
         };
 
+        // 日志被整段 purge 后表为空：按 openraft 契约，`last_log_id` 至少等于
+        // `last_purged_log_id`（快照已覆盖这些条目，见 openraft memstore 同口径）。
+        // 否则「快照安装 → purge → 未追加新条目就重启」会把
+        // `last_log_id(None) < last_purged(Some(..))` 判成 log store corrupted，
+        // 节点再也起不来。
+        let last_log_id = last.or(last_purged);
+
         Ok(LogState {
-            last_log_id: last,
+            last_log_id,
             last_purged_log_id: last_purged,
         })
     }
@@ -1019,6 +1026,41 @@ mod tests {
 
             let state = store.get_log_state().await.unwrap();
             assert_eq!(state.last_log_id.map(|l| l.index), Some(1500));
+        });
+    }
+
+    /// 快照安装后日志被整段 purge、尚未追加新条目就重启：`get_log_state` 必须
+    /// 把 `last_log_id` 报成 purge 边界，否则 openraft 判 log store corrupted。
+    /// 负控制：去掉 `last.or(last_purged)` ⇒ 本用例必红（节点重启失败）。
+    #[test]
+    fn test_get_log_state_after_full_purge_survives_reopen() {
+        let dir = std::env::temp_dir().join(format!(
+            "coord-test-logstore-full-purge-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut store = LogStore::new(&dir).await.unwrap();
+            let entries: Vec<EntryOf<TypeConfig>> = (1..=3).map(test_entry).collect();
+            store.append(entries, IOFlushed::noop()).await.unwrap();
+            store.purge(test_entry(3).log_id).await.unwrap();
+            drop(store);
+
+            let mut reopened = LogStore::new(&dir).await.unwrap();
+            let state = reopened.get_log_state().await.unwrap();
+            assert_eq!(
+                state.last_purged_log_id.map(|l| l.index),
+                Some(3),
+                "purge boundary must be persisted"
+            );
+            assert_eq!(
+                state.last_log_id.map(|l| l.index),
+                Some(3),
+                "an empty table after a full purge must still report the purge boundary"
+            );
         });
     }
 
