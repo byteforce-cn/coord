@@ -47,8 +47,13 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    commit `4633507`，ETA 2026-10-28T07:57Z）——完成且证据目录里 `soak-report.md`
    为通过，才算这一条达标。截至 2026-10-25T10:55Z：4300+ 轮、35 次 kill -9 region 0
    leader 后恢复、节点日志无内部不变量锚点。
-2. #174：**split/merge 停顿未测**（语义已由 g5 套件覆盖；停顿/失败率没有数字，
-   不写「达标」）。其余事务面数字已落在 `performance.md` §6。
+2. #174：**split/merge 停顿未测，且自动 split/merge 路径仍有未修缺陷**（§3.5
+   2–3）：多 Region 自动 split 在「执行节点不是目标 Region leader」时以
+   `ForwardToLeader` 失败；Region 有直写时导出守卫
+   （`last_applied_decision_ts == pinned revision`）永不成立。停顿测量
+   （`PERF_GATE=1` 的 `perf_split_write_pause`）保留为复现器，当前 fail-closed
+   在「split never ran」——不写「达标」。其余事务面数字已落在
+   `performance.md` §6。
 3. #175：**split/merge 迁移中断的进程级注入按 D10 明确停止**（不是「已覆盖」的
    代称）：executor 级失败注入已覆盖「迁移失败 → 保留 intent、不动表、释放
    write fence、不 cutover」（`kv_t_g5_split_merge_test::test_migration_failure_keeps_intent_for_recovery`、
@@ -69,7 +74,22 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    = `max(rate, 块大小)`（`with_burst`），回归
    `storage::snapshot_limiter::tests::test_burst_capacity_covers_large_requests` /
    `test_acquire_larger_than_rate_eventually_returns`。
-2. **快照安装后重启被判 log store corrupted**：整段 purge 后日志表为空，
+2. **PD 自动 split 永远被拒绝（已修）**：split-checker 生成的候选带
+   `new_region_id=0`，`plan_split` 以「new region id 0 is invalid」拒绝，生成源
+   从未分配 ID ⇒ 只有显式带 ID 的测试 operator 能跑。修复：入队前用
+   `PdMetaStore::allocate_region_id()` 分配（生成源唯一 = region 0 leader），
+   回归 `pd::tests::test_generated_split_gets_a_fresh_region_id`；进程级复现/
+   测量见 `perf_split_write_pause`。
+3. **自动 split 在多节点上仍会失败（未修，GA 阻塞）**：`RangeImportMigrator` 的
+   `reset_range`/`import_range` 直接对**本节点**的 target raft `client_write`；
+   目标组 leader 在别的节点时返回 `ForwardToLeader`（`None, None` 竞态窗口也会
+   中招）。split 只有在执行节点同时是源与目标 leader 时才成功。需要内部命令
+   转发（或目标组单成员初始化）——单独设计/PR，不在本节声明的修复范围。
+4. **直写 Region 的 split 导出守卫永不成立（未修，GA 阻塞）**：`import_pages`
+   要求 `last_applied_decision_ts == 导出 revision`，但直写（`coord.kv.v2` 自带
+   `commit_ts`、lease 清理）推进 `current_revision` 而不推进决策游标；有直写的
+   Region 在 split 时永远被守卫拒绝。需要重新定义「导出水位」口径（ADR 级决定）。
+5. **快照安装后重启被判 log store corrupted**：整段 purge 后日志表为空，
    `get_log_state` 报 `last_log_id=None < last_purged=Some(..)` ⇒ openraft 拒绝
    启动（节点无法重启）。修复：`last_log_id = last_entry.or(last_purged)`（与
    openraft memstore 同口径），回归

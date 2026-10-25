@@ -50,7 +50,9 @@ pub struct V2Node {
     pub initial_nodes: Vec<(u64, String, String)>,
     pub bootstrapped: bool,
     partition_file: Option<PathBuf>,
+    pd_scheduler_file: Option<PathBuf>,
     kvt_extra: String,
+    pd_extra: String,
     toml_extra: String,
 }
 
@@ -67,6 +69,11 @@ pub struct V2ClusterOptions {
     pub kvt: &'static str,
     /// 追加到配置末尾的其它段（例如 `[raft]` 调参）。
     pub toml: &'static str,
+    /// 允许用 [`V2Cluster::resume_scheduler`] / [`V2Cluster::pause_scheduler`]
+    /// 运行时切换 PD 调度（debug 构建的 `COORD_TEST_PD_SCHEDULER_FILE` 钩子）。
+    pub pd_control: bool,
+    /// 追加到 `[multi_raft.pd]` 段的键（例如 split/merge 阈值）。
+    pub pd: &'static str,
 }
 
 impl V2Node {
@@ -99,7 +106,7 @@ impl V2Node {
              # 只注入决策面故障：split/merge 的 merge watermark 会让旧 revision 按\
              # 设计变成 HISTORY_UNAVAILABLE（属 split/merge 连续性套件），混进来\
              # 会被误判成数据丢失。\n\
-             scheduler_paused = true\n\
+             scheduler_paused = true\n{pd}\
              [kv_t]\nenabled = true\n{kvt}\
 {toml}",
             id = self.id,
@@ -108,6 +115,7 @@ impl V2Node {
             root_key = "ab".repeat(32),
             bootstrap = bootstrap,
             kvt = self.kvt_extra,
+            pd = self.pd_extra,
             toml = self.toml_extra,
         )
     }
@@ -142,6 +150,10 @@ impl V2Node {
         if let Some(path) = &self.partition_file {
             // debug 构建的 raft-RPC 分区钩子（release 二进制忽略该变量）。
             cmd.env("COORD_TEST_RAFT_PARTITION_FILE", path);
+        }
+        if let Some(path) = &self.pd_scheduler_file {
+            // debug 构建的 PD 调度暂停开关（release 二进制忽略该变量）。
+            cmd.env("COORD_TEST_PD_SCHEDULER_FILE", path);
         }
         if bootstrap {
             cmd.arg("--bootstrap");
@@ -224,6 +236,7 @@ impl V2Cluster {
         let partition_file = options
             .partitionable
             .then(|| root.join("raft-partition.txt"));
+        let pd_scheduler_file = options.pd_control.then(|| root.join("pd-scheduler.txt"));
         let mut nodes = Vec::new();
         for (i, (grpc, raft, http)) in ports.iter().enumerate() {
             let id = i as u64 + 1;
@@ -239,7 +252,9 @@ impl V2Cluster {
                 initial_nodes: initial_nodes.clone(),
                 bootstrapped: false,
                 partition_file: partition_file.clone(),
+                pd_scheduler_file: pd_scheduler_file.clone(),
                 kvt_extra: options.kvt.to_string(),
+                pd_extra: options.pd.to_string(),
                 toml_extra: options.toml.to_string(),
             });
         }
@@ -292,6 +307,18 @@ impl V2Cluster {
 
     fn partition_path(&self) -> PathBuf {
         self.root.join("raft-partition.txt")
+    }
+
+    /// 运行时解冻 PD 调度（依赖 debug 构建的 `COORD_TEST_PD_SCHEDULER_FILE` 钩子）。
+    pub fn resume_scheduler(&self) {
+        std::fs::write(self.root.join("pd-scheduler.txt"), "running\n")
+            .expect("write PD scheduler control file");
+    }
+
+    /// 运行时冻结 PD 调度。
+    pub fn pause_scheduler(&self) {
+        std::fs::write(self.root.join("pd-scheduler.txt"), "paused\n")
+            .expect("write PD scheduler control file");
     }
 
     pub fn logs(&self) -> String {

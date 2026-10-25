@@ -24,7 +24,10 @@ use std::time::{Duration, Instant};
 #[path = "common/mod.rs"]
 mod common;
 
-use common::v2_cluster::{commit_txn, runtime, V2Cluster};
+use common::v2_cluster::{
+    allocate_ts, commit_txn, direct_put, metric_value as node_metric, runtime, V2Cluster,
+    V2ClusterOptions,
+};
 
 /// 证书/权限门禁：没有 `PERF_GATE=1` 就当「未跑」，直接失败而不是静默跳过。
 fn require_gate() {
@@ -462,5 +465,139 @@ fn perf_write_amplification() {
          amplification={:.2}x disk_bytes_per_txn={:.0}",
         written as f64 / user_bytes as f64,
         written as f64 / TXNS as f64,
+    );
+}
+
+/// 一次**不重试**的直写：split fence 期间的失败必须原样暴露给测量（重试会把
+/// 停顿抹平成「慢」）。TSO 取号仍可重试（region 0 不受 split 影响）。
+async fn try_direct_put(addrs: &[String], key: &[u8], value: &[u8]) -> Result<u64, String> {
+    use coord_proto::kv::v2::kv_client::KvClient;
+    let ts = allocate_ts(addrs).await;
+    let mut last = String::from("no reachable node");
+    for addr in addrs {
+        let Ok(ch) = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect_timeout(Duration::from_secs(1))
+            .connect()
+            .await
+        else {
+            continue;
+        };
+        let mut kv = KvClient::new(ch);
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            kv.put(coord_proto::kv::v2::PutRequest {
+                key: key.to_vec(),
+                value: value.to_vec(),
+                lease_id: 0,
+                prev_kv: false,
+                request_id: Vec::new(),
+                commit_ts: ts as i64,
+            }),
+        )
+        .await
+        {
+            Ok(Ok(_)) => return Ok(ts),
+            Ok(Err(e)) => last = e.to_string(),
+            Err(_) => last = "put timed out".to_string(),
+        }
+    }
+    Err(last)
+}
+
+/// #174：split 写停顿（PD 驱动、真实 3 进程）。
+///
+/// 先在暂停调度下把 region 1 灌到 1.2MiB / 200 keys（避免 PD 首个 merge tick
+/// 合并两个空 Region），再运行时解冻：split checker（1s）由 `region_split_keys=32`
+/// 触发 split。测量窗口内每 50ms 对**子 Region 区间**（中位数之后的 key）做一次
+/// 不重试直写，记录失败窗口与延迟分位。
+///
+/// **当前状态（诚实记录）**：split 自动路径仍有两个未修缺陷（目标组 leader 在
+/// 别的节点时 `ForwardToLeader`；有直写的 Region 导出守卫永不成立，见 GA gate
+/// §3.5），所以本用例目前 fail-closed 在「the split never ran」。它是修复后的
+/// 测量入口 + 复现器，不用「没测到」冒充数字。
+#[test]
+#[ignore = "perf measurement; PERF_GATE=1, real 3-process cluster"]
+fn perf_split_write_pause() {
+    require_gate();
+    let cluster = V2Cluster::start_with(V2ClusterOptions {
+        pd_control: true,
+        // 起点暂停；merge 间隔拉长，避免 split 完又被 merge 回去干扰测量。
+        pd: "balance_interval = 1\nsplit_check_interval = 1\nmerge_check_interval = 3600\n\
+             region_split_keys = 32\nregion_merge_size_mb = 1\n\
+             max_concurrent_operators = 1\n",
+        ..Default::default()
+    });
+    let addrs = cluster.addrs();
+    let baseline = runtime().block_on(commit_txn(&addrs, b"ps", b"zs", 0));
+    assert!(baseline > 0);
+
+    // key 以 0x90 打头：region 2 = [0x6D, +∞)，fallback split_key=0x80，
+    // 上表中的 key 全部落在右半段 —— 测量点必然进入 split 的 write fence 区间。
+    for i in 0..200u64 {
+        let key = format!("\u{90}-p-{i:08}").into_bytes();
+        let value = vec![b's'; 20 * 1024];
+        runtime().block_on(direct_put(&addrs, &key, &value));
+    }
+
+    let target = format!("\u{90}-p-{:08}", 150).into_bytes();
+    let value = b"w".to_vec();
+    let mut latencies_us: Vec<u128> = Vec::new();
+    let mut failures = 0u32;
+    let mut fail_started: Option<Instant> = None;
+    let mut max_pause = Duration::ZERO;
+    let started = Instant::now();
+    let window = Duration::from_secs(40);
+    let mut resumed = false;
+    while started.elapsed() < window {
+        if !resumed && started.elapsed() >= Duration::from_secs(2) {
+            cluster.resume_scheduler();
+            resumed = true;
+        }
+        let op = Instant::now();
+        match runtime().block_on(try_direct_put(&addrs, &target, &value)) {
+            Ok(_) => {
+                latencies_us.push(op.elapsed().as_micros());
+                if let Some(f) = fail_started.take() {
+                    max_pause = max_pause.max(f.elapsed());
+                }
+            }
+            Err(_) => {
+                failures += 1;
+                fail_started.get_or_insert(op);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if let Some(f) = fail_started.take() {
+        max_pause = max_pause.max(f.elapsed());
+    }
+    cluster.pause_scheduler();
+
+    let split_total: u64 = cluster
+        .nodes
+        .iter()
+        .map(|n| node_metric(n.http_port, "coord_region_split_total").unwrap_or(0))
+        .sum();
+    let merge_total: u64 = cluster
+        .nodes
+        .iter()
+        .map(|n| node_metric(n.http_port, "coord_region_merge_total").unwrap_or(0))
+        .sum();
+    assert!(
+        split_total > 0,
+        "the PD-driven split never ran (region_split_total = 0): the measurement is not evidence; \
+         logs:\n{}",
+        cluster.logs()
+    );
+    latencies_us.sort_unstable();
+    println!(
+        "PERF split_write_pause: splits={split_total} merges={merge_total} ops={} failures={failures} \
+         max_pause_ms={} p50_us={} p99_us={} max_us={}",
+        latencies_us.len(),
+        max_pause.as_millis(),
+        percentile(&latencies_us, 0.50),
+        percentile(&latencies_us, 0.99),
+        latencies_us.last().copied().unwrap_or(0),
     );
 }

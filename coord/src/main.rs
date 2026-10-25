@@ -2925,6 +2925,12 @@ async fn run_server(
         None
     };
 
+    // 测试专用（仅 debug 构建）：PD 调度暂停开关的控制文件钩子。
+    #[cfg(debug_assertions)]
+    if let Some(pd) = embedded_pd.as_ref() {
+        install_test_pd_scheduler_hook(pd);
+    }
+
     // 5.75 Legacy → Multi-Raft boot 迁移。
     //
     // `[multi_raft].legacy_migration = true`（一次性，迁移前停写；fail-closed 闸
@@ -5185,6 +5191,51 @@ fn install_test_raft_partition_hook(factory: &RaftNetworkFactoryImpl, node_id: u
                 factory.block_node(*peer);
             }
             applied = next;
+        }
+    });
+}
+
+/// 测试专用（仅 debug 构建）：从控制文件切换 PD 调度暂停。
+///
+/// 文件内容 `paused` / `running`（或 `<node_id>:paused` 只对指定节点生效）；
+/// 路径来自 `COORD_TEST_PD_SCHEDULER_FILE`。release 构建不编译本函数——生产
+/// 二进制没有「运行时解冻调度」的旁路（见 `V2Cluster::resume_scheduler`）。
+#[cfg(debug_assertions)]
+fn install_test_pd_scheduler_hook(pd: &Arc<EmbeddedPd>) {
+    let Ok(path) = std::env::var("COORD_TEST_PD_SCHEDULER_FILE") else {
+        return;
+    };
+    let node_id = pd.node_id();
+    let driver = Arc::clone(&pd.driver);
+    tokio::spawn(async move {
+        let mut applied = driver.is_scheduler_paused();
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            tick.tick().await;
+            let Ok(text) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let mut desired: Option<bool> = None;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let (node, state) = match line.split_once(':') {
+                    Some((node, state)) => (node.trim(), state.trim()),
+                    None => ("", line),
+                };
+                if !node.is_empty() && node.parse::<u64>().ok() != Some(node_id) {
+                    continue;
+                }
+                desired = Some(state.eq_ignore_ascii_case("paused"));
+            }
+            if let Some(desired) = desired {
+                if desired != applied {
+                    driver.set_scheduler_paused(desired);
+                    applied = desired;
+                }
+            }
         }
     });
 }

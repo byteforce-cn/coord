@@ -447,6 +447,12 @@ impl PlacementDriver {
             return;
         }
 
+        // PD 生成的 split 候选项 `new_region_id=0`，由生成源（region 0 leader）
+        // 在入队前分配。少了这一步 `plan_split` 会以
+        // 「new region id 0 is invalid or already in use」拒绝，自动 split
+        // 永远不会发生（只有显式带 ID 的测试/运维 operator 能执行）。
+        assign_split_region_ids(&mut generated, self.meta_store.allocate_region_id());
+
         self.enqueue_generated_global(&system, generated).await;
     }
 
@@ -619,6 +625,21 @@ pub(super) fn now_unix_secs() -> i64 {
 // ============================================================================
 // 测试
 // ============================================================================
+
+/// 给 PD 生成的 split 候选分配单调递增的新 Region ID（0 = 待分配）。
+///
+/// 生成源唯一（region 0 leader），因此本地 `max(id)+1` 即可；执行前 `plan_split`
+/// 会再校验 ID 不在权威表里（并发/换主后重叠 ⇒ fail-closed 重试）。
+fn assign_split_region_ids(ops: &mut [Operator], mut next_id: RegionId) {
+    for op in ops {
+        if let Operator::SplitRegion { new_region_id, .. } = op {
+            if *new_region_id == 0 {
+                *new_region_id = next_id;
+                next_id += 1;
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -943,6 +964,20 @@ mod tests {
     }
 
     // ──── 调度 tick 测试 ────
+
+    #[test]
+    fn test_generated_split_gets_a_fresh_region_id() {
+        let mut ops = vec![Operator::SplitRegion {
+            region_id: 1,
+            split_key: b"m".to_vec(),
+            new_region_id: 0,
+        }];
+        assign_split_region_ids(&mut ops, 7);
+        match &ops[0] {
+            Operator::SplitRegion { new_region_id, .. } => assert_eq!(*new_region_id, 7),
+            other => panic!("expected SplitRegion, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_schedule_tick_no_regions() {
