@@ -7,6 +7,7 @@ import cn.byteforce.coord.sdk.lease.v2.LeaseClient;
 import cn.byteforce.coord.sdk.lock.LockInfo;
 import cn.byteforce.coord.sdk.registry.Registration;
 import cn.byteforce.coord.sdk.registry.ServiceInstance;
+import cn.byteforce.coord.sdk.workflow.WorkflowState;
 import cn.byteforce.coord.sdk.storage.v2.StorageClient;
 import cn.byteforce.coord.sdk.tso.v2.TsoClient;
 import cn.byteforce.coord.sdk.txn.v2.TxnClient;
@@ -319,6 +320,33 @@ class KvTV2ClusterIntegrationTest {
                 .commit(List.of(TxnClient.Mutation.put(runKey("a/order-next"), utf8("next"))));
         assertThat(next.committed()).isTrue();
         assertThat(next.commitTs()).isGreaterThan(directTs);
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("workflow pure-KV path completes on the v2 data plane (no MQ)")
+    void workflowPureKvPathCompletesOnV2() throws Exception {
+        String defId = "v2-smoke-" + System.currentTimeMillis();
+        String definition = "{" +
+                "\"id\":\"" + defId + "\"," +
+                "\"version\":\"1.0\"," +
+                "\"start\":\"init\"," +
+                "\"states\":[{\"name\":\"init\",\"type\":\"inject\"," +
+                "\"data\":{\"ok\":true},\"end\":true}]}";
+        String workflowId = client.workflow().start(definition, utf8("{}"));
+
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        WorkflowState state = null;
+        while (System.nanoTime() < deadline) {
+            state = client.workflow().getStatus(workflowId).state();
+            if (state.isTerminal()) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+        assertThat(state)
+                .as("workflow must finish through the v2 KV store + watch, without MQ")
+                .isEqualTo(WorkflowState.COMPLETED);
     }
 
     @Test

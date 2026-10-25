@@ -161,6 +161,10 @@ lock = true
 idgen = true
 leader_election = true
 EOF
+  if [[ "$MODE" == "v2" ]]; then
+    # 纯 KV/审批路径的 workflow 在 v2 上可用；durable 依赖 MQ v1，启动期拒绝。
+    printf 'workflow = true\n' >>"$RUN_DIR/agent.toml"
+  fi
 }
 
 wait_port() {

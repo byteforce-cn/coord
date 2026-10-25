@@ -61,6 +61,48 @@ async fn test_durable_without_mq_is_fail_closed() {
     );
 }
 
+/// v2 数据面：MQ v1 被策略冻结（D13）⇒ 启动期拒绝，不能静默注册。
+#[tokio::test]
+async fn test_v2_data_plane_rejects_mq() {
+    let services = ServiceConfig {
+        mq: true,
+        ..ServiceConfig::default()
+    };
+    let (mut config, _tmp) = durable_config(find_port(), "v2-mq", services);
+    config.data_plane = coord_agent::AgentDataPlane::V2;
+    let err = AgentServer::new(config)
+        .serve()
+        .await
+        .expect_err("v2 data plane must reject services.mq");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("v2 data plane") && msg.contains("MQ"),
+        "failure must name the v2/MQ boundary, got: {msg}"
+    );
+}
+
+/// v2 数据面：即使 mq=true，workflow_durable 也不能装配（MQ v1 不服务）。
+#[tokio::test]
+async fn test_v2_data_plane_rejects_workflow_durable() {
+    let services = ServiceConfig {
+        workflow: true,
+        workflow_durable: true,
+        mq: true,
+        ..ServiceConfig::default()
+    };
+    let (mut config, _tmp) = durable_config(find_port(), "v2-durable", services);
+    config.data_plane = coord_agent::AgentDataPlane::V2;
+    let err = AgentServer::new(config)
+        .serve()
+        .await
+        .expect_err("v2 data plane must reject workflow_durable");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("v2 data plane"),
+        "failure must name the v2 data-plane boundary, got: {msg}"
+    );
+}
+
 /// 无 Server 连接（static_peers 空；mq=true）⇒ 拒绝启动，消息点名 server connection。
 #[tokio::test]
 async fn test_durable_without_server_is_fail_closed() {
