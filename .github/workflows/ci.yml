@@ -526,8 +526,18 @@ jobs:
           for spec in "${groups[@]}"; do
             read -r -a args <<< "$spec"
             echo "+ cargo test --no-run ${args[*]}"
-            cargo test --no-run "${args[@]}"
+            cargo test --no-run --timings "${args[@]}"
           done
+      - name: Upload per-unit build timings (shard rebalancing data)
+        # 分片盐是按「每个 target 的编译耗时」搜出来的，而只有 CI 上的真实数据才准；
+        # 这份报告就是下次重算盐的输入（也是核对 debug 等级收益的依据）。7 天足够。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-shard-${{ matrix.shard }}
+          path: target/cargo-timings/cargo-timing-*.html
+          retention-days: 7
+          if-no-files-found: warn
       - name: Pre-clean leaked test processes
         # 进程级套件在超时/中断时会留下孤儿 `coord server`（本地实测可积累 30+ 个、
         # 最久 11 小时），它们抢 CPU/端口 → 后续套件出现假红
