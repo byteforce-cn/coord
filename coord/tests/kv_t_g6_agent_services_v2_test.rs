@@ -13,7 +13,7 @@
 //!      `coord.txn.v2` 的 CAS 分配，ID 必须落在号段空间（雪花 ID 是 10^18 量级），
 //!      否则说明它退回本地雪花、冒烟没有覆盖 v2 数据面。
 //!
-//! 覆盖矩阵与未覆盖项的单一事实源：`docs/production/ops/kv-t-ga-gate.md`。
+//! 能力矩阵与边界的单一事实源：`docs/production/ops/boundaries.md`（B-KVT-6）。
 
 use std::collections::BTreeSet;
 use std::io::Write;
