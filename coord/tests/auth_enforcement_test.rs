@@ -60,28 +60,16 @@ fn spawn_server(data_dir: &std::path::Path, grpc_port: u16, raft_port: u16) -> s
         .expect("spawn coord server")
 }
 
-/// 就绪探测：HTTP /healthz（BFF 匿名端点，端口 = grpc + 10）
+/// 就绪探测：gRPC 端口 + HTTP /healthz（BFF 匿名端点，端口 = grpc + 10）。
+///
+/// 两个 listener 都接受连接才算就绪：HTTP 先起、gRPC 后起的窗口里只探测
+/// `/healthz` 会让紧接着的 `channel()` 撞上 `Connection refused`（CI 实测
+/// 12:31:40Z 的 `test_scoped_watch_grants_are_enforced_per_prefix`）。
 async fn wait_ready(grpc_port: u16, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(stream) = tokio::net::TcpStream::connect(("127.0.0.1", grpc_port + 10)).await {
-            use tokio::io::AsyncReadExt;
-            stream.writable().await.ok();
-            let req = b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n";
-            if stream.try_write(req).is_ok() {
-                let mut buf = [0u8; 256];
-                if let Ok(stream) = tokio::time::timeout(Duration::from_millis(500), async {
-                    let mut stream = stream;
-                    let n = stream.read(&mut buf).await?;
-                    Ok::<usize, std::io::Error>(n)
-                })
-                .await
-                {
-                    if stream.is_ok() {
-                        return;
-                    }
-                }
-            }
+        if grpc_listening(grpc_port).await && healthz_ok(grpc_port + 10).await {
+            return;
         }
         assert!(
             Instant::now() < deadline,
@@ -89,6 +77,33 @@ async fn wait_ready(grpc_port: u16, timeout: Duration) {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+async fn grpc_listening(port: u16) -> bool {
+    tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .is_ok()
+}
+
+async fn healthz_ok(http_port: u16) -> bool {
+    use tokio::io::AsyncReadExt;
+    let Ok(stream) = tokio::net::TcpStream::connect(("127.0.0.1", http_port)).await else {
+        return false;
+    };
+    stream.writable().await.ok();
+    let req = b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n";
+    if stream.try_write(req).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 256];
+    matches!(
+        tokio::time::timeout(Duration::from_millis(500), async {
+            let mut stream = stream;
+            stream.read(&mut buf).await
+        })
+        .await,
+        Ok(Ok(n)) if n > 0
+    )
 }
 
 /// 连接指定 gRPC 地址
