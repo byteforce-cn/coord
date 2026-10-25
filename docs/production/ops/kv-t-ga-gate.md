@@ -31,7 +31,7 @@ CI 基线：main 的 `workspace tests`、三片 test shard、两个 chaos job、
 | 备份/恢复（#169） | ⚠️ 部分 | `backup_cli_test`（save→restore：TSO 不复用/revision 不倒退/Commit Log 连续/清单 fail-closed）；**未做**：在线一致性备份、跨节点目录恢复、恢复后完整 Watch stream 的端到端用例 |
 | Agent 数据面 v2（#170） | ✅ | `kv_t_g6_agent_services_v2_test::test_v2_cluster_serves_all_builtin_services`（15 个非 MQ 内建服务在真实 v2 集群注册并各调一次；idgen 走 segment ⇒ v2 Txn CAS）；`agent_v2_*_proxy_test`、`agent_v2_mode_test` |
 | Workflow/MQ fail-closed（#171） | ✅ | `agent_workflow_durable_gate_test`（6 例：v2 拒绝 mq / workflow_durable，纯 KV workflow 可用）；`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
-| Rust client / Java SDK v2（#172） | ⚠️ 部分 | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；**未做**：`java-example` 的 v2 示例、Java↔Rust 同场景互操作脚本 |
+| Rust client / Java SDK v2（#172） | ✅ | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；`java-example` v2 示例 `KvTV2Example`（`bash java-example/scripts/run-v2-example.sh`，非 v2 集群退出码 2，无 v1 降级）；跨语言互操作 `KvTInteropIntegrationTest` + `kvt_interop_peer`（`bash scripts/check-kvt-interop.sh`：Rust 写 → Java 按精确 `commit_ts` 读，再反向；对账 value/`mod_revision`/`create_revision` 与 Watch 批 `commit_ts`） |
 | 性能/容量/长稳（#174） | ⛔ 未达标 | 已跑：`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 全绿、多 Region ≥80% 硬闸通过（数字见 `performance.md`）；**未跑**：sequencer 吞吐/OCC 冲突率/写放大/watch lag/split 停顿、**72h soak**；ValidationIndex 容量与区间删除 apply 成本两个残余未收口 |
 | 混沌/Jepsen（#175） | ⛔ 未达标 | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）；新增 v2 场景 `kv_t_g6_chaos_v2_test` 能跑，但**约 1/10 运行失败**（已提交事务 60s 内读不到），根因未收口，未接入门禁（见 #175） |
 | Ops runbook/监控（#176） | ✅ | `monitoring/prometheus-rules.yml` + `docs/production/ops/runbook.md`；`bash scripts/check-gate-drills.sh`（每条告警必须有可达 runbook 锚点） |
@@ -44,8 +44,7 @@ CI 基线：main 的 `workspace tests`、三片 test shard、两个 chaos job、
 2. #174：补 sequencer 吞吐、OCC 冲突/重试、写放大、watch lag、split/merge 停顿的实测；**执行 72h soak** 并保留报告工件（`scripts/soak-72h.sh`）。
 3. #174 残余：校验区间索引容量（`/_sys/seq/iidx/` 无 GC）与区间删除 apply 成本。
 4. #169 残余：恢复后 Watch stream 端到端；在线备份/跨节点恢复要么实现、要么在 `boundaries.md` 明确排除并同步 ADR（当前 B-KVT-12 已排除在线/跨节点，但 issue 仍未关）。
-5. #172 残余：`java-example` v2 示例 + 跨语言互操作脚本。
-6. 本节 1–5 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
+5. 本节 1–4 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
 
 ## 4. 签字记录
 
