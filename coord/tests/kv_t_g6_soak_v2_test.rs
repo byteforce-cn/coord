@@ -21,6 +21,7 @@
 //! - `KVT_CHAOS_ARTIFACT_DIR`：保留节点日志/数据目录（默认随 TempDir 清理）。
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 #[path = "common/mod.rs"]
@@ -37,6 +38,86 @@ const WINDOW: usize = 16;
 const PROGRESS: Duration = Duration::from_secs(60);
 /// 直写计数器 key：落在 region 1（`[.., "m")`）。
 const COUNTER_KEY: &[u8] = b"/soak/counter";
+
+/// 当前阶段（看门狗用：卡住时最后进入的是哪一段）。
+mod phase {
+    pub const IDLE: u64 = 0;
+    pub const TSO: u64 = 1;
+    pub const DIRECT: u64 = 2;
+    pub const READ: u64 = 3;
+    pub const TXN: u64 = 4;
+    pub const VERIFY: u64 = 5;
+    pub const FAULT: u64 = 6;
+
+    pub fn name(value: u64) -> &'static str {
+        match value {
+            TSO => "tso",
+            DIRECT => "direct_put",
+            READ => "read",
+            TXN => "txn",
+            VERIFY => "verify",
+            FAULT => "fault_injection",
+            _ => "idle",
+        }
+    }
+}
+
+/// 最后一次取得进展的 UNIX 秒（每完成一轮/一次故障注入都更新）。
+static LAST_PROGRESS: AtomicU64 = AtomicU64::new(0);
+/// 当前阶段（见 [`phase`]）。
+static CURRENT_PHASE: AtomicU64 = AtomicU64::new(phase::IDLE);
+
+fn mark_progress() {
+    LAST_PROGRESS.store(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        Ordering::Relaxed,
+    );
+}
+
+fn enter(phase: u64) {
+    CURRENT_PHASE.store(phase, Ordering::Relaxed);
+    mark_progress();
+}
+
+/// 卡住检测：超过 `KVT_SOAK_STALL_SECS`（默认 600s）没有进展就打印阶段并中止。
+///
+/// 72h 长跑必须自己终结「挂住」：否则进程永远停在 park 上，报告既不通过也不失败，
+/// 「未跑」就被伪装成了「还在跑」。中止（而不是 panic）保证 cargo test 立刻失败。
+fn spawn_watchdog() {
+    let limit = env_secs("KVT_SOAK_STALL_SECS", Some(600)).max(30);
+    std::thread::spawn(move || {
+        let mut stalled_since: Option<u64> = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(15));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = LAST_PROGRESS.load(Ordering::Relaxed);
+            if last == 0 {
+                continue;
+            }
+            let idle = now.saturating_sub(last);
+            if idle < limit {
+                stalled_since = None;
+                continue;
+            }
+            let since = *stalled_since.get_or_insert(now);
+            eprintln!(
+                "soak: WATCHDOG no progress for {idle}s (phase={}, stalled_for={}s, limit={limit}s)",
+                phase::name(CURRENT_PHASE.load(Ordering::Relaxed)),
+                now.saturating_sub(since),
+            );
+            if idle >= limit.saturating_mul(2) {
+                eprintln!("soak: WATCHDOG aborting: the harness is wedged, not making progress");
+                std::process::abort();
+            }
+        }
+    });
+}
 
 fn env_secs(name: &str, default: Option<u64>) -> u64 {
     match std::env::var(name) {
@@ -115,8 +196,10 @@ fn soak_v2_mixed_workload_stays_consistent() {
     let deadline = started + Duration::from_secs(secs);
     eprintln!("soak: start duration={secs}s fault_interval={fault_secs}s window={WINDOW}");
 
+    spawn_watchdog();
     let mut cluster = V2Cluster::start();
     let addrs = cluster.addrs();
+    mark_progress();
 
     let mut window: VecDeque<(Vec<u8>, Vec<u8>, i64)> = VecDeque::new();
     let mut last_ts = 0u64;
@@ -132,6 +215,7 @@ fn soak_v2_mixed_workload_stays_consistent() {
         iterations += 1;
 
         // 1) TSO 严格单调（换 leader / 重启后也不复用、不回退）。
+        enter(phase::TSO);
         let ts = runtime().block_on(allocate_ts(&addrs));
         assert!(
             ts > last_ts,
@@ -140,9 +224,11 @@ fn soak_v2_mixed_workload_stays_consistent() {
         last_ts = ts;
 
         // 2) 直写 + safe_ts 读回：水位必须能追上最新写入。
+        enter(phase::DIRECT);
         let counter = format!("s{iterations}");
         let written_ts =
             runtime().block_on(direct_put(&addrs, COUNTER_KEY, counter.as_bytes())) as u64;
+        enter(phase::READ);
         wait_read(
             &addrs,
             COUNTER_KEY,
@@ -158,6 +244,7 @@ fn soak_v2_mixed_workload_stays_consistent() {
         let right = format!("zz-soak-{tag:08}").into_bytes();
         // 与夹具的写入值保持一致：`commit_txn` 写入 `txn-{tag}`。
         let value = format!("txn-{tag}");
+        enter(phase::TXN);
         let commit_ts = runtime().block_on(commit_txn(&addrs, &left, &right, tag));
         let commit_ts_i64 = commit_ts;
         let commit_ts = commit_ts as u64;
@@ -172,6 +259,7 @@ fn soak_v2_mixed_workload_stays_consistent() {
         }
 
         // 4) 抽验窗口内最旧一条（滚动覆盖，内存有界）。
+        enter(phase::VERIFY);
         if let Some((key, expected, ts)) = window.front() {
             let key = key.clone();
             let expected = expected.clone();
@@ -185,6 +273,7 @@ fn soak_v2_mixed_workload_stays_consistent() {
             );
         }
 
+        mark_progress();
         if Instant::now() >= next_progress {
             eprintln!(
                 "soak: iterations={iterations} elapsed={}s tso={last_ts} committed={} last_read_ts={}",
@@ -197,7 +286,9 @@ fn soak_v2_mixed_workload_stays_consistent() {
 
         if let Some(at) = next_fault {
             if Instant::now() >= at {
+                enter(phase::FAULT);
                 fault_region0_leader(&mut cluster);
+                mark_progress();
                 next_fault = next_fault.map(|at| at + Duration::from_secs(fault_secs));
                 // 故障窗口后重新校准进度心跳，避免把暂停误读成卡住。
                 next_progress = Instant::now() + PROGRESS;
