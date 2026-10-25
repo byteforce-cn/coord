@@ -28,22 +28,27 @@ CI 基线：main 的 `workspace tests`、三片 test shard、两个 chaos job、
 |:--|:--|:--|
 | v2 全链路 e2e（#168） | ✅ | `kv_t_g6_full_chain_test::test_full_chain_tso_txn_watch_split_merge` |
 | v1 冻结与服务面收敛（#173） | ✅ | `kv_t_g6_v1_freeze_test`（4 例）；`[multi_raft].legacy_migration` 与 `[kv_t]` 互斥 |
-| 备份/恢复（#169） | ⚠️ 部分 | `backup_cli_test`（save→restore：TSO 不复用/revision 不倒退/Commit Log 连续/清单 fail-closed）；**未做**：在线一致性备份、跨节点目录恢复、恢复后完整 Watch stream 的端到端用例 |
+| 备份/恢复（#169） | ✅ | `backup_cli_test`（save→restore：TSO 不复用/revision 不倒退/Commit Log 连续/清单 fail-closed）；恢复后 Watch 连续 `test_backup_restore_keeps_watch_stream_continuous`（备份前 cursor 续订：pre-backup 历史 → 恢复后新写，无洞；`start_revision` 重读 ts1→ts2→ts3 全可读）；窗口边界 `test_backup_restore_before_retention_is_history_unavailable`（`gc_before_ts` 随备份恢复，低于它的起点两次请求都终态 `OUT_OF_RANGE` + `HISTORY_UNAVAILABLE`）。重启可见性依赖 `region_restart_test`（PR #264） |
 | Agent 数据面 v2（#170） | ✅ | `kv_t_g6_agent_services_v2_test::test_v2_cluster_serves_all_builtin_services`（15 个非 MQ 内建服务在真实 v2 集群注册并各调一次；idgen 走 segment ⇒ v2 Txn CAS）；`agent_v2_*_proxy_test`、`agent_v2_mode_test` |
 | Workflow/MQ fail-closed（#171） | ✅ | `agent_workflow_durable_gate_test`（6 例：v2 拒绝 mq / workflow_durable，纯 KV workflow 可用）；`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
 | Rust client / Java SDK v2（#172） | ✅ | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；`java-example` v2 示例 `KvTV2Example`（`bash java-example/scripts/run-v2-example.sh`，非 v2 集群退出码 2，无 v1 降级）；跨语言互操作 `KvTInteropIntegrationTest` + `kvt_interop_peer`（`bash scripts/check-kvt-interop.sh`：Rust 写 → Java 按精确 `commit_ts` 读，再反向；对账 value/`mod_revision`/`create_revision` 与 Watch 批 `commit_ts`） |
-| 性能/容量/长稳（#174） | ⛔ 未达标 | 已跑：`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 全绿、多 Region ≥80% 硬闸通过（数字见 `performance.md`）；**未跑**：sequencer 吞吐/OCC 冲突率/写放大/watch lag/split 停顿、**72h soak**；ValidationIndex 容量与区间删除 apply 成本两个残余未收口 |
-| 混沌/Jepsen（#175） | ⛔ 未达标 | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）；新增 v2 场景 `kv_t_g6_chaos_v2_test` 能跑，但**约 1/10 运行失败**（已提交事务 60s 内读不到），根因未收口，未接入门禁（见 #175） |
+| 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§6，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**未达标**：split/merge 停顿未测；**72h soak 运行中**（server commit `4633507`，start 2026-10-25T07:44:11Z），完成前不算通过 |
+| 混沌/Jepsen（#175） | ⚠️ 部分 | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）；v2 决策面故障 `kv_t_g6_chaos_v2_test::chaos_v2_mixed_writes_survive_decision_leader_loss`（3 进程 + kill -9 / SIGSTOP region 0 leader + 混合事务/直写；断言 commit_ts 可读、`mod_revision==commit_ts`、safe_ts 追上、无内部不变量锚点）已接入 `chaos-kill9-soak` job，连续 37 次运行无失败。此前「约 1/10 读不到」的根因：**PD 在首个调度 tick 合并两个空 Region**，merge watermark 之后的旧 revision 按设计返回 `HISTORY_UNAVAILABLE`（B-KVT-10），旧夹具把错误吞成「不可读」。**未覆盖**：网络分区注入、split/merge 迁移中断、shard seal stall、快照恢复中断 |
 | Ops runbook/监控（#176） | ✅ | `monitoring/prometheus-rules.yml` + `docs/production/ops/runbook.md`；`bash scripts/check-gate-drills.sh`（每条告警必须有可达 runbook 锚点） |
 | ADR accepted / 文档一致 | ✅ | ADR-0015 状态 accepted；`scripts/check-doc-refs.sh` 0 悬空 |
 | 发布 sign-off | ⛔ | §4 未填 |
 
 ## 3. 关闭 G6 的硬条件（当前未满足）
 
-1. #175：v2 故障注入的**未解释失败**收口（先把失败做成可重复种子/时间线，再定位 apply 游标/快照 install/换届竞态），然后把 `kv_t_g6_chaos_v2_test` 接入 CI。
-2. #174：补 sequencer 吞吐、OCC 冲突/重试、写放大、watch lag、split/merge 停顿的实测；**执行 72h soak** 并保留报告工件（`scripts/soak-72h.sh`）。
-3. #174 残余：校验区间索引容量（`/_sys/seq/iidx/` 无 GC）与区间删除 apply 成本。
-4. #169 残余：恢复后 Watch stream 端到端；在线备份/跨节点恢复要么实现、要么在 `boundaries.md` 明确排除并同步 ADR（当前 B-KVT-12 已排除在线/跨节点，但 issue 仍未关）。
+1. #174：**72h v2 soak 仍在运行**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，server
+   commit `4633507`）——完成且证据目录里 `soak-report.md` 为通过，才算这一条达标。
+2. #174：**split/merge 停顿未测**（语义已由 g5 套件覆盖；停顿/失败率没有数字，
+   不写「达标」）。其余事务面数字已落在 `performance.md` §6。
+3. #175：**混沌矩阵未覆盖**：网络分区注入、split/merge 迁移中断、shard seal stall、
+   快照恢复中断。要么补实现，要么按 D10 走 ADR scope 裁定——不得用「已覆盖
+   kill/pause」代替整张矩阵。
+4. 容量无 GC 已在 `boundaries.md` B-KVT-13 明确停止（D10：停，不静默）；给
+   `start_ts` 定下限后再做 GC 属后续版本。
 5. 本节 1–4 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
 
 ## 4. 签字记录

@@ -4535,6 +4535,18 @@ impl<B: StorageBackend> MvccStorage<B> {
                         count += 1;
                         continue;
                     }
+                    // fail-closed：决策的数据无法在本 Region 落地（revision 已越过
+                    // 它且没有 changelog 证据）。游标停在这里，safe_ts 会被它封住；
+                    // 日志必须给出定位所需的三个水位，否则只剩「读不到」。
+                    tracing::error!(
+                        region_id = logged.map(|log| log.region_id),
+                        commit_ts,
+                        current_revision = current,
+                        decision_cursor = through,
+                        mutations = mutations.len(),
+                        "commit decision is behind the applied revision without a changelog \
+                         record; apply stops (safe_ts stays pinned)"
+                    );
                     break;
                 }
 

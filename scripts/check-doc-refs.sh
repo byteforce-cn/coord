@@ -19,7 +19,7 @@ import pathlib
 import re
 import sys
 
-SKIP_DIRS = {"target", "node_modules", ".git", ".ua", ".codegraph", "dist", "__pycache__"}
+SKIP_DIRS = {"target", "node_modules", ".git", ".ua", ".codegraph", "dist", "__pycache__", ".superpowers"}
 # 一次性工作清单不属发布树（按后缀排除，避免在脚本里固化其文件名）。
 EXCLUDE_SUFFIXES = ("-CHECKLIST.md",)
 SCAN_EXTS = {".md", ".rs", ".sh", ".toml", ".yml", ".yaml", ".xml", ".java", ".proto", ".py"}
