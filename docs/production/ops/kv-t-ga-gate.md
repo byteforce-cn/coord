@@ -43,9 +43,11 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
 
 ## 3. 关闭 G6 的硬条件（当前未满足）
 
-1. #174：**72h v2 soak 仍在运行**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，server
-   commit `4633507`，ETA 2026-10-28T07:57Z）——完成且证据目录里 `soak-report.md`
-   为通过，才算这一条达标。截至 2026-10-25T10:55Z：4300+ 轮、35 次 kill -9 region 0
+1. #174：**72h v2 soak 运行中**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，2026-10-25T12:26:36Z
+   起，server commit `4633507` / main `c48d384`，ETA 2026-10-28T12:26:36Z）——完成且证据
+   目录里 `soak-report.md` 为通过才算达标。**注意**：该实例构建早于 #269
+   （log_store / snapshot_limiter / PD split-id 修复），不含这些改动；若签字前
+   server 代码再变，必须在最终 GA 提交上重跑 72h，不能拿旧实例替代。截至 2026-10-25T10:55Z：4300+ 轮、35 次 kill -9 region 0
    leader 后恢复、节点日志无内部不变量锚点。
 2. #174：**split/merge 停顿未测，且自动 split/merge 路径仍有未修缺陷**（§3.5
    2–3）：多 Region 自动 split 在「执行节点不是目标 Region leader」时以
@@ -66,7 +68,7 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    `start_ts` 定下限后再做 GC 属后续版本。
 5. 本节 1–4 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
 
-## 3.5 本轮故障矩阵抓出的缺陷（已修，带回归用例）
+## 3.5 本轮故障矩阵抓出的缺陷（3 个已修 / 2 个 GA 阻塞未修）
 
 1. **快照限速让小快照永久卡住**：`SnapshotRateLimiter` 的桶容量 = 速率；
    `transmit` 按 2MiB 分块申请，`rate < 2MiB` 时 `acquire(2MiB)` 永远攒不够
