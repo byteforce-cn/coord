@@ -481,6 +481,23 @@ impl CoordNode {
         mvcc: &MvccStorage<RedbBackend>,
         commit_ts: u64,
     ) -> Result<(), tonic::Status> {
+        let budget = std::time::Duration::from_millis(self.kvt().config().read_ts_wait_ms.max(1));
+        self.guard_direct_write_commit_ts_within(region_id, mvcc, commit_ts, budget)
+            .await
+    }
+
+    /// [`Self::guard_direct_write_commit_ts`] 的显式等待预算版本。
+    ///
+    /// 后台重试 worker（租约清理）每拍都会重来一次，单拍只给短预算：一个 Region
+    /// 的 pending 决策不能把同批其它 Region 的清理串行拖住（D12.3 只要求把追不上的
+    /// 那个 Region 留在 pending）。请求路径仍用 `[kv_t].read_ts_wait_ms`。
+    pub(crate) async fn guard_direct_write_commit_ts_within(
+        &self,
+        region_id: RegionId,
+        mvcc: &MvccStorage<RedbBackend>,
+        commit_ts: u64,
+        budget: std::time::Duration,
+    ) -> Result<(), tonic::Status> {
         if !self.kvt().is_enabled()
             || !self.kvt().is_implemented(crate::kvt::KvTCapability::Txn)
             || self.commit_sequencer().is_none()
@@ -490,8 +507,7 @@ impl CoordNode {
 
         let started = tokio::time::Instant::now();
         let poll = std::time::Duration::from_millis(10);
-        let deadline =
-            started + std::time::Duration::from_millis(self.kvt().config().read_ts_wait_ms.max(1));
+        let deadline = started + budget.max(std::time::Duration::from_millis(1));
         let mut waited = false;
         let lag_error = |detail: String| {
             if let Some(metrics) = &self.metrics {

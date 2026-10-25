@@ -34,6 +34,9 @@ const LEASE_V2_MAX_REQUEST_ID: usize = 256;
 const LEASE_V2_MAX_KEYS: usize = 10_000;
 
 const REVOKER_TICK: Duration = Duration::from_millis(100);
+/// 清理拍内等 pending 决策的预算：worker 每 [`REVOKER_TICK`] 重试一次，单拍只做
+/// 短探测，别让一个 Region 的 pending 决策串行拖住同批其它 Region 的清理。
+const REVOKER_GUARD_PROBE: Duration = Duration::from_millis(100);
 const EXPIRY_TICK: Duration = Duration::from_millis(250);
 /// 周期性重扫已 revoke 记录（快照安装跳过日志 apply 时没有广播）。
 const REVOKER_RESCAN_TICKS: u32 = 600;
@@ -510,7 +513,7 @@ async fn cleanup_ordered_behind_decisions(
     commit_ts: u64,
 ) -> bool {
     match node
-        .guard_direct_write_commit_ts(region_id, mvcc, commit_ts)
+        .guard_direct_write_commit_ts_within(region_id, mvcc, commit_ts, REVOKER_GUARD_PROBE)
         .await
     {
         Ok(()) => true,
