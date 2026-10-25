@@ -191,6 +191,23 @@ impl LogStore {
         Ok(committed.is_some())
     }
 
+    /// 是否已有任何持久化 raft 状态（committed / vote / 日志条目）。
+    ///
+    /// [`Self::is_initialized`] 只看 committed 元数据：一个被 `initialize()` 过、
+    /// 但 quorum 未上线因而**从未提交**过任何条目的组（成员表在日志里、vote 已
+    /// 落盘）会被误判成「新组」。重启时再次 `initialize()` 会被 openraft 拒绝
+    /// （`NotAllowed`），而失败前创建的 core 仍持有 store 锁，同进程重试会撞上
+    /// 「Database already open」。装配路径必须用本方法判断「是否需要初始化」。
+    pub async fn has_prior_state(&mut self) -> Result<bool, io::Error> {
+        if self.is_initialized()? {
+            return Ok(true);
+        }
+        if self.read_vote().await?.is_some() {
+            return Ok(true);
+        }
+        Ok(self.get_log_state().await?.last_log_id.is_some())
+    }
+
     // ──── 内部辅助方法 ────
 
     /// 读取单条元数据（vote/committed/last_purged）

@@ -2300,7 +2300,7 @@ async fn run_server(
 
     // 5. 构建 Raft 栈
     // 5a. Raft LogStore（Redb 持久化，独立实例 raft-log/log.db）
-    let log_store = LogStore::new(&data_dir)
+    let mut log_store = LogStore::new(&data_dir)
         .await
         .map_err(|e| format!("create raft log store: {e}"))?
         .with_snapshot_tracker(Arc::clone(&snapshot_tracker));
@@ -2626,8 +2626,13 @@ async fn run_server(
     // 5f. 在创建 Raft 实例之前检查是否已初始化
     //     raft.metrics() 在 Raft::new() 返回后可能尚未被异步 core task 填充，
     //     因此直接查询 LogStore 更为可靠。
+    //     `is_initialized()` 只看 committed 行：被 initialize 过、但 quorum 未
+    //     上线因而从未提交的空组会被误判成新组（见 `LogStore::has_prior_state`）。
     let already_initialized = if bootstrap {
-        log_store.is_initialized().unwrap_or(false)
+        log_store
+            .has_prior_state()
+            .await
+            .map_err(|e| format!("read raft state: {e}"))?
     } else {
         false
     };
@@ -2671,9 +2676,23 @@ async fn run_server(
                     members.insert(node.id, coord_server::raft::new_basic_node(&node.raft));
                 }
             }
-            raft.initialize(members)
-                .await
-                .map_err(|e| format!("raft initialize: {e}"))?;
+            if let Err(err) = raft.initialize(members).await {
+                // 对端已初始化（并发 bootstrap/重启）：按「等 leader 复制」继续。
+                if matches!(
+                    err,
+                    openraft::errors::RaftError::APIError(
+                        openraft::error::InitializeError::NotAllowed(_)
+                    )
+                ) {
+                    tracing::info!(
+                        "Raft cluster was initialized elsewhere; waiting for replication"
+                    );
+                } else {
+                    // 释放 store 锁，避免同进程重试撞 `Database already open`。
+                    let _ = raft.shutdown().await;
+                    return Err(format!("raft initialize: {err}").into());
+                }
+            }
         }
     } else if let Some(join_addr) = cfg.cluster.join_addr.clone() {
         // JoinRequest 流程 —— 新节点向 join_addr 发送 JoinRequest，

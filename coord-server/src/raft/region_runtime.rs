@@ -169,7 +169,7 @@ pub async fn spawn_region_runtime(
             .map_err(|e| Error::Storage(format!("create region {region_id} mvcc: {e}")))?,
     );
     let tracker = Arc::new(SnapshotTracker::default());
-    let log_store = LogStore::new(&data_dir)
+    let mut log_store = LogStore::new(&data_dir)
         .await
         .map_err(|e| Error::Storage(format!("open region {region_id} raft log: {e}")))?
         .with_snapshot_tracker(Arc::clone(&tracker));
@@ -193,12 +193,15 @@ pub async fn spawn_region_runtime(
     // RegionRuntime（与 main.rs 单 Raft 的 node_raft_log 同理），再移入 raft。
     let raft_log_store = log_store.clone();
 
-    // 重启引导（与 main.rs 单 Raft 的 already_initialized 守卫同理）：bootstrap
-    // 节点重启时 Region 日志已持久化，重复 initialize 会报错——仅在日志未初始化
-    // 时才需要 initialize（首次启动）；非首次启动靠既有日志 + leader 复制收敛。
-    let already_initialized = log_store
-        .is_initialized()
-        .map_err(|e| Error::Storage(format!("region {region_id}: read initialized state: {e}")))?;
+    // 重启引导（与 main.rs 单 Raft 的守卫同理）：只对**没有任何持久化 raft
+    // 状态**的组 initialize。`is_initialized()` 只看 committed 行，会把
+    // 「initialize 过、但 quorum 未上线因而从未提交」的空组误判成新组，重启时
+    // 重复 initialize 被 openraft 拒绝并留下持有 store 锁的 core（同进程重试撞
+    // `Database already open`）。判据见 `LogStore::has_prior_state`。
+    let has_prior_state = log_store
+        .has_prior_state()
+        .await
+        .map_err(|e| Error::Storage(format!("region {region_id}: read raft state: {e}")))?;
 
     // per-region 网络门面（共享节点连接池 + 绑定 region_id）
     let region_factory = RegionRaftNetworkFactory::new(shared_factory.clone(), region_id);
@@ -206,20 +209,39 @@ pub async fn spawn_region_runtime(
         .await
         .map_err(|e| Error::Internal(format!("create region {region_id} raft: {e}")))?;
 
-    // 成员初始化（仅 bootstrap 节点，且仅当本 Region 日志尚未初始化）
-    if initialize && !already_initialized {
+    // 成员初始化（仅 bootstrap 节点，且仅当本 Region 没有任何 raft 状态）
+    if initialize && !has_prior_state {
         let members: BTreeMap<u64, RaftNode> = meta
             .voter_peers()
             .map(|p| (p.node_id, new_basic_node(&p.raft_addr)))
             .collect();
         if members.is_empty() {
+            // 失败前必须释放 store 锁：否则调用方重试同一目录会撞 `Database
+            // already open`（本函数是装配入口，重试由上层按拍执行）。
+            let _ = raft.shutdown().await;
             return Err(Error::InvalidArgument(format!(
                 "region {region_id} has no voter peers; cannot initialize"
             )));
         }
-        raft.initialize(members)
-            .await
-            .map_err(|e| Error::Internal(format!("initialize region {region_id}: {e}")))?;
+        if let Err(err) = raft.initialize(members).await {
+            // 对端已建组/并发初始化赢了：按「等 leader 复制」继续，不是错误。
+            if matches!(
+                err,
+                openraft::errors::RaftError::APIError(
+                    openraft::error::InitializeError::NotAllowed(_)
+                )
+            ) {
+                tracing::debug!(
+                    region_id,
+                    "region group was initialized elsewhere before this node; waiting for replication"
+                );
+            } else {
+                let _ = raft.shutdown().await;
+                return Err(Error::Internal(format!(
+                    "initialize region {region_id}: {err}"
+                )));
+            }
+        }
     }
 
     // 网络注册（RaftRpcService 按 region_id 解复用）
