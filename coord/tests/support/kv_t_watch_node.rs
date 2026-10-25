@@ -1,17 +1,24 @@
 //! KV-T G4 e2e 共享夹具：两数据 Region + region 0 shard 元数据 + Commit Log shard 协调器。
 //!
-//! 由 `kv_t_g4_watch_coordinator_test`（直接调 coordinator）与
-//! `kv_t_g4_watch_rpc_test`（真实 gRPC 流）共用。夹具不启动 gRPC 服务；
-//! RPC 测试用 [`WatchNode::serve`] 按需挂载。
+//! 由 `kv_t_g4_watch_coordinator_test`（直接调 coordinator）、
+//! `kv_t_g4_watch_rpc_test`（真实 gRPC 流）与 `backup_cli_test`（备份/恢复后
+//! 重启）共用。夹具不自动启动 gRPC 服务；RPC 用例用 [`WatchNode::serve`] 按需挂载。
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tonic::transport::Server;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::{Channel, Server};
+use tonic::{Request, Streaming};
 
+use coord_proto::watch::v2 as watch_v2;
+use coord_proto::watch::v2::watch_client::WatchClient;
+use watch_v2::watch_request::Request as WatchFrame;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta, StorageConfig};
 use coord_proto::maintenance::maintenance_server::MaintenanceServer;
@@ -92,26 +99,54 @@ pub struct WatchNode {
     pub shards: Arc<CommitLogShardManager>,
     pub now: Arc<AtomicU64>,
     pub metrics: Arc<Metrics>,
-    _dir: TempDir,
+    /// 数据目录（region 0 在根、数据 Region 在 `regions/region-*`）。
+    base: PathBuf,
+    /// 夹具自建临时目录的所有权：`None` = 目录由调用方持有（备份/恢复用例要
+    /// 在停机后原地备份→恢复→重启，目录不能被夹具 Drop 删掉）。
+    _dir: Option<TempDir>,
     _factory: RaftNetworkFactoryImpl,
     _rpc: RaftRpcService,
 }
 
 impl WatchNode {
+    /// 临时目录 + 首次启动（含种子数据）。
     pub async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().to_path_buf();
+        Self::build(base, Some(dir), true).await
+    }
+
+    /// 在调用方持有的目录上首次启动（夹具不删该目录）。
+    pub async fn start_at(base: PathBuf) -> Self {
+        Self::build(base, None, true).await
+    }
+
+    /// 在既有数据目录上以同一 `node_id` 重启：region 0、数据 Region 与 Commit
+    /// Log shard 组全部从磁盘恢复，不重新播种、不重新预取 TSO 高水位——两者都
+    /// 已随数据目录持久化（重启后重复 `initialize` 会失败，见
+    /// `spawn_region_runtime` 的 `already_initialized` 守卫）。
+    pub async fn restart_at(base: PathBuf) -> Self {
+        Self::build(base, None, false).await
+    }
+
+    async fn build(base: PathBuf, dir: Option<TempDir>, seed: bool) -> Self {
         let addr = format!("127.0.0.1:{}", find_port());
 
-        // region 0 system raft（shard 元数据权威）
-        let root_dir = base.join("region-0");
+        // region 0 system raft（shard 元数据权威）。目录布局与生产一致：region 0
+        // 直接用数据目录根（`store.db` / `raft-log/` / `snapshots/`），
+        // `coord backup` 也按这个布局认定数据目录。
+        let root_dir = base.clone();
         std::fs::create_dir_all(&root_dir).unwrap();
-        let backend = RedbBackend::open(&root_dir, &StorageConfig::default()).unwrap();
+        let backend = RedbBackend::open(&root_dir, &StorageConfig::default())
+            .unwrap_or_else(|e| panic!("open root {} failed: {e}", root_dir.display()));
         let root_mvcc =
             Arc::new(MvccStorage::new_with_revision_mode(backend, RevisionMode::CommitTs).unwrap());
         let root_factory = RaftNetworkFactoryImpl::new(1);
         root_factory.register_node(1, addr.clone());
-        let root_log = LogStore::new(&root_dir).await.unwrap();
+        let mut root_log = LogStore::new(&root_dir).await.unwrap();
+        // 只看 committed 会把「initialize 过但从未提交」的组当成新组（见
+        // `LogStore::has_prior_state`）；重启路径必须用同一判据。
+        let already_initialized = root_log.has_prior_state().await.unwrap_or(false);
         let root_sm = StateMachineStore::new(
             Arc::clone(&root_mvcc),
             root_dir.join("snapshots"),
@@ -122,13 +157,15 @@ impl WatchNode {
                 .await
                 .expect("create region 0 raft"),
         );
-        root_raft
-            .initialize(std::collections::BTreeMap::from([(
-                1u64,
-                new_basic_node(&addr),
-            )]))
-            .await
-            .expect("initialize region 0 raft");
+        if !already_initialized {
+            root_raft
+                .initialize(std::collections::BTreeMap::from([(
+                    1u64,
+                    new_basic_node(&addr),
+                )]))
+                .await
+                .expect("initialize region 0 raft");
+        }
 
         // 两个数据 Region（[.., "m") / ["m", ..)）
         let factory = RaftNetworkFactoryImpl::new(1);
@@ -229,7 +266,7 @@ impl WatchNode {
                 Arc::clone(&manager),
                 factory.clone(),
                 rpc.clone(),
-                base,
+                base.clone(),
                 Arc::new(raft_config()),
                 node.kvt().config().clone(),
             )
@@ -239,32 +276,56 @@ impl WatchNode {
 
         let node = Arc::new(node);
         wait_for_leaders(&node, &manager).await;
-        // 种子数据占 `SEED_TS`，TSO 必须从它之上起发：把高水位推到 `SEED_TS+10`
-        // （经 region 0 raft apply，与生产 allocator 一致；直写次序守卫用高水位
-        // 给 safe-ts fence 封顶）。
-        let allocator = TsoAllocator::new(root_raft.as_ref().clone(), 1);
-        let primed = allocator
-            .allocate((SEED_TS + SEED_HEADROOM) as u32)
-            .await
-            .expect("prime TSO high-water");
-        assert!(
-            primed.start_ts <= SEED_TS && primed.end_ts > SEED_TS,
-            "primed batch must cover the seed revision: {primed:?}"
-        );
-        // 种子数据：两个 Region 各有已提交值，prev 值可用于校验完整记录。
         let fixture = Self {
             node,
             manager,
             shards,
             now,
             metrics,
+            base,
             _dir: dir,
             _factory: factory,
             _rpc: rpc,
         };
-        fixture.put_v2(b"aa", b"seed", SEED_TS).await;
-        fixture.put_v2(b"zz", b"seed", SEED_TS).await;
+        if seed {
+            // 种子数据占 `SEED_TS`，TSO 必须从它之上起发：把高水位推到
+            // `SEED_TS+SEED_HEADROOM`（经 region 0 raft apply，与生产 allocator
+            // 一致；直写次序守卫用高水位给 safe-ts fence 封顶）。
+            let allocator = TsoAllocator::new(root_raft.as_ref().clone(), 1);
+            let primed = allocator
+                .allocate((SEED_TS + SEED_HEADROOM) as u32)
+                .await
+                .expect("prime TSO high-water");
+            assert!(
+                primed.start_ts <= SEED_TS && primed.end_ts > SEED_TS,
+                "primed batch must cover the seed revision: {primed:?}"
+            );
+            // 种子数据：两个 Region 各有已提交值，prev 值可用于校验完整记录。
+            fixture.put_v2(b"aa", b"seed", SEED_TS).await;
+            fixture.put_v2(b"zz", b"seed", SEED_TS).await;
+        }
         fixture
+    }
+
+    /// 停机并释放全部存储句柄，返回数据目录。
+    ///
+    /// 停机整节点备份要求数据目录无人持有 redb 锁（`coord backup save` 正是靠
+    /// 这个写锁 fail-closed），因此备份前必须显式停机，不能只等 Drop；返回前
+    /// 探到锁已释放（服务端连接任务可能比停机晚几十毫秒才放掉节点句柄）。
+    pub async fn shutdown(self) -> PathBuf {
+        let base = self.base.clone();
+        for (_, runtime) in self.shards.runtimes() {
+            let _ = runtime.raft.shutdown().await;
+        }
+        for runtime in self.manager.list_runtimes() {
+            let _ = runtime.raft.shutdown().await;
+        }
+        if let Some(raft) = self.node.raft.as_ref() {
+            let _ = raft.shutdown().await;
+        }
+        drop(self);
+        wait_until_data_dir_unlocked(&base).await;
+        base
     }
 
     /// 在随机端口挂载 Maintenance（Leader 发现）+ `coord.watch.v2`。
@@ -321,7 +382,7 @@ impl WatchNode {
         self.manager
             .apply_region_table(&table)
             .expect("apply region table");
-        let base = self._dir.path().to_path_buf();
+        let base = self.base.clone();
         for meta in &table.regions {
             if self.manager.runtime(meta.region_id).is_some() {
                 continue;
@@ -540,6 +601,120 @@ impl WatchNode {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+}
+
+/// 每 Region 与数据目录根的 redb 写锁都必须可独占开：停 Raft 组后句柄是异步
+/// 释放的，`coord backup save` 依赖同一把锁判活，所以夹具在返回前探到锁。
+async fn wait_until_data_dir_unlocked(base: &Path) {
+    let mut dirs = vec![base.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(base.join("regions")) {
+        dirs.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    for dir in dirs {
+        if !dir.join("store.db").is_file() {
+            continue;
+        }
+        loop {
+            match RedbBackend::open(&dir, &StorageConfig::default()) {
+                Ok(backend) => {
+                    drop(backend);
+                    break;
+                }
+                Err(err) => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "data dir {} still holds the redb lock after shutdown: {err}",
+                        dir.display()
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+}
+
+/// 一条真实的 `coord.watch.v2` 客户端流（一次 Create 一条流）。
+#[derive(Debug)]
+pub struct WatchStream {
+    /// 只为了在 Drop 时关闭服务端流；Create 已发出，后续没有客户端帧。
+    _tx: mpsc::Sender<watch_v2::WatchRequest>,
+    stream: Streaming<watch_v2::WatchResponse>,
+}
+
+impl WatchStream {
+    /// 下一帧；空批 ack 也会返回，调用方按事件数决定何时结束。
+    pub async fn next_batch(&mut self) -> watch_v2::WatchResponse {
+        tokio::time::timeout(Duration::from_secs(10), self.stream.message())
+            .await
+            .expect("watch response timed out")
+            .expect("watch stream error")
+            .expect("watch stream closed")
+    }
+
+    /// 收集事件直到至少 `min_events` 条；返回（全部事件，最后一帧）。
+    pub async fn collect(
+        &mut self,
+        min_events: usize,
+    ) -> (Vec<watch_v2::WatchEvent>, watch_v2::WatchResponse) {
+        let mut events = Vec::new();
+        loop {
+            let response = self.next_batch().await;
+            events.extend(response.events.iter().cloned());
+            if events.len() >= min_events {
+                return (events, response);
+            }
+        }
+    }
+}
+
+/// 从 `start_revision` 起订阅（含该 revision；`0` = 当前 watermark + 1）。
+pub fn watch_from(start_revision: u64) -> watch_v2::WatchCreateRequest {
+    watch_v2::WatchCreateRequest {
+        key: Vec::new(),
+        range_end: Vec::new(),
+        start_revision: start_revision as i64,
+        start_cursor: None,
+        prev_kv: false,
+        filter: 1,
+    }
+}
+
+/// 从持久化的 [`WatchCursor`] 精确续订。
+pub fn watch_from_cursor(cursor: WatchCursor) -> watch_v2::WatchCreateRequest {
+    watch_v2::WatchCreateRequest {
+        start_revision: 0,
+        start_cursor: Some(watch_v2::WatchCursor {
+            shard_id: cursor.shard_id,
+            commit_ts: cursor.commit_ts as i64,
+        }),
+        ..watch_from(0)
+    }
+}
+
+/// 打开一条 `coord.watch.v2` 流。首帧（参数错误 / `HISTORY_UNAVAILABLE`）以 RPC
+/// 错误返回，不是空流——终态错误不会在后续帧里“补”出来。
+pub async fn open_watch(
+    addr: &str,
+    create: watch_v2::WatchCreateRequest,
+) -> Result<WatchStream, tonic::Status> {
+    let channel = Channel::from_shared(format!("http://{addr}"))
+        .expect("endpoint")
+        .connect()
+        .await
+        .expect("connect watch v2");
+    let mut client = WatchClient::new(channel);
+    let (tx, rx) = mpsc::channel(4);
+    tx.send(watch_v2::WatchRequest {
+        request: Some(WatchFrame::Create(create)),
+    })
+    .await
+    .expect("send create frame");
+    let stream = client
+        .watch(Request::new(ReceiverStream::new(rx)))
+        .await?
+        .into_inner();
+    Ok(WatchStream { _tx: tx, stream })
 }
 
 pub async fn wait_for_leaders(node: &CoordNode, manager: &RegionManager) {
