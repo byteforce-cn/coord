@@ -4,18 +4,29 @@
 //! 快照区分）：region 0（TSO/元数据/校验索引/shard 表）、数据 Region、Commit
 //! Log shard 与 Raft log/snapshot 一起走。恢复后 TSO 不复用、revision 不倒退、
 //! Watch 历史（Commit Log 行）连续。
+//!
+//! 两条端到端用例在真节点（真实 `WatchCoordinator` + `coord.watch.v2` gRPC 流）
+//! 上做「停机备份 → 删目录 → CLI 恢复 → 同 node_id 重启」：不是只看文件还在，
+//! 而是看恢复后 Watch 能否从备份前的位点读到历史与新写、窗口外是否终态失败。
+
+#[path = "support/kv_t_watch_node.rs"]
+mod watch_node;
 
 use std::path::Path;
 use std::process::{Command, Output};
 
+use coord_core::error_code::error_code_of;
 use coord_core::storage::StorageBackend;
 use coord_core::types::StorageConfig;
+use coord_server::kvt::watch::WatchCursor;
 use coord_server::raft::region_runtime::region_data_dir;
 use coord_server::raft::type_config::CommitLogShardOp;
 use coord_server::storage::commit_log::{CommitChange, CommitRecord};
 use coord_server::storage::commit_log_shard::shard_region_id;
 use coord_server::storage::mvcc::{AppliedLogId, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
+use tonic::Code;
+use watch_node::{open_watch, watch_from, watch_from_cursor, WatchNode};
 
 const TSO_BATCH: u32 = 64;
 const REGION0_REVISION: u64 = 300;
@@ -346,6 +357,189 @@ fn test_backup_restore_fails_closed() {
     ]);
     assert!(!out.status.success());
     assert!(!target4.exists());
+}
+
+/// 备份前的 Watch 位点在恢复后仍然有效：从它续订先补上备份前的历史（无洞），
+/// 再接恢复后的新写。路径与 runbook §3.3 一致（停机 → save → 删目录 → restore）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_backup_restore_keeps_watch_stream_continuous() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("coord-data");
+    let backup = tmp.path().join("backup");
+
+    // 备份前：真节点上先写 ts1，从 ts1 起读真实 gRPC Watch 流并留下客户端已消费
+    // 到的 cursor；再写 ts2，作为「备份前已提交、客户端还没读到」的历史。
+    let node = WatchNode::start_at(data.clone()).await;
+    node.open_first_shard().await;
+    let ts1 = node.commit_pairs(&[(b"aa", b"v1")]).await;
+    let server = node.serve().await;
+    let mut watch = open_watch(&server.addr, watch_from(ts1))
+        .await
+        .expect("open watch before backup");
+    let (events, response) = watch.collect(1).await;
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e.commit_ts as u64)
+            .collect::<Vec<_>>(),
+        vec![ts1],
+        "备份前的流必须先给到起点事件"
+    );
+    let consumed = response.cursor.expect("server cursor");
+    drop(watch);
+    let ts2 = node.commit_pairs(&[(b"bb", b"v2")]).await;
+    assert!(ts2 > ts1, "commit_ts 必须严格递增: {ts1} -> {ts2}");
+    server.shutdown().await;
+
+    // 停机整节点备份 → 删数据目录（模拟从备份重建节点）→ 恢复。
+    node.shutdown().await;
+    let out = coord(&[
+        std::ffi::OsStr::new("backup"),
+        std::ffi::OsStr::new("save"),
+        std::ffi::OsStr::new("--data-dir"),
+        path_arg(&data),
+        std::ffi::OsStr::new("--output"),
+        path_arg(&backup),
+    ]);
+    assert!(
+        out.status.success(),
+        "backup save after shutdown failed: {}",
+        stderr(&out)
+    );
+    std::fs::remove_dir_all(&data).unwrap();
+    let out = coord(&[
+        std::ffi::OsStr::new("backup"),
+        std::ffi::OsStr::new("restore"),
+        std::ffi::OsStr::new("--input"),
+        path_arg(&backup),
+        std::ffi::OsStr::new("--data-dir"),
+        path_arg(&data),
+    ]);
+    assert!(
+        out.status.success(),
+        "backup restore failed: {}",
+        stderr(&out)
+    );
+
+    // 恢复后同 node_id 重启，再写一笔：从备份前的 cursor 续订必须先补 ts2
+    // （备份前历史，不跳）再接 ts3（恢复后新写）。
+    let node = WatchNode::restart_at(data.clone()).await;
+    let ts3 = node.commit_pairs(&[(b"cc", b"v3")]).await;
+    assert!(ts3 > ts2, "恢复后的新写必须拿到更大的 commit_ts");
+    let server = node.serve().await;
+    let mut resumed = open_watch(
+        &server.addr,
+        watch_from_cursor(WatchCursor {
+            shard_id: consumed.shard_id,
+            commit_ts: consumed.commit_ts as u64,
+        }),
+    )
+    .await
+    .expect("resume watch from the pre-backup cursor after restore");
+    let (events, _) = resumed.collect(2).await;
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e.commit_ts as u64)
+            .collect::<Vec<_>>(),
+        vec![ts2, ts3],
+        "恢复后 cursor 续读必须无洞：先 pre-backup 历史，再新写"
+    );
+    drop(resumed);
+
+    // 同一起点用 start_revision 复跑：备份前全部历史 + 恢复后新写都可读。
+    let mut replay = open_watch(&server.addr, watch_from(ts1))
+        .await
+        .expect("replay watch from start_revision after restore");
+    let (events, _) = replay.collect(3).await;
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e.commit_ts as u64)
+            .collect::<Vec<_>>(),
+        vec![ts1, ts2, ts3],
+        "恢复后从 start_revision 重读不得丢任何已提交事务"
+    );
+    drop(replay);
+    server.shutdown().await;
+}
+
+/// 保留窗口已回收的历史在恢复后仍然不可读：低于 `gc_before_ts` 的起点必须是
+/// 终态的 `HISTORY_UNAVAILABLE`（同请求重复发结果一致），而不是空流。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_backup_restore_before_retention_is_history_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("coord-data");
+    let backup = tmp.path().join("backup");
+
+    // 备份前就把保留窗口走完：shard 1 整组回收，其记录不可读。
+    let node = WatchNode::start_at(data.clone()).await;
+    node.open_first_shard().await;
+    let first_ts = node.commit_pairs(&[(b"aa", b"v1")]).await;
+    let second_ts = node.commit_pairs(&[(b"bb", b"v2")]).await;
+    node.wait_until_sealed(1).await;
+    let gc_before = node.shards.table().unwrap().shards[0].end_ts;
+    assert_eq!(
+        gc_before, second_ts,
+        "shard 2 从第一个保留 ts 开始: first={first_ts}"
+    );
+    node.advance_clock_ms(60_000);
+    node.wait_until_gc_before(gc_before).await;
+    node.shutdown().await;
+
+    let out = coord(&[
+        std::ffi::OsStr::new("backup"),
+        std::ffi::OsStr::new("save"),
+        std::ffi::OsStr::new("--data-dir"),
+        path_arg(&data),
+        std::ffi::OsStr::new("--output"),
+        path_arg(&backup),
+    ]);
+    assert!(out.status.success(), "backup save failed: {}", stderr(&out));
+    std::fs::remove_dir_all(&data).unwrap();
+    let out = coord(&[
+        std::ffi::OsStr::new("backup"),
+        std::ffi::OsStr::new("restore"),
+        std::ffi::OsStr::new("--input"),
+        path_arg(&backup),
+        std::ffi::OsStr::new("--data-dir"),
+        path_arg(&data),
+    ]);
+    assert!(
+        out.status.success(),
+        "backup restore failed: {}",
+        stderr(&out)
+    );
+
+    // 回收水位属于 region 0 的 shard 表，必须随目录一起恢复。
+    let node = WatchNode::restart_at(data.clone()).await;
+    assert_eq!(
+        node.shards.table().unwrap().gc_before_ts,
+        gc_before,
+        "回收水位必须随备份一起恢复"
+    );
+    let server = node.serve().await;
+    for attempt in 1..=2 {
+        let err = open_watch(&server.addr, watch_from(1))
+            .await
+            .expect_err("低于 gc_before_ts 的起点必须拒绝，而不是空流");
+        assert_eq!(
+            err.code(),
+            Code::OutOfRange,
+            "第 {attempt} 次：窗口外起点必须是 OUT_OF_RANGE（gc_before_ts={gc_before}）"
+        );
+        assert_eq!(
+            error_code_of(&err).as_deref(),
+            Some("HISTORY_UNAVAILABLE"),
+            "第 {attempt} 次：错误码必须稳定"
+        );
+        assert!(
+            err.message().contains("oldest retained position"),
+            "第 {attempt} 次：必须回显最老可读位点: {}",
+            err.message()
+        );
+    }
+    server.shutdown().await;
 }
 
 fn copy_dir(src: &Path, dst: &Path) {
