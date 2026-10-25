@@ -42,6 +42,8 @@ case "$MODE" in
     DEFAULT_GRPC_PORT=50051
     DEFAULT_RAFT_PORT=50061
     DEFAULT_HTTP_PORT=50071
+    AGENT_DATA_PLANE="v1"
+    AGENT_IDGEN_MODE="snowflake"
     ;;
   v2)
     DEFAULT_RUN_DIR="${TMPDIR:-/tmp}/coord-dev-cluster-v2"
@@ -50,6 +52,10 @@ case "$MODE" in
     DEFAULT_GRPC_PORT=51051
     DEFAULT_RAFT_PORT=51061
     DEFAULT_HTTP_PORT=51071
+    # v2 集群：Agent 内部服务必须走 coord.*.v2（v1 面同时被冻结）。
+    AGENT_DATA_PLANE="v2"
+    # segment 模式经 KV Txn CAS 分配号段——v2 迁移的写入路径判据。
+    AGENT_IDGEN_MODE="segment"
     ;;
   *)
     printf '[dev-cluster] ERROR: unknown mode: %s (expected v1|v2)\n' "$MODE" >&2
@@ -140,6 +146,7 @@ http_addr = "127.0.0.1:${AGENT_HTTP_PORT}"
 data_dir = "${RUN_DIR}/agent"
 discovery_mode = "static"
 static_peers = ["127.0.0.1:${GRPC_PORT}"]
+data_plane = "${AGENT_DATA_PLANE}"
 
 [auth]
 enabled = false
@@ -147,6 +154,7 @@ enabled = false
 [services]
 # Java 集成套件只用核心面（KV/Txn/Lease/Watch/Maintenance + Registry），
 # 但 agent 侧这些服务需要显式开启。
+idgen_mode = "${AGENT_IDGEN_MODE}"
 registry = true
 config_center = true
 lock = true

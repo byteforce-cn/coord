@@ -514,9 +514,15 @@ impl IdGenService {
                 .map_err(|e| format!("failed to CAS id segment '{name}': {e}"))?;
 
             if resp.succeeded {
-                // 更新本地号段：(local_start, local_end]
-                self.cache.write().set_segment(name, local_start, local_end);
-                let first_id = local_start + 1;
+                // 更新本地号段 (local_start, local_end] 并**消费**首个 ID：
+                // 只 set_segment 就返回 local_start+1 会让下一次 try_next_id 再返回
+                // 同一个值（重复 ID）。由 LocalSegment 自己推进 current。
+                let mut cache = self.cache.write();
+                cache.set_segment(name, local_start, local_end);
+                let first_id = cache
+                    .try_next_id(name)
+                    .ok_or("allocated segment is empty")?;
+                drop(cache);
                 tracing::debug!(
                     "IdGenService: allocated segment for '{name}': ({}, {}], first_id={first_id}",
                     local_start,
@@ -767,6 +773,8 @@ mod tests {
 
         let id = cache.try_next_id("test").unwrap();
         assert_eq!(id, 1);
+        // 号段申请返回的首个 ID 必须已被消费：否则下一次分配会重复返回 1。
+        assert_eq!(cache.try_next_id("test"), Some(2));
     }
 
     #[test]
