@@ -3,11 +3,15 @@ name: CI
 # PR 校验与验收标准
 #
 # - fmt / clippy（非测试目标 -D warnings，测试目标警告级）/ panic 校验
-# - 全量 workspace 测试（含 restart_recovery_test / lease_raft_test /
-#   snapshot_transfer_test / snapshot_rpc_test / compaction_raft_test /
-#   m0_recovery_suite 真实二进制套件）
+# - 全量 workspace 测试：152 个 test target 按 hash 分 3 片**并行构建 + 并行执行**
+#   （分片由 scripts/ci-shard.sh 从 cargo metadata 现算，不维护清单），最后由同名
+#   汇总 check `workspace tests` 断言「每片绿 + 合起来覆盖全部单元」（含
+#   restart_recovery_test / lease_raft_test / snapshot_transfer_test /
+#   snapshot_rpc_test / compaction_raft_test / m0_recovery_suite 真实二进制套件）
 # - 前端 lint（coord-ui）
 # - proto 契约（buf lint + 格式 + 对 main 的 breaking 检查）
+# - 插件引擎 feature 门控（默认 / js+wasm / 无引擎）：拆成两个并行 job，由同名汇总
+#   check `plugin engine feature matrix` 统一给出红/绿
 # - 真实故障注入（chaos_real / multi-raft / auth / plugin）：拆成两个并行 job，
 #   由一个汇总 check 统一给出红/绿
 # - 每周性能基准（perf_bench + 劣化 >20% 校验）
@@ -441,21 +445,62 @@ jobs:
             echo "base revision has no buf.yaml; breaking gate active from next merge"
           fi
 
-  test:
-    name: workspace tests
+  # ── 测试面：按 target 分片并行 ────────────────────────────────────────────
+  # 墙钟由 `cargo build --workspace --tests` 决定：152 个集成测试二进制各链一遍
+  # tonic/openraft，实测 19m09s（依赖 + workspace lib 的 base ≈6m，每个二进制 ≈5–13s），
+  # 而执行只占 3m29s ⇒ 并行度必须加在**构建**上，不只是执行。
+  #
+  # 分片不维护清单：每次从 `cargo metadata` 现算（见 scripts/ci-shard.sh），新加的
+  # tests/*.rs 自动进某一片；`verify` 在汇总 job 里断言「合起来 == 全部单元」，并带
+  # 负控制（注入一个 cargo 看不见的测试文件 ⇒ 门禁必须变红）。
+  test-plan:
+    name: test shard plan
     runs-on: ubuntu-latest
-    # 测试 job 显式超时（无 timeout-minutes 时卡死无上限）
+    timeout-minutes: 10
+    outputs:
+      # 矩阵与分片数都来自 scripts/ci-shard.sh。workflow 里不写第二份 [1, 2, 3]：
+      # 「矩阵腿数 / selectors I/N / verify N」三处会漂，漂了就是某片永不执行。
+      matrix: ${{ steps.plan.outputs.matrix }}
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          set -euo pipefail
+          plan="$(bash scripts/ci-shard.sh plan)"
+          matrix="$(printf '%s' "$plan" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["matrix"]))')"
+          shards="$(printf '%s' "$plan" | python3 -c 'import json,sys; print(json.load(sys.stdin)["shards"])')"
+          echo "plan: shards=$shards matrix=$matrix"
+          printf 'matrix=%s\nshards=%s\n' "$matrix" "$shards" >> "$GITHUB_OUTPUT"
+
+  test-shard:
+    name: test shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }}
+    needs: test-plan
+    runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      # 一片红不取消其它片：一次 run 要给出全部分片的结论，而不是首个失败就失去其余执行记录。
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.test-plan.outputs.matrix) }}
+    env:
+      # 只给**测试面**降 debug 等级：codegen 与链接都不再产出完整 DWARF，测试二进制
+      # 与 target 缓存都明显变小（10GB 缓存上限是硬约束）。失败 backtrace 仍保留
+      # 函数名 + 文件:行，丢的只是局部变量；panic 位置来自 panic 现场元数据，不受影响。
+      # chaos-* 必须与本 job 用同一组值，否则共用 target 缓存会互相失效。
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
-          # 与拆分后的 chaos jobs 共用 target：三者都只做
-          # `cargo build --workspace --tests` 的默认 feature 构建，
-          # 共享后只维护一份 ~750MB 缓存（原先 3 份各自约 700MB，且都计入
-          # 10GB 上限、互相驱逐）。
+          # 三个分片 + 两个 chaos job 共用一份 target：都只做默认 feature 的
+          # `cargo build`（库/二进制相同，只有各自的 test target 不同）。
           shared-key: tests
+          # 但**只有 1 号片保存**：每个 job 都保存 = 至少 3 份同内容缓存，在 10GB
+          # 上限下互相驱逐；驱逐一次就是 28 分钟冷编译（实测 push run 全量重编 432
+          # 个依赖）。其余 job 只 Restore——它们要多链的只是自己的测试二进制（≈13–20s）。
+          save-if: ${{ matrix.shard == 1 }}
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
@@ -464,36 +509,116 @@ jobs:
             -o Acquire::https::Timeout=20
           timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
             apt-get install -y protobuf-compiler
-      - name: Build tests
-        run: cargo build --workspace --tests
+      - name: Build this shard's test binaries
+        # 用 `cargo test --no-run` 而不是 `cargo build`：lib/bin 单元要的是**带
+        # cfg(test) 的测试二进制**（`cargo build --lib` 只建库），否则那部分编译会
+        # 落到下面的 run step 里，既看不出耗时也不好归因。
+        run: |
+          set -euo pipefail
+          mapfile -t sel < <(bash scripts/ci-shard.sh selectors --shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }})
+          # 选择符为空 ⇒ cargo 会把 `--no-run` 当成「构建全部 test target」，静默退回
+          # 串行时代的行为；必须显式红。
+          if [ "${#sel[@]}" -eq 0 ]; then
+            echo "::error::分片 ${{ matrix.shard }} 的选择符为空"
+            exit 1
+          fi
+          echo "shard ${{ matrix.shard }}: $(bash scripts/ci-shard.sh count --shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }}) 个单元"
+          cargo test --no-run "${sel[@]}"
       - name: Pre-clean leaked test processes
         # 进程级套件在超时/中断时会留下孤儿 `coord server`（本地实测可积累 30+ 个、
         # 最久 11 小时），它们抢 CPU/端口 → 后续套件出现假红
         # （"raft write timed out (no quorum?)"）。CI 是全新 VM，这步通常是 no-op，
         # 但能保证重跑/自托管 runner 上的确定性。只清理 /tmp/.tmp* 数据目录的进程。
         run: bash scripts/kill-stray-coord-procs.sh
-      - name: Run workspace tests
+      - name: Run workspace tests (this shard)
         # 测试失败即红：不得用「首次失败降级为 warning 并重跑」掩盖不稳定，
         # 真 flaky 必须被修。
         #
         # 失败必须**自描述**：间歇红（同一 SHA 定时跑绿、push 跑红）曾因日志不可取
         # 而无法定位测试。现经包装脚本落盘 + 注解：失败测试名与 panic 位置会以
         # **check-run 注解**（匿名可取）带出。
-        run: bash scripts/ci-run-with-annotations.sh /tmp/ci-workspace-tests.log cargo test --workspace --no-fail-fast
-      - name: Run deterministic simulation suites (gated)
+        run: |
+          set -euo pipefail
+          mapfile -t sel < <(bash scripts/ci-shard.sh selectors --shard ${{ matrix.shard }}/${{ needs.test-plan.outputs.shards }})
+          if [ "${#sel[@]}" -eq 0 ]; then
+            echo "::error::分片 ${{ matrix.shard }} 的选择符为空"
+            exit 1
+          fi
+          bash scripts/ci-run-with-annotations.sh "/tmp/ci-workspace-tests-shard-${{ matrix.shard }}.log" cargo test --no-fail-fast "${sel[@]}"
+      - name: Run deterministic simulation suites (gated, shard 1)
         # sim_jepsen/sim_chaos 是**自建模型**而非系统级证据，用
         # `required-features = ["sim-tests"]` 移出默认套件（避免测试数量虚高）；
-        # 这里显式跑它们，保证"移出默认"不等于"永不运行"。
+        # 这里显式跑它们，保证"移出默认"不等于"永不运行"。它们带 required-features，
+        # 不在任何分片里——`scripts/ci-shard.sh verify` 会断言这条命令真的存在。
+        if: matrix.shard == 1
         run: bash scripts/ci-run-with-annotations.sh /tmp/ci-sim-suites.log cargo test -p coord-server --features sim-tests --test sim_jepsen_test --test sim_chaos_test
+      - name: Doc tests (shard 1)
+        # doc-test 不属于任何分片单元（~5s，且要求每片都跑没有意义）。
+        if: matrix.shard == 1
+        run: bash scripts/ci-run-with-annotations.sh /tmp/ci-doc-tests.log cargo test --workspace --doc
 
-  feature-matrix:
-    name: plugin engine feature matrix
+  test:
+    name: workspace tests
+    # 汇总 check：branch protection 的 required context 仍是这个名字。
+    # `if: always()` 保证依赖失败时本 job 也运行并显式失败，而不是变成 skipped（
+    # skipped 的 required check 会让 PR 永远等不到结论）。
+    needs: [test-plan, test-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - name: Assert every shard succeeded
+        run: |
+          set -euo pipefail
+          result='${{ needs.test-shard.result }}'
+          if [ "$result" != "success" ]; then
+            echo "::error::测试分片未全部通过（matrix 结果：$result）"
+            exit 1
+          fi
+      - name: Coverage gate (every test unit lands in exactly one shard)
+        # 分片全绿 ≠ 覆盖完整：新 target 可能根本没被枚举到（autotests=false、
+        # 自定义 [[test]] 路径、新 crate）。这条门禁把「合起来 == 全部单元」变成机器事实。
+        run: bash scripts/ci-shard.sh verify --shards ${{ needs.test-plan.outputs.shards }}
+      - name: Assert the coverage gate turns red on an injected gap
+        # 与 gate self-check 同口径：检查存在 ≠ 检查生效。让 cargo **看不见**一个已经
+        # 存在的测试文件（coord 加 autotests = false），断言门禁必须变红；随后还原。
+        # CI 是全新 checkout，`git checkout --` 只还原本步的注入。
+        run: |
+          set -euo pipefail
+          bash scripts/ci-shard.sh verify --shards ${{ needs.test-plan.outputs.shards }}
+          cp coord/Cargo.toml /tmp/coord-Cargo.toml.bak
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("coord/Cargo.toml")
+          t = p.read_text(encoding="utf-8")
+          assert "autotests" not in t, "self-check anchor: coord/Cargo.toml 已有 autotests，语义变了"
+          p.write_text(t.replace("[package]", "[package]\nautotests = false", 1), encoding="utf-8")
+          PY
+          if bash scripts/ci-shard.sh verify --shards ${{ needs.test-plan.outputs.shards }} >/dev/null 2>&1; then
+            echo "::error::coverage gate DID NOT fail when cargo stopped seeing the test files — the gate is not effective"
+            exit 1
+          fi
+          cp /tmp/coord-Cargo.toml.bak coord/Cargo.toml
+          echo "OK: coverage gate correctly turned red on the injected drift"
+
+  # 插件引擎 feature 门控。原先一个 job 串行 6 步 = 12m39s（3 个 feature check
+  # 2m15s + 插件单测 3m33s + native-service 3m20s + component 2m17s + wasm 重建
+  # 28s）。两类工作之间没有依赖：checks/单测只读代码，component/wasm 只读 fixture
+  # 与 guest 源码 ⇒ 拆两个 job 并行。共用 `shared-key: plugin-matrix`（同 feature
+  # 集合的依赖只训一份），且**只有 checks job 保存**缓存（同测试面的理由：
+  # 多份同内容缓存在 10GB 上限下会互相驱逐）。
+  feature-matrix-checks:
+    name: 'feature matrix: checks + unit tests'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: plugin-matrix
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
@@ -516,6 +641,26 @@ jobs:
       # 插件指标（调用/trap/加载失败；含 wasm fuel/epoch 分类）——同一 feature 组合下验证。
       - name: Run plugin metrics tests
         run: "cargo test -p coord-agent --lib --features plugin-js,plugin-wasm metrics::"
+
+  feature-matrix-component:
+    name: 'feature matrix: component + wasm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: plugin-matrix
+          save-if: false
+      - name: Install protoc (coord-proto build dependency)
+        run: |
+          set -euo pipefail
+          timeout --kill-after=10 600 sudo apt-get update \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
+          timeout --kill-after=10 600 sudo DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y protobuf-compiler
       # 原生服务 = 真插件（内建插件）：gRPC 服务面由 PluginManager 动态组装，
       # 未启用的服务不得挂载。用真实的 AgentServer + 真实 gRPC 调用验证，而不是
       # 只断言注册表内容（「登记即算」不能作为判据）。
@@ -540,6 +685,28 @@ jobs:
         run: |
           scripts/build-plugin-guest.sh
           cargo test -p coord-agent --test agent_plugin_component_test --features plugin-js,plugin-wasm
+
+  feature-matrix:
+    name: plugin engine feature matrix
+    # 汇总 check：branch protection 的 required context 仍是这个名字（拆分前它由
+    # 单个 job 直接给出）。任一子 job 失败即红；`if: always()` 保证依赖失败时也
+    # 运行并显式失败，而不是变成 skipped。
+    needs: [feature-matrix-checks, feature-matrix-component]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Aggregate feature matrix results
+        run: |
+          set -euo pipefail
+          failed=0
+          for result in '${{ needs.feature-matrix-checks.result }}' '${{ needs.feature-matrix-component.result }}'; do
+            if [ "$result" != "success" ]; then
+              echo "feature matrix sub-job failed (result: $result)" >&2
+              failed=1
+            fi
+          done
+          exit $failed
 
   security-audit:
     name: cargo audit + deny
@@ -593,19 +760,25 @@ jobs:
   # 孤儿 `coord server`/`coord agent` 会抢 CPU/端口，让**后面的**套件出现
   # 「像产品 bug」的假红（本地实测：残留孤儿 → plugin_real_process_test 红；
   # `kill-stray-coord-procs.sh` 清一次 → 同一条命令、同一提交绿）。
-  # 两个 job 与 test job 共用一份 target 缓存（`shared-key: tests`）：
+  # 两个 job 与测试分片共用一份 target 缓存（`shared-key: tests`）：
   # 库/依赖构建相同，只有各自的 test target 不同；每个 job 内部的套件仍逐步
-  # 清孤儿，失败信息按 suite 独立可读。
+  # 清孤儿，失败信息按 suite 独立可读。**本 job 不保存缓存**（`save-if: false`）：
+  # 保存者只有 `test-shard` 的 1 号片，避免同内容的多份缓存互相驱逐。
   chaos-kill9-soak:
     name: chaos (kill9 + soak, real processes)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # 与 test-shard 一致（共用 target 缓存，profile 不同会互相失效）。
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: tests
+          save-if: false
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
@@ -625,10 +798,11 @@ jobs:
         if: always()
         env:
           CHAOS_REAL: "1"
-        # kill9 与 soak 各自起 3 个真实进程 + 6 个代理；二者串行执行避免同机互扰。
+        # `--skip chaos_soak_distributed`：soak 有独立 step（固定 120s），若这里不跳
+        # 它就会用默认 300s 再跑一遍——实测 5 分钟纯重复。
         run: |
           bash scripts/kill-stray-coord-procs.sh
-          bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-kill9.log cargo test -p coord --test chaos_real -- --ignored --nocapture --test-threads=1
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-kill9.log cargo test -p coord --test chaos_real -- --ignored --skip chaos_soak_distributed --nocapture --test-threads=1
       - name: Run distributed soak (smoke, 120s)
         if: always()
         env:
@@ -642,12 +816,17 @@ jobs:
     name: chaos (multi-raft + auth/plugin/object/dos)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # 与 test-shard 一致（共用 target 缓存，profile 不同会互相失效）。
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: tests
+          save-if: false
       - name: Install protoc (coord-proto build dependency)
         run: |
           set -euo pipefail
