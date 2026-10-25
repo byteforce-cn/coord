@@ -14,8 +14,12 @@
 //!   3. 服务端日志里不出现「直写越过 pending decision / decision apply 停在批中」
 //!      这两类内部不变量违反。
 //!
-//! 由 CI 的真实故障注入 job 触发（`#[ignore]`）：
+//! 运行（真实 3 进程，debug 构建即可）：
 //!   `cargo test -p coord --test kv_t_g6_chaos_v2_test -- --ignored --nocapture --test-threads=1`
+//!
+//! **尚未接入 CI**：本套件约 1/10 的运行会在「region 0 leader 暂停」轮次里
+//! 出现「已提交事务 60s 内读不到」（见 #175 的记录）。在根因收口前不把它做成
+//! 门禁——用 flaky 门禁换绿不是证据；但也不能因此删掉复现路径。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
