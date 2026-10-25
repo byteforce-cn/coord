@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-25-kv-t-v2-jepsen-workload-design.md`
 
+**Issue:** #272（GA gate 行：#174 / #175）
+
 > 路径约定：`Files:` 里的 `{name}` 表示**本任务要新建**的文件；命令一律在控制机的 `/root/coord-test`
 > 里执行（`./scripts/...` 是相对该目录的写法）。
 
