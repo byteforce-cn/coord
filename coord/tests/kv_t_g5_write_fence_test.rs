@@ -132,9 +132,16 @@ fn merge_migrator_with_node(fx: &WatchNode, node_id: u64) -> RangeImportMigrator
         Arc::new(move |region_id| manager.runtime(region_id).map(|rt| rt.raft.clone()))
     };
     let targets: Arc<RegionImportTargetResolver> = Arc::new(|_| None);
-    RangeImportMigrator::new(source, targets, ranges, source_raft, Arc::new(NoopDrain))
-        .with_node_id(node_id)
-        .with_donor_fence_wait(Duration::from_secs(1))
+    RangeImportMigrator::new(
+        source,
+        targets,
+        ranges,
+        source_raft,
+        Arc::new(NoopDrain),
+        Arc::new(|_| Ok(None)),
+    )
+    .with_node_id(node_id)
+    .with_donor_fence_wait(Duration::from_secs(1))
 }
 
 /// merge 的 donor 区间也在 cutover 前被 fence：窗口内的直写不会落进被吸收 Region

@@ -231,7 +231,14 @@ fn migrator(
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&target)));
     let ranges: Arc<RegionRangeResolver> =
         Arc::new(|region_id| (region_id == 2).then(|| (b"m".to_vec(), Vec::new())));
-    RangeImportMigrator::new(source, targets, ranges, Arc::new(|_| None), drain)
+    RangeImportMigrator::new(
+        source,
+        targets,
+        ranges,
+        Arc::new(|_| None),
+        drain,
+        Arc::new(|_| Ok(None)),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -506,6 +513,7 @@ async fn test_merge_fails_closed_when_donor_range_is_missing_or_mismatched() {
         missing,
         Arc::new(|_| None),
         RecordingDrain::new(),
+        Arc::new(|_| Ok(None)),
     )
     .migrate(&merge_plan())
     .await
@@ -521,6 +529,7 @@ async fn test_merge_fails_closed_when_donor_range_is_missing_or_mismatched() {
         mismatched,
         Arc::new(|_| None),
         RecordingDrain::new(),
+        Arc::new(|_| Ok(None)),
     )
     .migrate(&merge_plan())
     .await

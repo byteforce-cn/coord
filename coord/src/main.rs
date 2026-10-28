@@ -3976,8 +3976,19 @@ async fn run_server(
                         }),
                         Arc::new(region_shared_factory.clone()),
                     ));
+                let pending_decisions = Arc::clone(&node.storage);
                 pd.install_split_migrator(coord_server::split_merge::range_import_migrator(
-                    manager, &lifecycle, drain,
+                    manager,
+                    &lifecycle,
+                    drain,
+                    // 决策日志在 region 0：导出水位以下的决策必须先 apply，
+                    // 否则目标游标越过它们会永久丢写（直写不产生决策，
+                    // 所以不能用 cursor == revision 当判据）。
+                    Arc::new(move |cursor| {
+                        pending_decisions
+                            .next_sequencer_decision_ts(cursor)
+                            .map_err(|e| format!("read region0 sequencer decisions: {e}"))
+                    }),
                 ));
                 tracing::info!(
                     "KV-T split data migration wired (source=RegionManager runtime, \
