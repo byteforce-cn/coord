@@ -461,10 +461,18 @@ impl CompactProposer for RegionCompactProposer {
 ///
 /// 只把 `Command::ImportRange` / `Command::ImportRangePreserveHistory` /
 /// `Command::ClearImportRange` 提案给目标 Region 的 raft leader：导入必须
-/// 成为日志条目，副本/快照/压缩才对同一状态机收敛。非 leader 节点经
-/// openraft 的转发路径提出（与 `client_write` 的既有语义一致）。
+/// 成为日志条目，副本/快照/压缩才对同一状态机收敛。目标组的 leader 可能不在
+/// 本节点（预创建时成员是完整副本集、选举任意）——`client_write` 只在 leader
+/// 本地可提案，所以装配了 forwarder 时把命令经 `SubmitRegionCommand` 提到
+/// leader 节点；未装配（单节点/测试）时直接本地提案。
 pub struct CoordRangeImportTarget {
     raft: CoordRaft,
+    /// 目标 Region ID（跨节点转发 `SubmitRegionCommand` 的解复用键）。
+    region_id: RegionId,
+    /// 目标组副本地址：新组的成员未必在启动期静态表里，转发前灌进工厂。
+    peers: Vec<(NodeID, String)>,
+    /// 节点间 raft RPC 工厂 + 本节点 ID；`None` = 单节点/测试装配。
+    forwarder: Option<RegionCommandForwarder>,
     /// 等待目标组选出 leader 的上界（0 = 不等待，直接提案）。
     ///
     /// split 目标由 lifecycle 异步预创建：组刚装配时还没有 leader，`client_write`
@@ -473,27 +481,132 @@ pub struct CoordRangeImportTarget {
     leader_wait: Duration,
 }
 
+/// 数据 Region 内部命令的跨节点提案器。
+#[derive(Clone)]
+pub struct RegionCommandForwarder {
+    /// 本节点 ID（leader 在本节点时走本地 `client_write`）。
+    pub node_id: NodeID,
+    pub factory: RaftNetworkFactoryImpl,
+}
+
+/// 转发提案的重试预算/间隔。
+///
+/// 换届窗口里 leader 视图会短暂滞后（选举超时通常 ≥ 1s），所以按**截止时间**
+/// 重试而不是固定次数；导入/清理命令 apply 幂等，重放安全。
+const FORWARD_RETRY_BUDGET: Duration = Duration::from_secs(10);
+const FORWARD_RETRY_POLL: Duration = Duration::from_millis(150);
+
 impl CoordRangeImportTarget {
     /// 从 Region raft 实例构建
     pub fn from_raft(raft: CoordRaft) -> Self {
         Self {
             raft,
+            region_id: 0,
+            peers: Vec::new(),
+            forwarder: None,
             leader_wait: Duration::ZERO,
         }
     }
 
     /// 从 Region 运行时构建（`CoordRaft` Clone 为 Arc bump，廉价）
     pub fn from_runtime(rt: &RegionRuntime) -> Self {
+        let meta = rt.meta();
         Self {
             raft: rt.raft.clone(),
+            region_id: meta.region_id,
+            peers: meta
+                .peers
+                .iter()
+                .map(|peer| (peer.node_id, peer.raft_addr.clone()))
+                .collect(),
+            forwarder: None,
             leader_wait: Duration::ZERO,
         }
+    }
+
+    /// 目标 Region ID（`from_raft` 构不到元数据时由接线层补）。
+    pub fn with_region_id(mut self, region_id: RegionId) -> Self {
+        self.region_id = region_id;
+        self
+    }
+
+    /// 装配跨节点提案（生产接线：目标 leader 可能不在本节点）。
+    pub fn with_forwarder(mut self, node_id: NodeID, factory: RaftNetworkFactoryImpl) -> Self {
+        self.forwarder = Some(RegionCommandForwarder { node_id, factory });
+        self
     }
 
     /// 提案前等待 leader 选举的上界。
     pub fn with_leader_wait(mut self, wait: Duration) -> Self {
         self.leader_wait = wait;
         self
+    }
+
+    /// 把一条内部命令提到目标 Region 的 leader 上提出并等 apply。
+    ///
+    /// 本节点是 leader → 本地 `client_write`；否则经 `SubmitRegionCommand`
+    /// 转发到 leader 节点。换届窗口有界重试（每次刷新 leader 视图）；重试耗尽
+    /// 则整次迁移失败、intent 保留重试。
+    async fn propose(&self, command: Command) -> std::result::Result<Response, String> {
+        self.wait_for_leader().await?;
+        let Some(forwarder) = self.forwarder.as_ref() else {
+            return self.propose_local(command).await;
+        };
+        // 新组的成员地址来自权威表（可能不在启动期静态表里）。
+        for (node_id, addr) in &self.peers {
+            if !addr.is_empty() {
+                forwarder.factory.register_node(*node_id, addr.clone());
+            }
+        }
+        let mut last_err = "target region raft has no leader".to_string();
+        let deadline = tokio::time::Instant::now() + FORWARD_RETRY_BUDGET;
+        while tokio::time::Instant::now() < deadline {
+            match self.raft.current_leader().await {
+                Some(leader) if leader == forwarder.node_id => {
+                    return self.propose_local(command).await;
+                }
+                Some(leader) => {
+                    match forwarder
+                        .factory
+                        .submit_region_command(leader, self.region_id, command.clone())
+                        .await
+                    {
+                        Ok(response) => return Ok(response),
+                        Err(e) => {
+                            tracing::warn!(
+                                region_id = self.region_id,
+                                leader,
+                                error = %e,
+                                "forwarding region command to the target leader failed; retrying"
+                            );
+                            last_err = e;
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        region_id = self.region_id,
+                        "target region has no leader; retrying the forwarded command"
+                    );
+                }
+            }
+            tokio::time::sleep(FORWARD_RETRY_POLL).await;
+        }
+        Err(format!(
+            "target region {} command could not be proposed within {FORWARD_RETRY_BUDGET:?}: \
+             {last_err}",
+            self.region_id
+        ))
+    }
+
+    /// 本地提案（本节点是 leader，或无转发装配的单节点模式）。
+    async fn propose_local(&self, command: Command) -> std::result::Result<Response, String> {
+        let resp = self
+            .raft
+            .client_write(command)
+            .await
+            .map_err(|e| format!("target region raft propose failed: {e}"))?;
+        Ok(resp.response().clone())
     }
 
     /// 等本组选出 leader（有界）。返回 `None` = 已就绪。
@@ -518,16 +631,13 @@ impl CoordRangeImportTarget {
 #[async_trait]
 impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
     async fn reset_range(&self, start: &[u8], end: &[u8]) -> std::result::Result<(), String> {
-        self.wait_for_leader().await?;
         let resp = self
-            .raft
-            .client_write(Command::ClearImportRange {
+            .propose(Command::ClearImportRange {
                 start_key: start.to_vec(),
                 end_key: end.to_vec(),
             })
-            .await
-            .map_err(|e| format!("target region raft clear import range: {e}"))?;
-        match resp.response() {
+            .await?;
+        match resp {
             Response::ImportRangeCleared { .. } => Ok(()),
             other => Err(format!(
                 "target region raft returned unexpected response: {other:?}"
@@ -544,7 +654,6 @@ impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
         seal_prior_history: bool,
         done: bool,
     ) -> std::result::Result<u64, String> {
-        self.wait_for_leader().await?;
         let start_key = start.to_vec();
         let end_key = end.to_vec();
         let command = if seal_prior_history {
@@ -565,17 +674,16 @@ impl crate::split_merge::RangeImportTarget for CoordRangeImportTarget {
             }
         };
         let resp = self
-            .raft
-            .client_write(command)
+            .propose(command)
             .await
             .map_err(|e| format!("target region raft import: {e}"))?;
-        match resp.response() {
+        match resp {
             // 回显的 watermark 必须与本页一致：不一致说明目标 apply 的实现
             // 钉在了别的 revision 上，继续翻页会把两代快照拼进同一个 Region。
             Response::ImportRange {
                 imported,
                 watermark: echoed,
-            } if *echoed == watermark => Ok(*imported),
+            } if echoed == watermark => Ok(imported),
             Response::ImportRange {
                 watermark: echoed, ..
             } => Err(format!(

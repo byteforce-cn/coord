@@ -445,6 +445,65 @@ impl RaftNetworkFactoryImpl {
         Ok(reply.index)
     }
 
+    /// SubmitRegionCommand：把一条数据 Region 内部命令转发到该 Region 的
+    /// leader 节点提出（`client_write` 只有 leader 能本地提出）。
+    ///
+    /// 与 `submit_pd_op` 同一条出站路径（连接池 + TLS/mTLS + 共享密钥 HMAC，
+    /// region_id = 目标 Region）。返回 apply 响应；接收方非 leader 或提出失败
+    /// 时返回 `Err`（调用方刷新 leader 视图后重试；导入命令幂等，重放安全）。
+    pub async fn submit_region_command(
+        &self,
+        target: u64,
+        region_id: u64,
+        command: crate::raft::type_config::Command,
+    ) -> Result<crate::raft::type_config::Response, String> {
+        if self.is_blocked(target) {
+            return Err(format!("node {target} is blocked by the test partition"));
+        }
+        let addr = self
+            .node_addrs
+            .read()
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| format!("no known raft address for node {target}"))?;
+        let client_slot = self.get_or_create_client_slot(target).await;
+        let net = RaftNetworkImpl {
+            target_id: target,
+            target_addr: addr,
+            client_slot,
+            tls_config: self.raft_tls_config.clone(),
+            shared_secret: self.shared_secret.clone(),
+            snapshot_rate_limiter: None,
+            region_id,
+        };
+        let mut client = net
+            .get_client()
+            .await
+            .map_err(|e| format!("connect to node {target}: {e}"))?;
+        let req_payload = serialize_payload(&RegionCommandPayload { region_id, command })
+            .map_err(|e| format!("serialize region command: {e}"))?;
+        let req = tonic::Request::new(
+            net.build_authed_message(req_payload)
+                .map_err(|e| format!("auth region command: {e}"))?,
+        );
+        let resp = client
+            .submit_region_command(req)
+            .await
+            .map_err(|e| format!("submit_region_command to node {target}: {e}"))?
+            .into_inner();
+        let reply: RegionCommandReply = decode_message_payload(&resp)
+            .map_err(|e| format!("decode region command reply: {e}"))?;
+        if !reply.error.is_empty() {
+            return Err(format!(
+                "node {target} rejected region {region_id} command: {}",
+                reply.error
+            ));
+        }
+        reply
+            .response
+            .ok_or_else(|| format!("node {target} returned no response for region {region_id}"))
+    }
+
     /// DrainRange：请 `target` 节点的本地会话表 drain 一段区间。
     ///
     /// 返回 `Ok(Drained)` / `Ok(Blocked)` 区分「对端可达但仍有会话」与
@@ -867,6 +926,25 @@ pub struct PdSubmitPayload {
 pub struct PdSubmitReply {
     pub index: u64,
     pub error: String,
+}
+
+// ──── / SubmitRegionCommand（数据 Region 内部命令跨节点转发提出）────
+
+/// SubmitRegionCommand 请求载荷：目标 Region + 一条内部命令（postcard）。
+/// 与 `PdSubmitOp` 同一条 raft_addr 节点间 RPC（共享密钥 HMAC / mTLS）。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RegionCommandPayload {
+    pub region_id: u64,
+    pub command: crate::raft::type_config::Command,
+}
+
+/// SubmitRegionCommand 响应：`error` 非空 = 提出失败（接收方不是该组 leader
+/// 时也在 `error` 里回报，调用方刷新 leader 视图后重试）；成功时 `response`
+/// 是该命令的 apply 响应。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RegionCommandReply {
+    pub error: String,
+    pub response: Option<crate::raft::type_config::Response>,
 }
 
 // ──── / DrainRange（split/merge 区间 drain 扇出）────
@@ -1477,6 +1555,44 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         Ok(tonic::Response::new(make_raft_message_for_region(
             resp_payload,
             0,
+        )))
+    }
+
+    /// SubmitRegionCommand：接收方在**本机该 Region 的 raft** 本地提出
+    /// 一条内部命令并等待 apply。
+    ///
+    /// 只接受本机是该组 leader 的提案：follower 会把 openraft 的
+    /// `ForwardToLeader` 暴露为 `error`，由调用方（搬迁器）按 leader 视图重试——
+    /// 不在节点间把命令再转发一次（避免两个 follower 互相踢回）。
+    async fn submit_region_command(
+        &self,
+        request: tonic::Request<RaftMessageProto>,
+    ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
+        let msg = request.into_inner();
+        inject_received_trace_context(&msg);
+        self.verify_incoming(&msg)?;
+        let payload: RegionCommandPayload = decode_message_payload(&msg)?;
+        let region_id = payload.region_id;
+        let reply = match self.get_raft_for_region(region_id) {
+            Ok(raft) => match raft.client_write(payload.command).await {
+                Ok(resp) => RegionCommandReply {
+                    error: String::new(),
+                    response: Some(resp.response().clone()),
+                },
+                Err(e) => RegionCommandReply {
+                    error: format!("region {region_id} command propose failed: {e}"),
+                    response: None,
+                },
+            },
+            Err(status) => RegionCommandReply {
+                error: status.message().to_string(),
+                response: None,
+            },
+        };
+        let resp_payload = serialize_payload(&reply)?;
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            resp_payload,
+            region_id,
         )))
     }
 
