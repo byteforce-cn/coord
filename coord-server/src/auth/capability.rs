@@ -1007,6 +1007,7 @@ mod tests {
         "/coord.raft.Raft/DrainRange",
         "/coord.raft.Raft/InstallSnapshot",
         "/coord.raft.Raft/InstallSnapshotStreaming",
+        "/coord.raft.Raft/ReportRegionStats",
         "/coord.raft.Raft/SubmitPdOp",
         "/coord.raft.Raft/SubmitRegionCommand",
         "/coord.raft.Raft/TransferLeader",

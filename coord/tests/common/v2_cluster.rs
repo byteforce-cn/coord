@@ -51,13 +51,14 @@ pub struct V2Node {
     pub bootstrapped: bool,
     partition_file: Option<PathBuf>,
     pd_scheduler_file: Option<PathBuf>,
+    scheduler_paused: bool,
     kvt_extra: String,
     pd_extra: String,
     toml_extra: String,
 }
 
 /// 集群装配选项：默认值与历史夹具逐字一致（不可分区、无额外配置）。
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct V2ClusterOptions {
     /// 允许用 [`V2Cluster::partition`] 注入对称网络分区。
     ///
@@ -73,7 +74,27 @@ pub struct V2ClusterOptions {
     /// 运行时切换 PD 调度（debug 构建的 `COORD_TEST_PD_SCHEDULER_FILE` 钩子）。
     pub pd_control: bool,
     /// 追加到 `[multi_raft.pd]` 段的键（例如 split/merge 阈值）。
+    ///
+    /// 不得包含 `scheduler_paused`（模板已写死该键，重复键会让配置解析失败）；
+    /// 启动即调度用 [`V2ClusterOptions::scheduler_paused`]。
     pub pd: &'static str,
+    /// PD 启动时是否暂停调度（默认 true：故障/长稳夹具不产生 split/merge）。
+    pub scheduler_paused: bool,
+}
+
+impl Default for V2ClusterOptions {
+    fn default() -> Self {
+        Self {
+            partitionable: false,
+            kvt: "",
+            toml: "",
+            pd_control: false,
+            pd: "",
+            // 故障/长稳夹具默认不产生 split/merge：merge watermark 会让旧
+            // revision 按设计变成 HISTORY_UNAVAILABLE，混进一致性断言会被误判。
+            scheduler_paused: true,
+        }
+    }
 }
 
 impl V2Node {
@@ -106,7 +127,7 @@ impl V2Node {
              # 只注入决策面故障：split/merge 的 merge watermark 会让旧 revision 按\
              # 设计变成 HISTORY_UNAVAILABLE（属 split/merge 连续性套件），混进来\
              # 会被误判成数据丢失。\n\
-             scheduler_paused = true\n{pd}\
+             scheduler_paused = {scheduler_paused}\n{pd}\
              [kv_t]\nenabled = true\n{kvt}\
 {toml}",
             id = self.id,
@@ -116,6 +137,7 @@ impl V2Node {
             bootstrap = bootstrap,
             kvt = self.kvt_extra,
             pd = self.pd_extra,
+            scheduler_paused = self.scheduler_paused,
             toml = self.toml_extra,
         )
     }
@@ -253,6 +275,7 @@ impl V2Cluster {
                 bootstrapped: false,
                 partition_file: partition_file.clone(),
                 pd_scheduler_file: pd_scheduler_file.clone(),
+                scheduler_paused: options.scheduler_paused,
                 kvt_extra: options.kvt.to_string(),
                 pd_extra: options.pd.to_string(),
                 toml_extra: options.toml.to_string(),

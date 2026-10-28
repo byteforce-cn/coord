@@ -74,6 +74,49 @@ pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// 计算区间 `[start, end)` 的字节序中点（`end` 为空 = 无上界）。
+///
+/// PD 的 split 建议与 Region 采样探测点共用这一份中点口径：两处各写一份会让
+/// 「无样本回退」和「采样探测」落在不同的 key 分布上。返回的 key 保证落在
+/// `(start, end)` 内（无上界时只要求 `> start`）。
+pub fn mid_key(start: &[u8], end: &[u8]) -> Vec<u8> {
+    if start.is_empty() && end.is_empty() {
+        return vec![0x80];
+    }
+    if end.is_empty() || end == [0xFF] {
+        // 无上界：0x80 只在它大于 start 时可用；start 已经越过 0x80 的 Region
+        // （例如 split 产生的右半区）必须落在 start 之后，否则 split 计划会被
+        // 「split key out of range」拒绝。
+        if start < [0x80u8].as_slice() {
+            return vec![0x80];
+        }
+        let mut mid = start.to_vec();
+        mid.push(0x80);
+        return mid;
+    }
+
+    let len = start.len().max(end.len());
+    let mut mid = Vec::with_capacity(len);
+    let mut carry: u16 = 0;
+
+    for i in 0..len {
+        let s = start.get(i).copied().unwrap_or(0);
+        let e = end.get(i).copied().unwrap_or(0xFF);
+        let sum = s as u16 + e as u16 + carry;
+        mid.push((sum / 2) as u8);
+        carry = (sum % 2) * 256;
+    }
+
+    // 进位可能把 mid 压到 start 上（或以下）；+1 后仍 < end（end > start 时成立）。
+    if mid.as_slice() <= start {
+        if let Some(last) = mid.last_mut() {
+            *last = last.saturating_add(1);
+        }
+    }
+
+    mid
+}
+
 /// 半开区间 `[lo, hi)` 的包含判定；`hi = None` 表示无上界。
 ///
 /// 与 [`watch_match_interval`] 配套：区间一旦由**同一处**算出，判定也只有一份。
@@ -233,6 +276,18 @@ mod tests {
             RangeSemantics::Interval
         );
         assert!(RangeSemantics::of(b"/k", b"/k0").is_interval());
+    }
+
+    #[test]
+    fn mid_key_stays_inside_unbounded_range() {
+        assert_eq!(mid_key(b"", b""), vec![0x80]);
+        // 右半区（start 已越过 0x80）的无上界中点必须大于 start，否则 split
+        // 计划会以「split key 不在 Region 区间内」被拒绝。
+        let mid = mid_key(b"\x90", b"");
+        assert!(mid.as_slice() > b"\x90".as_slice(), "mid {mid:?} <= start");
+        assert_eq!(mid, vec![0x90, 0x80]);
+        // 有界区间仍取字节中点
+        assert_eq!(mid_key(b"a", b"e"), vec![b'c']);
     }
 
     #[test]

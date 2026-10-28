@@ -661,3 +661,70 @@ fn test_chaos_configs_stay_outside_the_repository() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert!(!dir.starts_with(repo));
 }
+
+/// Region 心跳统计/采样跨节点送达后，PD 驱动的自动 split 必须真实发生。
+///
+/// 判据来自可观测状态而非日志：`coord_region_split_total`（operator success 时
+/// 累加）与 `coord_regions_total`（PD 元数据视图）。夹具最小化写入量（8 key
+/// 阈值、512B 值）：统计没送达或采样缺失时 split 不会触发，这条用例就会红。
+#[test]
+#[ignore = "real-process fault injection; run by the CI chaos job"]
+fn autosplit_runs_after_region_heartbeat_reaches_pd() {
+    let cluster = V2Cluster::start_with(V2ClusterOptions {
+        scheduler_paused: false,
+        pd: "balance_interval = 1\nsplit_check_interval = 1\nmerge_check_interval = 3600\n\
+             region_split_keys = 8\nregion_merge_size_mb = 1\n\
+             max_concurrent_operators = 1\n",
+        ..Default::default()
+    });
+    let addrs = cluster.addrs();
+    let baseline = runtime().block_on(commit_txn(&addrs, b"ak", b"zk", 0));
+    assert!(baseline > 0);
+
+    // 两个初始 Region 都写：首字节在 0x40/0x90 间轮转，采样点才有分布。
+    for i in 0..48u64 {
+        let prefix = if i % 2 == 0 { 0x40u8 } else { 0x90u8 };
+        let key = format!("{}-s-{i:08}", char::from(prefix)).into_bytes();
+        let value = vec![b'v'; 512];
+        runtime().block_on(direct_put(&addrs, &key, &value));
+    }
+
+    let read_metrics = |cluster: &V2Cluster| {
+        let split: u64 = cluster
+            .nodes
+            .iter()
+            .map(|n| metric_value(n.http_port, "coord_region_split_total").unwrap_or(0))
+            .sum();
+        let regions = cluster
+            .nodes
+            .iter()
+            .map(|n| metric_value(n.http_port, "coord_regions_total").unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        (split, regions)
+    };
+
+    // split 指标在 operator success 时累加；PD Region 表经心跳对账后
+    // `coord_regions_total` 才会增长（最多滞后一个心跳拍）。
+    let deadline = Instant::now() + FAILOVER_TIMEOUT;
+    let (mut split_total, mut regions_total) = (0u64, 0u64);
+    while Instant::now() < deadline {
+        cluster.assert_all_alive();
+        (split_total, regions_total) = read_metrics(&cluster);
+        if split_total > 0 && regions_total > 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    assert!(
+        split_total > 0,
+        "PD never generated a split: region heartbeat stats likely never reached the \
+         scheduler node (split_total={split_total}, regions={regions_total}); logs:\n{}",
+        cluster.logs()
+    );
+    assert!(
+        regions_total > 2,
+        "split metric advanced but the PD region table did not grow (regions={regions_total})"
+    );
+}
