@@ -3989,6 +3989,9 @@ async fn run_server(
                             .next_sequencer_decision_ts(cursor)
                             .map_err(|e| format!("read region0 sequencer decisions: {e}"))
                     }),
+                    // 目标组 leader 不一定在本节点：导入命令经节点间 raft RPC
+                    // 转发到 leader 提出（`client_write` 只在 leader 本地可提案）。
+                    Some((node_id, region_shared_factory.clone())),
                 ));
                 tracing::info!(
                     "KV-T split data migration wired (source=RegionManager runtime, \

@@ -68,7 +68,7 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    `start_ts` 定下限后再做 GC 属后续版本。
 5. 本节 1–4 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
 
-## 3.5 本轮故障矩阵抓出的缺陷（4 个已修 / 1 个 GA 阻塞未修）
+## 3.5 故障矩阵抓出的缺陷（均已修）
 
 1. **快照限速让小快照永久卡住**：`SnapshotRateLimiter` 的桶容量 = 速率；
    `transmit` 按 2MiB 分块申请，`rate < 2MiB` 时 `acquire(2MiB)` 永远攒不够
@@ -82,11 +82,14 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    `PdMetaStore::allocate_region_id()` 分配（生成源唯一 = region 0 leader），
    回归 `pd::tests::test_generated_split_gets_a_fresh_region_id`；进程级复现/
    测量见 `perf_split_write_pause`。
-3. **自动 split 在多节点上仍会失败（未修，GA 阻塞）**：`RangeImportMigrator` 的
+3. **自动 split 在多节点上失败（已修）**：`RangeImportMigrator` 的
    `reset_range`/`import_range` 直接对**本节点**的 target raft `client_write`；
    目标组 leader 在别的节点时返回 `ForwardToLeader`（`None, None` 竞态窗口也会
-   中招）。split 只有在执行节点同时是源与目标 leader 时才成功。需要内部命令
-   转发（或目标组单成员初始化）——单独设计/PR，不在本节声明的修复范围。
+   中招），split 只在执行节点同时是源与目标 leader 时才成功。修复：新增节点间
+   `SubmitRegionCommand` RPC（与 `SubmitPdOp` 同一条认证/连接池路径），搬迁器把
+   目标组的 `ClearImportRange`/`ImportRange` 提到 leader 提出，换届窗口有界重试。
+   回归：`kv_t_g5_region_command_forward_test::test_import_range_forwards_to_the_target_leader`
+   （两节点组，导入端口建在 follower 上，旧实现报 `has to forward request to`）。
 4. **直写 Region 的 split 导出守卫永不成立（已修）**：`import_pages`
    曾要求 `last_applied_decision_ts == 导出 revision`，但直写（`coord.kv.v2` 自带
    `commit_ts`、lease 清理）推进 `current_revision` 而不推进决策游标；有直写的

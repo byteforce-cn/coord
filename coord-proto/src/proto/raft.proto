@@ -60,4 +60,17 @@ service Raft {
   // postcard(DrainRangeReply{drained,error})。节点间认证（共享密钥 HMAC /
   // mTLS）与其他 Raft RPC 同口径。
   rpc DrainRange(RaftMessage) returns (RaftMessage);
+
+  // SubmitRegionCommand: 把一条数据 Region 的内部命令转发到该 Region 的
+  // **leader 节点**提出并等待 apply。
+  //
+  // 用途：split 目标 Region 预创建后，执行节点（源 Region leader）不一定也是
+  // 目标组的 leader；`client_write` 只有 leader 能本地提出（follower 返回
+  // ForwardToLeader）。搬迁器用本 RPC 把 ClearImportRange / ImportRange 提到
+  // 目标组 leader（openraft 不替应用层转发客户端写）。请求 region_id = 目标
+  // Region；payload = postcard(RegionCommandPayload{region_id,command})，响应
+  // payload = postcard(RegionCommandReply{error,response})。接收方必须自己是该组
+  // leader，否则在 `error` 里回报（调用方刷新 leader 视图后重试）。节点间认证
+  // （共享密钥 HMAC / mTLS）与其他 Raft RPC 同口径；导入 apply 幂等，重放安全。
+  rpc SubmitRegionCommand(RaftMessage) returns (RaftMessage);
 }

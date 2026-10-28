@@ -890,12 +890,14 @@ impl SplitMergeMigrator for RangeImportMigrator {
 /// + region 0 成员的远程 drain 扇出）；单节点/单测可直接传本地会话表端口。
 ///
 /// `pending` 读 region 0 决策日志（导出水位的决策屏障）；未装配时每次迁移
-/// 都会 fail-closed。
+/// 都会 fail-closed。`forwarder` = (本节点 ID, 节点间 raft RPC 工厂)：目标组
+/// leader 不在本节点时把导入命令转发到 leader 提出；`None` = 单节点/测试装配。
 pub fn range_import_migrator(
     manager: &Arc<RegionManager>,
     lifecycle: &Arc<RegionLifecycle>,
     drain: Arc<dyn SplitDrain>,
     pending: Arc<PendingDecisionResolver>,
+    forwarder: Option<(NodeID, RaftNetworkFactoryImpl)>,
 ) -> Arc<dyn SplitMergeMigrator> {
     let node_id = manager.node_id();
     let manager = Arc::clone(manager);
@@ -914,11 +916,15 @@ pub fn range_import_migrator(
     });
 
     let lifecycle = Arc::clone(lifecycle);
+    let forwarder = forwarder.map(Arc::new);
     let targets: Arc<RegionImportTargetResolver> = Arc::new(move |region_id| {
         lifecycle.migration_target(region_id).map(|runtime| {
-            let target: Arc<dyn RangeImportTarget> = Arc::new(
-                CoordRangeImportTarget::from_runtime(&runtime).with_leader_wait(TARGET_LEADER_WAIT),
-            );
+            let mut target =
+                CoordRangeImportTarget::from_runtime(&runtime).with_leader_wait(TARGET_LEADER_WAIT);
+            if let Some(forwarder) = forwarder.as_ref() {
+                target = target.with_forwarder(forwarder.0, forwarder.1.clone());
+            }
+            let target: Arc<dyn RangeImportTarget> = Arc::new(target);
             target
         })
     });
