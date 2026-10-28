@@ -27,8 +27,8 @@ use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::type_config::{CommitDecisionApply, SequencerMutation};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RaftNode};
 use coord_server::split_merge::{
-    RangeImportMigrator, RangeImportTarget, RegionImportTargetResolver, RegionMvccResolver,
-    SplitDrain,
+    PendingDecisionResolver, RangeImportMigrator, RangeImportTarget, RegionImportTargetResolver,
+    RegionMvccResolver, SplitDrain,
 };
 use coord_server::storage::mvcc::{AppliedLogId, KvMetadata, MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
@@ -291,6 +291,15 @@ fn migrator(
     target: Arc<dyn RangeImportTarget>,
     drain: Arc<RecordingDrain>,
 ) -> RangeImportMigrator {
+    migrator_with_pending(source, target, drain, Arc::new(|_| Ok(None)))
+}
+
+fn migrator_with_pending(
+    source: &Arc<MvccStorage<RedbBackend>>,
+    target: Arc<dyn RangeImportTarget>,
+    drain: Arc<RecordingDrain>,
+    pending: Arc<PendingDecisionResolver>,
+) -> RangeImportMigrator {
     let src = Arc::clone(source);
     let source_resolver: Arc<RegionMvccResolver> =
         Arc::new(move |region_id| (region_id == 1).then(|| Arc::clone(&src)));
@@ -302,6 +311,7 @@ fn migrator(
         Arc::new(|_| None),
         Arc::new(|_| None),
         drain,
+        pending,
     )
 }
 
@@ -383,6 +393,58 @@ async fn test_split_migrator_moves_live_rows_and_pins_revision() {
         .unwrap();
     assert_eq!(applied.through_ts, 15);
     assert_eq!(target_mvcc.get(b"m").unwrap().as_deref(), Some(&b"2"[..]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_split_exports_a_region_whose_revision_is_ahead_of_its_decision_cursor() {
+    // 直写（`coord.kv.v2` 自带 commit_ts）只推进 revision、不产生 sequencer
+    // 决策：游标停在 14、revision 被直写到 20。导出判据必须看「水位以下有
+    // 没有未 apply 的决策」，而不是 `cursor == revision`。
+    let (_src_dir, source) = source_region_with_rows().await;
+    source
+        .put_at_commit_ts(b"d", b"direct", None, 20, applied(15))
+        .expect("seed direct write");
+    assert_eq!(source.current_revision(), 20);
+    assert_eq!(source.last_applied_decision_ts().unwrap(), 14);
+
+    let (_dst_dir, target_mvcc, target) = boot_target_region().await;
+    migrator(&source, target, RecordingDrain::new())
+        .migrate(&split_plan())
+        .await
+        .expect("direct writes must not block the split export");
+
+    assert_eq!(source.current_revision(), 20, "源只读、revision 不变");
+    assert_eq!(target_mvcc.current_revision(), 20);
+    assert_eq!(
+        target_mvcc.last_applied_decision_ts().unwrap(),
+        20,
+        "目标游标钉在导出水位"
+    );
+    assert_eq!(target_mvcc.get(b"m").unwrap().as_deref(), Some(&b"1"[..]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_split_fails_closed_when_a_decision_below_the_watermark_is_unapplied() {
+    // 决策 18 已决定但未 apply，revision 被直写推到 20：导出水位 20 会越过
+    // 决策 18，目标游标钉到 20 后它永远不会被重放。
+    let (_src_dir, source) = source_region_with_rows().await;
+    source
+        .put_at_commit_ts(b"d", b"direct", None, 20, applied(15))
+        .expect("seed direct write");
+
+    let (_dst_dir, target_mvcc, target) = boot_target_region().await;
+    let pending: Arc<PendingDecisionResolver> = Arc::new(|cursor| Ok((cursor < 18).then_some(18)));
+    let err = migrator_with_pending(&source, target, RecordingDrain::new(), pending)
+        .with_decision_wait(Duration::from_millis(120))
+        .migrate(&split_plan())
+        .await
+        .expect_err("unapplied decision below the export watermark must fail closed");
+
+    assert!(
+        err.contains("still unapplied at revision 20") && err.contains("decision 18"),
+        "{err}"
+    );
+    assert!(target_mvcc.get(b"m").unwrap().is_none(), "不得导入任何行");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -487,6 +549,7 @@ async fn test_split_migrator_waits_for_the_target_region_to_be_assembled() {
         Arc::new(|_| None),
         Arc::new(|_| None),
         RecordingDrain::new(),
+        Arc::new(|_| Ok(None)),
     )
     .with_page_size(1)
     .with_target_wait(Duration::from_secs(2))
@@ -518,6 +581,7 @@ async fn test_split_migrator_gives_up_when_the_target_never_appears() {
         Arc::new(|_| None),
         Arc::new(|_| None),
         RecordingDrain::new(),
+        Arc::new(|_| Ok(None)),
     )
     .with_target_wait(Duration::from_millis(150))
     .migrate(&split_plan())

@@ -1,6 +1,6 @@
 # KV-T GA Gate（G0–G6 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-10-25（本轮：故障矩阵 + #265）
+> Owner: maintainers ｜ Last verified: 2026-10-28（本轮：72h soak 完成、split 导出水位与目标组转发修复、Region 心跳缺口）
 
 - **状态**：**NO-GO（未签）**。G0–G5 已交付；G6 有关闭项未清（见 §3）。
 - 本文是 GA 状态的**单一事实源**：gate 证据、未达标项、签字记录。语义口径仍以
@@ -35,7 +35,7 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
 | Agent 数据面 v2（#170） | ✅ | `kv_t_g6_agent_services_v2_test::test_v2_cluster_serves_all_builtin_services`（15 个非 MQ 内建服务在真实 v2 集群注册并各调一次；idgen 走 segment ⇒ v2 Txn CAS）；`agent_v2_*_proxy_test`、`agent_v2_mode_test` |
 | Workflow/MQ fail-closed（#171） | ✅ | `agent_workflow_durable_gate_test`（6 例：v2 拒绝 mq / workflow_durable，纯 KV workflow 可用）；`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
 | Rust client / Java SDK v2（#172） | ✅ | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；`java-example` v2 示例 `KvTV2Example`（`bash java-example/scripts/run-v2-example.sh`，非 v2 集群退出码 2，无 v1 降级）；跨语言互操作 `KvTInteropIntegrationTest` + `kvt_interop_peer`（`bash scripts/check-kvt-interop.sh`：Rust 写 → Java 按精确 `commit_ts` 读，再反向；对账 value/`mod_revision`/`create_revision` 与 Watch 批 `commit_ts`） |
-| 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§6，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**未达标**：split/merge 停顿未测；**72h soak 运行中**（server commit `4633507`，start 2026-10-25T07:44:11Z），完成前不算通过 |
+| 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§7，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**72h v2 soak 已通过**（2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z，main `c53bbfb`；103 630 轮、TSO 2.556 亿、863 次 kill -9 region 0 leader 注入、watchdog 0 次、节点日志 0 ERROR、无不变量锚点；报告见 #174 评论）。**未达标**：split/merge 停顿仍无数字——根因是 PD 收不到 Region 心跳（§3.5-6） |
 | 混沌/Jepsen（#175） | ✅ | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）。v2 3 进程矩阵 `kv_t_g6_chaos_v2_test`（CI `chaos-kill9-soak` job，整文件跑）：`chaos_v2_mixed_writes_survive_decision_leader_loss`（kill -9 / SIGSTOP region 0 leader + 混合事务/直写，37 次连续绿）；`chaos_v2_partitioned_region0_leader_keeps_invariants`（对称网络分区隔离 region 0 leader：debug 构建的 `COORD_TEST_RAFT_PARTITION_FILE` 钩子在 raft RPC 层双向阻断，多数派换主、分区窗口内写入、heal 后收敛）；`chaos_v2_shard_seal_stall_keeps_watch_continuous`（`commit_log_shard_records=8` / `shard_secs=1` 下 SIGSTOP region 0 leader ⇒ TSO/sequencer/shard seal 停摆；恢复后 Watch 从 baseline+1 严格递增、无重无丢，sealed shard 指标增长）；`chaos_v2_interrupted_snapshot_install_recovers`（follower 落后 → 快照安装途中冻结 + kill -9 → 重启追平、全部 `commit_ts` 可读）。本轮矩阵抓出并修复两个 GA 阻塞缺陷（见 §3.5），`test_lease_cleanup_is_per_region` 的 CI 间歇超时也一并修掉（PR #268）。**仍未做**：split/merge 迁移中断的进程级注入（§3.3 的 D10 裁定）。 |
 | Ops runbook/监控（#176） | ✅ | `monitoring/prometheus-rules.yml` + `docs/production/ops/runbook.md`；`bash scripts/check-gate-drills.sh`（每条告警必须有可达 runbook 锚点） |
 | ADR accepted / 文档一致 | ✅ | ADR-0015 状态 accepted；`scripts/check-doc-refs.sh` 0 悬空 |
@@ -43,19 +43,22 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
 
 ## 3. 关闭 G6 的硬条件（当前未满足）
 
-1. #174：**72h v2 soak 运行中**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，2026-10-25T12:26:36Z
-   起，server commit `4633507` / main `c48d384`，ETA 2026-10-28T12:26:36Z）——完成且证据
-   目录里 `soak-report.md` 为通过才算达标。**注意**：该实例构建早于 #269
-   （log_store / snapshot_limiter / PD split-id 修复），不含这些改动；若签字前
-   server 代码再变，必须在最终 GA 提交上重跑 72h，不能拿旧实例替代。截至 2026-10-25T10:55Z：4300+ 轮、35 次 kill -9 region 0
-   leader 后恢复、节点日志无内部不变量锚点。
-2. #174：**split/merge 停顿未测，且自动 split/merge 路径仍有未修缺陷**（§3.5
-   2–3）：多 Region 自动 split 在「执行节点不是目标 Region leader」时以
-   `ForwardToLeader` 失败；Region 有直写时导出守卫
-   （`last_applied_decision_ts == pinned revision`）永不成立。停顿测量
-   （`PERF_GATE=1` 的 `perf_split_write_pause`）保留为复现器，当前 fail-closed
-   在「split never ran」——不写「达标」。其余事务面数字已落在
-   `performance.md` §6。
+1. #174：**72h v2 soak 已通过**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，
+   2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z，main `c53bbfb`）：
+   `soak-report.md` 结论 ✅（无一致性违规）；103 630 轮、TSO 2.555 亿、863 次
+   kill -9 region 0 leader 注入后恢复、watchdog 0 次、三个节点日志 0 条 ERROR、
+   无 `passed unapplied decision` / `decision apply stopped` /
+   `behind the applied revision` 锚点。证据目录 `/tmp/coord-soak72/`
+   （`driver.log`、`soak-report.md`、`v2-nodes/node-*.log`），报告全文贴在 #174。
+   **最终提交口径**：本轮之后 server 代码有变更（split 导出水位、目标组转发），
+   按维护者 2026-10-28 裁定，最终 GA 提交上的长稳证据由 **Jepsen v2（#272）**
+   承担，不再重跑 72h bash 浸泡——在该证据落地前不签字。
+2. #174：**split/merge 停顿未测**——阻塞项不再是迁移路径本身（§3.5 3/4 已修），
+   而是 PD 侧没有 Region 统计来源（§3.5-6）：`approximate_keys`/`approximate_size`
+   恒为 0，split-checker 永不产生 operator，`perf_split_write_pause` 仍 fail-closed
+   在「split never ran」。该测量用例在 release 下还有一个独立原因：
+   `COORD_TEST_PD_SCHEDULER_FILE` 钩子只在 debug 编译（`resume_scheduler` 在 release
+   不生效）。其余事务面数字已落在 `performance.md` §6。
 3. #175：**split/merge 迁移中断的进程级注入按 D10 明确停止**（不是「已覆盖」的
    代称）：executor 级失败注入已覆盖「迁移失败 → 保留 intent、不动表、释放
    write fence、不 cutover」（`kv_t_g5_split_merge_test::test_migration_failure_keeps_intent_for_recovery`、
@@ -68,7 +71,7 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    `start_ts` 定下限后再做 GC 属后续版本。
 5. 本节 1–4 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
 
-## 3.5 本轮故障矩阵抓出的缺陷（3 个已修 / 2 个 GA 阻塞未修）
+## 3.5 故障矩阵抓出的缺陷（均已修）
 
 1. **快照限速让小快照永久卡住**：`SnapshotRateLimiter` 的桶容量 = 速率；
    `transmit` 按 2MiB 分块申请，`rate < 2MiB` 时 `acquire(2MiB)` 永远攒不够
@@ -82,21 +85,38 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    `PdMetaStore::allocate_region_id()` 分配（生成源唯一 = region 0 leader），
    回归 `pd::tests::test_generated_split_gets_a_fresh_region_id`；进程级复现/
    测量见 `perf_split_write_pause`。
-3. **自动 split 在多节点上仍会失败（未修，GA 阻塞）**：`RangeImportMigrator` 的
+3. **自动 split 在多节点上失败（已修）**：`RangeImportMigrator` 的
    `reset_range`/`import_range` 直接对**本节点**的 target raft `client_write`；
    目标组 leader 在别的节点时返回 `ForwardToLeader`（`None, None` 竞态窗口也会
-   中招）。split 只有在执行节点同时是源与目标 leader 时才成功。需要内部命令
-   转发（或目标组单成员初始化）——单独设计/PR，不在本节声明的修复范围。
-4. **直写 Region 的 split 导出守卫永不成立（未修，GA 阻塞）**：`import_pages`
-   要求 `last_applied_decision_ts == 导出 revision`，但直写（`coord.kv.v2` 自带
+   中招），split 只在执行节点同时是源与目标 leader 时才成功。修复：新增节点间
+   `SubmitRegionCommand` RPC（与 `SubmitPdOp` 同一条认证/连接池路径），搬迁器把
+   目标组的 `ClearImportRange`/`ImportRange` 提到 leader 提出，换届窗口有界重试。
+   回归：`kv_t_g5_region_command_forward_test::test_import_range_forwards_to_the_target_leader`
+   （两节点组，导入端口建在 follower 上，旧实现报 `has to forward request to`）。
+4. **直写 Region 的 split 导出守卫永不成立（已修）**：`import_pages`
+   曾要求 `last_applied_decision_ts == 导出 revision`，但直写（`coord.kv.v2` 自带
    `commit_ts`、lease 清理）推进 `current_revision` 而不推进决策游标；有直写的
-   Region 在 split 时永远被守卫拒绝。需要重新定义「导出水位」口径（ADR 级决定）。
+   Region 在 split 时永远被守卫拒绝。修复：导出水位以下不得有未 apply 的决策
+   （`next_pending_decision_ts(cursor) > 导出水位`，与 safe_ts 同一判据），导出前
+   有界等决策屏障，水位之后取 `current_revision()`。回归：
+   `kv_t_g5_split_migrator_test::test_split_exports_a_region_whose_revision_is_ahead_of_its_decision_cursor`
+   （旧实现报 `decision cursor … is behind the exported revision`）、
+   `test_split_fails_closed_when_a_decision_below_the_watermark_is_unapplied`
+   （已决定未 apply 的决策仍 fail-closed）。口径见 ADR-0015 D6 的 G5 cutover 连续性。
 5. **快照安装后重启被判 log store corrupted**：整段 purge 后日志表为空，
    `get_log_state` 报 `last_log_id=None < last_purged=Some(..)` ⇒ openraft 拒绝
    启动（节点无法重启）。修复：`last_log_id = last_entry.or(last_purged)`（与
    openraft memstore 同口径），回归
    `raft::log_store::tests::test_get_log_state_after_full_purge_survives_reopen`；
    进程级回归 `chaos_v2_interrupted_snapshot_install_recovers`。
+
+6. **PD 收不到 Region 心跳（本轮发现，GA 阻塞）**：`PlacementDriver::handle_region_heartbeat`
+   没有生产调用方，`region_sample_keys` 只有测试注入 ⇒ `approximate_keys` /
+   `approximate_size` / `storage_bytes` / leader 视图恒空，split-checker 与
+   size 驱动的 merge-checker 都不会产生 operator。也就是说：**修好迁移路径之后，
+   自动 split/merge 依然不会自动发生**。缺口与修法见 #278（需要 Region leader
+   周期性上报 stats + 采样 Key；这是 `region_split_keys`/`region_split_size_mb`
+   这两个 D9 数值真正生效的前提）。
 
 ## 4. 签字记录
 
