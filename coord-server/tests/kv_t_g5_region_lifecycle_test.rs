@@ -691,6 +691,7 @@ async fn test_production_migrator_wires_manager_source_and_pending_target() {
         &harness.manager,
         &harness.lifecycle,
         Arc::new(NoopDrain),
+        Arc::new(|_| Ok(None)),
     );
     migrator
         .migrate(&intent.plan)

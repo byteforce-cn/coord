@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use coord_core::types::{NodeID, RegionId};
+use coord_core::types::{NodeID, RegionId, Revision};
 
 use crate::pd::executor::SplitMergeMigrator;
 use crate::raft::network::{DrainRpcOutcome, RaftNetworkFactoryImpl};
@@ -46,6 +46,15 @@ pub type RegionImportTargetResolver =
 /// `client_write` 拒为 `ForwardToLeader`）；split 的认领条件就是源 Region 的
 /// leader，所以源侧 fence 总是可提案的。
 pub type RegionRaftResolver = dyn Fn(RegionId) -> Option<CoordRaft> + Send + Sync;
+
+/// 源 Region 决策游标之后的下一条 sequencer 决策（无 = None）。
+///
+/// 决策日志在 region 0；迁移器需要它来判定「导出水位以下是否还有未 apply 的
+/// 决策」。直写只推进 revision、不产生决策，所以不能用
+/// `last_applied_decision_ts == current_revision` 当导出判据（有直写的 Region
+/// 永远不相等）。
+pub type PendingDecisionResolver =
+    dyn Fn(Revision) -> std::result::Result<Option<Revision>, String> + Send + Sync;
 
 /// 目标 Region 的分页导入端口。
 ///
@@ -197,6 +206,15 @@ const DEFAULT_PAGE_SIZE: usize = 1024;
 /// 等区间内活跃事务收尾的默认上界；超时整次迁移失败（intent 保留重试）。
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 等决策屏障（导出水位以下的决策 apply 完）的默认上界。
+///
+/// 决策 apply 循环每拍从 region 0 日志按批推进；30s 覆盖一次批积压/换届，
+/// 超时即整次迁移失败、intent 保留重试。
+const DEFAULT_DECISION_WAIT: Duration = Duration::from_secs(30);
+
+/// 决策屏障轮询间隔。
+const DECISION_BARRIER_POLL: Duration = Duration::from_millis(50);
+
 /// 等待 split 目标 Region 预创建装配上界的默认值。
 ///
 /// executor 与 `RegionLifecycle` 各自跑循环：operator 可能先于 pending 目标
@@ -235,12 +253,16 @@ pub struct RangeImportMigrator {
     ranges: Arc<RegionRangeResolver>,
     source_raft: Arc<RegionRaftResolver>,
     drain: Arc<dyn SplitDrain>,
+    /// 决策日志入口（region 0）：迁移器用它判定导出水位以下是否还有未 apply
+    /// 的决策。
+    pending: Arc<PendingDecisionResolver>,
     /// 本节点 ID：判断 donor Region 的 leader 是否在本节点（fence 只能本地提案）。
     node_id: NodeID,
     page_size: usize,
     drain_timeout: Duration,
     target_wait: Duration,
     donor_fence_wait: Duration,
+    decision_wait: Duration,
 }
 
 impl RangeImportMigrator {
@@ -250,6 +272,7 @@ impl RangeImportMigrator {
         ranges: Arc<RegionRangeResolver>,
         source_raft: Arc<RegionRaftResolver>,
         drain: Arc<dyn SplitDrain>,
+        pending: Arc<PendingDecisionResolver>,
     ) -> Self {
         Self {
             source,
@@ -257,11 +280,13 @@ impl RangeImportMigrator {
             ranges,
             source_raft,
             drain,
+            pending,
             node_id: 0,
             page_size: DEFAULT_PAGE_SIZE,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             target_wait: DEFAULT_TARGET_WAIT,
             donor_fence_wait: DEFAULT_DONOR_FENCE_WAIT,
+            decision_wait: DEFAULT_DECISION_WAIT,
         }
     }
 
@@ -293,6 +318,68 @@ impl RangeImportMigrator {
     pub fn with_target_wait(mut self, timeout: Duration) -> Self {
         self.target_wait = timeout;
         self
+    }
+
+    /// 等决策屏障（导出水位以下没有未 apply 的决策）的上界。
+    pub fn with_decision_wait(mut self, timeout: Duration) -> Self {
+        self.decision_wait = timeout;
+        self
+    }
+
+    /// 非阻塞复核：`pinned` 以下没有未 apply 的决策。
+    ///
+    /// 导出水位钉住目标的 `DECISION_APPLIED_TS`；水位以下未 apply 的决策既不在
+    /// 导出快照里、又不会被目标重放（游标已越过），只能 fail-closed。
+    fn require_no_pending_decision(
+        &self,
+        cursor: Revision,
+        pinned: Revision,
+        what: &str,
+    ) -> std::result::Result<(), String> {
+        match (self.pending)(cursor)
+            .map_err(|e| format!("{what}: scan sequencer decisions after {cursor}: {e}"))?
+        {
+            Some(next) if next <= pinned => Err(format!(
+                "{what}: sequencer decision {next} is decided but not applied at export \
+                 revision {pinned}; refusing to seed the target from an unapplied watermark"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// 有界等待决策屏障：`pinned` 以下不再有未 apply 的决策。
+    ///
+    /// 直写被 fence 冻结后 revision 只会因决策 apply 前进，而决策 apply 会同时
+    /// 推进游标，所以 barrier 之后重新取 `current_revision()` 得到的是目标游标
+    /// 可以续跑的水位。等待有界：超时整次迁移失败、intent 保留重试。
+    async fn wait_for_decision_barrier(
+        &self,
+        source: &MvccStorage<RedbBackend>,
+        pinned: Revision,
+        what: &str,
+    ) -> std::result::Result<(), String> {
+        let started = tokio::time::Instant::now();
+        loop {
+            let cursor = source
+                .last_applied_decision_ts()
+                .map_err(|e| format!("{what}: read decision cursor: {e}"))?;
+            match (self.pending)(cursor)
+                .map_err(|e| format!("{what}: scan sequencer decisions after {cursor}: {e}"))?
+            {
+                Some(next) if next <= pinned => {
+                    if started.elapsed() >= self.decision_wait {
+                        return Err(format!(
+                            "{what}: sequencer decision {next} is still unapplied at revision \
+                             {pinned} after {:?}; refusing to seed the target from an unapplied \
+                             watermark",
+                            self.decision_wait
+                        ));
+                    }
+                    tokio::time::sleep(DECISION_BARRIER_POLL).await;
+                }
+                _ => return Ok(()),
+            }
+        }
     }
 
     /// 解析目标 Region，并在 `target_wait` 内重试（pending 预创建是异步的）。
@@ -513,24 +600,27 @@ impl RangeImportMigrator {
         let mut after: Option<Vec<u8>> = None;
         let mut watermark: Option<u64> = expected_revision;
         target.reset_range(start, end).await?;
+        if expected_revision.is_none() {
+            // 首屏导出前先等决策屏障：fence 已冻结直写，剩下的推进只来自
+            // 「已决定、未 apply」的 sequencer 决策；等它们 apply 完再取水位，
+            // 导出快照才是目标游标可以续跑的 cut。
+            let revision = source.current_revision();
+            self.wait_for_decision_barrier(source, revision, "split source export")
+                .await?;
+        }
         loop {
             let page = source
                 .export_range_page(start, end, after.as_deref(), self.page_size, watermark)
                 .map_err(|e| format!("export range page: {e}"))?;
             let pinned = *watermark.get_or_insert(page.revision);
             if seal_prior_history && after.is_none() {
-                // 快照 revision 已包含 == cursor 的决策。源游标落后说明有决策
-                // 尚未 apply 却已被水位越过；目标从 watermark 续跑就会永久跳过
-                // 它们（apply 在 fence 前停住）。
+                // 水位以下不得有未 apply 的决策：目标从 watermark 续跑会永久
+                // 跳过它们。导出期间源继续前进由下一页的 `expected_revision`
+                // 拒掉（重试时重新取水位）。
                 let cursor = source
                     .last_applied_decision_ts()
                     .map_err(|e| format!("read split source decision cursor: {e}"))?;
-                if cursor != pinned {
-                    return Err(format!(
-                        "split source decision cursor {cursor} is behind the exported revision \
-                         {pinned}; refusing to seed the target from an unapplied watermark"
-                    ));
-                }
+                self.require_no_pending_decision(cursor, pinned, "split source export")?;
             }
             let done = page.next_after.is_none();
             target
@@ -798,10 +888,14 @@ impl SplitMergeMigrator for RangeImportMigrator {
 ///
 /// `drain` 由接线层传入（`main.rs` = `ClusterSplitDrain`：本节点 `TxnSessions`
 /// + region 0 成员的远程 drain 扇出）；单节点/单测可直接传本地会话表端口。
+///
+/// `pending` 读 region 0 决策日志（导出水位的决策屏障）；未装配时每次迁移
+/// 都会 fail-closed。
 pub fn range_import_migrator(
     manager: &Arc<RegionManager>,
     lifecycle: &Arc<RegionLifecycle>,
     drain: Arc<dyn SplitDrain>,
+    pending: Arc<PendingDecisionResolver>,
 ) -> Arc<dyn SplitMergeMigrator> {
     let node_id = manager.node_id();
     let manager = Arc::clone(manager);
@@ -833,7 +927,8 @@ pub fn range_import_migrator(
         Arc::new(move |region_id| raft_source.runtime(region_id).map(|rt| rt.raft.clone()));
 
     Arc::new(
-        RangeImportMigrator::new(source, targets, ranges, source_raft, drain).with_node_id(node_id),
+        RangeImportMigrator::new(source, targets, ranges, source_raft, drain, pending)
+            .with_node_id(node_id),
     )
 }
 
@@ -927,9 +1022,16 @@ mod tests {
             _ => None,
         });
         let source_raft: Arc<RegionRaftResolver> = Arc::new(|_| None);
-        RangeImportMigrator::new(source, targets, ranges, source_raft, Arc::new(NoopDrain))
-            .with_node_id(node_id)
-            .with_donor_fence_wait(Duration::from_millis(200))
+        RangeImportMigrator::new(
+            source,
+            targets,
+            ranges,
+            source_raft,
+            Arc::new(NoopDrain),
+            Arc::new(|_| Ok(None)),
+        )
+        .with_node_id(node_id)
+        .with_donor_fence_wait(Duration::from_millis(200))
     }
 
     #[tokio::test]
