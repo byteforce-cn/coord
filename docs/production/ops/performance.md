@@ -130,8 +130,21 @@ redb 页）；24h 容量按「事务数 × 37 KB ÷ 3（单副本）」估算，
 
 ### 6.6 Split/Merge 停顿
 
-**未测**：语义由 g5 连续性/搬迁套件覆盖（不丢不重、`HISTORY_UNAVAILABLE` 边界），
-但「迁移窗口内的写停顿/失败率」没有实测数字 ⇒ 不写「达标」。
+**仍无数字**。迁移路径本身的两个缺陷已修（PR #273 导出水位判据、PR #275 目标组
+leader 转发，回归见 `kv_t_g5_split_migrator_test` / `kv_t_g5_region_command_forward_test`），
+但 PD 侧没有 Region 统计来源：`PlacementDriver::handle_region_heartbeat` 没有生产
+调用方、`region_sample_keys` 只有测试注入 ⇒ `approximate_keys` / `approximate_size`
+恒为 0，split-checker 永不产生 operator（缺口与修法见 #278）。
+
+复现器保留：
+
+```bash
+PERF_GATE=1 cargo test -p coord --test kv_t_g6_perf_v2_test perf_split_write_pause \
+  -- --ignored --nocapture --test-threads=1     # 需 debug 构建：调度解冻钩子只在 debug 编译
+```
+
+当前 fail-closed 在 `region_split_total = 0`（「the PD-driven split never ran」），
+不是「停顿很小」的证据。统计上报落地后按同一命令取值并回填本节。
 
 ## 7. Soak
 
@@ -139,7 +152,7 @@ redb 页）；24h 容量按「事务数 × 37 KB ÷ 3（单副本）」估算，
 |:--|:--|
 | CI 冒烟（120s，真实 3 进程，v1） | 每个 PR 的 `chaos (kill9 + soak, real processes)` job 执行 `chaos_soak_distributed`；`scripts/collect-evidence.sh soak-smoke` 可产出证据目录 |
 | v2 冒烟（45s + 2 次 region 0 leader kill，真实 3 进程） | `KVT_SOAK_SECS=45 KVT_SOAK_FAULT_SECS=15 cargo test -p coord --release --test kv_t_g6_soak_v2_test soak_v2_mixed_workload_stays_consistent -- --ignored --nocapture --test-threads=1`（每次 PR 的混沌 job 同时跑 v2 决策面故障套件；本行是长窗口冒烟命令） |
-| **72h 生产浸泡（v2）** | **运行中**（测试进程 start 2026-10-25T07:57Z，server commit `4633507`，ETA 2026-10-28T07:57Z；截至 2026-10-25T10:55Z 已 4300+ 轮、35 次 kill -9 region 0 leader 后恢复、日志无内部不变量锚点；结果以证据目录的 `soak-report.md` 为准，完成前不算达标）。看门狗（卡住 → 告警 → abort）见 PR #266，只影响后续浸泡 |
+| **72h 生产浸泡（v2）** | ✅ **通过**：2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z（259 200 s，main `c53bbfb`），`soak-report.md` 结论「通过（无一致性违规）」；103 630 轮、TSO 2.555 亿、863 次 kill -9 region 0 leader 注入后恢复、watchdog 0 次、节点日志 0 ERROR、无 `passed unapplied decision` / `decision apply stopped` / `behind the applied revision` 锚点。看门狗（卡住 → 告警 → abort）见 PR #266；证据目录 `/tmp/coord-soak72/`（报告全文贴在 #174） |
 
 ```bash
 # KV-T GA 的证据口径是 v2 数据面的 72h 浸泡：
@@ -152,6 +165,9 @@ COORD_EVIDENCE_DIR=/path/to/artifact-store SOAK_SUITE=v2 SOAK_DURATION_SECS=2592
 ```
 
 在 72h 证据入库（或挂到发布工件）之前，任何「长稳已达标」的表述都不成立。
+本次实例的证据是 `/tmp/coord-soak72/`（报告 + driver.log + 三节点日志），报告全文
+贴在 #174；最终 GA 提交上的长稳证据由 Jepsen v2（#272）承担（维护者 2026-10-28
+裁定，见 `kv-t-ga-gate.md` §3.1）。
 
 ## 8. 调参口径（只改数值）
 
