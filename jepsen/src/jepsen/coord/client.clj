@@ -2209,6 +2209,15 @@
       ;; request_id cannot double-apply -- treat it as retryable, but keep
       ;; INTERNAL/FAILED_PRECONDITION as :other so real bugs stay visible.
       (= Status$Code/ABORTED (status-code e))         :unavailable
+      ;; CANCELLED / UNKNOWN with no trailer show up when the peer is
+      ;; paused/killed mid-call: the transport cannot say whether the request
+      ;; was applied. Direct writes retry with the SAME commit_ts and
+      ;; request_id, and the server dedupes on them, so the retry cannot
+      ;; double-apply -- classify as retryable instead of a lost write.
+      ;; (First 2h soak: 17/71 deletes "v2 :other" during one disruption
+      ;; window for exactly this reason.)
+      (= Status$Code/CANCELLED (status-code e))       :unavailable
+      (= Status$Code/UNKNOWN (status-code e))         :unavailable
       (= Status$Code/DEADLINE_EXCEEDED (status-code e)) :unavailable
       :else :other)))
 
