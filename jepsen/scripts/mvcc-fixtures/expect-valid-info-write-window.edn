@@ -1,0 +1,9 @@
+;; 响应丢失的写（:info）尝试过 120 和 140；read_ts=130 的读看到旧值或新值都合法
+;; —— 但只有候选 ts<=R 时才放宽，所以这不能当作「必须可见」的证据。
+[{:type :ok, :f :v2-write, :process 0, :node "n1", :time 10,
+  :key "/jepsen/v2/k/0", :value "v1", :commit-ts 100, :request-id "r1"}
+ {:type :info, :f :v2-write, :process 0, :node "n1", :time 20,
+  :key "/jepsen/v2/k/0", :value "v2", :request-id "r2", :attempted-ts [120 140]}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 30,
+  :key "/jepsen/v2/k/0", :read-ts 130, :requested-read-ts 130,
+  :value "v2", :mod-revision 120, :create-revision 120}]

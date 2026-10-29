@@ -95,6 +95,41 @@
   (mapv (fn [n] (str (node-ip n) ":" grpc-port))
         (take server-count nodes)))
 
+(defn kv-t-toml
+  "The KV-T v2 deployment block: a fixed two-region layout plus the PD and
+  `[kv_t]` switches.
+
+  The region table is written out literally (not derived from
+  `regions/region-configs`) because `--kv-t` is its own topology: v2 pins
+  region 1 = keyspace start to byte `m`, region 2 = `m` to keyspace end,
+  exactly like `tests/common/v2_cluster.rs`, so a run's key placement
+  (`/jepsen/v2/*` in region 1, `zz-jepsen-v2-*` in region 2) does not depend
+  on `--regions`.
+
+  `scheduler_paused = true` is deliberate: automatic split/merge would turn
+  old revisions into the designed-in `HISTORY_UNAVAILABLE`, which mixes a
+  topology event into the data-plane oracle and reads as a false red."
+  []
+  (str "\n"
+       "[multi_raft]\n"
+       "enabled = true\n"
+       "[[multi_raft.initial_regions]]\n"
+       "id = 1\n"
+       "start_key = \"\"\n"
+       "end_key = \"m\"\n"
+       "[[multi_raft.initial_regions]]\n"
+       "id = 2\n"
+       "start_key = \"m\"\n"
+       "end_key = \"\"\n"
+       "\n"
+       "[multi_raft.pd]\n"
+       "enabled = true\n"
+       "target_replicas = 3\n"
+       "scheduler_paused = true\n"
+       "\n"
+       "[kv_t]\n"
+       "enabled = true\n"))
+
 (defn config-str
   "The full TOML config for a given node.
 
@@ -102,7 +137,12 @@
   (from --regions N, see jepsen.coord.regions), appends an identical
   `[multi_raft]` block on every node -- each region replicated to all
   cluster.initial_nodes members (v1 static replication). Without :regions the
-  output is byte-identical to the single-Raft legacy config (T2.6)."
+  output is byte-identical to the single-Raft legacy config (T2.6).
+
+  `:kv-t?` (from --kv-t) appends the KV-T v2 block instead: same two-region
+  layout on every node, `[multi_raft.pd]` enabled, `[kv_t]` enabled. The two
+  modes are mutually exclusive at the CLI; when both reach this function the
+  config carries both blocks and the server rejects it on startup."
   [db test node]
   (let [id          (node-id test node)
         bootstrap?  (= id 1)
@@ -143,6 +183,7 @@
      ;; coord 默认 fail-closed（鉴权开启 + 非 loopback gRPC + 无 TLS ⇒ 拒绝启动，
      ;; R-SEC-04），此处为显式逃生阀。生产严禁开启。
      "allow_plaintext_remote = true\n"
+     (when (:kv-t? db) (kv-t-toml))
      (when multi-raft multi-raft))))
 
 (defn- write-config!
@@ -243,7 +284,7 @@
 
 (defrecord CoordDB [coord-bin nodes data-dir config-dir coord-dir logfile
                     pidfile-prefix root-password auth-root-key raft-secret
-                    cluster-name regions agents agent-peers
+                    cluster-name regions kv-t? agents agent-peers
                     agent-bootstrap-token]
   db/DB
   (setup! [db test node]
@@ -304,6 +345,9 @@
   opts :regions (int, from --regions) enables multi-raft mode: the db record
   carries the derived region table (nil = single-Raft legacy).
 
+  opts :kv-t? (from --kv-t) switches to the KV-T v2 topology (fixed two
+  regions, PD on, `[kv_t]` on); the v1 `--regions` table is unused then.
+
   opts :agents (int, from --agents) > 0 additionally carries the agent plan
   inputs: the resolved cluster peers (for the agent's `static_peers`) and a
   shared one-shot bootstrap token. The agent processes themselves are managed
@@ -324,6 +368,7 @@
        :raft-secret    (or (:raft-secret opts) default-raft-secret)
        :cluster-name   (or (:cluster-name opts) "jepsen-coord")
        :regions        (regions/region-configs (:regions opts))
+       :kv-t?          (boolean (:kv-t opts))
        :agents         agents
        :agent-peers    (when (pos? agents) (agent-peers (:nodes opts)))
        :agent-bootstrap-token (when (pos? agents)

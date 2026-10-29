@@ -1,0 +1,8 @@
+;; commit_ts 问不出来的 :info 事务：只断言全有或全无（这里全有）。
+[{:type :info, :f :v2-txn, :process 0, :node "n1", :time 10, :txn-id "t1",
+  :start-ts 100, :ts-unknown true, :writes {"/jepsen/v2/acct/a" "10" "/jepsen/v2/acct/b" "20"}}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 20,
+  :read-ts 200, :requested-read-ts 200,
+  :covers ["/jepsen/v2/acct/a" "/jepsen/v2/acct/b"],
+  :kvs [{:key "/jepsen/v2/acct/a" :value "10" :mod-revision 150}
+        {:key "/jepsen/v2/acct/b" :value "20" :mod-revision 150}]}]

@@ -1,0 +1,5 @@
+;; 同一 (process,node) 的 read_ts=0 回显回退，且中间没有重启。
+[{:type :ok, :f :v2-read, :process 0, :node "n1", :time 10,
+  :key "/jepsen/v2/k/0", :read-ts 500, :requested-read-ts 0, :value nil}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 20,
+  :key "/jepsen/v2/k/0", :read-ts 400, :requested-read-ts 0, :value nil}]

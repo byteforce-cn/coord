@@ -112,6 +112,8 @@ SOAK_REGIONS    :=      # multi-raft mode: region count (use WORKLOAD=multi-regi
 #   make test WORKLOAD=multi-register REGIONS=3 NEMESIS=partition-halves
 # 说明：--regions N 走 Multi-Raft（[multi_raft] 装配）；缺省（REGIONS 空）= legacy 单 Raft。
 REGIONS         :=      # 透传给 coord.clj --regions（make test / matrix-multi）
+KV_T            :=      # set to 1 for the KV-T v2 data plane (--kv-t; exclusive with REGIONS)
+SOAK_NAME       :=      # soak log/pid suffix (soak-<name>.log), keeps concurrent soaks apart
 MULTI_REGIONS   := 3
 
 # T0.5 随机种子（缺省由 coord.clj 生成并打印，同时写进 test map / results.edn）
@@ -246,6 +248,15 @@ MATRIX_M1       := map:none   map:kill \
 # M2 Watch+Lease 矩阵（T2.1/T2.2，每个 45s）：none 是对照，kill/pause/
 # partition-halves 是「流中断 → 按契约 resume」与「Lease 到期/续期在故障下
 # 仍成立」的证伪路径。
+# KV-T v2（#272）：--kv-t + rate 20（45s ≈ 900 op，远超 200/200/200 样本门槛）
+MATRIX_M3       := kvv2:none kvv2:kill kvv2:partition-halves \
+                   txnv2:none txnv2:kill txnv2:partition-halves
+# txnv2 一个 op 是 4 个 RPC（Begin/Read×2/Commit），45s 只有 ~90 个成功事务；
+# 60s 给到 ~130，门槛 100 才有余量（kvv2 45s 就够，统一 60s 更好读）。
+M3_TIME         := 60
+# 分区格吃掉 ~40% 的 txnv2 事务（每次事务 4 个 RPC），60s 只剩 77 个成功；
+# 120s 给到 ~150，100 的门槛才有意义。
+M3_TIME_TXN     := 120
 MATRIX_M2       := watch:none watch:kill watch:pause watch:partition-halves \
                    lease:none lease:kill lease:pause lease:partition-halves
 
@@ -408,6 +419,10 @@ stage: binary ## Assemble $(UPLOAD_STAGE)/coord-test from jepsen/ + binary (no d
 	@rm -rf $(UPLOAD_STAGE)/coord-test/store $(UPLOAD_STAGE)/coord-test/soak
 	@rm -f $(UPLOAD_STAGE)/coord-test/coord
 	@cp $(COORD_BIN) $(UPLOAD_STAGE)/coord-test/coord
+	# v2 wire 漂移检查解析 contract 原文（docker provider 走仓库 bind mount，
+	# vagrant 必须显式上传，否则检查会 fail-closed 找不到 ../apis）。
+	@rm -rf $(UPLOAD_STAGE)/coord-test/apis && mkdir -p $(UPLOAD_STAGE)/coord-test/apis
+	@cp -r $(REPO_ROOT)/apis/contracts $(UPLOAD_STAGE)/coord-test/apis/
 	@cp $(UPLOAD_STAGE)/coord-test/scripts/coord-soak.sh $(UPLOAD_STAGE)/coord-test/coord-soak.sh
 	@echo "staged -> $(UPLOAD_STAGE)/coord-test (coord @ $$(cd $(REPO_ROOT) && git rev-parse --short HEAD))"
 
@@ -461,9 +476,22 @@ test: $(CHECKER_GATE) ## Coord test: WORKLOAD, NEMESIS, TIME_LIMIT, CONCURRENCY,
 	    --workload $(WORKLOAD) --nemesis $(NEMESIS) \
 	    --time-limit $(TIME_LIMIT) --concurrency $(CONCURRENCY) \
 	    $(if $(RATE),--rate $(RATE)) $(if $(CHECKER),--checker $(CHECKER)) \
-	    $(if $(REGIONS),--regions $(REGIONS)) $(CTRL_FLAGS))
+	    $(if $(REGIONS),--regions $(REGIONS)) $(if $(KV_T),--kv-t) $(CTRL_FLAGS))
 
 checkers: ## T0.3: run every checker fixture suite on control (red refuses to start a run)
+	# KV-T v2 配置模式（--kv-t）：先钉住 v1 配置逐字节不变，再看 v2 三段的形状。
+	# 放在最前面：它不加载任何 fixture，纯 config-str 断言。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    ./scripts/test-kv-t-config.clj)
+	# v2 wire 漂移：先证明比较器不是空转（--selftest 注入一个错号），再真比对。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    ./scripts/check-kv-t-wire.clj --selftest)
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    ./scripts/check-kv-t-wire.clj)
+	# #272：MVCC 判据（快照读/事务原子性/TSO/safe_ts）的 15 个负控制先行 fixture。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.mvcc scripts/mvcc-fixtures \
+	    '{:min-writes 0 :min-reads 0 :min-ts 0}')
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.soak scripts/soak-checker-fixtures)
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
@@ -632,6 +660,17 @@ matrix-m2: checkers ## M2 Watch+Lease 矩阵（T2.1 watch / T2.2 lease × none|k
 	    || { echo "M2 MATRIX FAILED at $$w/$$n"; exit 1; }; \
 	done; echo; echo "===== ALL M2 MATRIX PASSED ====="
 
+matrix-m3: checkers ## KV-T v2 矩阵（kvv2/txnv2 × none|kill|partition-halves，45s，--kv-t）
+	@set -e; for combo in $(MATRIX_M3); do \
+	  w=$${combo%%:*}; n=$${combo##*:}; \
+	  tl=$(M3_TIME); [ "$$w" = txnv2 ] && tl=$(M3_TIME_TXN); \
+	  echo; echo "===== $$w / $$n (kv-t, $${tl}s) ====="; \
+	  $(MAKE) test WORKLOAD=$$w NEMESIS=$$n TIME_LIMIT=$$tl \
+	           CONCURRENCY=2n RATE=20 KV_T=1 SKIP_CHECKERS=1 \
+	           JEPSEN_PROVIDER=$(JEPSEN_PROVIDER) --no-print-directory \
+	    || { echo "M3 MATRIX FAILED at $$w/$$n"; exit 1; }; \
+	done; echo; echo "===== ALL M3 (KV-T v2) MATRIX PASSED ====="
+
 matrix-m5: checkers ## M5a agent 矩阵（lock/election/idgen/registry × none|kill-agent + partition-agent-server，--agents 2，45s）
 	@set -e; failed=""; for combo in $(MATRIX_M5); do \
 	  w=$${combo%%:*}; n=$${combo##*:}; \
@@ -728,7 +767,7 @@ matrix-m5b: checkers ## M5b agent 本地数据面矩阵（cache/mq × none|kill-
 # ---------------------------------------------------------------------------
 
 soak: ## Start the soak in the background on control (SOAK_HOURS / SOAK_TIME_LIMIT, SOAK_RATE, SOAK_REGIONS...)
-	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh start \
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME='$(SOAK_NAME)' ./scripts/coord-soak.sh start \
 	    $(if $(SOAK_TIME_LIMIT),--time-limit $(SOAK_TIME_LIMIT),--hours $(SOAK_HOURS)) \
 	    --rate $(SOAK_RATE) --quiet $(SOAK_QUIET) --disrupt $(SOAK_DISRUPT) \
 	    $(if $(SOAK_NEMESIS),--nemesis $(SOAK_NEMESIS)) \
@@ -737,7 +776,7 @@ soak: ## Start the soak in the background on control (SOAK_HOURS / SOAK_TIME_LIM
 	    $(if $(SEED),--seed $(SEED)) \
 	    $(if $(MIXTURE_RATIO),--mixture-ratio $(MIXTURE_RATIO)) \
 	    $(if $(MAP_MIN_DELETES),--map-min-deletes $(MAP_MIN_DELETES)) \
-	    $(if $(SOAK_EXTRA),--extra '$(SOAK_EXTRA)') \
+	    $(if $(or $(SOAK_EXTRA),$(KV_T)),--extra '$(SOAK_EXTRA) $(if $(KV_T),--kv-t)') \
 	    --workload $(WORKLOAD))
 	@echo "Soak started. Monitor: make soak-status   (or make soak-tail)"
 
@@ -750,6 +789,26 @@ soakfull: ## T6.1: 组合浸泡（默认 --workload soakfull，面比例由 SOAK
 	# workload 的 --time-limit，后者（默认 1800s）才是真正决定 run 长度的那一个。
 	# 只设前者会把 lab 占住半小时（实测踩过）。例：
 	#   make soakfull SOAK_TIME_LIMIT=120 SOAK_QUIET=60
+
+soak-kv-t: ## #272: KV-T v2 soak (kvv2 + mvcc checker; SOAK_TIME_LIMIT=259200 = 72h)
+	$(MAKE) soak WORKLOAD=kvv2 KV_T=1 SOAK_NAME=kvt \
+	    SOAK_NEMESIS=soak SOAK_RATE=0.5 --no-print-directory
+	@echo "KV-T v2 soak started (log soak/soak-kvt.log). Stop: make soak-kv-t-stop"
+
+soak-kv-t-status: ## #272: KV-T v2 soak progress
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh status)
+
+soak-kv-t-wait: ## #272: block until the KV-T v2 soak finishes
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh wait $(SOAK_WAIT_INTERVAL))
+
+soak-kv-t-tail: ## #272: tail the KV-T v2 soak log
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh tail)
+
+soak-kv-t-stop: ## #272: cancel the KV-T v2 soak
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh stop)
+
+soak-kv-t-results: ## #272: summarize the KV-T v2 soak results
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh results)
 
 soak-status: ## Soak progress + latest log lines
 	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh status)

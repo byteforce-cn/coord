@@ -12,6 +12,10 @@
 
 **Issue:** #272（GA gate 行：#174 / #175）
 
+> **状态（2026-10-29）：** Task 1–6 已落地并合入（PR #292）；Task 7 的浸泡证据在
+> GA 提交上用 `make soak-kv-t SOAK_TIME_LIMIT=259200` 重跑，结论写进
+> `docs/production/ops/kv-t-ga-gate.md`。
+
 > 路径约定：`Files:` 里的 `{name}` 表示**本任务要新建**的文件；命令一律在控制机的 `/root/coord-test`
 > 里执行（`./scripts/...` 是相对该目录的写法）。
 

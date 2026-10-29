@@ -29,8 +29,11 @@ set -euo pipefail
 
 PROJECT=/root/coord-test
 SOAK_DIR="$PROJECT/soak"
-LOG="$SOAK_DIR/soak.log"
-PIDFILE="$SOAK_DIR/soak.pid"
+# SOAK_NAME 让第二条浸泡（例如 #272 的 Jepsen v2 `kvv2`）有自己的日志/pid，
+# 不会覆盖正在跑的 v1 长跑：SOAK_NAME=kvt -> soak-kvt.log / soak-kvt.pid。
+SOAK_NAME="${SOAK_NAME:-}"
+LOG="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}.log"
+PIDFILE="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}.pid"
 STORE="$PROJECT/store/coord"
 
 mkdir -p "$SOAK_DIR"

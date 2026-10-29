@@ -2142,6 +2142,311 @@
                           :ack-ok? ack-ok?
                           :t0-ns t0 :done-ns (System/nanoTime)))))))
 
+;; ---------------------------------------------------------------------------
+;; KV-T v2 data plane (#272): retry classification and invokes
+;;
+;; The rule everywhere below: a failure the client retried is visible in the
+;; op (`:retried`), and an ambiguous outcome becomes :info -- never a silent
+;; success. The MVCC checker's whole value depends on this.
+;; ---------------------------------------------------------------------------
+
+(def ^:private ledger-accounts
+  "8 accounts per region. More accounts than workers keeps the OCC conflict
+  rate from swallowing the sample: with 2 per region, 5 workers collided on
+  ~83% of txns and almost nothing succeeded."
+  {:region1 (mapv #(str "/jepsen/v2/acct/" %) "abcdefgh")
+   :region2 (mapv #(str "zz-jepsen-v2/acct/" %) "abcdefgh")})
+
+(def ^:private ledger-keys
+  (into (vec (:region1 ledger-accounts)) (:region2 ledger-accounts)))
+
+(def ^:private ledger-total
+  "Every account starts at 25 (16 x 25 = 400); a transfer moves exactly 1, so
+  the sum is invariant. A half-applied transfer breaks the sum as well as the
+  per-key snapshot expectations."
+  400)
+
+(def ^:private v2-recent-ts
+  "Recent successful commit timestamps: [{:ts n :at millis} …]. The kvv2
+  generator only sends historical reads for ts values it has seen -- a read
+  that is guaranteed to fail would be a fake sample."
+  (atom []))
+
+(defn- record-v2-ts!
+  [ts]
+  (swap! v2-recent-ts (fn [xs]
+                        (->> (conj xs {:ts (long ts) :at (System/currentTimeMillis)})
+                             (take-last 400)
+                             vec))))
+
+(defn recent-v2-ts
+  "A commit_ts observed within the last 600s, or nil."
+  []
+  (let [cutoff (- (System/currentTimeMillis) (* 600 1000))
+        xs (filter #(>= (long (:at %)) cutoff) @v2-recent-ts)]
+    (when (seq xs)
+      (:ts (rand-nth (vec xs))))))
+
+(defn- v2-error-class
+  "Classifies a v2 failure: the `x-coord-error-code` trailer first, the gRPC
+  code second (SAFE_TS_LAG vs a dropped connection are both UNAVAILABLE;
+  TXN_CONFLICT vs EPOCH_STALE are both ABORTED)."
+  [^StatusRuntimeException e]
+  (let [code (p/error-code e)]
+    (cond
+      (= "COMMIT_REJECTED" code)     :commit-rejected
+      (= "SAFE_TS_LAG" code)         :safe-ts-lag
+      (= "EPOCH_STALE" code)         :epoch-stale
+      (= "TXN_CONFLICT" code)        :txn-conflict
+      (= "NOT_LEADER" code)          :not-leader
+      (= "HISTORY_UNAVAILABLE" code) :history-unavailable
+      (= "TXN_NOT_FOUND" code)       :txn-not-found
+      (= Status$Code/UNAUTHENTICATED (status-code e)) :unauthenticated
+      (= Status$Code/OUT_OF_RANGE (status-code e))    :history-unavailable
+      (= Status$Code/UNAVAILABLE (status-code e))     :unavailable
+      ;; ABORTED without a code: the node dropped the proposal (lost leadership
+      ;; mid-partition). Nothing was applied, and a retry with the same
+      ;; request_id cannot double-apply -- treat it as retryable, but keep
+      ;; INTERNAL/FAILED_PRECONDITION as :other so real bugs stay visible.
+      (= Status$Code/ABORTED (status-code e))         :unavailable
+      (= Status$Code/DEADLINE_EXCEEDED (status-code e)) :unavailable
+      :else :other)))
+
+(defn- v2-call-on
+  "One call on the node at `idx`. Returns {:ok resp} / {:err e}."
+  [this idx method req]
+  (let [ch (nth @(:channels this) idx)]
+    (try
+      (let [resp (p/call ch method req)]
+        (leader-seen! this :v2 idx)
+        {:ok resp})
+      (catch StatusRuntimeException e
+        {:err e}))))
+
+(defn- v2-rotate
+  "Next node index after a retryable failure (NOT_LEADER / EPOCH_STALE / plain
+  UNAVAILABLE all mean 'try elsewhere', never 'the write happened')."
+  [this idx]
+  (mod (inc (long idx)) (count @(:channels this))))
+
+(defn- v2-get-ts
+  "Allocates one timestamp (GetTs), rotating nodes on UNAVAILABLE."
+  [this]
+  (loop [idx (leader-start this :v2-tso) i 0]
+    (let [{:keys [ok err]} (v2-call-on this idx p/tso-v2-get-ts-method
+                                       (p/tso-get-ts-req))]
+      (cond
+        ok (p/tso-get-ts ok)
+        (> i 16) (throw err)
+        :else (recur (v2-rotate this idx) (inc i))))))
+
+(defn- v2-put!
+  "Direct write with TS allocation and the documented retry budget.
+
+  COMMIT_REJECTED: the ts lost a race with safe_ts -> fresh ts, SAME
+  request_id (the server dedupes by request_id, so a retry can never apply
+  twice). SAFE_TS_LAG: the region has not caught up; recorded as :info with
+  the attempted ts (it may or may not apply later), never retried with a
+  different timestamp."
+  [this op]
+  (let [req-id (or (:request-id op) (request-id))
+        f      (if (= :v2-delete (:f op)) p/kv-v2-delete-method p/kv-v2-put-method)
+        req-of (if (= :v2-delete (:f op))
+                 (fn [ts] (p/kv2-delete-req* {:key (:key op) :commit-ts ts
+                                              :request-id req-id}))
+                 (fn [ts] (p/kv2-put-req* {:key (:key op) :value (:value op)
+                                           :commit-ts ts :request-id req-id})))]
+    (loop [idx     (leader-start this (:f op))
+           tries   0
+           ts      nil
+           retried []]
+      (cond
+        (> tries 40)
+        (assoc op :type :info :error :unavailable-maybe-applied
+               :attempted-ts (vec (distinct (remove nil? (conj retried ts))))
+               :request-id req-id)
+
+        :else
+        (let [ts (or ts (v2-get-ts this))
+              {:keys [ok err]} (v2-call-on this idx f (req-of ts))]
+          (cond
+            ok
+            (do (record-v2-ts! ts)
+                (assoc op :type :ok :commit-ts ts :request-id req-id :retried retried))
+
+            :else
+            (case (v2-error-class err)
+              :commit-rejected
+              (recur idx (inc tries) nil (conj retried ts))
+
+              :safe-ts-lag
+              (assoc op :type :info :error :safe-ts-lag :attempted-ts [ts]
+                     :request-id req-id :retried retried)
+
+              (:epoch-stale :not-leader :unavailable)
+              (recur (v2-rotate this idx) (inc tries) ts (conj retried ts))
+
+              :unauthenticated
+              (assoc op :type :fail :error :unauthenticated)
+
+              (assoc op :type :fail :error (str "v2 " (v2-error-class err))
+                     :code (p/error-code err) :detail (str err)))))))))
+
+(defn- invoke-v2-write [this op] (v2-put! this op))
+(defn- invoke-v2-delete [this op] (v2-put! this op))
+
+(defn- invoke-v2-ts
+  [this op]
+  (try
+    (let [ts (v2-get-ts this)]
+      (record-v2-ts! ts)
+      (assoc op :type :ok :ts ts))
+    (catch StatusRuntimeException e
+      (if (= :unauthenticated (v2-error-class e))
+        (assoc op :type :fail :error :unauthenticated)
+        (assoc op :type :info :error :unavailable-maybe-applied)))))
+
+(defn- invoke-v2-read
+  "Snapshot / historical read. read_ts=0 means safe_ts; the echoed read_ts is
+  recorded as the fact the checker computes expectations from."
+  [this op]
+  (let [R   (long (or (:read-ts op) 0))
+        req (p/kv2-range-req* {:key (:key op)
+                               :range-end (:range-end op)
+                               :read-ts R
+                               :limit (:limit op)})]
+    (loop [idx (leader-start this :v2-read) tries 0 retried []]
+      (if (> tries 30)
+        (assoc op :type :info :error :unavailable-maybe-applied
+               :requested-read-ts R :retried retried)
+        (let [{:keys [ok err]} (v2-call-on this idx p/kv-v2-range-method req)]
+          (if ok
+            (let [{:keys [kvs read-ts]} (p/kv2-range-resp ok)
+                  kv (first kvs)]
+              (merge op
+                     {:type :ok
+                      :requested-read-ts R
+                      :read-ts read-ts
+                      :kvs kvs
+                      :retried retried}
+                     (when-not (:range-end op)
+                       ;; the requested key, not (:key kv): an absent key has no
+                       ;; KeyValue, and nil would make the checker index by nil.
+                       {:key (:key op)
+                        :value (:value kv)
+                        :mod-revision (:mod-revision kv)
+                        :create-revision (:create-revision kv)})))
+            (case (v2-error-class err)
+              (:safe-ts-lag :unavailable)
+              (assoc op :type :info :error (v2-error-class err)
+                     :requested-read-ts R :retried retried)
+              :history-unavailable
+              (assoc op :type :info :error :history-unavailable
+                     :requested-read-ts R :retried retried)
+              :unauthenticated
+              (assoc op :type :fail :error :unauthenticated)
+              (recur (v2-rotate this idx) (inc tries) (conj retried err)))))))))
+
+(defn- v2-txn-commit!
+  "Commits the txn; on a lost response re-commits with the SAME request_id so
+  the server replays the first commit_ts (idempotent). Returns
+  {:ok commit-ts} / {:conflict true} / {:unknown true}."
+  [this idx txn-id req-id mutations]
+  (let [call (fn []
+               (v2-call-on this idx p/txn-v2-commit-method
+                           (p/txn2-commit-req* {:txn-id txn-id
+                                                :request-id req-id
+                                                :mutations mutations})))
+        {:keys [ok err]} (call)]
+    (cond
+      ok {:ok (:commit-ts (p/txn2-commit-resp ok))}
+      (= :txn-conflict (v2-error-class err)) {:conflict true}
+      :else
+      (let [again (call)]
+        (cond
+          (:ok again) {:ok (:commit-ts (p/txn2-commit-resp (:ok again)))}
+          (= :txn-conflict (v2-error-class (:err again))) {:conflict true}
+          :else {:unknown true})))))
+
+(defn- v2-ledger-snapshot
+  "Both ledger ranges at read_ts=0 (a transfer preserves the sum, so a lagging
+  safe_ts cannot turn the sum check into a false red). nil when either range
+  call fails."
+  [this idx]
+  (let [rng (fn [k e] (v2-call-on this idx p/kv-v2-range-method
+                                  (p/kv2-range-req* {:key k :range-end e :read-ts 0})))
+        r1  (rng "/jepsen/v2/acct/" "/jepsen/v2/acct0")
+        r2  (rng "zz-jepsen-v2/acct/" "zz-jepsen-v2/acct0")]
+    (when (and (:ok r1) (:ok r2))
+      (concat (:kvs (p/kv2-range-resp (:ok r1)))
+              (:kvs (p/kv2-range-resp (:ok r2)))))))
+
+(defn- v2-txn!
+  "Begin -> Read(from,to) -> Commit on ONE node (sessions are not replicated).
+
+  A node switch or TXN_NOT_FOUND aborts and starts a new session (visible as
+  `:retried`); TXN_CONFLICT is a legal :fail. When the commit_ts cannot be
+  recovered, the op is :info with :ts-unknown and the checker only asserts
+  all-or-none."
+  [this op]
+  (let [from   (:from op)
+        to     (:to op)
+        amount (long (or (:amount op) 1))
+        req-id (request-id)
+        mks    (fn [f t] [{:kind :put :key from :value (str f)}
+                          {:kind :put :key to :value (str t)}])]
+    (loop [idx (leader-start this :v2-txn) tries 0 retried []]
+      (if (> tries 12)
+        (assoc op :type :info :error :unavailable-maybe-applied
+               :ts-unknown true :retried retried)
+        (let [{:keys [ok err]} (v2-call-on this idx p/txn-v2-begin-method
+                                           (p/txn2-begin-req* {:start-ts 0 :ttl-ms 15000}))]
+          (if-not ok
+            (if (= :unauthenticated (v2-error-class err))
+              (assoc op :type :fail :error :unauthenticated)
+              (recur (v2-rotate this idx) (inc tries) (conj retried err)))
+            (let [{:keys [txn-id start-ts]} (p/txn2-begin-resp ok)
+                  rd     (fn [k] (v2-call-on this idx p/txn-v2-read-method
+                                             (p/txn2-read-req* {:txn-id txn-id :key k})))
+                  r1     (rd from)
+                  r2     (rd to)
+                  abort! (fn [] (v2-call-on this idx p/txn-v2-abort-method
+                                            (p/txn2-abort-req* {:txn-id txn-id})))]
+              (if (or (:err r1) (:err r2))
+                (do (abort!)
+                    (recur (v2-rotate this idx) (inc tries)
+                           (conj retried (:err r1) (:err r2))))
+                (let [val-of (fn [r] (some-> (first (:kvs (p/txn2-read-resp (:ok r))))
+                                             :value parse-long))
+                      nf  (or (val-of r1) 0)
+                      nt  (or (val-of r2) 0)
+                      res (v2-txn-commit! this idx txn-id req-id
+                                          (mks (- nf amount) (+ nt amount)))
+                      base {:txn-id (vec txn-id) :start-ts start-ts :request-id req-id
+                            :writes {from (str (- nf amount)) to (str (+ nt amount))}
+                            :reads {from (str nf) to (str nt)}
+                            :retried retried}]
+                  (cond
+                    (:ok res)
+                    (do (record-v2-ts! (:ok res))
+                        (merge op base {:type :ok
+                                        :commit-ts (:ok res)
+                                        :kvs (v2-ledger-snapshot this idx)
+                                        :ledger-total ledger-total}))
+
+                    (:conflict res)
+                    (do (abort!)
+                        (merge op {:type :fail :error :txn-conflict
+                                   :request-id req-id :retried retried}))
+
+                    :else
+                    (do (abort!)
+                        (merge op {:type :info :error :unavailable-maybe-applied
+                                   :ts-unknown true :request-id req-id
+                                   :retried retried}))))))))))))
+
+(defn- invoke-v2-txn [this op] (v2-txn! this op))
+
 (defn- invoke-coord!
   "Runs op, transparently re-authenticating and retrying when the cluster
   rejects our CCT as UNAUTHENTICATED (coord CCTs expire after ~1h; a rejected
@@ -2189,6 +2494,12 @@
                     :mq-create-topic  (invoke-mq-create-topic this op)
                     :mq-publish       (invoke-mq-publish this op)
                     :mq-poll          (invoke-mq-poll this op)
+                    ;; #272 KV-T v2 数据面
+                    :v2-write         (invoke-v2-write this op)
+                    :v2-delete        (invoke-v2-delete this op)
+                    :v2-read          (invoke-v2-read this op)
+                    :v2-ts            (invoke-v2-ts this op)
+                    :v2-txn           (invoke-v2-txn this op)
                     (assoc op :type :fail :error (str "unknown op " (:f op)))))]
     (loop [re-auths-left 2]
       (let [op' (attempt)]
@@ -2207,6 +2518,44 @@
               op'))
           op')))))
 
+(defn- v2-seed-ledger!
+  "Seeds the four accounts at 25 each (once, in setup!).
+
+  Without it every txn would read nil and the ledger sum check would compare
+  against an empty ledger -- green for the wrong reason. COMMIT_REJECTED retries
+  with a fresh ts and the same request_id (idempotent server-side)."
+  [this]
+  (doseq [k ledger-keys]
+    (loop [tries 0]
+      (let [ts (v2-get-ts this)
+            {:keys [ok err]} (v2-call-on this
+                                         (leader-start this :v2-seed)
+                                         p/kv-v2-put-method
+                                         (p/kv2-put-req* {:key k :value "25"
+                                                          :commit-ts ts
+                                                          :request-id (str "seed-" k)}))]
+        (cond
+          ok nil
+          (and (= :commit-rejected (v2-error-class err)) (< tries 8)) (recur (inc tries))
+          :else (throw (ex-info (str "v2 ledger seed failed for " k ": " err)
+                                {:key k :error-code (p/error-code err)})))))))
+
+(defn- v2-ready-probe
+  "One v2 readiness attempt: tso.v2 GetTs + kv.v2 Range(read_ts=0).
+
+  Both must succeed: GetTs alone would go green on a node whose TSO batch
+  cache is up while the KV data plane is still gated (or vice versa). Returns
+  {:ok resp :node n} or {:err e}."
+  [this]
+  (try
+    (try-nodes this :v2-ready
+               (fn [ch]
+                 (p/tso-get-ts (p/call ch p/tso-v2-get-ts-method (p/tso-get-ts-req)))
+                 (p/kv2-range-resp
+                   (p/call ch p/kv-v2-range-method
+                           (p/kv2-range-req* {:key "/jepsen/v2/ready" :read-ts 0})))))
+    (catch Exception e {:err e})))
+
 (defrecord CoordClient [nodes root-password cct channels raw-channels leader-idx
                         last-rev last-watch-rev parse-values?
                         ;; M5a：鉴权用的端点（server）可以与 ops 端点（agent 隧道）
@@ -2219,7 +2568,12 @@
                         ;; 锚（未确认的消息不得被跳过）。
                         mq-cursor
                         ;; M5b：需要在 setup! 里引导创建的主题（--workload mq）。
-                        mq-topic]
+                        mq-topic
+                        ;; #272：--kv-t。v1 数据面在 v2 集群上被 KvTState::v1_gate
+                        ;; 全量拒绝，setup! 的 v1 探针会 60 次后失败。
+                        kv-t?
+                        ;; #272：v2 workload 名（txnv2 需要在 setup! 里播种账本）。
+                        v2-workload]
   client/Client
   (open! [this test node]
     (info "Opening coord client on" node)
@@ -2260,8 +2614,41 @@
           (throw e)))))
 
   (setup! [this test]
-    (info "coord client setup: waiting for a successful read (quorum + auth)")
-    (let [res (loop [i 0]
+    (if (:kv-t? this)
+      (do
+        (info "coord client setup: waiting for tso.v2 GetTs + kv.v2 Range")
+        (let [res (loop [i 0]
+                    (if (< i 60)
+                      (let [r (v2-ready-probe this)]
+                        (if (:ok r)
+                          r
+                          (do (Thread/sleep 1000)
+                              (recur (inc i)))))
+                      nil))]
+          (when-not res
+            ;; Same diagnostics contract as the v1 branch: the last failure and
+            ;; its structured code, not just "did not become ready".
+            (let [last (v2-ready-probe this)
+                  e    (:err last)]
+              (throw (ex-info (str "coord v2 cluster did not become ready "
+                                   "(no successful tso.v2 GetTs + kv.v2 Range); "
+                                   "last error: " e
+                                   " | error-code: "
+                                   (when (instance? StatusRuntimeException e)
+                                     (pr-str (p/error-code e)))
+                                   "; ops endpoints: " (pr-str (:nodes this)))
+                              {:nodes (:nodes this)
+                               :err (str e)
+                               :error-code (when (instance? StatusRuntimeException e)
+                                             (p/error-code e))}))))
+          (info "coord v2 cluster is ready")
+          (when (= :txnv2 (:v2-workload this))
+            (v2-seed-ledger! this)
+            (info "coord v2 ledger seeded" ledger-total))
+          this))
+      (do
+        (info "coord client setup: waiting for a successful read (quorum + auth)")
+        (let [res (loop [i 0]
                 (if (< i 60)
                   (let [res (try
                               (try-nodes this register-key
@@ -2303,7 +2690,7 @@
                     (catch Exception e {:err e}))]
           (info "coord client: mq topic" t
                 (if (:ok res) "ready" (str "create failed: " (:err res)))))))
-    this)
+        this)))
 
   (invoke! [this test op]
     (invoke-coord! this test op))
@@ -2344,4 +2731,7 @@
                  ;; M5b：MQ 游标（运行时状态，open! 里初始化）
                  nil
                  ;; M5b：需要 setup! 引导创建的主题（--workload mq）
-                 (:mq-topic opts)))
+                 (:mq-topic opts)
+                 ;; #272：--kv-t（v2 数据面探针）与 v2 workload 名
+                 (boolean (:kv-t opts))
+                 (:workload opts)))

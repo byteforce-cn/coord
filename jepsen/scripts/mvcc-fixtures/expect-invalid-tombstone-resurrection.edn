@@ -1,0 +1,8 @@
+;; tombstone 之后又读到被删的值。
+[{:type :ok, :f :v2-write, :process 0, :node "n1", :time 10,
+  :key "/jepsen/v2/k/0", :value "v1", :commit-ts 100, :request-id "r1"}
+ {:type :ok, :f :v2-delete, :process 0, :node "n1", :time 20,
+  :key "/jepsen/v2/k/0", :value "", :commit-ts 110, :request-id "r2"}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 30,
+  :key "/jepsen/v2/k/0", :read-ts 120, :requested-read-ts 120,
+  :value "v1", :mod-revision 100, :create-revision 100}]

@@ -28,7 +28,8 @@
 
 (require '[clojure.java.io :as io]
          '[clojure.string :as str]
-         '[jepsen.coord.proto :as p])
+         '[jepsen.coord.proto :as p]
+         '[jepsen.coord.protoparse :as pp])
 (import '[jepsen.coord CoordRpc])
 
 (def failures (atom []))
@@ -63,87 +64,6 @@
             (str "method name: want " want-n ", got " got))))
 
 ;; ── 2. 字段号 / 字段名：解析 agent_api.proto 原文比对 ──────────────────────
-(defn- wire-class
-  "proto 标量/复合类型 → protobuf 的**线格式类**（varint / length / fixed32 / fixed64）。
-
-  这是本校验的核心判据：字段号写反、类型写错（int32 写成 string 之类），
-  单独看「字段名→号」可能仍然自洽，但**线上字节**解不出来。
-  `map<k,v>` 与 message / enum 这两类的判别需要类型解析，本 parser 不追求：
-  map 与 message 是 length，enum 是 varint（枚举名从 `enum X {` 收集）。"
-  [type-name enums]
-  (cond
-    (#{"string" "bytes"} type-name)                                  :length
-    (str/starts-with? type-name "map<")                                :length
-    (contains? enums (last (str/split type-name #"\.")))              :varint
-    (#{"int32" "int64" "uint32" "uint64" "sint32" "sint64" "bool"} type-name) :varint
-    (#{"fixed32" "sfixed32" "float"} type-name)                       :fixed32
-    (#{"fixed64" "sfixed64" "double"} type-name)                      :fixed64
-    :else                                                             :length))
-
-(defn- find-blocks
-  "按**花括号配平**切出 `keyword name { … }` 块，返回 [[name body] …]。
-
-  不用正则整块匹配（`\\{([^}]*)\\}`）：message 体里一旦出现嵌套 message / enum /
-  oneof，正则只截到第一个 `}`，会**悄悄给出半个字段集**（假绿）。
-  配平扫描让这种情况变成可见的「body 里还有 `{`」。"
-  [text kw]
-  (let [re (re-pattern (str kw "\\s+([A-Za-z0-9_]+)\\s*\\{"))]
-    (loop [m (re-matcher re text) acc []]
-      (if (.find m)
-        (let [name (.group m 1)
-              body-start (.end m)
-              body-end (loop [i body-start depth 1]
-                         (cond
-                           (>= i (count text)) (count text)
-                           (= \{ (.charAt text i)) (recur (inc i) (inc depth))
-                           (= \} (.charAt text i)) (if (= depth 1)
-                                                     i
-                                                     (recur (inc i) (dec depth)))
-                           :else (recur (inc i) depth)))]
-          (recur m (conj acc [name (subs text body-start body-end)])))
-        acc))))
-
-(defn- parse-proto
-  "解析一个 proto 原文：返回
-    {:messages {name {field-name {:number n :wire :varint|:length|:fixed32|:fixed64
-                                  :repeated bool}}}
-     :services #{name}
-     :enums #{name}}
-
-  刻意不写通用 parser：本套件用到的 message 都是**平的**（无嵌套 message/enum）。
-  若某个目标 message 里出现了嵌套块，本函数登记为 **:nested**，由调用方报 FAIL ——
-  不许「悄悄给出半个字段集」那种假绿。"
-  [path]
-  (let [text (-> (slurp path)
-                 (str/replace #"(?m)//.*$" ""))   ;; 去行注释
-        service-blocks (find-blocks text "service")
-        services (->> service-blocks (mapv first) set)
-        service-methods (into {}
-                              (map (fn [[sname body]]
-                                     [sname (->> (re-seq #"rpc\s+([A-Za-z0-9_]+)\s*\(" body)
-                                                 (mapv second)
-                                                 set)]))
-                              service-blocks)
-        enums (->> (find-blocks text "enum") (mapv first) set)
-        field-of (fn [body]
-                   (into {}
-                         (map (fn [[_ rep type-name fname num]]
-                                [fname {:number (Long/parseLong num)
-                                        :wire (wire-class type-name enums)
-                                        :repeated (some? rep)}]))
-                         (re-seq #"(?m)^\s*(repeated\s+)?(map<[^>]*>|[A-Za-z0-9_.]+)\s+([A-Za-z0-9_]+)\s*=\s*([0-9]+)\s*;"
-                                 body)))
-        messages (into {}
-                       (map (fn [[mname body]]
-                              [mname (if (str/includes? body "{")
-                                       :nested
-                                       (field-of body))]))
-                       (find-blocks text "message"))]
-    {:messages messages
-     :services services
-     :service-methods service-methods
-     :enums enums}))
-
 (def proto-dir
   "coord-proto/src/proto —— lab 里 /root/coord-test 的上层目录
   （jepsen/ 是仓库的一部分，proto 在 ../coord-proto/）。"
@@ -164,7 +84,7 @@
        (map #(.getPath %))
        sort))
 
-(def parsed-protos (mapv (fn [p] [p (parse-proto p)]) proto-files))
+(def parsed-protos (mapv (fn [p] [p (pp/parse-proto p)]) proto-files))
 
 (let [messages (into {} (mapcat (comp :messages second) parsed-protos))
       services (into #{} (mapcat (comp :services second) parsed-protos))
