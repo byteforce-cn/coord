@@ -13,3 +13,6 @@
 *.log
 soak.pid
 soak-curves.pid
+# #272: the KV-T v2 soak keeps its own log/pid (SOAK_NAME=kvt)
+soak-*.pid
+soak-*.log
