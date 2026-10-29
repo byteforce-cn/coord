@@ -1,0 +1,8 @@
+;; 事务写集只被看到一半：commit_ts=200 的 a/b，read_ts=210 的区间读只看到 a。
+[{:type :ok, :f :v2-txn, :process 0, :node "n1", :time 10, :txn-id "t1",
+  :start-ts 100, :commit-ts 200,
+  :writes {"/jepsen/v2/acct/a" "10" "/jepsen/v2/acct/b" "20"}}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 20,
+  :read-ts 210, :requested-read-ts 210,
+  :covers ["/jepsen/v2/acct/a" "/jepsen/v2/acct/b"],
+  :kvs [{:key "/jepsen/v2/acct/a" :value "10" :mod-revision 200}]}]

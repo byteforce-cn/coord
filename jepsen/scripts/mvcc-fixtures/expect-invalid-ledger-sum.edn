@@ -1,0 +1,9 @@
+;; 账本总和变了（只写了一半的转账）：每条读都能被事务解释，但总和 99 != 100。
+[{:type :ok, :f :v2-txn, :process 0, :node "n1", :time 10, :txn-id "t1",
+  :start-ts 100, :commit-ts 150,
+  :writes {"/jepsen/v2/acct/a" "10" "/jepsen/v2/acct/b" "89"}}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 20,
+  :read-ts 200, :requested-read-ts 200, :ledger-total 100,
+  :covers ["/jepsen/v2/acct/a" "/jepsen/v2/acct/b"],
+  :kvs [{:key "/jepsen/v2/acct/a" :value "10" :mod-revision 150}
+        {:key "/jepsen/v2/acct/b" :value "89" :mod-revision 150}]}]

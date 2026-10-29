@@ -43,6 +43,7 @@ public class CoordRpc {
   private static final Type T_BYTES  = Type.TYPE_BYTES;
   private static final Type T_INT32  = Type.TYPE_INT32;
   private static final Type T_INT64  = Type.TYPE_INT64;
+  private static final Type T_UINT32 = Type.TYPE_UINT32;
   private static final Type T_BOOL   = Type.TYPE_BOOL;
   private static final Type T_MSG    = Type.TYPE_MESSAGE;
   private static final Type T_ENUM   = Type.TYPE_ENUM;
@@ -72,6 +73,10 @@ public class CoordRpc {
 
   private static FieldDescriptorProto.Builder i32(String name, int num) {
     return f(name, num, T_INT32, L_OPT);
+  }
+
+  private static FieldDescriptorProto.Builder u32(String name, int num) {
+    return f(name, num, T_UINT32, L_OPT);
   }
 
   private static FieldDescriptorProto.Builder repI64(String name, int num) {
@@ -295,6 +300,260 @@ public class CoordRpc {
         .addMessageType(txnRequest())
         .addMessageType(txnResponse())
         .addService(txnService())
+        .build();
+  }
+
+  // ------------------------------------------------------------------
+  // coord/{tso,kv,txn}/v2 (KV-T v2 data plane)
+  //
+  // Field numbers are copied from apis/contracts/proto/coord/*/v2/*.proto;
+  // scripts/check-kv-t-wire.clj parses those files and fails on any drift
+  // (number, wire type, repeated-ness, missing/extra field, service/method).
+  // ------------------------------------------------------------------
+
+  private static DescriptorProto tsoV2AllocateRequest() {
+    return DescriptorProto.newBuilder().setName("AllocateRequest")
+        .addField(u32("batch_size", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto tsoV2AllocateResponse() {
+    return DescriptorProto.newBuilder().setName("AllocateResponse")
+        .addField(i64("start_ts", 1).build())
+        .addField(i64("end_ts", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto tsoV2GetTsResponse() {
+    return DescriptorProto.newBuilder().setName("GetTsResponse")
+        .addField(i64("ts", 1).build())
+        .build();
+  }
+
+  private static ServiceDescriptorProto tsoV2Service() {
+    return ServiceDescriptorProto.newBuilder().setName("TSO")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Allocate")
+            .setInputType(".coord.tso.v2.AllocateRequest")
+            .setOutputType(".coord.tso.v2.AllocateResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("GetTs")
+            .setInputType(".coord.tso.v2.GetTsRequest")
+            .setOutputType(".coord.tso.v2.GetTsResponse"))
+        .build();
+  }
+
+  private static FileDescriptorProto tsoV2FileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/tso/v2/tso.proto")
+        .setPackage("coord.tso.v2")
+        .setSyntax("proto3")
+        .addMessageType(tsoV2AllocateRequest())
+        .addMessageType(tsoV2AllocateResponse())
+        .addMessageType(DescriptorProto.newBuilder().setName("GetTsRequest").build())
+        .addMessageType(tsoV2GetTsResponse())
+        .addService(tsoV2Service())
+        .build();
+  }
+
+  private static DescriptorProto kvV2KeyValue() {
+    return DescriptorProto.newBuilder().setName("KeyValue")
+        .addField(bytes("key", 1).build())
+        .addField(bytes("value", 2).build())
+        .addField(i64("create_revision", 3).build())
+        .addField(i64("mod_revision", 4).build())
+        .addField(i64("version", 5).build())
+        .addField(i64("lease_id", 6).build())
+        .build();
+  }
+
+  private static DescriptorProto kvV2PutRequest() {
+    return DescriptorProto.newBuilder().setName("PutRequest")
+        .addField(bytes("key", 1).build())
+        .addField(bytes("value", 2).build())
+        .addField(i64("lease_id", 3).build())
+        .addField(bool("prev_kv", 4).build())
+        .addField(bytes("request_id", 5).build())
+        .addField(i64("commit_ts", 6).build())
+        .build();
+  }
+
+  private static DescriptorProto kvV2PutResponse() {
+    return DescriptorProto.newBuilder().setName("PutResponse")
+        .addField(msg("prev_kv", 1, ".coord.kv.v2.KeyValue").build())
+        .addField(i64("commit_ts", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto kvV2DeleteRequest() {
+    return DescriptorProto.newBuilder().setName("DeleteRequest")
+        .addField(bytes("key", 1).build())
+        .addField(bytes("range_end", 2).build())
+        .addField(bool("prev_kv", 3).build())
+        .addField(bytes("request_id", 4).build())
+        .addField(i64("commit_ts", 5).build())
+        .build();
+  }
+
+  private static DescriptorProto kvV2DeleteResponse() {
+    return DescriptorProto.newBuilder().setName("DeleteResponse")
+        .addField(i64("deleted", 1).build())
+        .addField(repMsg("prev_kvs", 2, ".coord.kv.v2.KeyValue").build())
+        .addField(i64("commit_ts", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto kvV2RangeRequest() {
+    return DescriptorProto.newBuilder().setName("RangeRequest")
+        .addField(bytes("key", 1).build())
+        .addField(bytes("range_end", 2).build())
+        .addField(i64("limit", 3).build())
+        .addField(i64("read_ts", 4).build())
+        .addField(bool("keys_only", 5).build())
+        .addField(bool("count_only", 6).build())
+        .build();
+  }
+
+  private static DescriptorProto kvV2RangeResponse() {
+    return DescriptorProto.newBuilder().setName("RangeResponse")
+        .addField(repMsg("kvs", 1, ".coord.kv.v2.KeyValue").build())
+        .addField(i64("count", 2).build())
+        .addField(i64("read_ts", 3).build())
+        .build();
+  }
+
+  private static ServiceDescriptorProto kvV2Service() {
+    return ServiceDescriptorProto.newBuilder().setName("KV")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Put")
+            .setInputType(".coord.kv.v2.PutRequest")
+            .setOutputType(".coord.kv.v2.PutResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Range")
+            .setInputType(".coord.kv.v2.RangeRequest")
+            .setOutputType(".coord.kv.v2.RangeResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Delete")
+            .setInputType(".coord.kv.v2.DeleteRequest")
+            .setOutputType(".coord.kv.v2.DeleteResponse"))
+        .build();
+  }
+
+  private static FileDescriptorProto kvV2FileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/kv/v2/kv.proto")
+        .setPackage("coord.kv.v2")
+        .setSyntax("proto3")
+        .addMessageType(kvV2KeyValue())
+        .addMessageType(kvV2PutRequest())
+        .addMessageType(kvV2PutResponse())
+        .addMessageType(kvV2DeleteRequest())
+        .addMessageType(kvV2DeleteResponse())
+        .addMessageType(kvV2RangeRequest())
+        .addMessageType(kvV2RangeResponse())
+        .addService(kvV2Service())
+        .build();
+  }
+
+  private static EnumDescriptorProto txnV2MutationOp() {
+    return EnumDescriptorProto.newBuilder().setName("Op")
+        .addValue(EnumValueDescriptorProto.newBuilder().setName("OP_UNSPECIFIED").setNumber(0).build())
+        .addValue(EnumValueDescriptorProto.newBuilder().setName("PUT").setNumber(1).build())
+        .addValue(EnumValueDescriptorProto.newBuilder().setName("DELETE").setNumber(2).build())
+        .addValue(EnumValueDescriptorProto.newBuilder().setName("DELETE_RANGE").setNumber(3).build())
+        .build();
+  }
+
+  private static DescriptorProto txnV2Mutation() {
+    return DescriptorProto.newBuilder().setName("Mutation")
+        .addEnumType(txnV2MutationOp())
+        .addField(enumF("op", 1, ".coord.txn.v2.Mutation.Op").build())
+        .addField(bytes("key", 2).build())
+        .addField(bytes("range_end", 3).build())
+        .addField(bytes("value", 4).build())
+        .addField(i64("lease_id", 5).build())
+        .build();
+  }
+
+  private static DescriptorProto txnV2BeginRequest() {
+    return DescriptorProto.newBuilder().setName("BeginRequest")
+        .addField(i64("start_ts", 1).build())
+        .addField(u32("ttl_ms", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto txnV2BeginResponse() {
+    return DescriptorProto.newBuilder().setName("BeginResponse")
+        .addField(bytes("txn_id", 1).build())
+        .addField(i64("start_ts", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto txnV2ReadRequest() {
+    return DescriptorProto.newBuilder().setName("ReadRequest")
+        .addField(bytes("txn_id", 1).build())
+        .addField(bytes("key", 2).build())
+        .addField(bytes("range_end", 3).build())
+        .addField(i64("limit", 4).build())
+        .addField(bool("keys_only", 5).build())
+        .build();
+  }
+
+  private static DescriptorProto txnV2ReadResponse() {
+    return DescriptorProto.newBuilder().setName("ReadResponse")
+        .addField(repMsg("kvs", 1, ".coord.kv.v2.KeyValue").build())
+        .addField(i64("read_ts", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto txnV2CommitRequest() {
+    return DescriptorProto.newBuilder().setName("CommitRequest")
+        .addField(bytes("txn_id", 1).build())
+        .addField(repMsg("mutations", 2, ".coord.txn.v2.Mutation").build())
+        .addField(bytes("request_id", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto txnV2CommitResponse() {
+    return DescriptorProto.newBuilder().setName("CommitResponse")
+        .addField(i64("commit_ts", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto txnV2AbortRequest() {
+    return DescriptorProto.newBuilder().setName("AbortRequest")
+        .addField(bytes("txn_id", 1).build())
+        .build();
+  }
+
+  private static ServiceDescriptorProto txnV2Service() {
+    return ServiceDescriptorProto.newBuilder().setName("Txn")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Begin")
+            .setInputType(".coord.txn.v2.BeginRequest")
+            .setOutputType(".coord.txn.v2.BeginResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Read")
+            .setInputType(".coord.txn.v2.ReadRequest")
+            .setOutputType(".coord.txn.v2.ReadResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Commit")
+            .setInputType(".coord.txn.v2.CommitRequest")
+            .setOutputType(".coord.txn.v2.CommitResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Abort")
+            .setInputType(".coord.txn.v2.AbortRequest")
+            .setOutputType(".coord.txn.v2.AbortResponse"))
+        .build();
+  }
+
+  private static FileDescriptorProto txnV2FileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/txn/v2/txn.proto")
+        .setPackage("coord.txn.v2")
+        .setSyntax("proto3")
+        .addDependency("coord/kv/v2/kv.proto")
+        .addMessageType(txnV2BeginRequest())
+        .addMessageType(txnV2BeginResponse())
+        .addMessageType(txnV2ReadRequest())
+        .addMessageType(txnV2ReadResponse())
+        .addMessageType(txnV2Mutation())
+        .addMessageType(txnV2CommitRequest())
+        .addMessageType(txnV2CommitResponse())
+        .addMessageType(txnV2AbortRequest())
+        .addMessageType(DescriptorProto.newBuilder().setName("AbortResponse").build())
+        .addService(txnV2Service())
         .build();
   }
 
@@ -1151,6 +1410,13 @@ public class CoordRpc {
 
   public static final FileDescriptor KV_FILE = build(kvFileProto(), new FileDescriptor[0]);
   public static final FileDescriptor TXN_FILE = build(txnFileProto(), new FileDescriptor[]{KV_FILE});
+  public static final FileDescriptor TSO_V2_FILE = build(tsoV2FileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor KV_V2_FILE = build(kvV2FileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor TXN_V2_FILE = build(txnV2FileProto(),
+      new FileDescriptor[]{KV_V2_FILE});
+
+  /// KV-T v2 数据面全部契约文件（scripts/check-kv-t-wire.clj 的比对对象）。
+  public static final FileDescriptor[] KV_T_FILES = {TSO_V2_FILE, KV_V2_FILE, TXN_V2_FILE};
   public static final FileDescriptor MAINT_FILE = build(maintenanceFileProto(), new FileDescriptor[0]);
   public static final FileDescriptor AUTH_FILE = build(authFileProto(), new FileDescriptor[0]);
   public static final FileDescriptor WATCH_FILE = build(watchFileProto(),
@@ -1191,6 +1457,49 @@ public class CoordRpc {
   public static final Descriptor TXN_RESPONSE_OP = TXN_FILE.findMessageTypeByName("ResponseOp");
   public static final Descriptor TXN_REQUEST = TXN_FILE.findMessageTypeByName("TxnRequest");
   public static final Descriptor TXN_RESPONSE = TXN_FILE.findMessageTypeByName("TxnResponse");
+
+  public static final Descriptor TSO_V2_ALLOCATE_REQUEST =
+      TSO_V2_FILE.findMessageTypeByName("AllocateRequest");
+  public static final Descriptor TSO_V2_ALLOCATE_RESPONSE =
+      TSO_V2_FILE.findMessageTypeByName("AllocateResponse");
+  public static final Descriptor TSO_V2_GET_TS_REQUEST =
+      TSO_V2_FILE.findMessageTypeByName("GetTsRequest");
+  public static final Descriptor TSO_V2_GET_TS_RESPONSE =
+      TSO_V2_FILE.findMessageTypeByName("GetTsResponse");
+
+  public static final Descriptor KV_V2_KEY_VALUE =
+      KV_V2_FILE.findMessageTypeByName("KeyValue");
+  public static final Descriptor KV_V2_PUT_REQUEST =
+      KV_V2_FILE.findMessageTypeByName("PutRequest");
+  public static final Descriptor KV_V2_PUT_RESPONSE =
+      KV_V2_FILE.findMessageTypeByName("PutResponse");
+  public static final Descriptor KV_V2_DELETE_REQUEST =
+      KV_V2_FILE.findMessageTypeByName("DeleteRequest");
+  public static final Descriptor KV_V2_DELETE_RESPONSE =
+      KV_V2_FILE.findMessageTypeByName("DeleteResponse");
+  public static final Descriptor KV_V2_RANGE_REQUEST =
+      KV_V2_FILE.findMessageTypeByName("RangeRequest");
+  public static final Descriptor KV_V2_RANGE_RESPONSE =
+      KV_V2_FILE.findMessageTypeByName("RangeResponse");
+
+  public static final Descriptor TXN_V2_BEGIN_REQUEST =
+      TXN_V2_FILE.findMessageTypeByName("BeginRequest");
+  public static final Descriptor TXN_V2_BEGIN_RESPONSE =
+      TXN_V2_FILE.findMessageTypeByName("BeginResponse");
+  public static final Descriptor TXN_V2_READ_REQUEST =
+      TXN_V2_FILE.findMessageTypeByName("ReadRequest");
+  public static final Descriptor TXN_V2_READ_RESPONSE =
+      TXN_V2_FILE.findMessageTypeByName("ReadResponse");
+  public static final Descriptor TXN_V2_MUTATION =
+      TXN_V2_FILE.findMessageTypeByName("Mutation");
+  public static final Descriptor TXN_V2_COMMIT_REQUEST =
+      TXN_V2_FILE.findMessageTypeByName("CommitRequest");
+  public static final Descriptor TXN_V2_COMMIT_RESPONSE =
+      TXN_V2_FILE.findMessageTypeByName("CommitResponse");
+  public static final Descriptor TXN_V2_ABORT_REQUEST =
+      TXN_V2_FILE.findMessageTypeByName("AbortRequest");
+  public static final Descriptor TXN_V2_ABORT_RESPONSE =
+      TXN_V2_FILE.findMessageTypeByName("AbortResponse");
 
   public static final Descriptor MAINT_STATUS_REQUEST = MAINT_FILE.findMessageTypeByName("StatusRequest");
   public static final Descriptor MAINT_STATUS_RESPONSE = MAINT_FILE.findMessageTypeByName("StatusResponse");
@@ -1455,6 +1764,43 @@ public class CoordRpc {
       unary("coord.mq.v1.MQ/Poll", MQ_POLL_REQUEST, MQ_POLL_RESPONSE);
   public static final MethodDescriptor<DynamicMessage, DynamicMessage> MQ_ACK =
       unary("coord.mq.v1.MQ/Ack", MQ_ACK_REQUEST, MQ_ACK_RESPONSE);
+
+  // KV-T v2 data plane (#272). Names are the contract's `package.Service/Method`;
+  // a typo shows up as UNIMPLEMENTED, which the client classifies as :other.
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> TSO_V2_ALLOCATE =
+      unary("coord.tso.v2.TSO/Allocate", TSO_V2_ALLOCATE_REQUEST, TSO_V2_ALLOCATE_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> TSO_V2_GET_TS =
+      unary("coord.tso.v2.TSO/GetTs", TSO_V2_GET_TS_REQUEST, TSO_V2_GET_TS_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> KV_V2_PUT =
+      unary("coord.kv.v2.KV/Put", KV_V2_PUT_REQUEST, KV_V2_PUT_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> KV_V2_RANGE =
+      unary("coord.kv.v2.KV/Range", KV_V2_RANGE_REQUEST, KV_V2_RANGE_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> KV_V2_DELETE =
+      unary("coord.kv.v2.KV/Delete", KV_V2_DELETE_REQUEST, KV_V2_DELETE_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> TXN_V2_BEGIN =
+      unary("coord.txn.v2.Txn/Begin", TXN_V2_BEGIN_REQUEST, TXN_V2_BEGIN_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> TXN_V2_READ =
+      unary("coord.txn.v2.Txn/Read", TXN_V2_READ_REQUEST, TXN_V2_READ_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> TXN_V2_COMMIT =
+      unary("coord.txn.v2.Txn/Commit", TXN_V2_COMMIT_REQUEST, TXN_V2_COMMIT_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> TXN_V2_ABORT =
+      unary("coord.txn.v2.Txn/Abort", TXN_V2_ABORT_REQUEST, TXN_V2_ABORT_RESPONSE);
+
+  /**
+   * The structured error code the server puts in the trailing metadata
+   * (`x-coord-error-code`, coord-core/src/error_code.rs). The gRPC status alone
+   * cannot classify v2 failures: SAFE_TS_LAG and a dropped connection are both
+   * UNAVAILABLE, TXN_CONFLICT and EPOCH_STALE are both ABORTED. Returns null
+   * when the trailer is absent (plain transport failures, v1 paths).
+   */
+  public static String errorCode(StatusRuntimeException e) {
+    Metadata trailers = e.getTrailers();
+    if (trailers == null) {
+      return null;
+    }
+    return trailers.get(Metadata.Key.of("x-coord-error-code",
+                                        Metadata.ASCII_STRING_MARSHALLER));
+  }
 
   // ------------------------------------------------------------------
   // Channels / calls

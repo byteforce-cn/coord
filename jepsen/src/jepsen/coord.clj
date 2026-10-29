@@ -71,6 +71,7 @@
                           [mapck :as mapck]
                           [mixck :as mixck]
                           [mqck :as mqck]
+                          [mvcc :as mvcc]
                           [nemesis :as n]
                           [regck :as regck]
                           [regions :as regions]
@@ -877,6 +878,53 @@
        :idgen-min-ids          (:idgen-min-ids opts)
        :idgen-min-regressions  (:idgen-min-regressions opts)})))
 
+(defn- kvv2-key
+  "Half the keys land in region 1 (`/jepsen/v2/...`), half in region 2
+  (`zz-jepsen-v2-...`) of the fixed two-region --kv-t layout."
+  []
+  (if (zero? (rand-int 2))
+    (str "/jepsen/v2/k/" (rand-int 32))
+    (str "zz-jepsen-v2-" (rand-int 32))))
+
+(defn- kvv2-gen
+  "Direct writes + snapshot reads + TSO + a slice of historical reads.
+
+  Historical reads only use a commit_ts the client actually observed in the
+  last 600s; when there is none yet, that slot becomes a read_ts=0 read (a
+  read that is guaranteed to fail would be a fake sample)."
+  [_opts]
+  (let [w  (fn [_ _] {:type :invoke, :f :v2-write, :key (kvv2-key)
+                      :value (str "w-" (rand-int 1000000))})
+        d  (fn [_ _] {:type :invoke, :f :v2-delete, :key (kvv2-key)})
+        r  (fn [_ _] {:type :invoke, :f :v2-read, :key (kvv2-key) :read-ts 0})
+        h  (fn [_ _] (if-let [ts (client/recent-v2-ts)]
+                       {:type :invoke, :f :v2-read, :key (kvv2-key) :read-ts ts}
+                       {:type :invoke, :f :v2-read, :key (kvv2-key) :read-ts 0}))
+        ts (fn [_ _] {:type :invoke, :f :v2-ts})]
+    ;; 20 slots: 10 writes, 1 delete, 5 snapshot reads, 2 historical, 2 TSO.
+    (gen/mix [w w w w w w w w w w d r r r r r h h ts ts])))
+
+(defn- txnv2-gen
+  "Cross-region bank ledger: every txn moves one unit between two of the four
+  accounts (two in each region), so the write set always spans regions and a
+  half-applied txn breaks both the snapshot and the sum."
+  [_opts]
+  (let [r1 ["/jepsen/v2/acct/a" "/jepsen/v2/acct/b" "/jepsen/v2/acct/c"
+            "/jepsen/v2/acct/d" "/jepsen/v2/acct/e" "/jepsen/v2/acct/f"
+            "/jepsen/v2/acct/g" "/jepsen/v2/acct/h"]
+        r2 ["zz-jepsen-v2/acct/a" "zz-jepsen-v2/acct/b" "zz-jepsen-v2/acct/c"
+            "zz-jepsen-v2/acct/d" "zz-jepsen-v2/acct/e" "zz-jepsen-v2/acct/f"
+            "zz-jepsen-v2/acct/g" "zz-jepsen-v2/acct/h"]
+        ;; Always one account per region: the write set spans regions by
+        ;; construction, which is the point of the workload.
+        t  (fn [_ _]
+             (let [a (rand-nth r1)
+                   b (rand-nth r2)
+                   [f t] (if (zero? (rand-int 2)) [a b] [b a])]
+               {:type :invoke, :f :v2-txn, :from f :to t :amount 1}))]
+    (gen/mix [(gen/repeat t) (gen/repeat t) (gen/repeat t)
+              (fn [_ _] {:type :invoke, :f :v2-ts})])))
+
 (defn- client-gen
   "Client generator for the given opts. For :multi-register, ops target one
   of the N region register keys (--regions N), each routing to its own region."
@@ -903,6 +951,8 @@
         :cache        [(cache-gen opts)]
         :mq           [(mq-gen opts)]
         :soakfull     [(soakfull-gen opts)]
+        :kvv2         [(kvv2-gen opts)]
+        :txnv2        [(txnv2-gen opts)]
         :multi-register
         (let [keys (vec (regions/region-keys (or (:regions opts) 1)))
               next-val (fn [k]
@@ -1131,6 +1181,13 @@
   (let [workload (:workload opts)
         ck       (:checker opts)
         linear   (cond
+                   ;; #272：v2 的期望由 commit_ts/read_ts 直接算出（确定性 MVCC），
+                   ;; knossos 的单寄存器模型表达不了 —— 参数解析期就拒绝。
+                   (contains? #{:kvv2 :txnv2} workload)
+                   (mvcc/checker {:min-writes (or (:v2-min-writes opts) 200)
+                                  :min-reads  (or (:v2-min-reads opts) 200)
+                                  :min-ts     (or (:v2-min-ts opts) 50)})
+
                    ;; T1.4：幂等专项有专用 checker（op 形状不是 register）。
                    (= :idempotency workload)
                    (idem/checker {:min-replay-attempts (:idem-min-replay-attempts opts)})
@@ -1373,7 +1430,13 @@
         ;; is still overridable via --rate / --checker.
         opts   (cond-> opts
                  soak? (update :rate #(or % 0.5))
-                 true  (update :checker #(or % (if soak? :soak :linear))))
+                 ;; v2 工作负载没有 knossos 模型（见 mvcc 的 docstring）：
+                 ;; 缺省就走 mvcc（:soak 分支），显式 --checker linear 由
+                 ;; 下面的构造期检查拒绝。
+                 true  (update :checker #(or % (if (or soak?
+                                                     (contains? #{:kvv2 :txnv2} (:workload opts)))
+                                                :soak
+                                                :linear))))
         ;; :multi-register needs a region count; default to 1 (multi_raft
         ;; enabled, single full-keyspace region -- the T5.1 greyscale shape).
         opts   (cond-> opts
@@ -1411,6 +1474,10 @@
                        (agent/endpoints aplan)
                        nodes)
         nemesis (build-nemesis (:nemesis opts) db aplan)]
+    (when (and (contains? #{:kvv2 :txnv2} (:workload opts))
+               (= :linear (:checker opts)))
+      (throw (ex-info "v2 工作负载不能用 --checker linear（多版本期望无法用单寄存器模型表达）"
+                      {:workload (:workload opts)})))
     ;; Two different cluster topologies cannot be mixed: --regions derives the
     ;; v1 region table from register keys, --kv-t pins the v2 two-region layout.
     ;; Reject at parse time so no run ever deploys a config with both blocks
@@ -1472,8 +1539,9 @@
     :default  :register
     :parse-fn keyword
     :validate [#{:register :cas-register :idempotency :map :txn :scan :mixture :watch :lease
-                 :lock :election :idgen :registry :cache :mq :soakfull :multi-register}
-               "Must be one of register, cas-register, idempotency, map, txn, scan, mixture, watch, lease, lock, election, idgen, registry, cache, mq, soakfull, multi-register"]]
+                 :lock :election :idgen :registry :cache :mq :soakfull :multi-register
+                 :kvv2 :txnv2}
+               "Must be one of register, cas-register, idempotency, map, txn, scan, mixture, watch, lease, lock, election, idgen, registry, cache, mq, soakfull, multi-register, kvv2, txnv2"]]
    [nil "--soak-mix MIX"
     "T6.1 (--workload soakfull): the surfaces to interleave and their relative
     weights, e.g. 'map=40,txn=20,scan=5,watch=15,lease=10'. A surface that is
@@ -1620,6 +1688,22 @@
     ;; `false` default to parse-fn and throws).
     :default  false
     :assoc-fn (fn [m _ _] (assoc m :kv-t true))]
+   [nil "--v2-min-writes N"
+    "#272 (--workload kvv2/txnv2): minimum successful writes/deletes/txns
+    before the MVCC checker may call a history valid (default 200)"
+    :default nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--v2-min-reads N"
+    "#272: minimum successful v2 reads (default 200)"
+    :default nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--v2-min-ts N"
+    "#272: minimum successful TSO GetTs ops (default 50; TSO is ~10% of ops)"
+    :default nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
    [nil "--checker CHECKER"
     "linear (knossos, default) or soak (O(n), for long 72h runs)"
     :default  nil

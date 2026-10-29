@@ -1,0 +1,6 @@
+;; 一次直写 + 一次读：读到的就是 commit_ts<=read_ts 的最后一条。
+[{:type :ok, :f :v2-write, :process 0, :node "n1", :time 10,
+  :key "/jepsen/v2/k/0", :value "v1", :commit-ts 100, :request-id "r1"}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 20,
+  :key "/jepsen/v2/k/0", :read-ts 110, :requested-read-ts 0,
+  :value "v1", :mod-revision 100, :create-revision 100}]

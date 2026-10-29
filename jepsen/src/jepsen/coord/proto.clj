@@ -1008,3 +1008,222 @@
            :payload   (utf8 (field m "payload"))
            :timestamp (field m "timestamp")})
         (field msg "messages")))
+
+;; ---------------------------------------------------------------------------
+;; KV-T v2 data plane (coord.tso.v2 / coord.kv.v2 / coord.txn.v2)
+;;
+;; Field numbers come from the hand-written descriptors in CoordRpc (checked
+;; against apis/contracts/proto/coord/*/v2/*.proto by check-kv-t-wire.clj).
+;; Empty `bytes` fields are returned as zero-length byte arrays, never nil:
+;; the MVCC checker distinguishes a tombstone (empty value) from "absent".
+;; ---------------------------------------------------------------------------
+
+(def tso-v2-allocate CoordRpc/TSO_V2_ALLOCATE)
+(def tso-v2-get-ts-method CoordRpc/TSO_V2_GET_TS)
+(def kv-v2-put-method CoordRpc/KV_V2_PUT)
+(def kv-v2-range-method CoordRpc/KV_V2_RANGE)
+(def kv-v2-delete-method CoordRpc/KV_V2_DELETE)
+(def txn-v2-begin-method CoordRpc/TXN_V2_BEGIN)
+(def txn-v2-read-method CoordRpc/TXN_V2_READ)
+(def txn-v2-commit-method CoordRpc/TXN_V2_COMMIT)
+(def txn-v2-abort-method CoordRpc/TXN_V2_ABORT)
+
+(defn- v2-set
+  "Sets `field` on the DynamicMessage builder when v is non-nil."
+  [^com.google.protobuf.DynamicMessage$Builder b ^com.google.protobuf.Descriptors$Descriptor d
+   ^String field v]
+  (when (some? v)
+    (.setField b (.findFieldByName d field) v))
+  b)
+
+(defn- bs ^ByteString [v]
+  (cond
+    (nil? v) nil
+    (instance? ByteString v) v
+    (bytes? v) (ByteString/copyFrom ^bytes v)
+    :else (ByteString/copyFromUtf8 (str v))))
+
+(defn tso-get-ts-req
+  "GetTsRequest (single timestamp from the local batch cache)."
+  []
+  (CoordRpc/message CoordRpc/TSO_V2_GET_TS_REQUEST))
+
+(defn tso-get-ts
+  "GetTsResponse.ts."
+  [^DynamicMessage msg]
+  (field msg "ts"))
+
+(defn kv2-put-req*
+  "kv.v2 PutRequest: key/value/commit-ts/request-id (+ optional lease-id/prev-kv).
+
+  `commit_ts` is required by the contract (> 0, from TSO); the server never
+  assigns it for direct writes."
+  [{:keys [key value commit-ts request-id lease-id prev-kv]}]
+  (let [d CoordRpc/KV_V2_PUT_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (v2-set d "key" (bs (or key "")))
+        (v2-set d "value" (bs (or value "")))
+        (v2-set d "commit_ts" (long commit-ts))
+        (v2-set d "request_id" (bs request-id))
+        (v2-set d "lease_id" (some-> lease-id long))
+        (v2-set d "prev_kv" (when prev-kv (boolean prev-kv)))
+        (.build))))
+
+(defn kv2-put-resp
+  "kv.v2 PutResponse → {:commit-ts n :prev-kv (nil | KeyValue)}."
+  [^DynamicMessage msg]
+  {:commit-ts (field msg "commit_ts")
+   :prev-kv   (let [p (field msg "prev_kv")]
+                (when (and p (.isInitialized ^DynamicMessage p))
+                  p))})
+
+(defn kv2-range-req*
+  "kv.v2 RangeRequest: key/read-ts (+ optional range-end/limit/keys-only)."
+  [{:keys [key range-end limit read-ts keys-only count-only]}]
+  (let [d CoordRpc/KV_V2_RANGE_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (v2-set d "key" (bs (or key "")))
+        (v2-set d "range_end" (some-> range-end bs))
+        (v2-set d "limit" (some-> limit long))
+        (v2-set d "read_ts" (long (or read-ts 0)))
+        (v2-set d "keys_only" (when keys-only true))
+        (v2-set d "count_only" (when count-only true))
+        (.build))))
+
+(defn- kv2-key-value
+  "KeyValue → {:key string :value bytes :create-revision n :mod-revision n
+               :version n :lease-id n}"
+  [^DynamicMessage kv]
+  {:key             (String. (.toByteArray ^ByteString (field kv "key")) "UTF-8")
+   ;; 空 value = tombstone（""），与「不存在」（nil）严格区分；不折叠成 nil。
+   :value           (String. (.toByteArray ^ByteString (field kv "value")) "UTF-8")
+   :create-revision (field kv "create_revision")
+   :mod-revision    (field kv "mod_revision")
+   :version         (field kv "version")
+   :lease-id        (field kv "lease_id")})
+
+(defn kv2-range-resp
+  "kv.v2 RangeResponse → {:kvs [{…}] :count n :read-ts n}。
+
+  `read-ts` 是服务端**实际**使用的快照时间戳（read_ts=0 时回显 safe_ts），
+  checker 的期望值就按它算。"
+  [^DynamicMessage msg]
+  {:kvs     (mapv kv2-key-value (field msg "kvs"))
+   :count   (field msg "count")
+   :read-ts (field msg "read_ts")})
+
+(defn kv2-delete-req*
+  "kv.v2 DeleteRequest: key/commit-ts/request-id (+ optional range-end/prev-kv)."
+  [{:keys [key range-end commit-ts request-id prev-kv]}]
+  (let [d CoordRpc/KV_V2_DELETE_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (v2-set d "key" (bs (or key "")))
+        (v2-set d "range_end" (some-> range-end bs))
+        (v2-set d "commit_ts" (long commit-ts))
+        (v2-set d "request_id" (bs request-id))
+        (v2-set d "prev_kv" (when prev-kv (boolean prev-kv)))
+        (.build))))
+
+(defn kv2-delete-resp
+  "kv.v2 DeleteResponse → {:deleted n :commit-ts n}."
+  [^DynamicMessage msg]
+  {:deleted   (field msg "deleted")
+   :commit-ts (field msg "commit_ts")})
+
+(defn txn2-begin-req*
+  "txn.v2 BeginRequest. start_ts=0 asks the server to allocate from TSO;
+  a non-zero start_ts pins the snapshot (retries reuse it)."
+  [{:keys [start-ts ttl-ms]}]
+  (let [d CoordRpc/TXN_V2_BEGIN_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (v2-set d "start_ts" (long (or start-ts 0)))
+        ;; uint32 在 DynamicMessage 里必须是 Integer（Long 会抛
+        ;; "Wrong object type used with protocol message reflection"）。
+        (v2-set d "ttl_ms" (int (or ttl-ms 0)))
+        (.build))))
+
+(defn txn2-begin-resp
+  "txn.v2 BeginResponse → {:txn-id byte[] :start-ts n}."
+  [^DynamicMessage msg]
+  {:txn-id   (.toByteArray ^ByteString (field msg "txn_id"))
+   :start-ts (field msg "start_ts")})
+
+(defn txn2-read-req*
+  "txn.v2 ReadRequest: txn-id/key (+ optional range-end/limit/keys-only).
+
+  Reads are recorded into the server-side read set; the client cannot omit
+  them to dodge conflicts."
+  [{:keys [txn-id key range-end limit keys-only]}]
+  (let [d CoordRpc/TXN_V2_READ_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (v2-set d "txn_id" (bs txn-id))
+        (v2-set d "key" (bs (or key "")))
+        (v2-set d "range_end" (some-> range-end bs))
+        (v2-set d "limit" (some-> limit long))
+        (v2-set d "keys_only" (when keys-only true))
+        (.build))))
+
+(defn txn2-read-resp
+  "txn.v2 ReadResponse → {:kvs [{…}] :read-ts n}."
+  [^DynamicMessage msg]
+  {:kvs     (mapv kv2-key-value (field msg "kvs"))
+   :read-ts (field msg "read_ts")})
+
+(def ^:private mutation-op-number
+  {:put 1 :delete 2 :delete-range 3})
+
+(defn- txn2-mutation
+  "One Mutation message. `:kind` is :put / :delete / :delete-range."
+  [{:keys [kind key value range-end lease-id]}]
+  (let [d CoordRpc/TXN_V2_MUTATION
+        op-num (or (mutation-op-number kind)
+                   (throw (ex-info (str "unknown mutation kind " (pr-str kind))
+                                   {:kind kind})))
+        op-field (.findFieldByName d "op")
+        op-value (.findValueByNumber (.getEnumType op-field) (int op-num))
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (v2-set d "op" op-value)
+        (v2-set d "key" (bs (or key "")))
+        (v2-set d "value" (bs (or value "")))
+        (v2-set d "range_end" (some-> range-end bs))
+        (v2-set d "lease_id" (some-> lease-id long))
+        (.build))))
+
+(defn txn2-commit-req*
+  "txn.v2 CommitRequest: txn-id/mutations/request-id.
+
+  request_id is the idempotency key: retrying the same Commit returns the
+  first commit_ts instead of deciding twice -- that is how the client learns
+  the ts of a response it lost."
+  [{:keys [txn-id request-id mutations]}]
+  (let [d CoordRpc/TXN_V2_COMMIT_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (v2-set d "txn_id" (bs txn-id))
+        (.setField (.findFieldByName d "mutations")
+                   (mapv txn2-mutation mutations))
+        (v2-set d "request_id" (bs request-id))
+        (.build))))
+
+(defn txn2-commit-resp
+  "txn.v2 CommitResponse → {:commit-ts n}."
+  [^DynamicMessage msg]
+  {:commit-ts (field msg "commit_ts")})
+
+(defn txn2-abort-req*
+  "txn.v2 AbortRequest."
+  [{:keys [txn-id]}]
+  (let [d CoordRpc/TXN_V2_ABORT_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b (v2-set d "txn_id" (bs txn-id)) (.build))))
+
+(defn error-code
+  "The structured error code from a StatusRuntimeException's trailer, or nil."
+  [^StatusRuntimeException e]
+  (CoordRpc/errorCode e))

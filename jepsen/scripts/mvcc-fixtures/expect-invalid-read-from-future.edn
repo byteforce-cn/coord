@@ -1,0 +1,6 @@
+;; 读到 read_ts 之后才提交的 revision：mod_revision > read_ts。
+[{:type :ok, :f :v2-write, :process 0, :node "n1", :time 10,
+  :key "/jepsen/v2/k/0", :value "v1", :commit-ts 200, :request-id "r1"}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 20,
+  :key "/jepsen/v2/k/0", :read-ts 150, :requested-read-ts 150,
+  :value "v1", :mod-revision 200, :create-revision 200}]
