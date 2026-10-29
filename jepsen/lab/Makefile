@@ -464,6 +464,10 @@ test: $(CHECKER_GATE) ## Coord test: WORKLOAD, NEMESIS, TIME_LIMIT, CONCURRENCY,
 	    $(if $(REGIONS),--regions $(REGIONS)) $(CTRL_FLAGS))
 
 checkers: ## T0.3: run every checker fixture suite on control (red refuses to start a run)
+	# KV-T v2 配置模式（--kv-t）：先钉住 v1 配置逐字节不变，再看 v2 三段的形状。
+	# 放在最前面：它不加载任何 fixture，纯 config-str 断言。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    ./scripts/test-kv-t-config.clj)
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.soak scripts/soak-checker-fixtures)
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
