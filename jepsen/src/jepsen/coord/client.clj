@@ -2330,7 +2330,9 @@
                       :kvs kvs
                       :retried retried}
                      (when-not (:range-end op)
-                       {:key (:key kv)
+                       ;; the requested key, not (:key kv): an absent key has no
+                       ;; KeyValue, and nil would make the checker index by nil.
+                       {:key (:key op)
                         :value (:value kv)
                         :mod-revision (:mod-revision kv)
                         :create-revision (:create-revision kv)})))

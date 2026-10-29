@@ -175,6 +175,61 @@ make soak-results      # summarize the latest results.edn
 make soak-stop         # cancel
 ```
 
+### KV-T v2 data plane (#272)
+
+The v1 soak above drives `coord.kv`/`coord.txn`/`coord.kv`'s **v1** wire, which a
+v2 cluster rejects wholesale (`KvTState::v1_gate` → `FAILED_PRECONDITION`). The
+v2 data plane needs its own cluster mode, workloads and oracle:
+
+```bash
+make test WORKLOAD=kvv2  KV_T=1 NEMESIS=none TIME_LIMIT=60 RATE=20
+make test WORKLOAD=txnv2 KV_T=1 NEMESIS=kill TIME_LIMIT=120 RATE=20
+make matrix-m3                     # kvv2/txnv2 x none|kill|partition-halves
+make soak-kv-t                     # 72h, SOAK_TIME_LIMIT=259200 for the real run
+make soak-kv-t-status              # (log/pid: soak/soak-kvt.log|pid, kept apart
+                                   #  from the v1 soak)
+```
+
+`--kv-t` deploys the fixed two-region layout (`""->m`, `m->""`), enables
+`[multi_raft.pd]` with `scheduler_paused = true` (auto-split would surface as
+`HISTORY_UNAVAILABLE` inside the data-plane oracle) and `[kv_t]`. Without the
+flag the config is **byte-identical** to before (`scripts/test-kv-t-config.clj`
+pins that with an embedded golden).
+
+The workloads send `tso.v2 GetTs` for one timestamp per write, `kv.v2 Put/Delete`
+with that `commit_ts` and a stable `request_id`, `kv.v2 Range` with
+`read_ts=0` (safe_ts) or a historical ts seen in the last 600s, and cross-region
+`txn.v2` transfers (16 accounts, sum 400). Every retry is recorded in the op
+(`:retried`); an ambiguous outcome is `:info` with `:attempted-ts` or
+`:ts-unknown`, never a silent success.
+
+`jepsen.coord.mvcc` judges, exactly (the expectations come from `commit_ts` /
+`read_ts`, so no knossos search):
+
+- **snapshot reads**: the value must be the last `:ok` write with
+  `commit_ts <= read_ts`; an `:info` write only widens the legal set to its
+  candidate timestamps;
+- **no read from the future** (`mod_revision > read_ts`) and no fabricated
+  value/revision;
+- **safe_ts monotonicity** for `read_ts=0` reads per (process, node), reset on
+  a nemesis `:start`; explicit historical reads must echo the requested ts;
+- **TSO**: strictly increasing per process, and `:ok` writes never share a
+  `commit_ts`;
+- **txn atomicity**: all-or-none of the write set, judged on range observations
+  that declare `:covers` (the fixtures) and, in txnv2, by the ledger sum --
+  a half-applied transfer changes the sum. A txn whose `commit_ts` could not
+  be recovered is only judged all-or-none;
+- **ledger sum** conservation (txnv2);
+- **fail-closed sample thresholds** (`--v2-min-writes/--v2-min-reads/--v2-min-ts`,
+  default 100/100/50): a history below them is invalid, never green.
+
+Not judged: `watch.v2` / `lease.v2` / `storage.v2`, split/merge windows (the PD
+scheduler is paused), cross-partition ordering, and `--checker linear` is
+rejected at startup (a single-register model cannot express multi-version
+expectations). The wire itself is pinned by `scripts/check-kv-t-wire.clj`
+(56 fields across `coord/{tso,kv,txn}/v2`, `--selftest` proves the comparator
+is not a no-op).
+
 组合浸泡（多个面按声明比例混跑，进入验收长跑的入口）：
 
 ```bash
