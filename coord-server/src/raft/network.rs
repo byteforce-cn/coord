@@ -504,6 +504,61 @@ impl RaftNetworkFactoryImpl {
             .ok_or_else(|| format!("node {target} returned no response for region {region_id}"))
     }
 
+    /// ReportRegionStats：把一条 Region 心跳快照发到 `target` 节点的 PD。
+    ///
+    /// `target` 应为 region 0 leader（operator 生成源）；复用 raft 出站连接池 /
+    /// TLS / 共享密钥 HMAC 路径。统计是瞬态数据：失败不需要重试语义，调用方
+    /// 下一拍重报即可。
+    pub async fn report_region_stats(
+        &self,
+        target: u64,
+        report: RegionStatsPayload,
+    ) -> Result<(), String> {
+        if self.is_blocked(target) {
+            return Err(format!("node {target} is blocked by the test partition"));
+        }
+        let addr = self
+            .node_addrs
+            .read()
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| format!("no known raft address for node {target}"))?;
+        let client_slot = self.get_or_create_client_slot(target).await;
+        let net = RaftNetworkImpl {
+            target_id: target,
+            target_addr: addr,
+            client_slot,
+            tls_config: self.raft_tls_config.clone(),
+            shared_secret: self.shared_secret.clone(),
+            snapshot_rate_limiter: None,
+            region_id: 0,
+        };
+        let mut client = net
+            .get_client()
+            .await
+            .map_err(|e| format!("connect to node {target}: {e}"))?;
+        let req_payload = serialize_payload(&report)
+            .map_err(|e| format!("serialize region stats report: {e}"))?;
+        let req = tonic::Request::new(
+            net.build_authed_message(req_payload)
+                .map_err(|e| format!("auth region stats report: {e}"))?,
+        );
+        let resp = client
+            .report_region_stats(req)
+            .await
+            .map_err(|e| format!("report_region_stats to node {target}: {e}"))?
+            .into_inner();
+        let reply: RegionStatsReply =
+            decode_message_payload(&resp).map_err(|e| format!("decode region stats reply: {e}"))?;
+        if !reply.error.is_empty() {
+            return Err(format!(
+                "node {target} rejected region stats report: {}",
+                reply.error
+            ));
+        }
+        Ok(())
+    }
+
     /// DrainRange：请 `target` 节点的本地会话表 drain 一段区间。
     ///
     /// 返回 `Ok(Drained)` / `Ok(Blocked)` 区分「对端可达但仍有会话」与
@@ -947,6 +1002,26 @@ pub struct RegionCommandReply {
     pub response: Option<crate::raft::type_config::Response>,
 }
 
+// ──── / ReportRegionStats（Region 心跳统计/采样上报）────
+
+/// ReportRegionStats 请求载荷：Region leader 的一次心跳快照（postcard）。
+/// 只承载内存瞬态数据，不是 raft 提案。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RegionStatsPayload {
+    pub region_id: u64,
+    pub size: u64,
+    pub keys: u64,
+    pub storage_bytes: u64,
+    pub leader_node_id: u64,
+    pub sample_keys: Vec<Vec<u8>>,
+}
+
+/// ReportRegionStats 响应：`error` 非空 = 接收方拒绝了上报（如本地未装配 PD）。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RegionStatsReply {
+    pub error: String,
+}
+
 // ──── / DrainRange（split/merge 区间 drain 扇出）────
 
 /// DrainRange 请求载荷：半开区间 `[start_key, end_key)`（`end_key` 空 = +∞）
@@ -1282,6 +1357,9 @@ pub struct RaftRpcService {
     /// split/merge 区间 drain 端口（本节点 `coord.txn.v2` 会话表）。
     /// `None` = `[kv_t]` 未启用/未装配：DrainRange RPC 返回 FAILED_PRECONDITION。
     split_drain: Arc<RwLock<Option<Arc<dyn crate::split_merge::SplitDrain>>>>,
+    /// Region 心跳上报接收端（本节点 PD；`None` = 未启用 PD，
+    /// ReportRegionStats 返回 FAILED_PRECONDITION）。
+    region_heartbeat_sink: Arc<RwLock<Option<Arc<dyn crate::pd::RegionHeartbeatSink>>>>,
 }
 
 impl Default for RaftRpcService {
@@ -1296,6 +1374,7 @@ impl RaftRpcService {
             rafts: Arc::new(RwLock::new(HashMap::new())),
             shared_secret: None,
             split_drain: Arc::new(RwLock::new(None)),
+            region_heartbeat_sink: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -1322,6 +1401,15 @@ impl RaftRpcService {
     /// `TxnSessions` 按 guard 计数）。
     pub fn set_split_drain(&self, drain: Option<Arc<dyn crate::split_merge::SplitDrain>>) {
         *self.split_drain.write() = drain;
+    }
+
+    /// 注册 Region 心跳上报接收端（本节点 PD；`None` = 未启用 PD）。
+    ///
+    /// 多节点装配时每个节点都装上，但只有 region 0 leader 节点的 PD 视图会被
+    /// 调度读取（见 `PlacementDriver::run_schedule_tick`）；其它节点接收上报
+    /// 不产生调度副作用。
+    pub fn set_region_heartbeat_sink(&self, sink: Option<Arc<dyn crate::pd::RegionHeartbeatSink>>) {
+        *self.region_heartbeat_sink.write() = sink;
     }
 
     /// 移除某 Region 的 Raft 实例（Region 下线/注销时）。
@@ -1596,6 +1684,49 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         )))
     }
 
+    /// ReportRegionStats：接收方把上报应用到**本机 PD**（内存瞬态视图）。
+    ///
+    /// 不是 raft 提案：统计不落盘、不进日志，失败只需下一拍重报。接收方即使
+    /// 不是 region 0 leader 也接受（PD 视图所有节点可写，调度只读 leader 节点的）。
+    async fn report_region_stats(
+        &self,
+        request: tonic::Request<RaftMessageProto>,
+    ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
+        let msg = request.into_inner();
+        inject_received_trace_context(&msg);
+        self.verify_incoming(&msg)?;
+        let payload: RegionStatsPayload = decode_message_payload(&msg)?;
+        let sink = self.region_heartbeat_sink.read().clone();
+        let reply = match sink {
+            Some(sink) => {
+                let report = crate::pd::RegionHeartbeatReport {
+                    region_id: payload.region_id,
+                    size: payload.size,
+                    keys: payload.keys,
+                    storage_bytes: payload.storage_bytes,
+                    leader_node_id: payload.leader_node_id,
+                    sample_keys: payload.sample_keys,
+                };
+                match sink.apply_region_heartbeat(report) {
+                    Ok(()) => RegionStatsReply {
+                        error: String::new(),
+                    },
+                    Err(e) => RegionStatsReply {
+                        error: e.to_string(),
+                    },
+                }
+            }
+            None => RegionStatsReply {
+                error: "PD is not assembled on this node".to_string(),
+            },
+        };
+        let resp_payload = serialize_payload(&reply)?;
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            resp_payload,
+            0,
+        )))
+    }
+
     /// DrainRange：在本节点用 `SplitDrain` 等待区间内会话收尾。
     ///
     /// `drained=false` 是应用级失败（仍有相交会话），用响应载荷回传给
@@ -1856,5 +1987,84 @@ mod tests {
         assert!(verify_raft_auth(&msg, Some(secret)).is_ok());
         let decoded: (u64, String) = decode_message_payload(&msg).unwrap();
         assert_eq!(decoded, value);
+    }
+}
+
+#[cfg(test)]
+mod region_stats_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    struct RecordingSink {
+        reports: StdMutex<Vec<crate::pd::RegionHeartbeatReport>>,
+    }
+
+    impl crate::pd::RegionHeartbeatSink for RecordingSink {
+        fn apply_region_heartbeat(
+            &self,
+            report: crate::pd::RegionHeartbeatReport,
+        ) -> coord_core::error::Result<()> {
+            self.reports.lock().unwrap().push(report);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn report_region_stats_applies_payload_to_the_local_pd_sink() {
+        let sink = Arc::new(RecordingSink {
+            reports: StdMutex::new(Vec::new()),
+        });
+        let service = RaftRpcService::new();
+        service.set_region_heartbeat_sink(Some(Arc::clone(&sink) as _));
+
+        let payload = RegionStatsPayload {
+            region_id: 7,
+            size: 4096,
+            keys: 42,
+            storage_bytes: 1024,
+            leader_node_id: 3,
+            sample_keys: vec![b"a".to_vec(), b"m".to_vec(), b"z".to_vec()],
+        };
+        let msg = make_raft_message_for_region(serialize_payload(&payload).unwrap(), 0);
+        service
+            .report_region_stats(tonic::Request::new(msg))
+            .await
+            .expect("handler must accept an authenticated report");
+
+        let reports = sink.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(report.region_id, 7);
+        assert_eq!(report.size, 4096);
+        assert_eq!(report.keys, 42);
+        assert_eq!(report.storage_bytes, 1024);
+        assert_eq!(report.leader_node_id, 3);
+        assert_eq!(
+            report.sample_keys,
+            vec![b"a".to_vec(), b"m".to_vec(), b"z".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn report_region_stats_without_pd_fails_closed() {
+        let service = RaftRpcService::new();
+        let payload = RegionStatsPayload {
+            region_id: 7,
+            size: 1,
+            keys: 1,
+            storage_bytes: 0,
+            leader_node_id: 1,
+            sample_keys: Vec::new(),
+        };
+        let msg = make_raft_message_for_region(serialize_payload(&payload).unwrap(), 0);
+        let resp = service
+            .report_region_stats(tonic::Request::new(msg))
+            .await
+            .expect("transport-level reply");
+        let reply: RegionStatsReply = decode_message_payload(&resp.into_inner()).unwrap();
+        assert!(
+            !reply.error.is_empty(),
+            "a node without PD must reject the report instead of silently dropping it"
+        );
     }
 }

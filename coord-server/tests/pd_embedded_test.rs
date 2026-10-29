@@ -258,6 +258,7 @@ async fn start_embedded_pds(hosts: &mut [NodeHost], region0: &Arc<Region0Cluster
             nodes_info.clone(),
             Duration::from_millis(200),
             region0.system.clone(), // 共享 region 0 raft（全局队列模式）
+            None,                   // 单进程夹具：统计不上报跨节点
         )
         .await
         .expect("start embedded pd");
@@ -388,51 +389,28 @@ async fn test_embedded_pd_steady_state_heartbeat_data_plane() {
     // 写入一个 key（leader 提交）
     propose_put(&hosts, leader_id, b"apple", b"v1").await;
 
-    // ── 心跳数据面：每个节点 PD 的 region leader 视图 == 真实 leader ──
+    // ── 心跳数据面：只有 Region leader 上报，leader 所在节点的 PD 必须看到
+    //    真实 leader 与统计。夹具没装跨节点转发（`None`），follower 节点的 PD
+    //    视图为空是设计口径；跨节点送达由进程级用例覆盖。──
+    let leader_host = hosts.iter().find(|h| h.node_id == leader_id).unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let mut all_ok = true;
-        for host in &hosts {
-            let view = host.pd.as_ref().unwrap().driver.region_leader(1);
-            if view != Some(leader_id) {
-                all_ok = false;
-                break;
-            }
-        }
-        if all_ok {
+        let view = leader_host.pd.as_ref().unwrap().driver.region_leader(1);
+        let keys = leader_host
+            .pd
+            .as_ref()
+            .unwrap()
+            .driver
+            .meta_store()
+            .get_region(1)
+            .map(|m| m.approximate_keys)
+            .unwrap_or(0);
+        if view == Some(leader_id) && keys >= 1 {
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "PD region_leader views never matched real leader {leader_id}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // ── 心跳统计：region 统计 keys ≥ 1（apple 已落库）随心跳刷新 ──
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        let mut all_ok = true;
-        for host in &hosts {
-            let meta = host
-                .pd
-                .as_ref()
-                .unwrap()
-                .driver
-                .meta_store()
-                .get_region(1)
-                .unwrap();
-            if meta.approximate_keys < 1 {
-                all_ok = false;
-                break;
-            }
-        }
-        if all_ok {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "PD region stats not refreshed by heartbeats"
+            "leader node PD never recorded region 1 (view={view:?}, keys={keys})"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

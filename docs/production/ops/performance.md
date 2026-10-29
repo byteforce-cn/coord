@@ -130,21 +130,35 @@ redb 页）；24h 容量按「事务数 × 37 KB ÷ 3（单副本）」估算，
 
 ### 6.6 Split/Merge 停顿
 
-**仍无数字**。迁移路径本身的两个缺陷已修（PR #273 导出水位判据、PR #275 目标组
-leader 转发，回归见 `kv_t_g5_split_migrator_test` / `kv_t_g5_region_command_forward_test`），
-但 PD 侧没有 Region 统计来源：`PlacementDriver::handle_region_heartbeat` 没有生产
-调用方、`region_sample_keys` 只有测试注入 ⇒ `approximate_keys` / `approximate_size`
-恒为 0，split-checker 永不产生 operator（缺口与修法见 #278）。
+环境同 §1；release 构建；真实 3 进程 v2 集群，PD 启动即调度
+（`scheduler_paused=false`、`split_check_interval=1`、`region_split_keys=16`、
+`max_concurrent_operators=1`）。Region leader 周期把统计与分位采样 Key 上报到
+region 0 leader 的 PD，split 由 PD 自动产生（不再依赖测试钩子）。
 
-复现器保留：
+测量窗口 40s，每 20ms 一次 20KiB 直写（key 首字节在 `0x90..0x97` 轮转，给采样
+提供分布）；`failures` 是 split 写 fence 期间被拒的写（`EPOCH_STALE`，调用方按
+重试处理），`max_pause` 是连续失败窗口（首次失败到下一次成功），延迟分位只统计
+成功写。
+
+| 指标 | 数值 |
+|:--|--:|
+| split / merge | 5 / 0 |
+| PD Region 表规模 | 6 |
+| 成功写 / 失败写 | 667 / 48 |
+| 最大停顿 | 2 067 ms |
+| p50 / p99 / max 成功写延迟 | 16.0 ms / 83.6 ms / 84.6 ms |
+
+**读数**：写停顿由 split 的 write fence + 数据搬迁（该阈值下每 Region 十几到几十
+个 key）+ cutover 组成，秒级；成功的写不承担搬迁成本，p99 仍在百毫秒内。40s 只
+完成 5 次 split（`max_concurrent_operators=1`，单次 split 含 fence/导入/换届），
+要更高 split 吞吐需提高并发 operator 上限（用 `region_split_keys` 调阈值前先测）。
 
 ```bash
-PERF_GATE=1 cargo test -p coord --test kv_t_g6_perf_v2_test perf_split_write_pause \
-  -- --ignored --nocapture --test-threads=1     # 需 debug 构建：调度解冻钩子只在 debug 编译
+PERF_GATE=1 cargo test -p coord --release --test kv_t_g6_perf_v2_test perf_split_write_pause \
+  -- --ignored --nocapture --test-threads=1
 ```
 
-当前 fail-closed 在 `region_split_total = 0`（「the PD-driven split never ran」），
-不是「停顿很小」的证据。统计上报落地后按同一命令取值并回填本节。
+未发生 split 时用例 fail-closed（`region_split_total = 0`），不把「没测到」当数字。
 
 ## 7. Soak
 

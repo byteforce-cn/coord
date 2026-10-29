@@ -25,8 +25,7 @@ use std::time::{Duration, Instant};
 mod common;
 
 use common::v2_cluster::{
-    allocate_ts, commit_txn, direct_put, metric_value as node_metric, runtime, V2Cluster,
-    V2ClusterOptions,
+    allocate_ts, commit_txn, metric_value as node_metric, runtime, V2Cluster, V2ClusterOptions,
 };
 
 /// 证书/权限门禁：没有 `PERF_GATE=1` 就当「未跑」，直接失败而不是静默跳过。
@@ -507,24 +506,22 @@ async fn try_direct_put(addrs: &[String], key: &[u8], value: &[u8]) -> Result<u6
 
 /// #174：split 写停顿（PD 驱动、真实 3 进程）。
 ///
-/// 先在暂停调度下把 region 1 灌到 1.2MiB / 200 keys（避免 PD 首个 merge tick
-/// 合并两个空 Region），再运行时解冻：split checker（1s）由 `region_split_keys=32`
-/// 触发 split。测量窗口内每 50ms 对**子 Region 区间**（中位数之后的 key）做一次
-/// 不重试直写，记录失败窗口与延迟分位。
+/// 启动即调度（release 构建没有 debug-only 的暂停钩子）：持续写新 key，让
+/// `region_split_keys` 在测量窗口内反复触发 split。每次写都记延迟，连续失败
+/// 窗口即 split 写 fence 的停顿。key 首字节在 0x90..0x97 间轮转，使分位采样
+/// 产生多个 split 点（单一前缀会让采样退化成同一个 key）。
 ///
-/// **当前状态（诚实记录）**：split 自动路径仍有两个未修缺陷（目标组 leader 在
-/// 别的节点时 `ForwardToLeader`；有直写的 Region 导出守卫永不成立，见 GA gate
-/// §3.5），所以本用例目前 fail-closed 在「the split never ran」。它是修复后的
-/// 测量入口 + 复现器，不用「没测到」冒充数字。
+/// 断言 `region_split_total > 0` 是「数字来自真实 split」的门槛；未发生 split
+/// 时 fail-closed，不用「没测到」冒充数字。
 #[test]
 #[ignore = "perf measurement; PERF_GATE=1, real 3-process cluster"]
 fn perf_split_write_pause() {
     require_gate();
     let cluster = V2Cluster::start_with(V2ClusterOptions {
-        pd_control: true,
-        // 起点暂停；merge 间隔拉长，避免 split 完又被 merge 回去干扰测量。
+        scheduler_paused: false,
+        // merge 间隔拉长：避免 split 完又被 merge 回去干扰测量。
         pd: "balance_interval = 1\nsplit_check_interval = 1\nmerge_check_interval = 3600\n\
-             region_split_keys = 32\nregion_merge_size_mb = 1\n\
+             region_split_keys = 16\nregion_merge_size_mb = 1\n\
              max_concurrent_operators = 1\n",
         ..Default::default()
     });
@@ -532,30 +529,20 @@ fn perf_split_write_pause() {
     let baseline = runtime().block_on(commit_txn(&addrs, b"ps", b"zs", 0));
     assert!(baseline > 0);
 
-    // key 以 0x90 打头：region 2 = [0x6D, +∞)，fallback split_key=0x80，
-    // 上表中的 key 全部落在右半段 —— 测量点必然进入 split 的 write fence 区间。
-    for i in 0..200u64 {
-        let key = format!("\u{90}-p-{i:08}").into_bytes();
-        let value = vec![b's'; 20 * 1024];
-        runtime().block_on(direct_put(&addrs, &key, &value));
-    }
-
-    let target = format!("\u{90}-p-{:08}", 150).into_bytes();
-    let value = b"w".to_vec();
     let mut latencies_us: Vec<u128> = Vec::new();
     let mut failures = 0u32;
     let mut fail_started: Option<Instant> = None;
     let mut max_pause = Duration::ZERO;
     let started = Instant::now();
     let window = Duration::from_secs(40);
-    let mut resumed = false;
+    let mut seq = 0u64;
     while started.elapsed() < window {
-        if !resumed && started.elapsed() >= Duration::from_secs(2) {
-            cluster.resume_scheduler();
-            resumed = true;
-        }
+        // 首字节轮转让 Region 内的 key 在字节空间上分散，采样中位数才有多样性。
+        let prefix = 0x90u8 + (seq % 8) as u8;
+        let key = format!("{}-p-{seq:08}", char::from(prefix)).into_bytes();
+        let value = vec![b's'; 20 * 1024];
         let op = Instant::now();
-        match runtime().block_on(try_direct_put(&addrs, &target, &value)) {
+        match runtime().block_on(try_direct_put(&addrs, &key, &value)) {
             Ok(_) => {
                 latencies_us.push(op.elapsed().as_micros());
                 if let Some(f) = fail_started.take() {
@@ -567,23 +554,38 @@ fn perf_split_write_pause() {
                 fail_started.get_or_insert(op);
             }
         }
-        std::thread::sleep(Duration::from_millis(50));
+        seq += 1;
+        std::thread::sleep(Duration::from_millis(20));
     }
     if let Some(f) = fail_started.take() {
         max_pause = max_pause.max(f.elapsed());
     }
-    cluster.pause_scheduler();
 
-    let split_total: u64 = cluster
-        .nodes
-        .iter()
-        .map(|n| node_metric(n.http_port, "coord_region_split_total").unwrap_or(0))
-        .sum();
+    // split 指标在 operator success 时累加；等 PD 把在途 operator 收口。
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut split_total: u64 = 0;
+    while Instant::now() < deadline {
+        split_total = cluster
+            .nodes
+            .iter()
+            .map(|n| node_metric(n.http_port, "coord_region_split_total").unwrap_or(0))
+            .sum();
+        if split_total > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
     let merge_total: u64 = cluster
         .nodes
         .iter()
         .map(|n| node_metric(n.http_port, "coord_region_merge_total").unwrap_or(0))
         .sum();
+    let regions_total: u64 = cluster
+        .nodes
+        .iter()
+        .map(|n| node_metric(n.http_port, "coord_regions_total").unwrap_or(0))
+        .max()
+        .unwrap_or(0);
     assert!(
         split_total > 0,
         "the PD-driven split never ran (region_split_total = 0): the measurement is not evidence; \
@@ -592,8 +594,8 @@ fn perf_split_write_pause() {
     );
     latencies_us.sort_unstable();
     println!(
-        "PERF split_write_pause: splits={split_total} merges={merge_total} ops={} failures={failures} \
-         max_pause_ms={} p50_us={} p99_us={} max_us={}",
+        "PERF split_write_pause: splits={split_total} merges={merge_total} regions={regions_total} \
+         ops={} failures={failures} max_pause_ms={} p50_us={} p99_us={} max_us={}",
         latencies_us.len(),
         max_pause.as_millis(),
         percentile(&latencies_us, 0.50),
