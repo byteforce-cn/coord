@@ -1,8 +1,9 @@
-;; tombstone 是**一个值**（空串），不是「不存在」：delete@110 之后 read_ts=120 读到 ""。
+;; delete@110 之后 read_ts=120：Range 只返回存活 key，所以读到的是「不存在」。
+;; （若服务端返回 tombstone，value 会是 ""；两种都合法，见 mvcc.clj 的 value-of。）
 [{:type :ok, :f :v2-write, :process 0, :node "n1", :time 10,
   :key "/jepsen/v2/k/0", :value "v1", :commit-ts 100, :request-id "r1"}
  {:type :ok, :f :v2-delete, :process 0, :node "n1", :time 20,
   :key "/jepsen/v2/k/0", :value "", :commit-ts 110, :request-id "r2"}
  {:type :ok, :f :v2-read, :process 0, :node "n1", :time 30,
   :key "/jepsen/v2/k/0", :read-ts 120, :requested-read-ts 120,
-  :value "", :mod-revision 110, :create-revision 100}]
+  :value nil}]

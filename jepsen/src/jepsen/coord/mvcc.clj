@@ -92,9 +92,11 @@
                    (assoc r :ok? (= :ok (:type op))))
 
                  :else
-                 (let [v (if (= :v2-delete kind) "" (:value op))]
+                 (let [delete? (= :v2-delete kind)
+                       v (if delete? "" (:value op))]
                    (for [ts (absolute-ts op)]
-                     {:key (:key op) :value v :ts ts :kind kind
+                     {:key (:key op) :value v :ts ts
+                      :kind (if delete? :delete :write)
                       :ok? (= :ok (:type op)) :request-id (:request-id op)}))))]
     (->> (apply concat recs)
          (sort-by :ts)
@@ -132,10 +134,14 @@
         ;; or the last :ok value is legal. Final reads come after everything
         ;; settled, so they must be exact.
         unplaced  (get unknown-values key #{})
+        ;; A committed delete makes the key ABSENT: kv.v2 Range only returns
+        ;; live keys (coord-server/src/kvt/services.rs read_kv_range_segment),
+        ;; while a returned tombstone would carry value "". Both are legal.
+        value-of  (fn [w] (if (= :delete (:kind w)) #{nil ""} #{(:value w)}))
         needed    (cond-> (if final
-                            (if last-ok #{(:value last-ok)} #{nil})
-                            (into (if last-ok #{(:value last-ok)} #{nil})
-                                  (map :value cand-ts)))
+                            (if last-ok (value-of last-ok) #{nil})
+                            (into (if last-ok (value-of last-ok) #{nil})
+                                  (mapcat value-of cand-ts)))
                     (seq unplaced) (into unplaced))
         known-ts  (set (map :ts rs))]
     ;; 2. no read from the future
