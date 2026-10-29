@@ -118,6 +118,16 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    周期性上报 stats + 采样 Key；这是 `region_split_keys`/`region_split_size_mb`
    这两个 D9 数值真正生效的前提）。
 
+7. **merge 导出水位口径过强（已修）**：`migrate_merge` 要求
+   `donor_cursor == pin == receiver_revision == receiver_cursor`。直写只推进
+   revision、不产生决策，任何有直写/并发写的 Region 都会永久 fail-closed，merge
+   在实际负载下不可用。修复：以**两侧决策游标相等**为判据（有界等待；游标以下双方
+   都已有数据，以上才重放），导出水位取 donor 当前 revision，导入完成后复查两侧
+   游标与源水位未前进（导入期间前进 → fail-closed 重试）。回归：
+   `kv_t_g5_merge_migrator_test`（`test_merge_allows_revision_gaps_when_decision_cursors_align`、
+   `test_merge_allows_receiver_revision_behind_pin_while_cursor_matches`、
+   `test_merge_fails_closed_when_cursor_moves_during_import`、两个游标不等用例）。
+
 ## 4. 签字记录
 
 | 日期 | 结论 | 依据 commit / CI run | 未关闭项 | 签字人 |
