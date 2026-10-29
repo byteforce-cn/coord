@@ -2204,6 +2204,11 @@
       (= Status$Code/UNAUTHENTICATED (status-code e)) :unauthenticated
       (= Status$Code/OUT_OF_RANGE (status-code e))    :history-unavailable
       (= Status$Code/UNAVAILABLE (status-code e))     :unavailable
+      ;; ABORTED without a code: the node dropped the proposal (lost leadership
+      ;; mid-partition). Nothing was applied, and a retry with the same
+      ;; request_id cannot double-apply -- treat it as retryable, but keep
+      ;; INTERNAL/FAILED_PRECONDITION as :other so real bugs stay visible.
+      (= Status$Code/ABORTED (status-code e))         :unavailable
       (= Status$Code/DEADLINE_EXCEEDED (status-code e)) :unavailable
       :else :other)))
 
@@ -2258,7 +2263,7 @@
       (cond
         (> tries 40)
         (assoc op :type :info :error :unavailable-maybe-applied
-               :attempted-ts (vec (distinct (conj retried ts)))
+               :attempted-ts (vec (distinct (remove nil? (conj retried ts))))
                :request-id req-id)
 
         :else
@@ -2285,7 +2290,7 @@
               (assoc op :type :fail :error :unauthenticated)
 
               (assoc op :type :fail :error (str "v2 " (v2-error-class err))
-                     :code (p/error-code err)))))))))
+                     :code (p/error-code err) :detail (str err)))))))))
 
 (defn- invoke-v2-write [this op] (v2-put! this op))
 (defn- invoke-v2-delete [this op] (v2-put! this op))

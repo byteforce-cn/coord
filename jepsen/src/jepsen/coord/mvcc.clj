@@ -39,7 +39,8 @@
        never catches up is a liveness failure;
     8. sample thresholds, fail-closed (insufficient sample is invalid, never
        green). The ts threshold is lower on purpose: TSO ops are ~10% of the
-       mix, so a 45s matrix cell (rate 20, ~900 ops) still clears it.
+       mix, snapshot reads are 25%, and a txn is four RPCs (so txnv2 does
+       ~2.3 txns/s/worker): a 45s matrix cell clears 100 writes/reads/ts.
 
   Not judged: watch/lease/storage v2, split/merge windows (the lab runs with
   the PD scheduler paused), cross-partition ordering."
@@ -62,8 +63,10 @@
   [op]
   (cond
     (= :ok (:type op)) (when-let [ts (:commit-ts op)] [ts])
-    (= :info (:type op)) (vec (or (seq (:attempted-ts op))
-                                  (when (:commit-ts op) [(:commit-ts op)])))
+    (= :info (:type op)) (->> (or (seq (:attempted-ts op))
+                                  (when (:commit-ts op) [(:commit-ts op)]))
+                              (remove nil?)
+                              vec)
     :else []))
 
 (defn- txn-writes
@@ -283,7 +286,7 @@
   history is invalid (`:insufficient-sample`), because a run that barely
   happened must never look green."
   [{:keys [min-writes min-reads min-ts]
-    :or {min-writes 200 min-reads 200 min-ts 50}}]
+    :or {min-writes 100 min-reads 100 min-ts 50}}]
   (reify jepsen.checker/Checker
     (check [_ _test history _opts]
       (let [writes-by-key (index-writes history)

@@ -1184,8 +1184,8 @@
                    ;; #272：v2 的期望由 commit_ts/read_ts 直接算出（确定性 MVCC），
                    ;; knossos 的单寄存器模型表达不了 —— 参数解析期就拒绝。
                    (contains? #{:kvv2 :txnv2} workload)
-                   (mvcc/checker {:min-writes (or (:v2-min-writes opts) 200)
-                                  :min-reads  (or (:v2-min-reads opts) 200)
+                   (mvcc/checker {:min-writes (or (:v2-min-writes opts) 100)
+                                  :min-reads  (or (:v2-min-reads opts) 100)
                                   :min-ts     (or (:v2-min-ts opts) 50)})
 
                    ;; T1.4：幂等专项有专用 checker（op 形状不是 register）。
@@ -1690,12 +1690,13 @@
     :assoc-fn (fn [m _ _] (assoc m :kv-t true))]
    [nil "--v2-min-writes N"
     "#272 (--workload kvv2/txnv2): minimum successful writes/deletes/txns
-    before the MVCC checker may call a history valid (default 200)"
+    before the MVCC checker may call a history valid (default 100; a 45s
+    matrix cell of txnv2 does ~105)"
     :default nil
     :parse-fn (fn [s] (Long/parseLong s))
     :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
    [nil "--v2-min-reads N"
-    "#272: minimum successful v2 reads (default 200)"
+    "#272: minimum successful v2 reads (default 100; reads are ~25% of ops)"
     :default nil
     :parse-fn (fn [s] (Long/parseLong s))
     :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]

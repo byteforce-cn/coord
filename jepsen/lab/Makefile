@@ -249,7 +249,14 @@ MATRIX_M1       := map:none   map:kill \
 # partition-halves 是「流中断 → 按契约 resume」与「Lease 到期/续期在故障下
 # 仍成立」的证伪路径。
 # KV-T v2（#272）：--kv-t + rate 20（45s ≈ 900 op，远超 200/200/200 样本门槛）
-MATRIX_M3       := kvv2:none kvv2:kill txnv2:none txnv2:kill
+MATRIX_M3       := kvv2:none kvv2:kill kvv2:partition-halves \
+                   txnv2:none txnv2:kill txnv2:partition-halves
+# txnv2 一个 op 是 4 个 RPC（Begin/Read×2/Commit），45s 只有 ~90 个成功事务；
+# 60s 给到 ~130，门槛 100 才有余量（kvv2 45s 就够，统一 60s 更好读）。
+M3_TIME         := 60
+# 分区格吃掉 ~40% 的 txnv2 事务（每次事务 4 个 RPC），60s 只剩 77 个成功；
+# 120s 给到 ~150，100 的门槛才有意义。
+M3_TIME_TXN     := 120
 MATRIX_M2       := watch:none watch:kill watch:pause watch:partition-halves \
                    lease:none lease:kill lease:pause lease:partition-halves
 
@@ -656,8 +663,9 @@ matrix-m2: checkers ## M2 Watch+Lease 矩阵（T2.1 watch / T2.2 lease × none|k
 matrix-m3: checkers ## KV-T v2 矩阵（kvv2/txnv2 × none|kill|partition-halves，45s，--kv-t）
 	@set -e; for combo in $(MATRIX_M3); do \
 	  w=$${combo%%:*}; n=$${combo##*:}; \
-	  echo; echo "===== $$w / $$n (kv-t) ====="; \
-	  $(MAKE) test WORKLOAD=$$w NEMESIS=$$n TIME_LIMIT=$(MATRIX_TIME) \
+	  tl=$(M3_TIME); [ "$$w" = txnv2 ] && tl=$(M3_TIME_TXN); \
+	  echo; echo "===== $$w / $$n (kv-t, $${tl}s) ====="; \
+	  $(MAKE) test WORKLOAD=$$w NEMESIS=$$n TIME_LIMIT=$$tl \
 	           CONCURRENCY=2n RATE=20 KV_T=1 SKIP_CHECKERS=1 \
 	           JEPSEN_PROVIDER=$(JEPSEN_PROVIDER) --no-print-directory \
 	    || { echo "M3 MATRIX FAILED at $$w/$$n"; exit 1; }; \
