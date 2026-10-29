@@ -905,6 +905,11 @@ public class CoordRpc {
         .addField(bytes("key", 4).build())
         .addField(bytes("payload", 5).build())
         .addField(i64("timestamp", 6).build())
+        // DLQ 处置把原始原因写回消息（mq.proto:155-156）；漏掉这两个字段时
+        // check-agent-wire 会报 descriptor 少字段，PollDlq 的 reason/detail
+        // 也会静默读成空串。
+        .addField(str("dlq_reason", 7).build())
+        .addField(str("dlq_detail", 8).build())
         .build();
   }
 
