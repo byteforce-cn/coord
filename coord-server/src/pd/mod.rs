@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use coord_core::error::Result;
-use coord_core::types::{NodeID, RegionId};
+use coord_core::types::{NodeID, RegionId, RegionMeta};
 use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -43,7 +43,7 @@ use crate::raft::system_raft::SystemRaftHandle;
 use crate::raft::type_config::{PdOp, PdQueueEntry};
 
 // Re-export 主要类型
-pub use embedded::{EmbeddedPd, NodeInfo};
+pub use embedded::{EmbeddedPd, NodeInfo, RaftRegionHeartbeatForwarder, RegionHeartbeatForwarder};
 pub use executor::OperatorExecutor;
 pub use operator::Operator;
 pub use types::{NodeState, PdConfig, PdMode};
@@ -51,6 +51,64 @@ pub use types::{NodeState, PdConfig, PdMode};
 // ============================================================================
 // PlacementDriver
 // ============================================================================
+
+/// Region leader 的一次心跳上报（统计 + 采样 + leader 视图）。
+///
+/// 传输形状只承载内存瞬态数据（不落盘）：Region leader 周期上报到 region 0
+/// leader 节点的 PD；丢失/换届只损失一拍，下一拍重报。
+#[derive(Debug, Clone, Default)]
+pub struct RegionHeartbeatReport {
+    /// 上报的 Region ID
+    pub region_id: RegionId,
+    /// redb 文件大小（字节）
+    pub size: u64,
+    /// 存活 Key 数
+    pub keys: u64,
+    /// coord.storage chunk 字节
+    pub storage_bytes: u64,
+    /// 上报方视图中的 Region leader（0 = 未知/选举窗口）
+    pub leader_node_id: NodeID,
+    /// split_key 采样 Key（空 = 无样本，调度器回退 `mid_key`）
+    pub sample_keys: Vec<Vec<u8>>,
+}
+
+/// Region 心跳接收端（节点间 RPC 的落地口）。
+///
+/// 接收方必须是 region 0 leader 节点的 PD（operator 生成源）；其他节点收到
+/// 后无调度意义，所以装配层只在需要时注入。
+pub trait RegionHeartbeatSink: Send + Sync {
+    /// 应用一条上报；错误（例如 Region 已不存于元数据）由调用方仅记日志。
+    fn apply_region_heartbeat(&self, report: RegionHeartbeatReport) -> Result<()>;
+}
+
+impl RegionHeartbeatSink for PlacementDriver {
+    fn apply_region_heartbeat(&self, report: RegionHeartbeatReport) -> Result<()> {
+        self.handle_region_heartbeat_report(report)
+    }
+}
+
+/// 把权威表的 range/epoch 与本地持久 peers 合并成 store 条目。
+///
+/// 统计字段是心跳派生的瞬态：对账保留本地值，避免表刷新把刚上报的容量清零。
+fn merge_region_meta(existing: RegionMeta, table: &RegionMeta) -> RegionMeta {
+    let peers = if existing.peers.is_empty() {
+        table.peers.clone()
+    } else {
+        existing.peers
+    };
+    RegionMeta {
+        region_id: table.region_id,
+        start_key: table.start_key.clone(),
+        end_key: table.end_key.clone(),
+        epoch: coord_core::types::RegionEpoch {
+            conf_ver: existing.epoch.conf_ver.max(table.epoch.conf_ver),
+            version: table.epoch.version,
+        },
+        peers,
+        approximate_size: existing.approximate_size,
+        approximate_keys: existing.approximate_keys,
+    }
+}
 
 /// Placement Driver：全局调度器
 ///
@@ -68,6 +126,11 @@ pub struct PlacementDriver {
     /// 与 `PdMetaStore` 落盘的成员/epoch/range 分离。节点离线或选举窗口（上报
     /// leader=0）时清除对应条目，调度器不得基于陈旧 leader 决策。
     region_leaders: RwLock<HashMap<RegionId, NodeID>>,
+    /// Region 心跳上报的采样 Key（内存瞬态，split_key 选取输入）。
+    ///
+    /// 与 `region_leaders` 同口径：派生瞬态数据、不入盘；无样本时调度器回退
+    /// `mid_key`。Region 注销后由下一拍上报失败清理。
+    region_samples: RwLock<HashMap<RegionId, Vec<Vec<u8>>>>,
     /// 调度器集合
     schedulers: Vec<Box<dyn Scheduler>>,
     /// 优雅关闭信号
@@ -121,6 +184,7 @@ impl PlacementDriver {
             meta_store,
             node_states: RwLock::new(HashMap::new()),
             region_leaders: RwLock::new(HashMap::new()),
+            region_samples: RwLock::new(HashMap::new()),
             schedulers,
             shutdown_rx,
             scheduler_paused: AtomicBool::new(scheduler_paused),
@@ -275,26 +339,59 @@ impl PlacementDriver {
         storage_bytes: u64,
         leader_node_id: NodeID,
     ) -> Result<()> {
-        self.meta_store.update_region_stats(region_id, size, keys)?;
-        self.meta_store
-            .update_region_storage_bytes(region_id, storage_bytes)?;
+        self.handle_region_heartbeat_report(RegionHeartbeatReport {
+            region_id,
+            size,
+            keys,
+            storage_bytes,
+            leader_node_id,
+            sample_keys: Vec::new(),
+        })
+    }
+
+    /// 处理一条完整的 Region 心跳上报（统计 + leader 视图 + 采样 Key）。
+    ///
+    /// 未知 Region 的上报是过期数据（Region 已被 merge 吸收/下线）：清理该
+    /// Region 的瞬态视图后返回错误，调用方只记日志、不快照回退。
+    pub fn handle_region_heartbeat_report(&self, report: RegionHeartbeatReport) -> Result<()> {
+        let region_id = report.region_id;
+        let updated = self
+            .meta_store
+            .update_region_stats(region_id, report.size, report.keys)
+            .and_then(|_| {
+                self.meta_store
+                    .update_region_storage_bytes(region_id, report.storage_bytes)
+            });
+        if let Err(e) = updated {
+            self.region_leaders.write().remove(&region_id);
+            self.region_samples.write().remove(&region_id);
+            return Err(e);
+        }
 
         {
             let mut leaders = self.region_leaders.write();
-            if leader_node_id == 0 {
+            if report.leader_node_id == 0 {
                 leaders.remove(&region_id);
             } else {
-                leaders.insert(region_id, leader_node_id);
+                leaders.insert(region_id, report.leader_node_id);
+            }
+        }
+        {
+            let mut samples = self.region_samples.write();
+            if report.sample_keys.is_empty() {
+                samples.remove(&region_id);
+            } else {
+                samples.insert(region_id, report.sample_keys);
             }
         }
 
         tracing::trace!(
             "PD: region {} heartbeat: size={}, keys={}, storage_bytes={}, leader={}",
             region_id,
-            size,
-            keys,
-            storage_bytes,
-            leader_node_id
+            report.size,
+            report.keys,
+            report.storage_bytes,
+            report.leader_node_id
         );
         Ok(())
     }
@@ -302,6 +399,91 @@ impl PlacementDriver {
     /// 查询 Region 心跳上报的当前 leader（无上报 / 选举窗口为 None）
     pub fn region_leader(&self, region_id: RegionId) -> Option<NodeID> {
         self.region_leaders.read().get(&region_id).copied()
+    }
+
+    /// 查询 Region 心跳上报的采样 Key（无上报返回空；调度器回退 `mid_key`）
+    pub fn region_samples(&self, region_id: RegionId) -> Vec<Vec<u8>> {
+        self.region_samples
+            .read()
+            .get(&region_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 把权威 Region 表收敛到本地 `PdMetaStore`。
+    ///
+    /// Region 表由 region 0 raft apply（每个节点都复制），因此本地读到的就是
+    /// 权威视图；operator 执行器只更新**执行节点**的 store，其它节点（包括
+    /// 调度所在节点）必须自己对账——否则 split/merge 后调度视图停在旧表，
+    /// 会按旧统计重复生成 operator。
+    ///
+    /// 返回 `true` 表示 store 有变化（心跳循环只在变化时打日志，避免每拍噪音）。
+    pub fn reconcile_region_table(
+        &self,
+        table: &crate::storage::region_table::RegionTable,
+    ) -> Result<bool> {
+        if table.version == 0 {
+            return Ok(false);
+        }
+        let mut changed = false;
+        // 1) 更新表内已有 Region（表拥有路由与 split version）。
+        for meta in &table.regions {
+            if let Some(existing) = self.meta_store.get_region(meta.region_id) {
+                let desired = merge_region_meta(existing, meta);
+                if self.meta_store.get_region(meta.region_id) != Some(desired.clone()) {
+                    self.meta_store.update_region(desired)?;
+                    changed = true;
+                }
+            }
+        }
+        // 2) 先删表里已不存在的 Region（避免残留条目占用 start_key 索引）。
+        for existing in self.meta_store.list_regions() {
+            if table.get(existing.region_id).is_none() {
+                match self.meta_store.delete_region(existing.region_id) {
+                    Ok(()) => changed = true,
+                    Err(coord_core::error::Error::RegionNotFound { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        // 3) 再创建新 Region（split 子 Region / 表里新增的区间）。
+        for meta in &table.regions {
+            if self.meta_store.get_region(meta.region_id).is_none() {
+                self.meta_store.create_region(meta.clone())?;
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// 刷新集群级 gauge（每条心跳拍调用；所有 PD 节点一致上报本地视图）。
+    pub fn refresh_cluster_gauges(&self) {
+        let obs = self.observability.read().clone();
+        let Some(metrics) = obs.and_then(|o| o.metrics) else {
+            return;
+        };
+        metrics.set_regions_total(self.meta_store.list_regions().len() as u64);
+        let online = self
+            .node_states
+            .read()
+            .values()
+            .filter(|n| n.online)
+            .count();
+        metrics.set_nodes_online(online as u64);
+    }
+
+    /// operator 成功收口时的分类计数（split/merge 计数供 `perf_split_write_pause`
+    /// 与监控面板使用；其余 operator 不单独计数）。
+    pub(crate) fn count_operator_success(&self, op: &Operator) {
+        let obs = self.observability.read().clone();
+        let Some(metrics) = obs.and_then(|o| o.metrics) else {
+            return;
+        };
+        match op {
+            Operator::SplitRegion { .. } => metrics.inc_region_split(),
+            Operator::MergeRegion { .. } => metrics.inc_region_merge(),
+            _ => {}
+        }
     }
 
     // ──── 调度循环 ────
@@ -396,11 +578,22 @@ impl PlacementDriver {
             }
         }
 
-        // 2. 构建调度上下文（含心跳上报的 Region leader 视图 + 对象存储字节）
+        // 2. 构建调度上下文（含心跳上报的 Region leader 视图、采样 Key 与
+        //    对象存储字节）。已不在元数据里的 Region（merge 吸收/下线）的瞬态
+        //    视图同步清掉，避免陈旧 leader/样本参与调度。
         let regions = self.meta_store.list_regions();
         let nodes: Vec<NodeState> = self.node_states.read().values().cloned().collect();
+        let known: std::collections::HashSet<RegionId> =
+            regions.iter().map(|r| r.region_id).collect();
+        self.region_leaders
+            .write()
+            .retain(|region_id, _| known.contains(region_id));
+        self.region_samples
+            .write()
+            .retain(|region_id, _| known.contains(region_id));
         let mut ctx = ScheduleContext::new(regions, nodes);
         ctx.leaders = self.region_leaders.read().clone();
+        ctx.region_sample_keys = self.region_samples.read().clone();
         ctx.region_storage_bytes = self.meta_store.all_region_storage_bytes();
 
         // 3. 运行所有调度器；并发上限 = 全局队列 Pending/Running 数。
@@ -842,6 +1035,75 @@ mod tests {
         let r = store.get_region(1).unwrap();
         assert_eq!(r.approximate_size, 0);
         assert_eq!(r.approximate_keys, 0);
+    }
+
+    // ──── Region 心跳采样 Key（split_key 输入）────
+
+    #[test]
+    fn test_region_heartbeat_report_stores_and_clears_samples() {
+        let (pd, _tx) = make_test_pd();
+        let region = make_region_meta(1, vec![0x00], vec![0xFF]);
+        pd.meta_store().create_region(region).unwrap();
+
+        let samples = vec![b"k1".to_vec(), b"k2".to_vec(), b"k3".to_vec()];
+        pd.handle_region_heartbeat_report(RegionHeartbeatReport {
+            region_id: 1,
+            size: 100,
+            keys: 3,
+            storage_bytes: 0,
+            leader_node_id: 2,
+            sample_keys: samples.clone(),
+        })
+        .unwrap();
+        assert_eq!(pd.region_samples(1), samples);
+        assert_eq!(pd.region_leader(1), Some(2));
+
+        // 空样本 = 无样本上报：清掉视图，调度器回退 mid_key。
+        pd.handle_region_heartbeat_report(RegionHeartbeatReport {
+            region_id: 1,
+            size: 100,
+            keys: 3,
+            storage_bytes: 0,
+            leader_node_id: 2,
+            sample_keys: Vec::new(),
+        })
+        .unwrap();
+        assert!(pd.region_samples(1).is_empty());
+    }
+
+    #[test]
+    fn test_region_heartbeat_report_for_unknown_region_drops_stale_views() {
+        let (pd, _tx) = make_test_pd();
+        let region = make_region_meta(1, vec![0x00], vec![0xFF]);
+        pd.meta_store().create_region(region).unwrap();
+        pd.handle_region_heartbeat_report(RegionHeartbeatReport {
+            region_id: 1,
+            size: 1,
+            keys: 1,
+            storage_bytes: 0,
+            leader_node_id: 3,
+            sample_keys: vec![b"k".to_vec()],
+        })
+        .unwrap();
+
+        // Region 被 merge 吸收/下线后，旧上报不得留下可被调度的 leader/样本。
+        pd.meta_store().delete_region(1).unwrap();
+        let err = pd
+            .handle_region_heartbeat_report(RegionHeartbeatReport {
+                region_id: 1,
+                size: 2,
+                keys: 2,
+                storage_bytes: 0,
+                leader_node_id: 3,
+                sample_keys: vec![b"k2".to_vec()],
+            })
+            .expect_err("report for a removed region must fail");
+        assert!(matches!(
+            err,
+            coord_core::error::Error::RegionNotFound { .. }
+        ));
+        assert_eq!(pd.region_leader(1), None);
+        assert!(pd.region_samples(1).is_empty());
     }
 
     // ──── 调度 tick 使用心跳 leader ────

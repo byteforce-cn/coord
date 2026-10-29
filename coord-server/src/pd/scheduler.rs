@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use coord_core::kv_range::mid_key;
 use coord_core::types::{NodeID, RegionId, RegionMeta};
 
 use super::operator::Operator;
@@ -283,40 +284,6 @@ impl Scheduler for ReplicaChecker {
 // ============================================================================
 // 辅助函数
 // ============================================================================
-
-/// 计算两个字节 slice 的中点 key（用于 split_key 建议）
-fn mid_key(start: &[u8], end: &[u8]) -> Vec<u8> {
-    if start.is_empty() && end.is_empty() {
-        return vec![0x80];
-    }
-    if end.is_empty() || end == [0xFF] {
-        // 全空间：取中间
-        return vec![0x80];
-    }
-
-    // 简化的中点计算：取 start 和 end 的中间字节
-    let len = start.len().max(end.len());
-    let mut mid = Vec::with_capacity(len);
-    let mut carry: u16 = 0;
-
-    for i in 0..len {
-        let s = start.get(i).copied().unwrap_or(0);
-        let e = end.get(i).copied().unwrap_or(0xFF);
-        let sum = s as u16 + e as u16 + carry;
-        mid.push((sum / 2) as u8);
-        carry = (sum % 2) * 256;
-    }
-
-    // 确保 mid 在 (start, end) 范围内
-    if mid.as_slice() <= start {
-        // 取 end 的前半部分
-        if let Some(last) = mid.last_mut() {
-            *last = last.saturating_add(1);
-        }
-    }
-
-    mid
-}
 
 // ============================================================================
 // KeySampler — Region Key 采样与 Split Key 选择

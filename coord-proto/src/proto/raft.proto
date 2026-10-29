@@ -73,4 +73,15 @@ service Raft {
   // leader，否则在 `error` 里回报（调用方刷新 leader 视图后重试）。节点间认证
   // （共享密钥 HMAC / mTLS）与其他 Raft RPC 同口径；导入 apply 幂等，重放安全。
   rpc SubmitRegionCommand(RaftMessage) returns (RaftMessage);
+
+  // ReportRegionStats: Region leader 把心跳统计（size/keys/chunk 字节/leader/
+  // 采样 Key）上报到 region 0 leader 节点的 PD（operator 生成源）。
+  //
+  // 统计是派生瞬态数据（不落盘、不进 raft 日志）：走节点间 RPC 而非 region 0
+  // raft，避免为每拍心跳引入共识 + fsync；丢失/换届只损失一拍，下一拍重报。
+  // 请求 region_id = 0；payload = postcard(RegionStatsPayload{...})，响应
+  // payload = postcard(RegionStatsReply{error})。节点间认证（共享密钥 HMAC /
+  // mTLS）与其他 Raft RPC 同口径；接收方不是 region 0 leader 时仍可接收
+  // （PD 内存视图在所有节点都可写），调度只读 leader 节点的视图。
+  rpc ReportRegionStats(RaftMessage) returns (RaftMessage);
 }

@@ -1988,6 +1988,83 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    /// 在区间 `[start, end)` 内按字节空间分位采样最多 `max_samples` 个存活 Key。
+    ///
+    /// PD 的 split 建议需要 Region 内真实 Key 的分布；全量扫描的代价随 Region
+    /// 增长不可接受。这里把区间不断用 [`coord_core::kv_range::mid_key`] 二分出
+    /// 探测点，每个探测点只做**有界**扫描取第一条存活 Key：返回数量与扫描行数
+    /// 都由探测点预算封顶。
+    ///
+    /// 无上界区间（`end` 为空）依赖 `mid_key` 的 0x80 分界；探测点落在区间外或
+    /// 区间内无 Key 时跳过——采样只影响 split_key 的均衡性，缺失时调度器回退
+    /// `mid_key`。
+    pub fn sample_keys_in(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        max_samples: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        if max_samples == 0 {
+            return Ok(Vec::new());
+        }
+        let mut samples: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+        let mut bounds = vec![(start.to_vec(), end.to_vec())];
+        // 探测点数最多 2^depth；限制轮数使一次心跳的扫描预算可预期。
+        let max_rounds = 8;
+        for _ in 0..max_rounds {
+            if samples.len() >= max_samples || bounds.is_empty() {
+                break;
+            }
+            let mut next = Vec::new();
+            for (lo, hi) in bounds {
+                let probe = coord_core::kv_range::mid_key(&lo, &hi);
+                if probe.as_slice() <= lo.as_slice()
+                    || (!hi.is_empty() && probe.as_slice() >= hi.as_slice())
+                {
+                    continue;
+                }
+                if let Some(key) = self.first_live_key_in(&probe, &hi)? {
+                    samples.insert(key);
+                }
+                next.push((lo, probe.clone()));
+                next.push((probe, hi));
+            }
+            bounds = next;
+            if bounds.len() > max_samples.saturating_mul(4) {
+                break;
+            }
+        }
+        Ok(samples.into_iter().take(max_samples).collect())
+    }
+
+    /// `[start, end)` 内第一条未被删除的 Key（有界扫描，供采样探测点使用）。
+    fn first_live_key_in(&self, start: &[u8], end: &[u8]) -> Result<Option<Vec<u8>>> {
+        let internal_start = encode_kv_key(start);
+        let internal_end = encode_kv_key(end);
+        self.backend.read(|tx| {
+            // 上限覆盖探测点附近少量 tombstone；超过预算视为该分位无存活 Key。
+            let rows = tx.iter_range_limited(TABLE_KV, &internal_start, &internal_end, 64)?;
+            for (internal_key, _) in rows {
+                let Some(user_key) = decode_kv_key(&internal_key) else {
+                    continue;
+                };
+                if !end.is_empty() && user_key >= end {
+                    break;
+                }
+                let meta_key = encode_kv_meta_key(user_key);
+                let deleted = tx
+                    .get(TABLE_KV_META, &meta_key)?
+                    .and_then(|bytes| KvMetadata::from_bytes(&bytes))
+                    .map(|m| m.deleted)
+                    .unwrap_or(false);
+                if !deleted {
+                    return Ok(Some(user_key.to_vec()));
+                }
+            }
+            Ok(None)
+        })
+    }
+
     /// Range 实时读（含 revision 元数据）：值、元数据与 header revision 取自
     /// **同一个读事务**。
     ///
@@ -6674,6 +6751,57 @@ mod tests {
         let results = storage.range_in(b"a", b"b", 0).unwrap();
         let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();
         assert_eq!(keys, vec![b"a".as_slice(), b"abc".as_slice()]);
+    }
+
+    #[test]
+    fn test_sample_keys_in_returns_live_keys_inside_range() {
+        let (_dir, storage) = create_storage();
+        for k in [b"a1".as_slice(), b"c1", b"e1", b"g1", b"z1"] {
+            storage.put(k, b"v", None).unwrap();
+        }
+        // 删除的 key 不得出现在样本里（split_key 指向 tombstone 没有意义）
+        storage.delete(b"e1").unwrap();
+
+        let samples = storage.sample_keys_in(b"a", b"z", 8).unwrap();
+        assert!(!samples.is_empty(), "non-empty range must yield samples");
+        assert!(samples.len() <= 8);
+        let mut sorted = samples.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted, samples, "samples must be sorted and unique");
+        for key in &samples {
+            assert!(
+                key.as_slice() >= b"a".as_slice(),
+                "sample below range: {key:?}"
+            );
+            assert!(
+                key.as_slice() < b"z".as_slice(),
+                "sample above range: {key:?}"
+            );
+            assert_ne!(key.as_slice(), b"e1".as_slice(), "deleted key sampled");
+        }
+
+        // 上限为 0 = 不采样（调用方无需特殊路径）
+        assert!(storage.sample_keys_in(b"a", b"z", 0).unwrap().is_empty());
+
+        // 空区间 = 无样本（调度器回退 mid_key）
+        assert!(storage.sample_keys_in(b"m", b"n", 8).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_sample_keys_in_unbounded_end_stays_above_start() {
+        let (_dir, storage) = create_storage();
+        for k in [b"\x90a".as_slice(), b"\x90b", b"\xa0c"] {
+            storage.put(k, b"v", None).unwrap();
+        }
+        let samples = storage.sample_keys_in(b"\x90", b"", 4).unwrap();
+        assert!(!samples.is_empty());
+        for key in &samples {
+            assert!(
+                key.as_slice() > b"\x90".as_slice(),
+                "sample not above start: {key:?}"
+            );
+        }
     }
 
     #[test]

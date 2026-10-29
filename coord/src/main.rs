@@ -46,7 +46,9 @@ use coord_server::bff::{
 use coord_server::health;
 use coord_server::lease::LeaseManager;
 use coord_server::metrics::Metrics;
-use coord_server::pd::{EmbeddedPd, NodeInfo};
+use coord_server::pd::{
+    EmbeddedPd, NodeInfo, RaftRegionHeartbeatForwarder, RegionHeartbeatForwarder,
+};
 use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 use coord_server::raft::region::{spawn_configured_regions, RegionManager, RegionSeed};
@@ -2900,6 +2902,12 @@ async fn run_server(
             CoordSystemRaftHandle::new(raft.as_ref().clone(), Arc::clone(&mvcc))
                 .with_forwarder(node_id, region_shared_factory.clone()),
         );
+        // Region 心跳统计的跨节点转发：region leader 节点经 raft 节点间 RPC
+        // 把瞬态统计送到 region 0 leader 节点的 PD（operator 生成源）；统计
+        // 不落盘、不进 raft 日志，丢失一拍由下一拍重报。
+        let stats_forwarder: Arc<dyn RegionHeartbeatForwarder> = Arc::new(
+            RaftRegionHeartbeatForwarder::new(region_shared_factory.clone()),
+        );
         let pd = EmbeddedPd::start(
             cfg.multi_raft.pd.to_pd_config(),
             node_id,
@@ -2909,6 +2917,7 @@ async fn run_server(
             pd_nodes,
             heartbeat_interval,
             system_raft,
+            Some(stats_forwarder),
         )
         .await
         .map_err(|e| format!("start embedded PD: {e}"))?;
@@ -2919,6 +2928,10 @@ async fn run_server(
                 Some(Arc::clone(&audit_logger)),
                 Some(Arc::clone(&metrics)),
             ));
+        // raft 端口上的 Region 统计上报落地口（节点间 RPC 的接收端）。
+        raft_rpc_service.set_region_heartbeat_sink(Some(
+            Arc::clone(&pd.driver) as Arc<dyn coord_server::pd::RegionHeartbeatSink>
+        ));
         Some(pd)
     } else {
         tracing::debug!("Multi-Raft PD disabled (multi_raft.pd.enabled=false)");

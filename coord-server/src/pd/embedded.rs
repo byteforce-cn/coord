@@ -48,7 +48,8 @@ use tokio::time::MissedTickBehavior;
 use super::executor::{AddPeerTargetResolver, RegionRaftResolver, SplitMergeMigrator};
 use super::meta_store::PdMetaStore;
 use super::types::NodeState;
-use super::{OperatorExecutor, PdConfig, PlacementDriver};
+use super::{OperatorExecutor, PdConfig, PlacementDriver, RegionHeartbeatReport};
+use crate::raft::network::{RaftNetworkFactoryImpl, RegionStatsPayload};
 use crate::raft::region::{RegionManager, RegionSeed};
 use crate::raft::region_runtime::{CoordRegionRaftHandle, RegionRaftHandle, RegionRuntime};
 use crate::raft::system_raft::SystemRaftHandle;
@@ -62,6 +63,53 @@ pub struct NodeInfo {
     pub raft_addr: String,
     /// gRPC 服务地址
     pub grpc_addr: String,
+}
+
+/// 心跳拍内每个 Region 的采样 Key 上限。
+///
+/// 采样只用于 split_key 的均衡性（无样本回退 `mid_key`）：每个探测点是一次
+/// 有界扫描，上限把一拍心跳的扫描预算钉住（不随 Region 大小增长）。
+const REGION_SAMPLE_KEYS: usize = 16;
+
+/// Region 心跳上报的转发口（Region leader 节点 → region 0 leader 节点的 PD）。
+///
+/// 统计是派生瞬态数据：转发失败只损失一拍，下一拍重报；不能把心跳变成
+/// 区块共识写（region 0 raft）——那会给每拍心跳引入一次 fsync。
+#[tonic::async_trait]
+pub trait RegionHeartbeatForwarder: Send + Sync {
+    /// 把一条上报发到 `target` 节点（region 0 leader）的 PD。
+    async fn forward(&self, target: NodeID, report: RegionHeartbeatReport) -> Result<(), String>;
+}
+
+/// 经 raft 节点间 gRPC 转发（与 `SubmitPdOp` 同一条认证/连接池路径）。
+pub struct RaftRegionHeartbeatForwarder {
+    factory: RaftNetworkFactoryImpl,
+}
+
+impl RaftRegionHeartbeatForwarder {
+    /// 用节点间共享的 raft 网络工厂构建（地址/TLS/共享密钥已装配）。
+    pub fn new(factory: RaftNetworkFactoryImpl) -> Self {
+        Self { factory }
+    }
+}
+
+#[tonic::async_trait]
+impl RegionHeartbeatForwarder for RaftRegionHeartbeatForwarder {
+    async fn forward(&self, target: NodeID, report: RegionHeartbeatReport) -> Result<(), String> {
+        self.factory
+            .report_region_stats(
+                target,
+                RegionStatsPayload {
+                    region_id: report.region_id,
+                    size: report.size,
+                    keys: report.keys,
+                    storage_bytes: report.storage_bytes,
+                    leader_node_id: report.leader_node_id,
+                    sample_keys: report.sample_keys,
+                },
+            )
+            .await
+    }
 }
 
 /// 内嵌 PD：单进程内 PlacementDriver 与其数据面/执行面的完整接线
@@ -106,6 +154,7 @@ impl EmbeddedPd {
         nodes: Vec<NodeInfo>,
         heartbeat_interval: Duration,
         system_raft: Arc<dyn SystemRaftHandle>,
+        forwarder: Option<Arc<dyn RegionHeartbeatForwarder>>,
     ) -> Result<Arc<Self>, coord_core::error::Error> {
         // 1. 元数据落盘 + 播种（key range 以配置为真源；持久 peers/epoch 保留）
         let meta_store = Arc::new(PdMetaStore::open(data_dir)?);
@@ -167,9 +216,10 @@ impl EmbeddedPd {
         let hb_handle = tokio::spawn(heartbeat_loop(
             Arc::clone(&driver),
             Arc::clone(&region_manager),
-            region_ids.clone(),
+            node_id,
             nodes.clone(),
             heartbeat_interval,
+            forwarder,
             hb_shutdown_rx,
         ));
 
@@ -355,16 +405,21 @@ fn add_peer_resolver(
 /// Region/节点心跳 + 成员对账循环（后台任务）。
 ///
 /// 每拍：
-/// - 刷新全部节点心跳（保持在线视图）；
-/// - 每个 Region：上报 leader / size / keys（喂 PD 实时调度数据面）；
-/// - 每个 Region：以 raft 已提交 voter 集对账 PdMetaStore 与 RegionHandle.meta
-///   （跨节点 PD meta 一致性，见模块文档）。
+/// - 刷新全部节点心跳（保持在线视图）与集群级 gauge；
+/// - 对每个本地 Region（含 split/merge 动态产生的）：
+///   1. 只有 raft 认定的 leader 才上报（follower 的 size/keys 会滞后）；
+///   2. leader 在阻塞池计算 size / keys / chunk 字节与分位采样 Key；
+///   3. 本节点是 region 0 leader → 直接写本机 PD；否则经节点间 RPC 转发到
+///      region 0 leader 的 PD（operator 生成源）。转发失败只丢一拍；
+///   4. 以 raft 已提交 voter 集对账 PdMetaStore 与 RegionHandle.meta
+///      （跨节点 PD meta 一致性，见模块文档）。
 async fn heartbeat_loop(
     driver: Arc<PlacementDriver>,
     region_manager: Arc<RegionManager>,
-    region_ids: Vec<RegionId>,
+    node_id: NodeID,
     nodes: Vec<NodeInfo>,
     interval: Duration,
+    forwarder: Option<Arc<dyn RegionHeartbeatForwarder>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -378,7 +433,7 @@ async fn heartbeat_loop(
             }
         }
 
-        // 节点心跳刷新
+        // 节点心跳刷新 + 集群级 gauge（每个 PD 节点都上报本地视图）
         for n in &nodes {
             driver.handle_node_heartbeat(NodeState::new(
                 n.node_id,
@@ -386,47 +441,113 @@ async fn heartbeat_loop(
                 n.grpc_addr.clone(),
             ));
         }
+        driver.refresh_cluster_gauges();
 
-        // Region 心跳上报 + 成员对账
-        for region_id in &region_ids {
-            let Some(rt) = region_manager.runtime(*region_id) else {
+        // PD 元数据对账：Region 表由 region 0 raft 复制到每个节点，但 operator
+        // 执行器只更新执行节点的 store——调度节点必须自己收敛，否则 split/merge
+        // 后调度视图停在旧表，会按旧统计重复生成 operator。
+        if let Some(system) = driver.system_raft() {
+            match system.region_table() {
+                Ok(table) if table.version > 0 => match driver.reconcile_region_table(&table) {
+                    Ok(true) => tracing::debug!(
+                        "PD heartbeat: reconciled local meta store to region table v{}",
+                        table.version
+                    ),
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!("PD heartbeat: reconcile region table failed: {e}")
+                    }
+                },
+                Ok(_) => {}
+                Err(e) => tracing::warn!("PD heartbeat: read region table failed: {e}"),
+            }
+        }
+
+        // operator 生成收敛到 region 0 leader；统计也送到它的 PD。
+        let scheduler_node = match driver.system_raft() {
+            Some(system) => system.current_leader().await,
+            None => None,
+        };
+
+        for rt in region_manager.list_runtimes() {
+            let region_id = rt.region_id;
+            let handle = CoordRegionRaftHandle::from_runtime(&rt);
+
+            // follower 不上报：stats 以 leader 视图为准，避免抢写各自的 PD。
+            if handle.current_leader().await != Some(node_id) {
+                reconcile_region_members(&driver, &rt, &handle).await;
+                continue;
+            }
+
+            let Some(region) = region_manager.get_region(region_id) else {
                 continue;
             };
-            let handle = CoordRegionRaftHandle::from_runtime(&rt);
-            let leader = handle.current_leader().await;
+            let (start_key, end_key) = {
+                let meta = region.meta.read();
+                (meta.start_key.clone(), meta.end_key.clone())
+            };
 
             // size/keys：redb 文件 stat + 表 len；storage_bytes：本 Region
             // chunk 存储（coord.storage 数据面，`objects/` 目录）用量——若对象
-            // 存储未启用则 0。移到阻塞池，避免阻塞 worker。
+            // 存储未启用则 0；采样 Key：有界分位探测。移到阻塞池，避免阻塞 worker。
             let mvcc = Arc::clone(&rt.mvcc);
             let chunk_store = rt.chunk_store.clone();
-            let (size, keys, storage_bytes) = match tokio::task::spawn_blocking(move || {
-                let b = mvcc.backend();
-                let size = b.disk_size_bytes();
-                let keys = b.key_count();
-                let storage = match &chunk_store {
-                    Some(store) => store.usage_bytes(),
-                    None => Ok(0),
+            let (size, keys, storage_bytes, sample_keys) =
+                match tokio::task::spawn_blocking(move || {
+                    let b = mvcc.backend();
+                    let size = b.disk_size_bytes()?;
+                    let keys = b.key_count()?;
+                    let storage = match &chunk_store {
+                        Some(store) => store.usage_bytes()?,
+                        None => 0,
+                    };
+                    let samples = mvcc.sample_keys_in(&start_key, &end_key, REGION_SAMPLE_KEYS)?;
+                    Ok::<_, coord_core::error::Error>((size, keys, storage, samples))
+                })
+                .await
+                {
+                    Ok(Ok(stats)) => stats,
+                    Ok(Err(e)) => {
+                        tracing::warn!("PD heartbeat: region {region_id} stats unavailable: {e}");
+                        (0, 0, 0, Vec::new())
+                    }
+                    Err(e) => {
+                        tracing::warn!("PD heartbeat: region {region_id} stats task failed: {e}");
+                        (0, 0, 0, Vec::new())
+                    }
                 };
-                (size, keys, storage)
-            })
-            .await
-            {
-                Ok((Ok(size), Ok(keys), Ok(storage))) => (size, keys, storage),
-                Ok(_) | Err(_) => {
-                    tracing::warn!("PD heartbeat: region {region_id} stats unavailable");
-                    (0, 0, 0)
-                }
-            };
 
-            if let Err(e) = driver.handle_region_heartbeat(
-                *region_id,
+            // 本节点 RegionHandle 也持有同一份瞬态统计（路由/执行器侧读取）。
+            region.update_stats(size, keys);
+
+            let report = RegionHeartbeatReport {
+                region_id,
                 size,
                 keys,
                 storage_bytes,
-                leader.unwrap_or(0),
-            ) {
-                tracing::warn!("PD heartbeat region {region_id}: {e}");
+                leader_node_id: node_id,
+                sample_keys,
+            };
+            match scheduler_node {
+                Some(target) if target == node_id => {
+                    if let Err(e) = driver.handle_region_heartbeat_report(report) {
+                        tracing::warn!("PD heartbeat region {region_id}: {e}");
+                    }
+                }
+                Some(target) => match &forwarder {
+                    Some(forwarder) => {
+                        if let Err(e) = forwarder.forward(target, report).await {
+                            tracing::debug!(
+                                "PD heartbeat region {region_id}: forward to node {target} failed: {e}"
+                            );
+                        }
+                    }
+                    None => tracing::debug!(
+                        "PD heartbeat region {region_id}: no cross-node forwarder;                          stats stay local"
+                    ),
+                },
+                // region 0 选举窗口：暂无 operator 生成源，下一拍重报。
+                None => {}
             }
 
             reconcile_region_members(&driver, &rt, &handle).await;

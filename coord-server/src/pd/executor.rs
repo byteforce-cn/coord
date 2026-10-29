@@ -45,7 +45,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use coord_core::types::{NodeID, Peer, PeerRole, RegionEpoch, RegionId, RegionMeta};
+use coord_core::types::{NodeID, Peer, PeerRole, RegionId, RegionMeta};
 use tokio::time::MissedTickBehavior;
 
 use super::{now_unix_secs, op_summary, Operator, PlacementDriver};
@@ -129,26 +129,6 @@ pub trait SplitMergeMigrator: Send + Sync {
 ///
 /// 成员变更目前不经 Region 表提案，所以对账必须保留 meta store 的这两类字段，
 /// 否则 AddPeer 的结果会在下一拍被表里的种子值覆盖。
-fn merge_pd_meta(existing: RegionMeta, table: &RegionMeta) -> RegionMeta {
-    let peers = if existing.peers.is_empty() {
-        table.peers.clone()
-    } else {
-        existing.peers
-    };
-    RegionMeta {
-        region_id: table.region_id,
-        start_key: table.start_key.clone(),
-        end_key: table.end_key.clone(),
-        epoch: RegionEpoch {
-            conf_ver: existing.epoch.conf_ver.max(table.epoch.conf_ver),
-            version: table.epoch.version,
-        },
-        peers,
-        approximate_size: existing.approximate_size,
-        approximate_keys: existing.approximate_keys,
-    }
-}
-
 /// Operator 执行器：消费 `PlacementDriver` 队列中的 operator 并应用到
 /// 本节点可执行的 Region raft。
 pub struct OperatorExecutor {
@@ -382,6 +362,7 @@ impl OperatorExecutor {
             if success {
                 self.pd
                     .record_operator_event(&original, "success", &op_summary(&original));
+                self.pd.count_operator_success(&original);
             } else {
                 self.pd.record_operator_event(
                     &original,
@@ -725,6 +706,7 @@ impl OperatorExecutor {
                     if success {
                         self.pd
                             .record_operator_event(&op, "success", &op_summary(&op));
+                        self.pd.count_operator_success(&op);
                     } else {
                         self.pd.record_operator_event(
                             &op,
@@ -827,45 +809,10 @@ impl OperatorExecutor {
     /// PD-only 写入回滚（AddPeer 被反复重新生成、size 驱动调度读到 0），还会
     /// 每 Region 每拍多一次 durable 写。表里没有的 Region 删除；空表 = v1，no-op。
     fn reconcile_meta_store(&self, table: &RegionTable) -> std::result::Result<(), String> {
-        if table.version == 0 {
-            return Ok(());
-        }
-        let store = self.pd.meta_store();
-        // 1) 更新表内已有 Region（表拥有路由与 split version）。
-        for meta in &table.regions {
-            if let Some(existing) = store.get_region(meta.region_id) {
-                let desired = merge_pd_meta(existing, meta);
-                if store.get_region(meta.region_id) != Some(desired.clone()) {
-                    store.update_region(desired).map_err(|e| {
-                        format!("pd meta store update region {}: {e}", meta.region_id)
-                    })?;
-                }
-            }
-        }
-        // 2) 先删表里已不存在的 Region（避免残留条目占用 start_key 索引）。
-        for existing in store.list_regions() {
-            if table.get(existing.region_id).is_none() {
-                match store.delete_region(existing.region_id) {
-                    Ok(()) => {}
-                    Err(coord_core::error::Error::RegionNotFound { .. }) => {}
-                    Err(e) => {
-                        return Err(format!(
-                            "pd meta store delete region {}: {e}",
-                            existing.region_id
-                        ))
-                    }
-                }
-            }
-        }
-        // 3) 再创建新 Region（split 子 Region / 表里新增的区间）。
-        for meta in &table.regions {
-            if store.get_region(meta.region_id).is_none() {
-                store
-                    .create_region(meta.clone())
-                    .map_err(|e| format!("pd meta store create region {}: {e}", meta.region_id))?;
-            }
-        }
-        Ok(())
+        self.pd
+            .reconcile_region_table(table)
+            .map(|_| ())
+            .map_err(|e| format!("pd meta store reconcile: {e}"))
     }
 
     // ──── 各 operator 的具体执行 ────
