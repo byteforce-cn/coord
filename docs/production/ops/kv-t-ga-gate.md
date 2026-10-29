@@ -150,4 +150,5 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
 - v2 集群**不能**回退到 v1 数据面；需要回退时保留旧 v1 集群（ADR-0015 D13）。
 - 任一 gate 未达标 ⇒ 停在 gate，不静默降级语义（D10）；`[kv_t].enabled=false` 时 v1
   行为字节级不变（ADR-0001）。
-- MQ v2 是 G7，不在本 gate 范围；v2 集群上 MQ v1 fail-closed（B-KVT-6）。
+- MQ v2 是 G7，不在本 gate 范围；设计与拆分见 ADR-0016；v2 集群上 MQ v1
+  fail-closed（B-KVT-6）。

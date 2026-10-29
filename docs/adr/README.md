@@ -37,3 +37,4 @@
 | [ADR-0013](0013-workflow-approval-v2.md) | 工作流引擎 v2：中国式审批能力落地（状态模型/并发/事件/恢复/契约） | proposed |
 | [ADR-0014](0014-approval-consume-closure.md) | 审批面消费闭环：动态席位来源 / 服务代终端用户 / 一体化启用 | accepted |
 | [ADR-0015](0015-kv-t.md) | KV-T：全局时间戳、serializable 跨 Region 事务与严格透明 Watch | accepted |
+| [ADR-0016](0016-mq-v2.md) | MQ v2：分区日志、消费组与工作流触发 | accepted |
