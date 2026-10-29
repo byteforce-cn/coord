@@ -129,7 +129,7 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    `kv_t_g6_chaos_v2_test::autosplit_runs_after_region_heartbeat_reaches_pd`
    的 `coord_regions_total` 断言（旧实现 split 成功但 PD 表不增长）。
 
-7. **merge 导出水位口径过强（已修）**：`migrate_merge` 要求
+8. **merge 导出水位口径过强（已修）**：`migrate_merge` 要求
    `donor_cursor == pin == receiver_revision == receiver_cursor`。直写只推进
    revision、不产生决策，任何有直写/并发写的 Region 都会永久 fail-closed，merge
    在实际负载下不可用。修复：以**两侧决策游标相等**为判据（有界等待；游标以下双方
