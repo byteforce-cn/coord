@@ -718,48 +718,40 @@ impl RangeImportMigrator {
             .drain(&merged.start_key, &merged.end_key, self.drain_timeout)
             .await?;
 
-        // 接收方尚未 apply 到源水位时不能导入：导入行会不可见，而把
-        // `current_revision` 抬过未应用决策会让该 Region 的决策 apply 永久
-        // 卡住（safe_ts 用同一约束）。直接失败：cutover 不推进，调度器会在
-        // apply 追上后重新下发 merge。
-        let pin = source.current_revision();
+        // 决策游标是「已 apply 决策的连续前缀」。只有两侧游标相等时：
+        //   - donor 快照（`pin = donor.current_revision()`）覆盖 <= 游标的全部决策；
+        //   - 接收方数据也覆盖 <= 游标（它按同一全局决策流 apply，区间裁剪不同）；
+        //   - 之后只剩 > 游标的决策要按合并后的区间重放。
+        //
+        // 不能拿 revision 对齐：直写只推进 revision、不产生决策，旧口径
+        // `cursor == revision` 会让任何有直写/并发写的 Region 永远 merge 不动。
+        // 游标随决策 apply 前进，短暂不等是常态（有界等待）；等不到才失败，
+        // 让调度器保留 intent 重试。
         let receiver = (self.source)(absorbing).ok_or_else(|| {
             format!("absorbing region {absorbing} storage is not assembled on this node")
         })?;
-        let receiver_revision = receiver.current_revision();
-        if receiver_revision < pin {
-            return Err(format!(
-                "absorbing region {absorbing} has applied revision {receiver_revision}, behind \
-                 the merge donor's {pin}; refusing to import until decision apply catches up"
-            ));
-        }
-        if receiver_revision > pin {
-            return Err(format!(
-                "merge donor region {donor} has applied revision {pin}, behind the absorbing \
-                 region {absorbing}'s {receiver_revision}; refusing to skip the donor's pending \
-                 decisions"
-            ));
-        }
-        // 接收方游标若落后自身水位，`(cursor, pin]` 的决策还没 apply；导入快照
-        // 只覆盖 donor 区间，直接合并会让这些接收方自己的决策永远被游标跳过。
-        let donor_cursor = source
-            .last_applied_decision_ts()
-            .map_err(|e| format!("read merge donor decision cursor: {e}"))?;
-        if donor_cursor != pin {
-            return Err(format!(
-                "merge donor region {donor} decision cursor {donor_cursor} is behind its \
-                 applied revision {pin}; refusing to import until the donor catches up"
-            ));
-        }
-        let receiver_cursor = receiver
-            .last_applied_decision_ts()
-            .map_err(|e| format!("read absorbing region decision cursor: {e}"))?;
-        if receiver_cursor != receiver_revision {
-            return Err(format!(
-                "absorbing region {absorbing} decision cursor {receiver_cursor} is behind its \
-                 applied revision {receiver_revision}; refusing to skip its pending decisions"
-            ));
-        }
+        let started = tokio::time::Instant::now();
+        let (pin, cursor) = loop {
+            let donor_cursor = source
+                .last_applied_decision_ts()
+                .map_err(|e| format!("read merge donor decision cursor: {e}"))?;
+            let receiver_cursor = receiver
+                .last_applied_decision_ts()
+                .map_err(|e| format!("read absorbing region decision cursor: {e}"))?;
+            if donor_cursor == receiver_cursor {
+                break (source.current_revision(), donor_cursor);
+            }
+            if started.elapsed() >= self.decision_wait {
+                return Err(format!(
+                    "merge decision cursors are not aligned: donor region {donor} at \
+                     {donor_cursor}, absorbing region {absorbing} at {receiver_cursor} \
+                     (behind/ahead within {:?}); refusing to cut over while decisions are \
+                     applied on only one side",
+                    self.decision_wait
+                ));
+            }
+            tokio::time::sleep(DECISION_BARRIER_POLL).await;
+        };
 
         let watermark = self
             .import_pages(
@@ -771,6 +763,25 @@ impl RangeImportMigrator {
                 (pin > 0).then_some(pin),
             )
             .await?;
+
+        // 导入期间两边的 apply 都可能前进：接收方游标越过 pin 会让合并后的
+        // Region 跳过 (pin, cursor] 里命中被吸收区间的决策（这些决策的 donor
+        // 部分两侧都没写过）；donor 水位越过 pin 则导入快照已不是导出水位。
+        // 任一发生都失败重试（导入只写 live 行、reset_range 幂等，尚未 cutover）。
+        let donor_after = source
+            .last_applied_decision_ts()
+            .map_err(|e| format!("read merge donor decision cursor after import: {e}"))?;
+        let receiver_after = receiver
+            .last_applied_decision_ts()
+            .map_err(|e| format!("read absorbing decision cursor after import: {e}"))?;
+        let revision_after = source.current_revision();
+        if donor_after != cursor || receiver_after != cursor || revision_after != pin {
+            return Err(format!(
+                "merge state moved during import (decision cursor {cursor} -> donor \
+                 {donor_after}/receiver {receiver_after}, donor revision {pin} -> \
+                 {revision_after}); refusing to cut over, retry the merge"
+            ));
+        }
 
         tracing::info!(
             region_id = absorbing,

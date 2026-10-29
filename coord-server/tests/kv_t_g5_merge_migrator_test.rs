@@ -320,7 +320,7 @@ async fn test_merge_migrator_is_idempotent_across_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_merge_fails_closed_when_receiver_lags_donor() {
+async fn test_merge_fails_closed_when_receiver_cursor_lags_donor() {
     let (_left_dir, left, target) = boot_left_region().await;
     assert_eq!(
         left.current_revision(),
@@ -335,9 +335,10 @@ async fn test_merge_fails_closed_when_receiver_lags_donor() {
         &donor,
         RecordingDrain::new() as Arc<dyn SplitDrain>,
     )
+    .with_decision_wait(Duration::from_millis(100))
     .migrate(&merge_plan())
     .await
-    .expect_err("接收方落后于源水位时必须失败");
+    .expect_err("接收方决策游标落后于源游标时必须失败");
 
     assert!(err.contains("behind"), "{err}");
     assert!(left.get(b"m").unwrap().is_none(), "不得导入任何行");
@@ -345,7 +346,7 @@ async fn test_merge_fails_closed_when_receiver_lags_donor() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_merge_fails_closed_when_donor_lags_the_receiver() {
+async fn test_merge_fails_closed_when_donor_cursor_lags_the_receiver() {
     let (_left_dir, left, target) = boot_left_region().await;
     apply_decisions(&left, vec![decision(20, vec![put(b"a", b"left", None)])]);
     let (_donor_dir, donor) = donor_region().await;
@@ -356,12 +357,13 @@ async fn test_merge_fails_closed_when_donor_lags_the_receiver() {
         &donor,
         RecordingDrain::new() as Arc<dyn SplitDrain>,
     )
+    .with_decision_wait(Duration::from_millis(100))
     .migrate(&merge_plan())
     .await
-    .expect_err("donor 落后接收方时必须失败");
+    .expect_err("donor 决策游标落后接收方时必须失败");
 
     assert!(
-        err.contains("merge donor") && err.contains("behind"),
+        err.contains("decision cursors") && err.contains("behind"),
         "{err}"
     );
     assert!(left.get(b"m").unwrap().is_none(), "不得导入任何行");
@@ -383,6 +385,7 @@ async fn test_merge_fails_closed_when_the_receiver_has_unapplied_decisions() {
         &donor,
         RecordingDrain::new() as Arc<dyn SplitDrain>,
     )
+    .with_decision_wait(Duration::from_millis(100))
     .migrate(&merge_plan())
     .await
     .expect_err("接收方决策游标落后水位时必须失败");
@@ -392,6 +395,142 @@ async fn test_merge_fails_closed_when_the_receiver_has_unapplied_decisions() {
         "{err}"
     );
     assert!(left.get(b"m").unwrap().is_none(), "不得导入任何行");
+}
+
+/// 两侧都带直写、revision 不等（20 vs 16），但决策游标相等（14）：
+/// merge 必须收敛，直写行随导入/接收方各自保留。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_merge_allows_revision_gaps_when_decision_cursors_align() {
+    let (_left_dir, left, target) = boot_left_region().await;
+    apply_decisions(
+        &left,
+        vec![
+            decision(5, vec![put(b"a", b"left", None)]),
+            decision(14, Vec::new()),
+        ],
+    );
+    left.put_at_commit_ts(b"l2", b"direct", None, 20, applied(20))
+        .expect("receiver direct write");
+    let (_donor_dir, donor) = donor_region().await;
+    donor
+        .put_at_commit_ts(b"z2", b"late", None, 16, applied(16))
+        .expect("donor direct write");
+
+    migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect("cursor-aligned merge with direct writes must converge");
+
+    assert_eq!(left.current_revision(), 20, "接收方水位不回退");
+    assert_eq!(left.get(b"m").unwrap().as_deref(), Some(b"1".as_slice()));
+    assert_eq!(
+        left.get(b"z2").unwrap().as_deref(),
+        Some(b"late".as_slice()),
+        "donor 直写行必须在导入水位内搬入"
+    );
+    assert!(left.get(b"n").unwrap().is_none(), "已删除的 key 不得复活");
+}
+
+/// 接收方 revision 落后导入水位（donor 有更新的直写）：行可以导入，但按
+/// `read_ts` 的可见性边界仍然成立——revision 追上之前读不到，追上后可见。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_merge_allows_receiver_revision_behind_pin_while_cursor_matches() {
+    let (_left_dir, left, target) = boot_left_region().await;
+    apply_decisions(&left, vec![decision(14, Vec::new())]);
+    let (_donor_dir, donor) = donor_region().await;
+    donor
+        .put_at_commit_ts(b"z2", b"late", None, 16, applied(16))
+        .expect("donor direct write");
+
+    migrator(
+        &left,
+        target,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect("receiver revision may lag the import watermark when cursors align");
+
+    assert_eq!(left.current_revision(), 14, "merge 不抬接收方水位");
+    // 导入区间在 pin 之前没有 changelog：低水位读显式 HISTORY_UNAVAILABLE，
+    // 不返回「空」。
+    assert!(
+        matches!(
+            left.get_at_revision(b"z2", 14),
+            Err(coord_core::error::Error::HistoryUnavailable { .. })
+        ),
+        "低于导入水位的区间历史必须显式不可用"
+    );
+    // 合并后重放一条更晚的决策，revision 追上导入水位，行变为可见。
+    advance_to(&left, 17);
+    assert_eq!(
+        left.get_at_revision(b"z2", 17).unwrap().as_deref(),
+        Some(b"late".as_slice())
+    );
+}
+
+/// 导入期间接收方游标前进：必须 fail-closed（cutover 会让 (pin, cursor] 的
+/// 决策被合并后的 Region 跳过），下一次重试才允许。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_merge_fails_closed_when_cursor_moves_during_import() {
+    struct AdvancingTarget {
+        inner: Arc<dyn RangeImportTarget>,
+        receiver: Arc<MvccStorage<RedbBackend>>,
+        advanced: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl RangeImportTarget for AdvancingTarget {
+        async fn reset_range(&self, start: &[u8], end: &[u8]) -> Result<(), String> {
+            self.inner.reset_range(start, end).await
+        }
+
+        async fn import_range(
+            &self,
+            start: &[u8],
+            end: &[u8],
+            rows: Vec<(Vec<u8>, Vec<u8>, coord_server::storage::mvcc::KvMetadata)>,
+            watermark: u64,
+            seal_prior_history: bool,
+            done: bool,
+        ) -> Result<u64, String> {
+            if !*self.advanced.lock().unwrap() {
+                *self.advanced.lock().unwrap() = true;
+                advance_to(&self.receiver, 30);
+            }
+            self.inner
+                .import_range(start, end, rows, watermark, seal_prior_history, done)
+                .await
+        }
+    }
+
+    let (_left_dir, left, target) = boot_left_region().await;
+    apply_decisions(&left, vec![decision(14, Vec::new())]);
+    let (_donor_dir, donor) = donor_region().await;
+
+    let advancing: Arc<dyn RangeImportTarget> = Arc::new(AdvancingTarget {
+        inner: target,
+        receiver: Arc::clone(&left),
+        advanced: Mutex::new(false),
+    });
+    let err = migrator(
+        &left,
+        advancing,
+        &donor,
+        RecordingDrain::new() as Arc<dyn SplitDrain>,
+    )
+    .migrate(&merge_plan())
+    .await
+    .expect_err("merge must fail closed when the receiver cursor advances during import");
+
+    assert!(err.contains("state moved during import"), "{err}");
+    assert_eq!(left.current_revision(), 30, "失败不得回退已 apply 的决策");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
