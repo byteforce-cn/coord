@@ -1411,6 +1411,13 @@
                        (agent/endpoints aplan)
                        nodes)
         nemesis (build-nemesis (:nemesis opts) db aplan)]
+    ;; Two different cluster topologies cannot be mixed: --regions derives the
+    ;; v1 region table from register keys, --kv-t pins the v2 two-region layout.
+    ;; Reject at parse time so no run ever deploys a config with both blocks
+    ;; (the server would refuse it on startup, hours into a soak).
+    (when (and (:kv-t opts) (:regions opts))
+      (throw (ex-info "--kv-t 与 --regions 互斥：v2 用固定 2 Region 布局"
+                      {:kv-t true :regions (:regions opts)})))
     (when (and aplan via?)
       (info "M5a: client endpoints" (pr-str client-nodes)
             "-> agents on" (pr-str (:hosts aplan))
@@ -1605,6 +1612,14 @@
     :parse-fn (fn [s] (Long/parseLong s))
     :validate [#(and (integer? %) (pos? %) (<= % 999))
                "regions must be an integer in 1..999"]]
+   [nil "--kv-t"
+    "KV-T v2 cluster ([kv_t].enabled = true): serves only the v2 data plane
+    (coord.tso/kv/txn.v2); fixed two-region layout with the PD scheduler paused.
+    Mutually exclusive with --regions (that one is the v1 multi-raft layout)."
+    ;; Boolean flags must use :assoc-fn, not :parse-fn (tools.cli feeds the
+    ;; `false` default to parse-fn and throws).
+    :default  false
+    :assoc-fn (fn [m _ _] (assoc m :kv-t true))]
    [nil "--checker CHECKER"
     "linear (knossos, default) or soak (O(n), for long 72h runs)"
     :default  nil
