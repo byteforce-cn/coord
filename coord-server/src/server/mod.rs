@@ -1726,7 +1726,28 @@ pub async fn ensure_linearizable_barrier(
             tokio::time::timeout(timeout, raft.ensure_linearizable(ReadPolicy::ReadIndex))
                 .await
                 .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
-                .map_err(|e| tonic::Status::internal(format!("linearizable read failed: {e}")))?;
+                .map_err(|e| {
+                    // follower 的 `ForwardToLeader` 是**路由信号**，不是内部错误：
+                    // 包装成 INTERNAL 会让 v2 客户端把它归为 `:other`（不可重试），
+                    // 一次换届后该节点上的 Delete 就永久失败（v2 Delete 的 pre-read
+                    // 走本屏障；Put 的 client_write 会自己转发，所以只有删除面暴露）。
+                    // 与 `map_client_write_error` 同口径：UNAVAILABLE + NOT_LEADER。
+                    let forward = matches!(
+                        &e,
+                        openraft::error::RaftError::APIError(
+                            openraft::error::LinearizableReadError::ForwardToLeader(_)
+                        )
+                    );
+                    let msg = format!("linearizable read failed: {e}");
+                    if forward {
+                        coord_core::error_code::attach(
+                            tonic::Status::unavailable(msg),
+                            coord_core::error_code::CoordErrorCode::NotLeader,
+                        )
+                    } else {
+                        tonic::Status::internal(msg)
+                    }
+                })?;
 
         // ReadIndex 之后的一致性 / 身份校验（防陈旧读）
         let m = raft.metrics().borrow_watched().clone();

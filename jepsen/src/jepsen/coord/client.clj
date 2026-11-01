@@ -2222,15 +2222,21 @@
       :else :other)))
 
 (defn- v2-call-on
-  "One call on the node at `idx`. Returns {:ok resp} / {:err e}."
-  [this idx method req]
-  (let [ch (nth @(:channels this) idx)]
-    (try
-      (let [resp (p/call ch method req)]
-        (leader-seen! this :v2 idx)
-        {:ok resp})
-      (catch StatusRuntimeException e
-        {:err e}))))
+  "One call on the node at `idx`. Returns {:ok resp} / {:err e}.
+
+  `hint` 是 `leader-start` 的缓存键（`:v2-write` / `:v2-delete` / `:v2-read` /
+  `:v2-txn` / `:v2-tso`）。这里必须按调用面记录：此前一律写 `:v2`，而所有
+  调用方都读自己的键，缓存永远停在 0 —— 换届后每个 op 都先打旧节点再轮换。
+  记录成功节点不改变判据，只是让重试从已知可用的 leader 开始。"
+  ([this idx method req] (v2-call-on this idx method req :v2))
+  ([this idx method req hint]
+   (let [ch (nth @(:channels this) idx)]
+     (try
+       (let [resp (p/call ch method req)]
+         (leader-seen! this hint idx)
+         {:ok resp})
+       (catch StatusRuntimeException e
+         {:err e})))))
 
 (defn- v2-rotate
   "Next node index after a retryable failure (NOT_LEADER / EPOCH_STALE / plain
@@ -2243,7 +2249,7 @@
   [this]
   (loop [idx (leader-start this :v2-tso) i 0]
     (let [{:keys [ok err]} (v2-call-on this idx p/tso-v2-get-ts-method
-                                       (p/tso-get-ts-req))]
+                                       (p/tso-get-ts-req) :v2-tso)]
       (cond
         ok (p/tso-get-ts ok)
         (> i 16) (throw err)
@@ -2277,7 +2283,7 @@
 
         :else
         (let [ts (or ts (v2-get-ts this))
-              {:keys [ok err]} (v2-call-on this idx f (req-of ts))]
+              {:keys [ok err]} (v2-call-on this idx f (req-of ts) (:f op))]
           (cond
             ok
             (do (record-v2-ts! ts)
@@ -2328,7 +2334,7 @@
       (if (> tries 30)
         (assoc op :type :info :error :unavailable-maybe-applied
                :requested-read-ts R :retried retried)
-        (let [{:keys [ok err]} (v2-call-on this idx p/kv-v2-range-method req)]
+        (let [{:keys [ok err]} (v2-call-on this idx p/kv-v2-range-method req :v2-read)]
           (if ok
             (let [{:keys [kvs read-ts]} (p/kv2-range-resp ok)
                   kv (first kvs)]
@@ -2365,7 +2371,8 @@
                (v2-call-on this idx p/txn-v2-commit-method
                            (p/txn2-commit-req* {:txn-id txn-id
                                                 :request-id req-id
-                                                :mutations mutations})))
+                                                :mutations mutations})
+                           :v2-txn))
         {:keys [ok err]} (call)]
     (cond
       ok {:ok (:commit-ts (p/txn2-commit-resp ok))}
@@ -2383,7 +2390,8 @@
   call fails."
   [this idx]
   (let [rng (fn [k e] (v2-call-on this idx p/kv-v2-range-method
-                                  (p/kv2-range-req* {:key k :range-end e :read-ts 0})))
+                                  (p/kv2-range-req* {:key k :range-end e :read-ts 0})
+                                  :v2-txn))
         r1  (rng "/jepsen/v2/acct/" "/jepsen/v2/acct0")
         r2  (rng "zz-jepsen-v2/acct/" "zz-jepsen-v2/acct0")]
     (when (and (:ok r1) (:ok r2))
@@ -2409,18 +2417,21 @@
         (assoc op :type :info :error :unavailable-maybe-applied
                :ts-unknown true :retried retried)
         (let [{:keys [ok err]} (v2-call-on this idx p/txn-v2-begin-method
-                                           (p/txn2-begin-req* {:start-ts 0 :ttl-ms 15000}))]
+                                           (p/txn2-begin-req* {:start-ts 0 :ttl-ms 15000})
+                                           :v2-txn)]
           (if-not ok
             (if (= :unauthenticated (v2-error-class err))
               (assoc op :type :fail :error :unauthenticated)
               (recur (v2-rotate this idx) (inc tries) (conj retried err)))
             (let [{:keys [txn-id start-ts]} (p/txn2-begin-resp ok)
                   rd     (fn [k] (v2-call-on this idx p/txn-v2-read-method
-                                             (p/txn2-read-req* {:txn-id txn-id :key k})))
+                                             (p/txn2-read-req* {:txn-id txn-id :key k})
+                                             :v2-txn))
                   r1     (rd from)
                   r2     (rd to)
                   abort! (fn [] (v2-call-on this idx p/txn-v2-abort-method
-                                            (p/txn2-abort-req* {:txn-id txn-id})))]
+                                            (p/txn2-abort-req* {:txn-id txn-id})
+                                            :v2-txn))]
               (if (or (:err r1) (:err r2))
                 (do (abort!)
                     (recur (v2-rotate this idx) (inc tries)
@@ -2542,7 +2553,8 @@
                                          p/kv-v2-put-method
                                          (p/kv2-put-req* {:key k :value "25"
                                                           :commit-ts ts
-                                                          :request-id (str "seed-" k)}))]
+                                                          :request-id (str "seed-" k)})
+                                         :v2-seed)]
         (cond
           ok nil
           (and (= :commit-rejected (v2-error-class err)) (< tries 8)) (recur (inc tries))
