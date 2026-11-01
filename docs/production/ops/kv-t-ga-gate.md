@@ -1,8 +1,8 @@
 # KV-T GA Gate（G0–G6 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-10-28（本轮：Region 统计/采样上报落地、自动 split 端到端打通、split 停顿实测）
+> Owner: maintainers ｜ Last verified: 2026-11-01（本轮：Jepsen v2 72h 抓到 v2 Delete follower 缺陷；#298/#299 修复后重跑）
 
-- **状态**：**NO-GO（未签）**。G0–G5 已交付；G6 有关闭项未清（见 §3）。
+- **状态**：**NO-GO（未签）**。G0–G5 已交付；G6 的最终 72h 重跑进行中（见 §3）。
 - 本文是 GA 状态的**单一事实源**：gate 证据、未达标项、签字记录。语义口径仍以
   `docs/adr/0015-kv-t.md` 为准；能力矩阵在 ADR D13；运维处置在 `runbook.md`。
 - 划线规则：**没有可复跑证据的项不写「通过」**；「未跑」必须留在未达标列。
@@ -17,7 +17,7 @@
 | G3 Serializable | OCC + sequencer；冲突不写决策 | ✅ | `kv_t_g3_commit_decision_test`、`kv_t_g3_txn_commit_test`、`kv_t_g3_delete_range_test`；`coord-server/tests/kv_t_g3_sequencer_test.rs`（write skew / phantom / 顺序） |
 | G4 Watch/Commit Log | 全局序/原子批/历史窗口 | ✅ | `kv_t_g4_watch_coordinator_test`、`kv_t_g4_watch_rpc_test`、`kv_t_g4_commit_log_shards_test`；`test_watch_history_unavailable` |
 | G5 Split/Merge | 动态表/epoch；不丢不重 | ✅ | `kv_t_g5_continuity_test`、`kv_t_g5_routing_epoch_test`、`kv_t_g5_write_fence_test`、`kv_t_g5_cross_node_drain_test`、`kv_t_g5_storage_v2_test`；split/merge migrator 套件 |
-| **G6 GA** | e2e/备份/SDK/Agent/混沌/性能/文档全绿 + 签字 | ⛔ **未达标** | 见 §2、§3 |
+| **G6 GA** | e2e/备份/SDK/Agent/混沌/性能/文档全绿 + 签字 | ⛔ **未达标（72h 重跑中）** | 见 §2、§3 |
 
 CI 基线：main 的 `workspace tests`、三片 test shard、两个 chaos job、`java example integration`、
 `cargo audit + deny`、`fmt + clippy`、`check-doc-refs` 全绿（run 40180615805 重跑后；
@@ -35,7 +35,7 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
 | Agent 数据面 v2（#170） | ✅ | `kv_t_g6_agent_services_v2_test::test_v2_cluster_serves_all_builtin_services`（15 个非 MQ 内建服务在真实 v2 集群注册并各调一次；idgen 走 segment ⇒ v2 Txn CAS）；`agent_v2_*_proxy_test`、`agent_v2_mode_test` |
 | Workflow/MQ fail-closed（#171） | ✅ | `agent_workflow_durable_gate_test`（6 例：v2 拒绝 mq / workflow_durable，纯 KV workflow 可用）；`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
 | Rust client / Java SDK v2（#172） | ✅ | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；`java-example` v2 示例 `KvTV2Example`（`bash java-example/scripts/run-v2-example.sh`，非 v2 集群退出码 2，无 v1 降级）；跨语言互操作 `KvTInteropIntegrationTest` + `kvt_interop_peer`（`bash scripts/check-kvt-interop.sh`：Rust 写 → Java 按精确 `commit_ts` 读，再反向；对账 value/`mod_revision`/`create_revision` 与 Watch 批 `commit_ts`） |
-| 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§7，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**72h v2 soak 已通过**（2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z，main `c53bbfb`；103 630 轮、TSO 2.556 亿、863 次 kill -9 region 0 leader 注入、watchdog 0 次、节点日志 0 ERROR、无不变量锚点；报告见 #174 评论）。**split/merge 停顿已测**（§3.5-6：统计/采样/leader 上报 + 自动 split 打通；数字见 `performance.md` §6.6）。剩余未达标：GA 最终长稳证据由 Jepsen v2（#272）承担 |
+| 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§7，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**72h v2 bash soak 已通过**（2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z，main `c53bbfb`；103 630 轮、TSO 2.556 亿、863 次 kill -9 region 0 leader 注入、watchdog 0 次、节点日志 0 ERROR、无不变量锚点；报告见 #174 评论）。**split/merge 停顿已测**（§3.5-6：统计/采样/leader 上报 + 自动 split 打通；数字见 `performance.md` §6.6）。剩余未达标：GA 最终长稳证据由 Jepsen v2（#272）承担。**2026-10-29 的 72h run 抓到一个删除面缺陷**（test version `f3da517`，merge `6e38522`）：`mvcc` 一致性判据 0 errors（writes 63 006 / reads 42 183 / ts 12 857），但 `v2-delete` 4 467/6 311 fail（ok 1 596，25.3%），错误全是 `v2 :other`；`gates` 的 per-op liveness 0.1 地板没有判红（§3.5-9）。**该 run 不作为 GA 证据。** 修复已合入 main `b49b213`（#298：follower 的 `ForwardToLeader` → `UNAVAILABLE + NOT_LEADER`；#299：wasmtime 48.0.8 让 `cargo audit` 恢复绿），`soak-kv-t` 收紧到 `--min-op-ok-ratio 0.9`。**最终 72h 重跑**：2026-11-01T08:13:22Z 起（main `b49b213`，tree `ddcf8e9`），ETA 2026-11-04T08:13Z；完成后回填本行与 §4 |
 | 混沌/Jepsen（#175） | ✅ | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）。v2 3 进程矩阵 `kv_t_g6_chaos_v2_test`（CI `chaos-kill9-soak` job，整文件跑）：`chaos_v2_mixed_writes_survive_decision_leader_loss`（kill -9 / SIGSTOP region 0 leader + 混合事务/直写，37 次连续绿）；`chaos_v2_partitioned_region0_leader_keeps_invariants`（对称网络分区隔离 region 0 leader：debug 构建的 `COORD_TEST_RAFT_PARTITION_FILE` 钩子在 raft RPC 层双向阻断，多数派换主、分区窗口内写入、heal 后收敛）；`chaos_v2_shard_seal_stall_keeps_watch_continuous`（`commit_log_shard_records=8` / `shard_secs=1` 下 SIGSTOP region 0 leader ⇒ TSO/sequencer/shard seal 停摆；恢复后 Watch 从 baseline+1 严格递增、无重无丢，sealed shard 指标增长）；`chaos_v2_interrupted_snapshot_install_recovers`（follower 落后 → 快照安装途中冻结 + kill -9 → 重启追平、全部 `commit_ts` 可读）。本轮矩阵抓出并修复两个 GA 阻塞缺陷（见 §3.5），`test_lease_cleanup_is_per_region` 的 CI 间歇超时也一并修掉（PR #268）。**仍未做**：split/merge 迁移中断的进程级注入（§3.3 的 D10 裁定）。 |
 | Ops runbook/监控（#176） | ✅ | `monitoring/prometheus-rules.yml` + `docs/production/ops/runbook.md`；`bash scripts/check-gate-drills.sh`（每条告警必须有可达 runbook 锚点） |
 | ADR accepted / 文档一致 | ✅ | ADR-0015 状态 accepted；`scripts/check-doc-refs.sh` 0 悬空 |
@@ -43,16 +43,18 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
 
 ## 3. 关闭 G6 的硬条件（当前未满足）
 
-1. #174：**72h v2 soak 已通过**（`SOAK_SUITE=v2 SOAK_DURATION_SECS=259200`，
-   2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z，main `c53bbfb`）：
-   `soak-report.md` 结论 ✅（无一致性违规）；103 630 轮、TSO 2.555 亿、863 次
-   kill -9 region 0 leader 注入后恢复、watchdog 0 次、三个节点日志 0 条 ERROR、
-   无 `passed unapplied decision` / `decision apply stopped` /
-   `behind the applied revision` 锚点。证据目录 `/tmp/coord-soak72/`
-   （`driver.log`、`soak-report.md`、`v2-nodes/node-*.log`），报告全文贴在 #174。
-   **最终提交口径**：本轮之后 server 代码有变更（split 导出水位、目标组转发），
-   按维护者 2026-10-28 裁定，最终 GA 提交上的长稳证据由 **Jepsen v2（#272）**
-   承担，不再重跑 72h bash 浸泡——在该证据落地前不签字。
+1. #174：**最终 72h v2 soak 重跑中**。2026-10-29T06:27Z 的 run（test version
+   `f3da517`，merge `6e38522`）已完成：`mvcc` 一致性判据 0 errors
+   （writes 63 006 / reads 42 183 / ts 12 857），但 `v2-delete` 4 467/6 311
+   fail（ok 25.3%），错误全是 `v2 :other`；`gates` 的 per-op liveness 0.1
+   地板没有判红（§3.5-9）。**该 run 不作为 GA 通过证据。**
+   修复（#298）已合入 main `b49b213`：follower 的 `ForwardToLeader` 映射为
+   `UNAVAILABLE + NOT_LEADER`，delete 在换届后按可重试错误轮换；同时把
+   `soak-kv-t` 的 per-op 下界收紧到 `--min-op-ok-ratio 0.9`。
+   **新 run**：2026-11-01T08:13:22Z 起（main `b49b213`，tree `ddcf8e9`），
+   `kvv2` + `mvcc` + soak nemesis，ETA 2026-11-04T08:13Z；结束后用
+   `collect-evidence.sh soak-kv-t` 归档 MANIFEST，回填本行与 §4。未见绿前
+   **不签字**。
 2. #174：**split/merge 停顿已测**（`performance.md` §6.6，release、真实 3 进程、
    PD 驱动 split）：统计/采样/leader 上报落地后（§3.5-6），`perf_split_write_pause`
    不再依赖 debug-only 的调度暂停钩子，直接测持续写入期间的 split 写停顿。剩余
@@ -139,7 +141,22 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    `test_merge_allows_receiver_revision_behind_pin_while_cursor_matches`、
    `test_merge_fails_closed_when_cursor_moves_during_import`、两个游标不等用例）。
 
+9. **v2 Delete 在 follower 上永久失败（已修）**：v2 Delete 为返回
+   `deleted`/`prev_kvs` 先走 leader-only 的 `ensure_linearizable_barrier`；
+   follower 上 openraft 返回 `ForwardToLeader`，该屏障把它包成 `INTERNAL`
+   （`linearizable read failed: has to forward request`）。v2 客户端只对
+   `NOT_LEADER`/`UNAVAILABLE`/`EPOCH_STALE` 重试，`INTERNAL` 归为不可重试的
+   `:other` ⇒ 换届后 delete 钉在旧节点上。修复：`RaftError::APIError(
+   LinearizableReadError::ForwardToLeader)` 映射为 `UNAVAILABLE + NOT_LEADER`
+   （与 `map_client_write_error` 同口径）；回归
+   `kv_v2_multi_node_range_test::test_v2_delete_on_a_follower_returns_retriable_not_leader`。
+   同一轮把 `soak-kv-t` 的 per-op liveness 下界从 0.1（F-13「从未跑过」地板）
+   收紧到 0.9；72h run 实测 delete 4 467/6 311 fail、ok 25.3%，旧门槛仍判绿。
+
 ## 4. 签字记录
+
+> 2026-11-01：§3-1 的最终 72h 重跑进行中；本节保持「未签」。跑绿后填日期、
+> 依据 commit / CI run、未关闭项与签字人。
 
 | 日期 | 结论 | 依据 commit / CI run | 未关闭项 | 签字人 |
 |:--|:--|:--|:--|:--|
