@@ -16,7 +16,10 @@ use coord_core::error_code::error_code_of;
 use coord_core::storage::StorageBackend;
 use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionId, RegionMeta, StorageConfig};
 use coord_proto::kv::v2::kv_server::Kv as KvV2;
-use coord_proto::kv::v2::{RangeRequest as RangeRequestV2, RangeResponse as RangeResponseV2};
+use coord_proto::kv::v2::{
+    DeleteRequest as DeleteRequestV2, RangeRequest as RangeRequestV2,
+    RangeResponse as RangeResponseV2,
+};
 use coord_server::kvt::{KvTCapability, KvTRuntimeConfig, KvTState};
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 use coord_server::raft::region::RegionManager;
@@ -373,4 +376,52 @@ async fn test_range_fails_closed_when_local_snapshot_is_missing() {
     let resp = cluster.range(1, 400).await.unwrap();
     assert_eq!(resp.read_ts, 400);
     assert_eq!(keys(&resp), expected_keys());
+}
+
+/// v2 Delete 的 pre-read（`deleted`/`prev_kvs` 的本地视图）走 leader-only 的
+/// ReadIndex 屏障；follower 必须回可重试的 `NOT_LEADER`，不能把 openraft 的
+/// `ForwardToLeader` 包成 `INTERNAL` —— 后者不在 v2 客户端的重试分类里，
+/// 一次换届就会让该节点上的删除大面积失败（72h v2 soak 实测：delete
+/// 4 467/6 311 失败、ok 率 25.3%，错误全是 `v2 :other`）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_v2_delete_on_a_follower_returns_retriable_not_leader() {
+    let cluster = Cluster::start().await;
+    assert_eq!(cluster.leader_node(1).await, 1);
+    cluster.put(1, b"a-del-on-follower", b"v", 100).await;
+
+    // n2 是 region 1 的 follower；请求打到 follower 时，pre-read 的 ReadIndex
+    // 只能由 leader 服务。
+    let err = cluster
+        .host(2)
+        .node
+        .delete(tonic::Request::new(DeleteRequestV2 {
+            key: b"a-del-on-follower".to_vec(),
+            commit_ts: 200,
+            prev_kv: true,
+            request_id: b"delete-on-follower".to_vec(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("follower must not serve a leader-only delete pre-read");
+    assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+    assert_eq!(
+        error_code_of(&err).as_deref(),
+        Some("NOT_LEADER"),
+        "follower rejection must stay retriable: {err:?}"
+    );
+
+    // 同一请求换到 leader：删除成功，证明上面的拒绝只是路由层可重试错误。
+    let resp = cluster
+        .host(1)
+        .node
+        .delete(tonic::Request::new(DeleteRequestV2 {
+            key: b"a-del-on-follower".to_vec(),
+            commit_ts: 200,
+            prev_kv: true,
+            request_id: b"delete-on-follower".to_vec(),
+            ..Default::default()
+        }))
+        .await
+        .expect("leader serves the same delete");
+    assert_eq!(resp.get_ref().deleted, 1);
 }

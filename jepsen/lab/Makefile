@@ -791,8 +791,12 @@ soakfull: ## T6.1: 组合浸泡（默认 --workload soakfull，面比例由 SOAK
 	#   make soakfull SOAK_TIME_LIMIT=120 SOAK_QUIET=60
 
 soak-kv-t: ## #272: KV-T v2 soak (kvv2 + mvcc checker; SOAK_TIME_LIMIT=259200 = 72h)
+	# `--min-op-ok-ratio 0.1` 是 F-13 的「该 op 类从未真正跑过」地板，不是
+	# 可用性门槛：0.1 会放过单类 op 长期约 25% 成功的系统性故障（delete 只
+	# 打旧节点、换届后永久失败即为一例）。GA 长稳用 0.9 的 per-op 下界。
 	$(MAKE) soak WORKLOAD=kvv2 KV_T=1 SOAK_NAME=kvt \
-	    SOAK_NEMESIS=soak SOAK_RATE=0.5 --no-print-directory
+	    SOAK_NEMESIS=soak SOAK_RATE=0.5 \
+	    SOAK_EXTRA="--min-op-ok-ratio 0.9 $(SOAK_EXTRA)" --no-print-directory
 	@echo "KV-T v2 soak started (log soak/soak-kvt.log). Stop: make soak-kv-t-stop"
 
 soak-kv-t-status: ## #272: KV-T v2 soak progress
