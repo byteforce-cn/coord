@@ -878,13 +878,20 @@
        :idgen-min-ids          (:idgen-min-ids opts)
        :idgen-min-regressions  (:idgen-min-regressions opts)})))
 
+(def ^:private kvv2-keys
+  "The kvv2 key space: half in region 1 (`/jepsen/v2/k/...`), half in region 2
+  (`zz-jepsen-v2-...`) of the fixed two-region --kv-t layout.
+
+  `workload-gen`'s soak finale reads **every** key here, so the generator and
+  the finale must share this one definition: a key that only the generator
+  knows is a key the convergence check never visits."
+  (into (mapv #(str "/jepsen/v2/k/" %) (range 32))
+        (map #(str "zz-jepsen-v2-" %) (range 32))))
+
 (defn- kvv2-key
-  "Half the keys land in region 1 (`/jepsen/v2/...`), half in region 2
-  (`zz-jepsen-v2-...`) of the fixed two-region --kv-t layout."
+  "A random kvv2 key (uniform over `kvv2-keys`; see the var for the layout)."
   []
-  (if (zero? (rand-int 2))
-    (str "/jepsen/v2/k/" (rand-int 32))
-    (str "zz-jepsen-v2-" (rand-int 32))))
+  (rand-nth kvv2-keys))
 
 (defn- kvv2-gen
   "Direct writes + snapshot reads + TSO + a slice of historical reads.
@@ -907,23 +914,59 @@
 (defn- txnv2-gen
   "Cross-region bank ledger: every txn moves one unit between two of the four
   accounts (two in each region), so the write set always spans regions and a
-  half-applied txn breaks both the snapshot and the sum."
+  half-applied txn breaks both the snapshot and the sum.
+
+  The ledger-wide range read is what makes `mvcc/checker`'s transaction
+  atomicity and ledger-sum judgements actually run: `check-txn-atomicity`
+  needs a `:v2-read` whose `:covers` includes the txn write set, and
+  `check-reads` only looks at `:v2-read` ops for `:ledger-total`. Without it
+  a txnv2 run only judged TSO monotonicity and the sample thresholds (a
+  `:v2-txn` op's own `:kvs` snapshot is never read by the checker)."
   [_opts]
-  (let [r1 ["/jepsen/v2/acct/a" "/jepsen/v2/acct/b" "/jepsen/v2/acct/c"
-            "/jepsen/v2/acct/d" "/jepsen/v2/acct/e" "/jepsen/v2/acct/f"
-            "/jepsen/v2/acct/g" "/jepsen/v2/acct/h"]
-        r2 ["zz-jepsen-v2/acct/a" "zz-jepsen-v2/acct/b" "zz-jepsen-v2/acct/c"
-            "zz-jepsen-v2/acct/d" "zz-jepsen-v2/acct/e" "zz-jepsen-v2/acct/f"
-            "zz-jepsen-v2/acct/g" "zz-jepsen-v2/acct/h"]
+  (let [ks  client/ledger-keys
+        half (quot (count ks) 2)
+        r1  (subvec ks 0 half)
+        r2  (subvec ks half)
         ;; Always one account per region: the write set spans regions by
         ;; construction, which is the point of the workload.
         t  (fn [_ _]
              (let [a (rand-nth r1)
                    b (rand-nth r2)
                    [f t] (if (zero? (rand-int 2)) [a b] [b a])]
-               {:type :invoke, :f :v2-txn, :from f :to t :amount 1}))]
-    (gen/mix [(gen/repeat t) (gen/repeat t) (gen/repeat t)
+               {:type :invoke, :f :v2-txn, :from f :to t :amount 1}))
+        ;; Whole-ledger read, start = smallest account, end just past the
+        ;; region-2 accounts (byte order: '/' < '0', so "acct0" is the first
+        ;; key after "acct/..."). Sum is invariant at `client/ledger-total`.
+        l  (fn [_ _]
+             {:type :invoke, :f :v2-read
+              :key (first ks)
+              :range-end "zz-jepsen-v2/acct0"
+              :read-ts 0
+              :covers ks
+              :ledger-total client/ledger-total})]
+    (gen/mix [(gen/repeat t) (gen/repeat t) (gen/repeat t) l
               (fn [_ _] {:type :invoke, :f :v2-ts})])))
+
+(defn- txnv2-seed-gen
+  "Seeds the 16 accounts at 25 as *history* ops (a generator phase), not in
+  `client/setup!`.
+
+  The mvcc checker places a read value/revision by its commit_ts. A seed done
+  in setup! is outside the history, so every later ledger read would look like
+  `fabricated-revision` / `stale-or-fabricated` against `#{nil}` (the checker
+  cannot know the account was written at some unknown ts). Emitting the seed as
+  ops also makes the ledger sum check meaningful from the first read.
+
+  `until-ok` guarantees the phase ends only when every account has an :ok
+  write; a retried op gets a fresh request-id/commit_ts and re-writes the same
+  value, so a lost response cannot corrupt the ledger."
+  []
+  (gen/mix
+    (map (fn [k]
+           (gen/until-ok
+             (gen/limit 20
+               (gen/repeat {:type :invoke, :f :v2-write, :key k, :value "25"}))))
+         client/ledger-keys)))
 
 (defn- client-gen
   "Client generator for the given opts. For :multi-register, ops target one
@@ -1078,8 +1121,11 @@
                       :all  (combined-nemesis-gen opts)
                       (single-nemesis-gen opts))
         clients     (client-part opts)
+        seed        (when (= :txnv2 (:workload opts))
+                      (gen/clients (txnv2-seed-gen)))
         recovery    (if soak? 60 30)]
     (gen/phases
+      seed
       (gen/time-limit (:time-limit opts)
         (if nemesis-gen
           (gen/nemesis nemesis-gen clients)
@@ -1125,6 +1171,15 @@
 
                          (= :register (:workload opts))
                          [{:f :read, :key nil}]
+
+                         ;; #272 / kvv2：last-disruption convergence. The reads
+                         ;; carry `:final true`, so the mvcc checker requires
+                         ;; their echoed safe_ts to cover every committed write
+                         ;; (a permanently stalled safe_ts is otherwise
+                         ;; invisible: read_ts=0 reads stay self-consistent).
+                         (= :kvv2 (:workload opts))
+                         (mapv (fn [k] {:f :v2-read, :key k, :read-ts 0, :final true})
+                               kvv2-keys)
 
                          :else nil)]
           (when (seq read-ops)

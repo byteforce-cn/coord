@@ -2157,10 +2157,14 @@
   {:region1 (mapv #(str "/jepsen/v2/acct/" %) "abcdefgh")
    :region2 (mapv #(str "zz-jepsen-v2/acct/" %) "abcdefgh")})
 
-(def ^:private ledger-keys
+(def ledger-keys
+  "The 16 ledger accounts, region 1 first. Public because the txnv2 generator
+  builds its whole-ledger range read (`:covers` + `:ledger-total`) from it:
+  the key set must have ONE definition or the oracle reads a different ledger
+  than the one under test."
   (into (vec (:region1 ledger-accounts)) (:region2 ledger-accounts)))
 
-(def ^:private ledger-total
+(def ledger-total
   "Every account starts at 25 (16 x 25 = 400); a transfer moves exactly 1, so
   the sum is invariant. A half-applied transfer breaks the sum as well as the
   per-key snapshot expectations."
@@ -2538,29 +2542,6 @@
               op'))
           op')))))
 
-(defn- v2-seed-ledger!
-  "Seeds the four accounts at 25 each (once, in setup!).
-
-  Without it every txn would read nil and the ledger sum check would compare
-  against an empty ledger -- green for the wrong reason. COMMIT_REJECTED retries
-  with a fresh ts and the same request_id (idempotent server-side)."
-  [this]
-  (doseq [k ledger-keys]
-    (loop [tries 0]
-      (let [ts (v2-get-ts this)
-            {:keys [ok err]} (v2-call-on this
-                                         (leader-start this :v2-seed)
-                                         p/kv-v2-put-method
-                                         (p/kv2-put-req* {:key k :value "25"
-                                                          :commit-ts ts
-                                                          :request-id (str "seed-" k)})
-                                         :v2-seed)]
-        (cond
-          ok nil
-          (and (= :commit-rejected (v2-error-class err)) (< tries 8)) (recur (inc tries))
-          :else (throw (ex-info (str "v2 ledger seed failed for " k ": " err)
-                                {:key k :error-code (p/error-code err)})))))))
-
 (defn- v2-ready-probe
   "One v2 readiness attempt: tso.v2 GetTs + kv.v2 Range(read_ts=0).
 
@@ -2663,9 +2644,11 @@
                                :error-code (when (instance? StatusRuntimeException e)
                                              (p/error-code e))}))))
           (info "coord v2 cluster is ready")
-          (when (= :txnv2 (:v2-workload this))
-            (v2-seed-ledger! this)
-            (info "coord v2 ledger seeded" ledger-total))
+          ;; The ledger is seeded by a generator phase (`txnv2-seed-gen`), not
+          ;; here: setup! writes are not part of the history, so the mvcc
+          ;; checker cannot place their revision/value and would red every
+          ;; later ledger read as `fabricated-revision` / `stale-or-fabricated`
+          ;; (it has no way to know the seed wrote 25 at some unknown ts).
           this))
       (do
         (info "coord client setup: waiting for a successful read (quorum + auth)")

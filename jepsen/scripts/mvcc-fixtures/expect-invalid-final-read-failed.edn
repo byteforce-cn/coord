@@ -1,0 +1,5 @@
+;; 收尾读一次都没成功：不可把「没读到」当成「收敛了」（fail-closed）。
+[{:type :ok, :f :v2-write, :process 0, :node "n1", :time 10,
+  :key "k" :value "v1" :commit-ts 100}
+ {:type :fail, :f :v2-read, :process 0, :node "n1", :time 20,
+  :key "k" :error :unavailable, :requested-read-ts 0, :final true}]
