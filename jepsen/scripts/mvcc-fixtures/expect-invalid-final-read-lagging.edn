@@ -1,0 +1,9 @@
+;; safe_ts 停在 400，最后一条已提交写是 500：读到的 v1 对 400 而言自洽
+;; （所以价值判据不会红），只有「收尾读必须覆盖全部已提交写」这条能抓住。
+[{:type :ok, :f :v2-write, :process 0, :node "n1", :time 10,
+  :key "k" :value "v1" :commit-ts 100}
+ {:type :ok, :f :v2-write, :process 0, :node "n1", :time 20,
+  :key "k" :value "v2" :commit-ts 500}
+ {:type :ok, :f :v2-read, :process 0, :node "n1", :time 30,
+  :key "k" :value "v1" :read-ts 400 :requested-read-ts 0
+  :final true :mod-revision 100}]

@@ -33,10 +33,19 @@
        the requested ts;
     5. TSO: strictly increasing per process; distinct commit_ts across :ok
        writes (a duplicate means the premise does not hold -> invalid);
-    6. txn atomicity: all-or-none of the write set, for any read_ts;
-       an :info txn with unknown commit_ts is only judged all-or-none;
-    7. final reads (:final true) must see the latest :ok write -- safe_ts that
-       never catches up is a liveness failure;
+    6. txn atomicity: for a read that covers every key of an :ok txn, the
+       write set is all-or-none *at that read_ts*: keys the txn still owns
+       (its commit_ts is the latest write <= read_ts) must show the txn's
+       value. A key superseded by a later write is not evidence either way;
+       a half-applied txn shows up as: one key still ours and correct, another
+       key still ours but missing/stale. An :info txn with unknown commit_ts
+       cannot be placed -- the ledger-sum check is its backstop (a half
+       transfer changes the sum);
+    7. convergence (:final true reads, emitted after the last nemesis stop):
+       the echoed safe_ts must cover every committed write, and the value must
+       be the latest :ok write. Without the read_ts bar a safe_ts that never
+       catches up is invisible -- read_ts=0 reads of a stalled clock echo the
+       stale ts and are judged self-consistently;
     8. sample thresholds, fail-closed (insufficient sample is invalid, never
        green). The ts threshold is lower on purpose: TSO ops are ~10% of the
        mix, snapshot reads are 25%, and a txn is four RPCs (so txnv2 does
@@ -131,17 +140,18 @@
         last-ok   (last before)
         cand-ts   (filter #(<= (:ts %) read-ts) candidates)
         ;; An :info write may or may not have applied; seeing either its value
-        ;; or the last :ok value is legal. Final reads come after everything
-        ;; settled, so they must be exact.
+        ;; or the last :ok value is legal -- including on a `:final` read,
+        ;; which may legitimately observe an `:info` write that did apply.
+        ;; Final reads are tightened by `check-final-convergence` (the echoed
+        ;; safe_ts must cover every committed write), not by narrowing this
+        ;; set.
         unplaced  (get unknown-values key #{})
         ;; A committed delete makes the key ABSENT: kv.v2 Range only returns
         ;; live keys (coord-server/src/kvt/services.rs read_kv_range_segment),
         ;; while a returned tombstone would carry value "". Both are legal.
         value-of  (fn [w] (if (= :delete (:kind w)) #{nil ""} #{(:value w)}))
-        needed    (cond-> (if final
-                            (if last-ok (value-of last-ok) #{nil})
-                            (into (if last-ok (value-of last-ok) #{nil})
-                                  (mapcat value-of cand-ts)))
+        needed    (cond-> (into (if last-ok (value-of last-ok) #{nil})
+                                (mapcat value-of cand-ts))
                     (seq unplaced) (into unplaced))
         known-ts  (set (map :ts rs))]
     ;; 2. no read from the future
@@ -163,22 +173,28 @@
 
 (defn- check-reads
   [errors writes-by-key unknown-values history]
-  (doseq [op history
-          :when (and (= :v2-read (:f op)) (= :ok (:type op)))]
-    (let [R (long (:read-ts op))]
-      (if-let [kvs (seq (:kvs op))]
-        (doseq [obs kvs]
+  (let [sums (atom 0)]
+    (doseq [op history
+            :when (and (= :v2-read (:f op)) (= :ok (:type op)))]
+      (let [R (long (:read-ts op))]
+        (if-let [kvs (seq (:kvs op))]
+          (doseq [obs kvs]
+            (check-read errors writes-by-key unknown-values
+                        (assoc obs :read-ts R :final (:final op))))
           (check-read errors writes-by-key unknown-values
-                      (assoc obs :read-ts R :final (:final op))))
-        (check-read errors writes-by-key unknown-values
-                    {:key (:key op) :value (:value op) :read-ts R
-                     :mod-revision (:mod-revision op) :final (:final op)})))
-    ;; 6b. ledger sum conservation (txnv2): the read set covers every account
-    (when-let [total (parse-long* (:ledger-total op))]
-      (let [vals (keep (comp parse-long* :value) (:kvs op))]
-        (when (and (seq vals) (not= (reduce + vals) total))
-          (invalid errors (format "ledger-sum: read %s, expected %s"
-                                  (reduce + vals) total)))))))
+                      {:key (:key op) :value (:value op) :read-ts R
+                       :mod-revision (:mod-revision op) :final (:final op)})))
+      ;; 6b. ledger sum conservation (txnv2): the read set covers every account
+      (when-let [total (parse-long* (:ledger-total op))]
+        (swap! sums inc)
+        (let [vals (keep (comp parse-long* :value) (:kvs op))]
+          ;; Fail-closed: the read is whole-ledger by construction, so an
+          ;; empty/partial result sums to 0 instead of `total` and is a
+          ;; violation, not "no data to check".
+          (when (not= (reduce + vals) total)
+            (invalid errors (format "ledger-sum: read %s (%s keys), expected %s"
+                                    (reduce + vals) (count vals) total))))))
+    {:ledger-sums @sums}))
 
 (defn- check-safe-ts
   "read_ts=0 reads must not regress per (process, node); the baseline resets on
@@ -235,53 +251,90 @@
       (invalid errors (format "historical-echo: asked read_ts %s, echoed %s"
                               (:requested-read-ts op) (:read-ts op))))))
 
-(defn- check-txn-atomicity
-  "A committed txn's write set is visible as a block: for a range read that
-  covers every key of the write set, `read_ts >= commit_ts` must show all of
-  them and `read_ts < commit_ts` must show none."
+(defn- check-final-convergence
+  "The soak's convergence gate: after the last nemesis stop and the recovery
+  window, every `:final` read must have echoed a safe_ts that covers every
+  committed write, and at least one final read must have succeeded.
+
+  Why the read_ts bar and not just the value: a `read_ts=0` read of a stalled
+  safe_ts returns an old-but-legal snapshot (the checker judges it against the
+  ts it echoed), so a cluster whose safe_ts never catches up would stay green
+  forever. The fence advances safe_ts to the TSO high-water every second, so
+  on a healthy cluster the bar is met within the recovery window; not meeting
+  it is a liveness failure, not a slow test.
+
+  `:info` writes do not set the bar -- their commit_ts may not exist."
   [errors history]
-  (let [txns  (filter #(and (= :v2-txn (:f %)) (= :ok (:type %))
+  (let [max-ok-ts (->> history
+                       (filter #(and (= :ok (:type %))
+                                     (contains? #{:v2-write :v2-txn} (:f %))))
+                       (keep :commit-ts)
+                       (map long)
+                       (reduce max 0))
+        finals    (filter #(and (= :v2-read (:f %)) (:final %)) history)]
+    (when (and (seq finals) (not (some #(= :ok (:type %)) finals)))
+      (invalid errors "final-reads-never-succeeded"))
+    (doseq [op finals
+            :when (= :ok (:type op))]
+      (when (< (long (:read-ts op)) max-ok-ts)
+        (invalid errors
+                 (format "final-read-lagging: %s echoed safe_ts %s < last commit_ts %s"
+                         (:key op) (:read-ts op) max-ok-ts))))
+    {:final-reads (count (filter #(= :ok (:type %)) finals))}))
+
+(defn- last-ok-write-at
+  "Latest :ok write for `key` with ts <= R, or nil."
+  [writes-by-key key R]
+  (->> (get writes-by-key key [])
+       (filter :ok?)
+       (filter #(<= (long (:ts %)) (long R)))
+       last))
+
+(defn- check-txn-atomicity
+  "A committed txn's write set must be visible as a block *at a given read_ts*.
+
+  Only keys the txn still owns count: a key overwritten by a later txn is
+  superseded and says nothing about atomicity (a half-applied txn whose keys
+  were later overwritten would otherwise look green). A violation is: some
+  owned key shows the txn's value while another owned key is missing/stale.
+
+  This deliberately does NOT judge a read at read_ts < commit_ts by matching
+  values: ledger balances repeat, so `read value == txn value` is not evidence
+  of early visibility. Per-key snapshot expectations (`check-read`) cover
+  early visibility on keys the read actually returns."
+  [errors writes-by-key history]
+  (let [judged (atom 0)
+        txns  (filter #(and (= :v2-txn (:f %)) (= :ok (:type %))
                             (:commit-ts %) (seq (:writes %)))
                       history)
-        reads (filter #(and (= :v2-read (:f %)) (seq (:kvs %)) (seq (:covers %)))
+        ;; Only :ok reads have an echoed read_ts; a failed range read still
+        ;; carries :covers on the invoke/completion op, so filtering by
+        ;; :covers alone would NPE on (:read-ts r) during a disruption.
+        reads (filter #(and (= :v2-read (:f %)) (= :ok (:type %))
+                            (seq (:covers %)))
                       history)]
     (doseq [t txns
             r reads
             :let [C     (long (:commit-ts t))
                   R     (long (:read-ts r))
                   seen  (into {} (map (juxt :key :value) (:kvs r)))
-                  cover (:covers r)]
-            :when (every? (set cover) (keys (:writes t)))]
-      (doseq [[k v] (:writes t)]
-        (cond
-          (and (>= R C) (not= v (get seen k)))
-          (invalid errors (format "txn-half-visible: txn %s key %s missing/stale at read_ts %s (commit_ts %s)"
-                                  (:txn-id t) k R C))
-
-          (and (< R C) (= v (get seen k)))
-          (invalid errors (format "txn-visible-before-commit: txn %s key %s visible at read_ts %s < commit_ts %s"
-                                  (:txn-id t) k R C)))))))
-
-(defn- check-unknown-ts-txn
-  "An :info txn whose commit_ts could not be recovered must still be
-  all-or-none within one range observation."
-  [errors history]
-  (let [unknown (->> history
-                     (filter #(and (= :v2-txn (:f %)) (= :info (:type %)) (:ts-unknown %)))
-                     (filter #(seq (:writes %))))
-        reads   (filter #(and (= :v2-read (:f %)) (seq (:kvs %))) history)]
-    (doseq [t unknown
-            r reads
-            :let [w (:writes t)
-                  seen (into {} (map (juxt :key :value) (:kvs r)))
-                  hits (for [[k v] w
-                             :when (contains? seen k)]
-                         (= v (get seen k)))
-                  total (count w)]
-            :when (>= (count seen) total)]
-      (when (and (some true? hits) (some false? hits))
-        (invalid errors (format "txn-half-visible: txn %s partially visible at read_ts %s"
-                                (:txn-id t) (:read-ts r)))))))
+                  cover (set (:covers r))]
+            :when (and (>= R C) (every? cover (keys (:writes t))))]
+      (swap! judged inc)
+      (let [states (into {}
+                         (for [[k v] (:writes t)
+                               :let [w (last-ok-write-at writes-by-key k R)]]
+                           [k (cond
+                                (nil? w)                :unindexed
+                                (not= (long (:ts w)) C) :superseded
+                                (= v (get seen k))      :visible
+                                :else                   :half)]))]
+        (when (and (some #{:visible} (vals states))
+                   (some #{:half} (vals states)))
+          (invalid errors
+                   (format "txn-half-visible: txn %s at read_ts %s (commit_ts %s) %s"
+                           (:txn-id t) R C (pr-str states))))))
+    {:txn-atomic-pairs @judged}))
 
 ;; ---------------------------------------------------------------------------
 ;; Checker
@@ -308,13 +361,13 @@
             tss (count (filter #(and (= :v2-ts (:f %)) (= :ok (:type %))) history))
             unknown (unknown-ts-txn-values history)
             errors (atom [])]
-        (check-reads errors writes-by-key unknown history)
-        (check-safe-ts errors history)
-        (check-tso errors history)
-        (check-historical-echo errors history)
-        (check-txn-atomicity errors history)
-        (check-unknown-ts-txn errors history)
-        (let [sample {:writes (+ writes deletes txns) :reads (+ reads txn-reads) :ts tss}
+        (let [judged (merge (check-reads errors writes-by-key unknown history)
+                            (check-final-convergence errors history)
+                            (check-txn-atomicity errors writes-by-key history))
+              _      (check-safe-ts errors history)
+              _      (check-tso errors history)
+              _      (check-historical-echo errors history)
+              sample {:writes (+ writes deletes txns) :reads (+ reads txn-reads) :ts tss}
               enough? (and (>= (:writes sample) min-writes)
                            (>= (:reads sample) min-reads)
                            (>= (:ts sample) min-ts))
@@ -322,12 +375,15 @@
           (cond
             (seq errs)
             {:valid? false :reason :mvcc-violation
-             :mvcc {:sample sample :errors (take 20 errs) :errors-count (count errs)}}
+             :mvcc {:sample sample :judged judged
+                    :errors (take 20 errs) :errors-count (count errs)}}
 
             (not enough?)
             {:valid? false :reason :insufficient-sample
-             :mvcc {:sample sample :need {:writes min-writes :reads min-reads :ts min-ts}}}
+             :mvcc {:sample sample :judged judged
+                    :need {:writes min-writes :reads min-reads :ts min-ts}}}
 
             :else
             {:valid? true
-             :mvcc {:sample sample :errors [] :errors-count 0}}))))))
+             :mvcc {:sample sample :judged judged
+                    :errors [] :errors-count 0}}))))))
