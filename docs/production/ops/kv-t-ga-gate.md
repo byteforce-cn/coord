@@ -1,6 +1,6 @@
 # KV-T GA Gate（G0–G6 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-07（本轮：最终 72h run 跑完并按**当前**判据复判；快速失败阶梯落地）
+> Owner: maintainers ｜ Last verified: 2026-11-08（重跑起跑 + 快速失败/保留窗口/范围历史读三处修复）
 
 - **状态**：**NO-GO（未签）**。G0–G5 已交付；G6 的 72h run 已跑完（2026-11-04T14:44:43Z →
   11-07T14:52:12Z），但按设计判据**不达标**（§3-1）。原因不是「跑得不够久」，而是取证口径：
@@ -73,6 +73,16 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    三者不一致即作废，`collect-evidence.sh` 现在会**拒绝**出 MANIFEST（#303）。
    历史 run（本轮的日志里没有哈希头）只能用 `COORD_IDENTITY_OVERRIDE` 事后钉住，
    并在 MANIFEST 里标注 `override(post-hoc)`。
+
+   **重跑（2026-11-08T06:17:09Z 起，进行中）**：commit `c105e9a1`（tree
+   `889452f1`）、bin `f94abe5d`（三节点同哈希，`control-dirty: 0`），参数
+   `--mvcc-retention-revs 600000 --v2-history-window-secs 120 --min-op-ok-ratio 0.9`，
+   ETA `2026-11-11T06:17Z`；watchdog 300s 周期复判（红了立即停跑并写
+   `soak/fail-fast-kvt.edn`）。起跑前用同一套参数跑了 30min `fast-soak` 预检：
+   `:history 0/710 = 0.00%`、mvcc 0 errors、gates 4/4 availability + RTO p95 1.13s、
+   `results.edn :valid? true`。预检还抓出两个真实缺陷（`#317` 数据 Region 的
+   retention 没接上配置、`#318` 范围历史读把「T 前删除、T 后重建」的 key 误判成
+   不可复原——它虚高了上一轮的 10.08%），修复后才起跑。
 2. #174：**split/merge 停顿已测**（`performance.md` §6.6，release、真实 3 进程、
    PD 驱动 split）：统计/采样/leader 上报落地后（§3.5-6），`perf_split_write_pause`
    不再依赖 debug-only 的调度暂停钩子，直接测持续写入期间的 split 写停顿。剩余
@@ -218,6 +228,22 @@ checker 结果新增 `:judged`（`final-reads` / `txn-atomic-pairs` / `ledger-su
    负控制：`jepsen/scripts/mvcc-fixtures/` 新增 4 条（含 0/0 必须显式 `:judged false`、
    safe_ts 读不进分母）。
 
+6. **`[storage] changelog_retention_revisions` 只对 region 0 生效**（#317）：
+   region-runtime builder 用的是 `CompactionConfig::default()`（100k），数据 Region
+   的 compaction 因此忽略配置。fast-soak 实测 `commit_ts` 推进 ~1005 revs/s ⇒
+   100k ≈ 100s，仍落在 120s 客户端窗口内。修复后数据 Region 与全局 manager 共用
+   同一份配置。
+7. **范围历史读把「T 前删除、T 后重建」的 key 误判成不可复原**（#318）：
+   `replay_historical_range` 的 `view` 只存值，删除后 key 从 `view` 消失；候选补齐
+   只靠 `create_revision > T` 证“T 时不存在”，而 `mark_deleted`/`update` 会**保留
+   最初创建 revision**，重建的 key 因此证不出结论 ⇒ 整条范围读 `HISTORY_UNAVAILABLE`。
+   单键路径（`get_at_revision`）在同一条历史上正确返回「不存在」。修复：`view`
+   缺值但 `last_write` 有记录（T 前最后一次变更是删除）⇒ 确定不存在；changelog
+   真被压缩时仍 fail-closed。回归
+   `test_historical_range_read_treats_deleted_key_as_absent`（去掉修复会红）。
+   这两个缺陷都由 30min fast-soak 在数分钟内暴露（#312 的价值）；上一轮 10.08%
+   的历史读失败率里包含了 7 的贡献。
+
 **验证口径的补强（长跑快速失败）**：`make rejudge` 用既有 store 的 262k op 历史做离线复判
 （15.5s），改判据不必重跑 72h；长跑内 `jepsen/scripts/soak-watchdog.sh` 周期性复判增量 op 日志，
 判据一红就停跑并写 `soak/fail-fast-<name>.edn`（只对 `op-liveness` /
@@ -231,6 +257,7 @@ checker 结果新增 `:judged`（`final-reads` / `txn-atomic-pairs` / `ledger-su
 
 | 日期 | 结论 | 依据 commit / CI run | 未关闭项 | 签字人 |
 |:--|:--|:--|:--|:--|
+| 2026-11-08 | **重跑中（未签）** | commit `c105e9a1` / tree `889452f1` / bin `f94abe5d`；起跑 `06:17:09Z`，ETA `2026-11-11T06:17Z`；watchdog 300s | 等跑完回填 §3-1/§4 | — |
 | 2026-11-07 | **不达标（未签）** | run `2026-11-04T14:44:43Z`，bin `09138e63`，tree `dd2803cc`；`make rejudge` = `invalid`（`:history-unavailable-rate :quiet-availability`） | §3-1 三条：历史读率、quiet 可用率、重跑对齐 | — |
 
 ## 5. 回退/降级口径
