@@ -2262,15 +2262,31 @@
   (mod (inc (long idx)) (count @(:channels this))))
 
 (defn- v2-get-ts
-  "Allocates one timestamp (GetTs), rotating nodes on UNAVAILABLE."
+  "Allocates one timestamp (GetTs). Never throws: returns `{:ok ts}` or
+  `{:class kw :detail str}` after a bounded number of rotations.
+
+  Why a result instead of an exception: `invoke-coord!`'s re-auth branch acts on
+  op *results*, so a `UNAUTHENTICATED` here has to come back as `:fail
+  :unauthenticated`. Throwing escaped `invoke!` entirely, which jepsen logs as
+  \"Process N crashed\" and records as `indeterminate: …`; the worker then stops
+  issuing ops, silently shrinking the sample (#309). Rotating 16 times on a
+  CCT-level rejection is pure waste too: all nodes share the expired session."
   [this]
   (loop [idx (leader-start this :v2-tso) i 0]
     (let [{:keys [ok err]} (v2-call-on this idx p/tso-v2-get-ts-method
                                        (p/tso-get-ts-req) :v2-tso)]
       (cond
-        ok (p/tso-get-ts ok)
-        (> i 16) (throw err)
-        :else (recur (v2-rotate this idx) (inc i))))))
+        ok {:ok (p/tso-get-ts ok)}
+
+        ;; Session-level: rotating cannot help, `invoke-coord!` refreshes the CCT.
+        (= :unauthenticated (v2-error-class err))
+        {:class :unauthenticated :detail (str err)}
+
+        (> i 16)
+        {:class (v2-error-class err) :detail (str err)}
+
+        :else
+        (recur (v2-rotate this idx) (inc i))))))
 
 (defn- v2-put!
   "Direct write with TS allocation and the documented retry budget.
@@ -2299,44 +2315,62 @@
                :request-id req-id)
 
         :else
-        (let [ts (or ts (v2-get-ts this))
-              {:keys [ok err]} (v2-call-on this idx f (req-of ts) (:f op))]
-          (cond
-            ok
-            (do (record-v2-ts! ts)
-                (assoc op :type :ok :commit-ts ts :request-id req-id :retried retried))
-
-            :else
-            (case (v2-error-class err)
-              :commit-rejected
-              (recur idx (inc tries) nil (conj retried ts))
-
-              :safe-ts-lag
-              (assoc op :type :info :error :safe-ts-lag :attempted-ts [ts]
-                     :request-id req-id :retried retried)
-
-              (:epoch-stale :not-leader :unavailable)
-              (recur (v2-rotate this idx) (inc tries) ts (conj retried ts))
-
+        (let [alloc (if ts {:ok ts} (v2-get-ts this))]
+          (if-let [cls (:class alloc)]
+            ;; Timestamp allocation failed: the write was never sent, so this is
+            ;; NOT "maybe applied". Classify it like any other op result.
+            (case cls
               :unauthenticated
               (assoc op :type :fail :error :unauthenticated)
 
-              (assoc op :type :fail :error (str "v2 " (v2-error-class err))
-                     :code (p/error-code err) :detail (str err)))))))))
+              (:epoch-stale :not-leader :unavailable)
+              (recur (v2-rotate this idx) (inc tries) nil retried)
+
+              (assoc op :type :info :error (or cls :tso-unavailable)
+                     :request-id req-id :detail (:detail alloc) :retried retried))
+            (let [ts (:ok alloc)
+                  {:keys [ok err]} (v2-call-on this idx f (req-of ts) (:f op))]
+              (cond
+                ok
+                (do (record-v2-ts! ts)
+                    (assoc op :type :ok :commit-ts ts :request-id req-id
+                           :retried retried))
+
+                :else
+                (case (v2-error-class err)
+                  :commit-rejected
+                  (recur idx (inc tries) nil (conj retried ts))
+
+                  :safe-ts-lag
+                  (assoc op :type :info :error :safe-ts-lag :attempted-ts [ts]
+                         :request-id req-id :retried retried)
+
+                  (:epoch-stale :not-leader :unavailable)
+                  (recur (v2-rotate this idx) (inc tries) ts (conj retried ts))
+
+                  :unauthenticated
+                  (assoc op :type :fail :error :unauthenticated)
+
+                  (assoc op :type :fail :error (str "v2 " (v2-error-class err))
+                         :code (p/error-code err) :detail (str err)))))))))))
 
 (defn- invoke-v2-write [this op] (v2-put! this op))
 (defn- invoke-v2-delete [this op] (v2-put! this op))
 
 (defn- invoke-v2-ts
   [this op]
-  (try
-    (let [ts (v2-get-ts this)]
-      (record-v2-ts! ts)
-      (assoc op :type :ok :ts ts))
-    (catch StatusRuntimeException e
-      (if (= :unauthenticated (v2-error-class e))
-        (assoc op :type :fail :error :unauthenticated)
-        (assoc op :type :info :error :unavailable-maybe-applied)))))
+  (let [r (v2-get-ts this)]
+    (cond
+      (:ok r)
+      (do (record-v2-ts! (:ok r))
+          (assoc op :type :ok :ts (:ok r)))
+
+      (= :unauthenticated (:class r))
+      (assoc op :type :fail :error :unauthenticated)
+
+      :else
+      (assoc op :type :info :error (or (:class r) :tso-unavailable)
+             :detail (:detail r)))))
 
 (defn- invoke-v2-read
   "Snapshot / historical read. read_ts=0 means safe_ts; the echoed read_ts is
@@ -2714,7 +2748,18 @@
         this)))
 
   (invoke! [this test op]
-    (invoke-coord! this test op))
+    (try
+      (invoke-coord! this test op)
+      (catch StatusRuntimeException e
+        ;; Last-resort guard (#309): an unclassified gRPC error must become an op
+        ;; result, never escape into the generator. Escaping kills the worker
+        ;; process ("Process N crashed"), records `indeterminate: …` and stops
+        ;; that worker from issuing further ops -- a silent sample cut, not a
+        ;; verdict. Non-gRPC exceptions still propagate: they are client bugs.
+        (if (= :unauthenticated (v2-error-class e))
+          (assoc op :type :fail :error :unauthenticated)
+          (assoc op :type :info :error (v2-error-class e)
+                 :detail (str e))))))
 
   (close! [this test]
     (doseq [^ManagedChannel ch (distinct (concat @(:raw-channels this)

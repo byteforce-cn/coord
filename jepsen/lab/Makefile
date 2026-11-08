@@ -488,6 +488,9 @@ checkers: ## T0.3: run every checker fixture suite on control (red refuses to st
 	    ./scripts/check-kv-t-wire.clj --selftest)
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    ./scripts/check-kv-t-wire.clj)
+	# #309：v2 时间戳分配不得把异常穿透 generator（8 条断言：分类/兜底/不吞 bug）。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    ./scripts/test-v2-get-ts-classification.clj)
 	# #272：MVCC 判据（快照读/事务原子性/TSO/safe_ts）的 15 个负控制先行 fixture。
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.mvcc scripts/mvcc-fixtures \
