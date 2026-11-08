@@ -3911,7 +3911,7 @@ async fn run_server(
         };
     let _compaction_mgr = CompactionManager::start_with_safe_ts(
         Arc::clone(&mvcc),
-        compaction_config,
+        compaction_config.clone(),
         Some(compaction_proposer),
         Some(Arc::clone(&metrics)),
         safe_ts_source.clone(),
@@ -3952,7 +3952,11 @@ async fn run_server(
                 region0_raft,
                 metrics: Some(Arc::clone(&metrics)),
                 safe_ts: safe_ts_source.clone(),
-                compaction: coord_server::storage::compaction::CompactionConfig::default(),
+                // 数据 Region 的 compaction 必须用**同一份**配置：默认值会
+                // 静默退回 100k revs，让 [storage] 的覆盖只对 region 0 生效
+                // （fast-soak 实测：600k 只写进了全局 manager，数据 Region 仍是
+                // 100k ⇒ 120s 历史窗口仍撞 HISTORY_UNAVAILABLE）。
+                compaction: compaction_config.clone(),
             },
         ));
         for handle in manager.list_regions() {

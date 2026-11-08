@@ -168,6 +168,10 @@ cmd_start() {
   # 它复判「跑到一半」的历史。每次 start 重建（同名 soak 的旧日志不能混进来）。
   local ops_log="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-ops.edn"
   : > "$ops_log"
+  # 新 run 必须清掉上一轮的 fail-fast 结论：watchdog/监控以这个文件为「已停跑」
+  # 标志，残留会把旧结论当成这一轮的（实测：fast-soak 一起来就"红"在一个小时前
+  # 的文件上）。
+  rm -f "$SOAK_DIR/fail-fast${SOAK_NAME:+-$SOAK_NAME}.edn"
   echo "   op-log:  $ops_log"
 
   # Detach into its own session/process group so neither SSH nor SIGHUP can
