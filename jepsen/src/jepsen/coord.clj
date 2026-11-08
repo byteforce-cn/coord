@@ -1777,6 +1777,16 @@
     :default nil
     :parse-fn (fn [s] (Long/parseLong s))
     :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--mvcc-retention-revs N"
+    "(#311) MVCC 历史保留窗口，**按 revision 计数**（服务端
+    `[storage] changelog_retention_revisions`，默认 100000）。它与
+    `--v2-history-window-secs`（秒）是两套时钟：直写每次取号会预占一个 TSO
+    批次，高写入速率下 100000 revs 只有几分钟。不传 = 用服务端默认。
+    证据 run 用 600000（72h 口径 ≈133s/1000 revs ⇒ ~30min，覆盖 120s 历史窗口）。"
+    :default nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 1_000 %))
+               "must be >= 1000 (server bound: [storage] changelog_retention_revisions)"]]
    [nil "--v2-history-window-secs S"
     "#272 (--workload kvv2): only send a historical read for a commit_ts
     observed within the last S seconds (default 600). Must stay inside the

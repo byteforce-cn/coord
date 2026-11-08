@@ -11,7 +11,11 @@ op 名（`:write` / `:read`），于是 kvv2 run 上全部空转，报告仍然 
 - `expect-invalid-v2-availability-not-judged.edn`：有写完成，但每个 quiet
   窗口的样本都低于 `:quiet-min-sample` ⇒ `:quiet-availability-not-judged`；
 - `expect-invalid-v2-rto-not-measured.edn`：有扰动，但 stop 落在写阶段之后
-  （`measurable?` 全 false）⇒ `:rto-not-measured`。
+  （`measurable?` 全 false）⇒ `:rto-not-measured`；
+- `expect-valid-v2-safe-ts-lag.edn`：窗口内 30 ok + 2 个 `:info :safe-ts-lag`
+  ⇒ 可用率 100%（背压类 info 从分母剔除并进 `:excluded-by-error`，设计 §5.4）；
+- `expect-invalid-v2-unavailable-counted.edn`：同形状但换成 `:info :unavailable`
+  ⇒ 93.75% < 0.95 ⇒ `:quiet-availability`（真不可用**不能**被豁免）。
 
 跑法（`make checkers` 已包含）：
 

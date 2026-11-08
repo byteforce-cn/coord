@@ -55,8 +55,11 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    - **历史读失败率 10.08% ≫ 1%**（设计 §5.4 的采样前提；#311）。根因是保留窗口
      按 revision 计数（`retention=100000 revs`，本负载 ≈334 rev/s ⇒ ~300s），而
      客户端历史窗口默认 600s（`--v2-history-window-secs`，此前硬编码）；逐小时 1.1%–18.2%，稳态滴漏。**重跑前必须对齐**：
-     把 `--v2-history-window-secs` 收到保留窗口以内（并/或提高 retention），先用
-     `make rejudge` 在既有历史上确认 <1%，再起 72h。
+     把 `--v2-history-window-secs` 收到保留窗口以内（并/或提高 retention），再起
+     72h。**裁定（2026-11-08）**：客户端窗口 600s → **120s**，
+     `[storage] changelog_retention_revisions` 100 000 → **600 000**（新配置项，
+     默认值不变；72h 口径 ≈30min、fast-soak 口径 ≈5min，均覆盖 120s 窗口），由
+     `make soak-kv-t` / `make fast-soak` 的 `SOAK_EXTRA` 固定传入。
    - **3/108 个 quiet 窗口可用率 <0.95**（94.98% / 93.81% / 91.30%），失败全部是
      `SAFE_TS_LAG`。这是 #308 修好 v2 op 覆盖后才可见的真实可用性信号；签字前
      要么让重跑达到 0.95，要么把「`SAFE_TS_LAG` 是否计入可用率」写成显式裁定

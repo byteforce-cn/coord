@@ -806,10 +806,15 @@ soak-kv-t: ## #272: KV-T v2 soak (kvv2 + mvcc checker; SOAK_TIME_LIMIT=259200 = 
 	# `--min-op-ok-ratio 0.1` 是 F-13 的「该 op 类从未真正跑过」地板，不是
 	# 可用性门槛：0.1 会放过单类 op 长期约 25% 成功的系统性故障（delete 只
 	# 打旧节点、换届后永久失败即为一例）。GA 长稳用 0.9 的 per-op 下界。
+	# #311：保留窗口（revision 计数）与历史读窗口（秒）必须对齐。72h 口径实测
+	# ≈300s/100k revs（每次直写取一个 1024 的 TSO 批次），600k revs ≈30min；
+	# 客户端历史窗口收到 120s（原来的 600s 会大面积撞 HISTORY_UNAVAILABLE：
+	# 72h run 实测 10.08%，设计上限 1%）。
 	$(MAKE) soak WORKLOAD=kvv2 KV_T=1 SOAK_NAME=kvt \
 	    SOAK_NEMESIS=soak SOAK_RATE=0.5 \
 	    SOAK_WATCHDOG=1 SOAK_WATCHDOG_INTERVAL=$(or $(SOAK_WATCHDOG_INTERVAL),300) \
-	    SOAK_EXTRA="--min-op-ok-ratio 0.9 $(SOAK_EXTRA)" --no-print-directory
+	    SOAK_EXTRA="--min-op-ok-ratio 0.9 --mvcc-retention-revs 600000 --v2-history-window-secs 120 $(SOAK_EXTRA)" \
+	    --no-print-directory
 	@echo "KV-T v2 soak started (log soak/soak-kvt.log). Stop: make soak-kv-t-stop"
 
 fast-soak: ## 加速浸泡（同 kvv2 workload + 扰动密度 ×4，缺陷 ~1h 暴露；FAST_SOAK_SECONDS=3600）
@@ -825,7 +830,8 @@ fast-soak: ## 加速浸泡（同 kvv2 workload + 扰动密度 ×4，缺陷 ~1h �
 	    SOAK_TIME_LIMIT=$(or $(FAST_SOAK_SECONDS),3600) \
 	    SOAK_QUIET=$(or $(FAST_SOAK_QUIET),300) \
 	    SOAK_DISRUPT=$(or $(FAST_SOAK_DISRUPT),120) \
-	    SOAK_EXTRA="--min-op-ok-ratio 0.9 $(SOAK_EXTRA)" --no-print-directory
+	    SOAK_EXTRA="--min-op-ok-ratio 0.9 --mvcc-retention-revs 600000 --v2-history-window-secs 120 $(SOAK_EXTRA)" \
+	    --no-print-directory
 	@echo "fast soak started (log soak/soak-kvt-fast.log). Wait: make fast-soak-wait"
 
 fast-soak-wait: ## block until the fast soak finishes

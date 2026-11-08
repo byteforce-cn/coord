@@ -30,9 +30,12 @@ use crate::server::CoordNode;
 
 /// 默认 fence 推进周期。
 ///
-/// 1s 让默认 100k revision 的 compaction retention 覆盖约 27.8h（> Watch 24h
-/// 默认）；真正的 time-based retention 归 #157。测试直接调用 [`advance_once`]，
-/// 不依赖这个周期。
+/// 1s 的周期只保证「fence 至少每秒推进一次」。**保留窗口是 revision 计数，
+/// 不是时间**：100k revs 在 1 rev/s 下是 ~27.8h，但在直写场景下每次取号会
+/// 预占一个 TSO 批次（1024），72h soak 实测约 300s。客户端的历史读窗口
+/// （`--v2-history-window-secs`）必须按真实保留窗口（`[storage]
+/// changelog_retention_revisions`）对齐，否则历史读会大面积
+/// `HISTORY_UNAVAILABLE`（#311）。真正的 time-based retention 归 #157。
 pub const SAFE_TS_ADVANCE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 执行一轮：发布 fence（若是 region 0 leader）+ fence 本节点领导的数据 Region。
