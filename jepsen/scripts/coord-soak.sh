@@ -144,11 +144,21 @@ cmd_start() {
     exit 3
   fi
   if [ -n "$ctl_real" ] && [ "$commit" != "-" ]; then
-    local commit_ts bin_ts
-    commit_ts="$(git -C "$PROJECT" log -1 --format=%ct 2>/dev/null || echo 0)"
+    local src_ts bin_ts
+    # 「二进制是否包含当前源码」看**最后一次改动 server 源码**的提交时间，而不是
+    # HEAD：docs/jepsen-only 提交不改二进制（jepsen 代码在运行时从检出读取），用
+    # HEAD 会误伤——每次改判据/文档都要重建一个逐字节相同的二进制才能起跑。
+    # `:/<path>` 是「相对仓库根」的 pathspec：$PROJECT 是 jepsen/ 子目录，
+    # 裸 `coord` 会被解释成 jepsen/coord（不存在）而静默退化成 HEAD 时间。
+    src_ts="$(git -C "$PROJECT" log -1 --format=%ct -- \
+        :/coord :/coord-server :/coord-core :/coord-proto :/coord-client \
+        :/coord-agent :/Cargo.toml :/Cargo.lock 2>/dev/null || echo 0)"
+    if [ -z "${src_ts:-}" ] || [ "$src_ts" = "0" ]; then
+      src_ts="$(git -C "$PROJECT" log -1 --format=%ct 2>/dev/null || echo 0)"
+    fi
     bin_ts="$(stat -c %Y "$ctl_real" 2>/dev/null || echo 0)"
-    if [ "$bin_ts" -lt "$commit_ts" ] && [ "${ALLOW_STALE_BINARY:-0}" != "1" ]; then
-      echo "refusing to start: $ctl_real (mtime $bin_ts) 早于 HEAD $commit ($commit_ts)" >&2
+    if [ "$bin_ts" -lt "$src_ts" ] && [ "${ALLOW_STALE_BINARY:-0}" != "1" ]; then
+      echo "refusing to start: $ctl_real (mtime $bin_ts) 早于最后一次 server 源码改动 ($src_ts)" >&2
       echo "  → 先 make binary/upload，或 ALLOW_STALE_BINARY=1 显式覆盖（会废掉本轮取证）" >&2
       exit 3
     fi
