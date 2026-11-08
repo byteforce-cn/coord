@@ -1785,7 +1785,7 @@
     证据 run 用 600000（72h 口径 ≈133s/1000 revs ⇒ ~30min，覆盖 120s 历史窗口）。"
     :default nil
     :parse-fn (fn [s] (Long/parseLong s))
-    :validate [#(and (integer? %) (<= 1_000 %))
+    :validate [#(and (integer? %) (<= 1000 %))
                "must be >= 1000 (server bound: [storage] changelog_retention_revisions)"]]
    [nil "--v2-history-window-secs S"
     "#272 (--workload kvv2): only send a historical read for a commit_ts
