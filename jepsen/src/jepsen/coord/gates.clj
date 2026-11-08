@@ -91,6 +91,20 @@
   "G6：单类 op 参与判定的最小完成数（不足只记录，不判定）。"
   10)
 
+(def default-min-op-ok-ratio-by-op
+  "按 op 类覆盖 `default-min-op-ok-ratio`（#310）。
+
+  v2 读路径对 `UNAVAILABLE` / `SAFE_TS_LAG` 直接记 `:info`、**不轮换节点**
+  （设计 §5.5：读不轮换节点、不换 read_ts，否则等于掩盖），而写路径会轮换
+  重试。于是「被 kill 的节点上 pin 住的 worker」发出的读是**结构性** `:info`
+  —— 它在分母里，但没重试机会。用同一个 0.9 同时承担「liveness」与「读可用率」
+  两个职责，会把正常扰动下的读判成「没跑」。
+
+  实测（72h kvv2 run，2026-11-04 起）：read 93.3% / write 96.9% / delete 96.9%，
+  单小时 read 最低 77%。0.85 只用来抓「读路径整体没通」（<85%），可用率本身
+  仍由 quiet 窗口判据负责。"
+  {:v2-read 0.85})
+
 (def default-min-agent-requests
   "AG-01（M5a）—— `--via-agent` 的 run 里，agent **代理面**请求计数的下界。
 
@@ -181,11 +195,29 @@
 ;; 数据面事实
 ;; ---------------------------------------------------------------------------
 
+;; ---------------------------------------------------------------------------
+;; 数据面事实
+;; ---------------------------------------------------------------------------
+
+(def ^:private write-ops
+  "算「写样本」的 `:f`。
+
+  教训（#308）：这里过去只认 `:write`，于是 `kvv2` / `txnv2` 的
+  `:v2-write`/`:v2-delete`/`:v2-txn` 既不算 premise、也不算 quiet 窗口可用率，
+  更不算 RTO —— 三条 gate 在 v2 run 上全部空转，而报告仍然 `:valid? true`。"
+  #{:write :v2-write :v2-delete :v2-txn})
+
+(def ^:private read-ops
+  "算「读样本」的 `:f`（t-end 的推导用）。"
+  #{:read :v2-read})
+
+(def ^:private data-ops (into read-ops write-ops))
+
 (defn- write-completions
   "`[[time type] ...]`：write op 的完成（`:ok`/`:info`/`:fail`），`time` 升序。"
   [history]
   (->> history
-       (filter #(and (= :write (:f %))
+       (filter #(and (contains? write-ops (:f %))
                      (contains? #{:ok :info :fail} (:type %))))
        (map (fn [op] [(long (:time op)) (:type op)]))
        (sort-by first)
@@ -225,11 +257,16 @@
   "G1 前提自检：每个 write *invoke* 的 `:value` 必须唯一。
 
   返回 `{:valid? bool :duplicate-values {...} :duplicate-value-count n
-  :writes n}`。`:value` 为 nil 的写（不应出现在 soak 上）不计入。"
+  :writes n}`。`:value` 为 nil 的写（不应出现在 soak 上）不计入。
+
+  **v2 工作负载显式关闭这条**（`check-premise? false`）：`kvv2` 的直写值只是
+  随机载荷、不是全局序号，MVCC 判据用 `commit_ts` 定位写入（TSO 单调由
+  `mvcc/checker` 判），前提自检不适用。关闭时仍会报 `:disabled? true`，
+  不会退回「writes 0 = 看着通过」的旧形态。"
   [history]
   (let [by-val (->> history
                     (filter #(and (= :invoke (:type %))
-                                  (= :write (:f %))
+                                  (contains? write-ops (:f %))
                                   (some? (:value %))))
                     (group-by :value))
         dups   (->> by-val
@@ -237,7 +274,9 @@
                     (sort-by (comp - count val))
                     vec)]
     {:valid? (empty? dups)
-     :writes (count (filter #(and (= :invoke (:type %)) (= :write (:f %)))
+     :writes (count (filter #(and (= :invoke (:type %))
+                                  (contains? write-ops (:f %))
+                                  (some? (:value %)))
                             history))
      :duplicate-value-count (count dups)
      :duplicate-values (into {} (take 20 dups))}))
@@ -267,8 +306,12 @@
     {:min-ratio min-ratio
      :min-sample min-sample
      :windows (count scored)
+     ;; `:samples` 让「有写但一条都没判」可以被显式说出来（#308）：之前
+     ;; `:judged 0` 与「没有写」无法区分，报告看起来总是绿的。
+     :samples (count writes)
      :judged (count judged)
      :skipped-small-sample (- (count scored) (count judged))
+     :not-judged? (and (pos? (count writes)) (zero? (count judged)))
      :worst-window (when worst
                      (select-keys worst [:start :end :avail]))
      :violations (mapv #(select-keys % [:start :end :avail]) viols)}))
@@ -323,8 +366,11 @@
   只算客户端 op（`:process` 为数字）：nemesis 的 `:start`/`:stop`/`:kill` … 与
   生成器 op 不参与。缺 `:process`（手写 fixture）时视为不可判定。
 
+  `min-ratio-by-op` 按 op 类覆盖下界（`#310`：v2-read 天然贴门槛，见
+  `default-min-op-ok-ratio-by-op`）。
+
   返回 `{:by-op {...} :judged n :skipped-small-sample n :violations [...]}`。"
-  [ops min-sample min-ratio]
+  [ops min-sample min-ratio min-ratio-by-op]
   (let [data (filterv #(and (contains? #{:ok :info :fail} (:type %))
                             (number? (:process %)))
                       ops)
@@ -344,12 +390,14 @@
                             :errors      (frequencies (keep :error group))}])))
         judged (filter #(>= (get-in by-op [% :judged]) min-sample)
                        (keys by-op))
+        floor-of (fn [f] (double (get min-ratio-by-op f min-ratio)))
         viols  (filterv (fn [f]
                           (< (double (/ (get-in by-op [f :ok])
                                         (get-in by-op [f :judged])))
-                             min-ratio))
+                             (floor-of f)))
                         judged)]
     {:min-ok-ratio min-ratio
+     :min-ok-ratio-by-op min-ratio-by-op
      :min-sample   min-sample
      :ops          (count by-op)
      :judged       (count judged)
@@ -360,6 +408,7 @@
      :by-op        by-op
      :violations   (mapv (fn [f] (assoc (get by-op f)
                                         :f f
+                                        :min-ok-ratio (floor-of f)
                                         :ratio (double (/ (get-in by-op [f :ok])
                                                           (get-in by-op [f :judged])))))
                          viols)}))
@@ -376,9 +425,16 @@
     :max-rto-seconds         全局 RTO 上界覆盖（默认按 `:nemesis` 分档）
     :nemesis                 本 run 的 nemesis 关键字（决定 RTO 分档）
     :check-premise?          值唯一性前提自检开关（默认 true；仅 T1.4 幂等
-                             workload 这种「故意重放同 value」的场景才关掉）
+                             workload 这种「故意重放同 value」的场景，或 v2
+                             工作负载（载荷不是全局序号、MVCC 用 commit_ts
+                             定位写入）才关掉；关掉时报告 `:disabled? true`）
     :min-op-ok-ratio         G6 单类 op 的 `:ok` 率下界（默认 0.1）
+    :min-op-ok-ratio-by-op   按 op 类覆盖 G6 下界（默认 `{:v2-read 0.85}`，
+                             见 `default-min-op-ok-ratio-by-op`）
     :min-op-sample           G6 单类 op 参与判定的最小完成数（默认 10）
+    :require-samples?        true = 长跑（soak）口径：有写样本却一条都没判
+                             （premise / availability / RTO）⇒ invalid。
+                             默认 false（矩阵/短跑窗口太少，Not-judged 是正常的）
     :agent-scrape            AG-01（可为 nil = 非 --via-agent 的 run）：路由证明的来源。
                              两种形式都支持：
                                * **函数**（生产用）：0 参，在 check 时抓一次 agent 指标
@@ -395,7 +451,8 @@
                              改为要求每个 agent 的指标端点都能抓到（:up?）。"
   ([] (checker {}))
   ([{:keys [quiet-availability-min quiet-min-sample max-rto-seconds
-            nemesis check-premise? min-op-ok-ratio min-op-sample
+            nemesis check-premise? min-op-ok-ratio min-op-ok-ratio-by-op
+            min-op-sample require-samples?
             agent-scrape min-agent-requests agent-local-surface?]}]
    ;; F-09：门槛必须用 `or` 解析，**不能**用 destructuring 的 `:or`。
    ;; `:or` 只在键缺失时生效；而调用方（coord.clj 的 checker 组合）总是显式
@@ -408,13 +465,16 @@
                                     default-quiet-availability-min)
          quiet-min-sample       (or quiet-min-sample default-quiet-min-sample)
          min-op-ok-ratio        (or min-op-ok-ratio default-min-op-ok-ratio)
+         min-op-ok-ratio-by-op  (merge default-min-op-ok-ratio-by-op
+                                        min-op-ok-ratio-by-op)
          min-op-sample          (or min-op-sample default-min-op-sample)
          min-agent-requests     (or min-agent-requests default-min-agent-requests)
+         require-samples?       (if (nil? require-samples?) false require-samples?)
          check-premise?         (if (nil? check-premise?) true check-premise?)]
      (reify checker/Checker
        (check [_ _test history _opts]
          (let [ops    (vec history)
-             data   (filterv #(contains? #{:read :write} (:f %)) ops)
+             data   (filterv #(contains? data-ops (:f %)) ops)
              t0     (some-> ops first :time long)
              t-end  (when (seq data) (apply max (map (comp long :time) data)))
              events (nemesis-events ops)
@@ -422,10 +482,13 @@
                                                    :t0 (or t0 0)
                                                    :t-end t-end})
              writes (write-completions ops)
+             write-invokes (count (filter #(and (= :invoke (:type %))
+                                                (contains? write-ops (:f %)))
+                                          ops))
              last-write-invoke
              (let [ts (->> ops
                            (filter #(and (= :invoke (:type %))
-                                         (= :write (:f %))))
+                                         (contains? write-ops (:f %))))
                            (map (comp long :time)))]
                (when (seq ts) (apply max ts)))
              budget (rto-budget nemesis max-rto-seconds)
@@ -435,7 +498,8 @@
              avail  (availability writes quiet quiet-min-sample
                                   quiet-availability-min)
              rto-r  (rto writes last-write-invoke disruptions budget)
-             liveness (op-liveness ops min-op-sample min-op-ok-ratio)
+             liveness (op-liveness ops min-op-sample min-op-ok-ratio
+                                    min-op-ok-ratio-by-op)
              ;; AG-01：路由证明。**在 check 时**抓（见 docstring）——
              ;; 抓失败（nil）也算「证不出来」，不能当通过。
              agent-scrape? (or (fn? agent-scrape) (map? agent-scrape))
@@ -486,6 +550,29 @@
                         (conj {:type :rto-exceeded
                                :p95 (:p95 rto-r)
                                :budget-seconds budget})
+
+                        ;; #308：长跑口径下「有样本却没判」必须 fail-closed，
+                        ;; 否则 op 名一改（或再引入新 workload），三条 gate 会
+                        ;; 安静地退回「空转 + valid」的旧形态。
+                        (and require-samples? check-premise?
+                             (pos? write-invokes) (zero? (:writes premise)))
+                        (conj {:type :premise-not-judged
+                               :write-invokes write-invokes
+                               :note "写样本存在，但前提自检一条也没判（op 名可能又没接上）"})
+
+                        (and require-samples? (pos? (count writes))
+                             (zero? (:judged avail)))
+                        (conj {:type :quiet-availability-not-judged
+                               :samples (count writes)
+                               :windows (:windows avail)
+                               :note "写完成存在，但没有任何 quiet 窗口参与判定"})
+
+                        (and require-samples? (seq disruptions)
+                             (zero? (:n rto-r)) (zero? (:unrecovered rto-r)))
+                        (conj {:type :rto-not-measured
+                               :disruptions (count disruptions)
+                               :not-measured (:not-measured rto-r)
+                               :note "有扰动，但一次 RTO 也没测到（measurable? 全为 false）"})
 
                         agent-fail?
                         (conj {:type :agent-route-not-proven

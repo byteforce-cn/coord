@@ -1,0 +1,6 @@
+;; read_ts=0（safe_ts 快照读）碰不到保留水位，即使返回 HISTORY_UNAVAILABLE 也
+;; 不进分母/分子；分母只有 1 条显式历史读 ⇒ 0% ⇒ valid。
+[ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 1},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 0, :error :history-unavailable, :time 2},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 5, :time 3},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 5, :value nil, :time 4}]

@@ -2173,7 +2173,12 @@
 (def ^:private v2-recent-ts
   "Recent successful commit timestamps: [{:ts n :at millis} …]. The kvv2
   generator only sends historical reads for ts values it has seen -- a read
-  that is guaranteed to fail would be a fake sample."
+  that is guaranteed to fail would be a fake sample.
+
+  Keep this ring larger than the longest configured history window: 400 entries
+  at the kvv2 rate (~0.3 ts/s) covers ~20 min, comfortably above the 600s
+  default. Shrinking the ring below the window would silently make older
+  timestamps unavailable to the generator."
   (atom []))
 
 (defn- record-v2-ts!
@@ -2184,12 +2189,20 @@
                              vec))))
 
 (defn recent-v2-ts
-  "A commit_ts observed within the last 600s, or nil."
-  []
-  (let [cutoff (- (System/currentTimeMillis) (* 600 1000))
-        xs (filter #(>= (long (:at %)) cutoff) @v2-recent-ts)]
-    (when (seq xs)
-      (:ts (rand-nth (vec xs))))))
+  "A commit_ts observed within the last `window-secs` (default 600), or nil.
+
+  The window is a *client* policy (`--v2-history-window-secs`), not the
+  server's retention: MVCC retention is counted in revisions
+  (`retention=100000 revs`), and at high write rates that is far less than the
+  nominal \"27.8h\" in the safe_ts comment. If the window outruns retention,
+  most historical reads land below the compaction watermark and come back as
+  HISTORY_UNAVAILABLE -- legal, but it starves the oracle (#311)."
+  ([] (recent-v2-ts 600))
+  ([window-secs]
+   (let [cutoff (- (System/currentTimeMillis) (* (long window-secs) 1000))
+         xs (filter #(>= (long (:at %)) cutoff) @v2-recent-ts)]
+     (when (seq xs)
+       (:ts (rand-nth (vec xs)))))))
 
 (defn- v2-error-class
   "Classifies a v2 failure: the `x-coord-error-code` trailer first, the gRPC
@@ -2360,8 +2373,12 @@
               (assoc op :type :info :error (v2-error-class err)
                      :requested-read-ts R :retried retried)
               :history-unavailable
+              ;; Legal (fail-closed), but the ratio is a sampling premise the
+              ;; checker enforces. Keep the server detail so a later failure
+              ;; can be attributed to the compaction watermark vs a split/merge
+              ;; import floor instead of being an untyped `:info` (#311).
               (assoc op :type :info :error :history-unavailable
-                     :requested-read-ts R :retried retried)
+                     :requested-read-ts R :detail (str err) :retried retried)
               :unauthenticated
               (assoc op :type :fail :error :unauthenticated)
               (recur (v2-rotate this idx) (inc tries) (conj retried err)))))))))

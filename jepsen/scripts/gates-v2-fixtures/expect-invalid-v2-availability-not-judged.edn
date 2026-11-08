@@ -1,0 +1,8 @@
+;; 有写完成，但两个 quiet 窗口各只有 1 条（< :quiet-min-sample 2）⇒ 一条都
+;; 没判。长跑口径（:require-samples?）必须红，不能退回「judged 0 + valid」。
+[{:type :invoke, :process 1, :f :v2-write, :key "zz-jepsen-v2-1", :value "w-1", :time 10}
+ {:type :ok,     :process 1, :f :v2-write, :key "zz-jepsen-v2-1", :value "w-1", :time 20}
+ {:type :info,   :process :nemesis, :f :kill, :time 110}
+ {:type :info,   :process :nemesis, :f :kill-stop, :time 200}
+ {:type :invoke, :process 1, :f :v2-write, :key "zz-jepsen-v2-2", :value "w-2", :time 210}
+ {:type :ok,     :process 1, :f :v2-write, :key "zz-jepsen-v2-2", :value "w-2", :time 220}]
