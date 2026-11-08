@@ -360,6 +360,16 @@ impl Config {
             ));
         }
 
+        // 10b. MVCC 保留窗口（按 revision）：太小会让历史读几乎全量
+        // HISTORY_UNAVAILABLE，太大等于不压缩、磁盘无界增长。
+        let retention = self.storage.changelog_retention_revisions;
+        if !(1_000..=100_000_000).contains(&retention) {
+            errs.push(format!(
+                "storage.changelog_retention_revisions must be in 1000..=100000000 \
+                 (got {retention})"
+            ));
+        }
+
         // 11. R-SVC-18：limits 段合法性（超时/规模/幂等参数）
         for (label, ms) in [
             ("limits.read_timeout_ms", self.limits.read_timeout_ms),
@@ -819,6 +829,16 @@ pub struct StorageConfig {
     /// 磁盘水位只读阈值（可用比例 < 该值置只读闸，默认 0.05）
     #[serde(default = "default_disk_readonly_ratio")]
     pub disk_readonly_ratio: f64,
+
+    /// MVCC 历史保留窗口，**按 revision 计数**（不是秒）：`read_ts` 低于
+    /// `current_revision - 该值` 的读返回 `HISTORY_UNAVAILABLE`。
+    ///
+    /// 这与「历史读窗口（秒）」是两套时钟：高写入速率下 100 000 revs 可能只有
+    /// 几分钟（72h Jepsen soak 实测 ≈300s，因为每次直写取一个 1024 的 TSO 批次），
+    /// 因此客户端历史读窗口必须落在它以内，或把本值调大。默认 100 000 与
+    /// v0.3.x 行为一致（不改变未显式配置的部署）。
+    #[serde(default = "default_changelog_retention_revisions")]
+    pub changelog_retention_revisions: u64,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -833,12 +853,17 @@ fn default_disk_readonly_ratio() -> f64 {
     0.05
 }
 
+fn default_changelog_retention_revisions() -> u64 {
+    100_000
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
             disk_warn_ratio: default_disk_warn_ratio(),
             disk_readonly_ratio: default_disk_readonly_ratio(),
+            changelog_retention_revisions: default_changelog_retention_revisions(),
         }
     }
 }
@@ -2141,6 +2166,40 @@ scheduler_paused = true
     }
 
     #[test]
+    #[test]
+    fn test_changelog_retention_revisions_defaults_and_bounds() {
+        // 默认与 v0.3.x 行为一致；证据 run 可通过 [storage] 显式调大（#311）。
+        assert_eq!(
+            Config::default().storage.changelog_retention_revisions,
+            100_000
+        );
+        for (value, ok) in [
+            (1_000u64, true),
+            (600_000, true),
+            (100_000_000, true),
+            (999, false),
+            (100_000_001, false),
+        ] {
+            let mut config = Config::default();
+            config.storage.changelog_retention_revisions = value;
+            assert_eq!(
+                config.validate().is_ok(),
+                ok,
+                "changelog_retention_revisions={value} 应为 {}",
+                if ok { "合法" } else { "非法" }
+            );
+        }
+    }
+
+    #[test]
+    fn test_storage_changelog_retention_parses_from_toml() {
+        let config: Config = toml::from_str("[storage]\nchangelog_retention_revisions = 600000\n")
+            .expect("storage.retention parses");
+        assert_eq!(config.storage.changelog_retention_revisions, 600_000);
+        let default: Config = toml::from_str("[storage]\n").expect("empty storage section");
+        assert_eq!(default.storage.changelog_retention_revisions, 100_000);
+    }
+
     fn test_kv_t_watch_retention_bounds_are_inclusive() {
         for (value, ok) in [
             (3_600u64, true),

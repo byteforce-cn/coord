@@ -167,6 +167,10 @@
      "\n"
      "[storage]\n"
      "data_dir = \"" (:data-dir db) "\"\n"
+     ;; #311：MVCC 保留窗口（revision 计数）可由 --mvcc-retention-revs 覆盖。
+     ;; 不传时服务端默认 100000；证据 run 显式调大以覆盖客户端历史读窗口。
+     (when-let [n (:mvcc-retention-revs test)]
+       (str "changelog_retention_revisions = " n "\n"))
      "\n"
      "[security]\n"
      "auth_enabled = true\n"

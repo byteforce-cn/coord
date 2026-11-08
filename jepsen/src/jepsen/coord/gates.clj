@@ -213,13 +213,25 @@
 
 (def ^:private data-ops (into read-ops write-ops))
 
+(def ^:private legit-availability-infos
+  "不计入 quiet 可用率分母的 `:info` 错误码（#308 修好 v2 op 覆盖后才可见）。
+
+  `SAFE_TS_LAG` 是 v2 直写的**设计内背压**：region 还没追上 safe_ts，服务端
+  fail-closed 拒绝（不生效、不给错值），客户端换号重试或记 `:info`。设计 §5.4
+  明确它「都不是失败，但都要可见」——所以从可用率分母里剔除、单独计数；
+  真正的不可用（`:unavailable` / `:unavailable-maybe-applied` / 超时）仍计入。
+
+  v1 没有这个错误码，行为不变。"
+  #{:safe-ts-lag})
+
 (defn- write-completions
-  "`[[time type] ...]`：write op 的完成（`:ok`/`:info`/`:fail`），`time` 升序。"
+  "`[[time type error] ...]`：write op 的完成（`:ok`/`:info`/`:fail`），`time`
+  升序；`error` 只在 `:info` 上有值（见 `legit-availability-infos`）。"
   [history]
   (->> history
        (filter #(and (contains? write-ops (:f %))
                      (contains? #{:ok :info :fail} (:type %))))
-       (map (fn [op] [(long (:time op)) (:type op)]))
+       (map (fn [op] [(long (:time op)) (:type op) (:error op)]))
        (sort-by first)
        vec))
 
@@ -282,16 +294,24 @@
      :duplicate-values (into {} (take 20 dups))}))
 
 (defn- availability-in
-  "窗口内 write 完成的 `:ok` 率。`{:ok n :total n :ratio r}`；窗口内没有
-  write 完成时 ratio = 1.0（无样本 ≠ 不可用）。"
+  "窗口内 write 完成的 `:ok` 率。`{:ok n :total n :ratio r :excluded n
+  :excluded-by-error {kw n}}`；窗口内没有可判定的写完成时 ratio = 1.0
+  （无样本 ≠ 不可用）。`legit-availability-infos` 里的背压类 `:info` 从分母
+  剔除并计数。"
   [writes {:keys [start end]}]
-  (let [in-win (filter (fn [[t _]] (and (>= (long t) (long start))
-                                       (< (long t) (long end))))
+  (let [in-win (filter (fn [[t _ _]] (and (>= (long t) (long start))
+                                          (< (long t) (long end))))
                        writes)
-        total  (count in-win)
-        ok     (count (filter (fn [[_ ty]] (= :ok ty)) in-win))]
+        legit? (fn [[_ ty err]] (and (= :info ty)
+                                     (contains? legit-availability-infos err)))
+        excluded (filterv legit? in-win)
+        scored   (remove legit? in-win)
+        total    (count scored)
+        ok       (count (filter (fn [[_ ty _]] (= :ok ty)) scored))]
     {:ok ok
      :total total
+     :excluded (count excluded)
+     :excluded-by-error (frequencies (map (fn [[_ _ e]] e) excluded))
      :ratio (if (pos? total) (double (/ ok total)) 1.0)}))
 
 (defn- availability
@@ -309,6 +329,12 @@
      ;; `:samples` 让「有写但一条都没判」可以被显式说出来（#308）：之前
      ;; `:judged 0` 与「没有写」无法区分，报告看起来总是绿的。
      :samples (count writes)
+     ;; 设计 §5.4：SAFE_TS_LAG 次数必须可见（不在分母里，但不能静默）。
+     :excluded (reduce + 0 (map #(get-in % [:avail :excluded]) scored))
+     :excluded-by-error (reduce (fn [m w] (merge-with + m
+                                                     (get-in w [:avail :excluded-by-error])))
+                                {}
+                                scored)
      :judged (count judged)
      :skipped-small-sample (- (count scored) (count judged))
      :not-judged? (and (pos? (count writes)) (zero? (count judged)))

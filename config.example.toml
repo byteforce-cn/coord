@@ -30,6 +30,15 @@ bootstrap = true               # 仅首节点 true
 [storage]
 data_dir = "/var/lib/coord"
 
+# MVCC 历史保留窗口，**按 revision 计数**（默认 100000）。
+#
+# `read_ts` 低于 `current_revision - 该值` 的读返回 `HISTORY_UNAVAILABLE`。
+# 注意它和「历史读窗口（秒）」是两套时钟：直写每次取号会预占一个 TSO 批次
+# （1024），高写入速率下 100000 revs 可能只有几分钟（72h soak 实测 ≈300s）。
+# 客户端要保持的历史读跨度（`--v2-history-window-secs`）必须落在它以内；
+# 需要更长的历史读就把它调大（代价是 changelog 占盘更多）。
+# changelog_retention_revisions = 100000
+
 # Multi-Raft 多 Region 模式（默认关闭 = 单 Raft，字节级退化）
 #
 # enabled = true 时：

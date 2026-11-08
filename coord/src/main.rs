@@ -3890,7 +3890,12 @@ async fn run_server(
 
     // 8. 启动 Changelog Compaction 后台任务（leader 经 raft 提案
     //    compact revision（节点一致）+ 定时 redb 文件级 compact 空间回收）
-    let compaction_config = CompactionConfig::default();
+    // 保留窗口可在 `[storage]` 显式配置（默认 100 000 revs，与历史行为一致）：
+    // 它是 revision 计数，不是秒；历史读窗口（秒）必须落在它以内。
+    let compaction_config = CompactionConfig {
+        changelog_retention_revisions: cfg.storage.changelog_retention_revisions,
+        ..CompactionConfig::default()
+    };
     let retention = compaction_config.changelog_retention_revisions;
     let compaction_interval = compaction_config.interval;
     let auto_compact = compaction_config.auto_compact;
