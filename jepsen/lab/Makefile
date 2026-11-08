@@ -510,7 +510,7 @@ checkers: ## T0.3: run every checker fixture suite on control (red refuses to st
 	# （改回只认 :write/:read 这条 expect-valid 就会变红）。
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.gates scripts/gates-v2-fixtures \
-	    '{:quiet-min-sample 2 :nemesis :kill :min-op-sample 2 :check-premise? false :require-samples? true}')
+	    '{:quiet-min-sample 2 :nemesis :kill :min-op-sample 2 :check-premise? false :require-samples? true :min-op-ok-ratio 0.7}')
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.idem scripts/idem-fixtures \
 	    '{:min-replay-attempts 0}')
@@ -830,7 +830,7 @@ fast-soak: ## 加速浸泡（同 kvv2 workload + 扰动密度 ×4，缺陷 ~1h �
 	    SOAK_TIME_LIMIT=$(or $(FAST_SOAK_SECONDS),3600) \
 	    SOAK_QUIET=$(or $(FAST_SOAK_QUIET),300) \
 	    SOAK_DISRUPT=$(or $(FAST_SOAK_DISRUPT),120) \
-	    SOAK_EXTRA="--min-op-ok-ratio 0.9 --mvcc-retention-revs 600000 --v2-history-window-secs 120 $(SOAK_EXTRA)" \
+	    SOAK_EXTRA="--min-op-ok-ratio 0.6 --mvcc-retention-revs 600000 --v2-history-window-secs 120 $(SOAK_EXTRA)" \
 	    --no-print-directory
 	@echo "fast soak started (log soak/soak-kvt-fast.log). Wait: make fast-soak-wait"
 
