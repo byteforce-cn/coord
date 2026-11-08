@@ -113,6 +113,44 @@
          (into {} (map (fn [[k rs]] [k (vec rs)]))))))
 
 ;; ---------------------------------------------------------------------------
+;; Historical-read sampling premise
+;; ---------------------------------------------------------------------------
+
+(def default-history-unavailable-cap
+  "设计 §5.4：历史读上的 `HISTORY_UNAVAILABLE` 是合法结果（fail-closed、不会
+  给错值），但必须计入失败率上限：超过它说明「历史读真的在采样」这个前提不
+  成立，整轮 run 不能当证据（不是正确性问题，是取证问题）。
+
+  分母只算**显式历史读**（`read_ts > 0`）：`read_ts = 0` 是 safe_ts 快照读，
+  而压缩水位恒 `< safe_ts`，它碰不到保留窗口，混进分母只会稀释比率。"
+  0.01)
+
+(defn history-unavailable-stats
+  "历史读失败率：`{:historical-reads n :unavailable m :ratio r :cap c
+  :judged bool}`。
+
+  `judged` 为 false 表示这段历史里没有显式历史读 —— 调用方必须显式说不判
+  （`:not-judged`），不能把 0/0 当 0%。这就是 #311 的核心：数字要进证据面，
+  而不是安静地缺席。"
+  ([history] (history-unavailable-stats history default-history-unavailable-cap))
+  ([history cap]
+   (let [read-ts-of (fn [op] (long (or (:requested-read-ts op) (:read-ts op) 0)))
+         historical (count (filter #(and (= :v2-read (:f %))
+                                         (= :invoke (:type %))
+                                         (pos? (read-ts-of %)))
+                                   history))
+         unavailable (count (filter #(and (= :v2-read (:f %))
+                                          (= :info (:type %))
+                                          (= :history-unavailable (:error %))
+                                          (pos? (read-ts-of %)))
+                                    history))]
+     {:historical-reads historical
+      :unavailable unavailable
+      :ratio (when (pos? historical) (/ (double unavailable) historical))
+      :cap (double cap)
+      :judged (pos? historical)})))
+
+;; ---------------------------------------------------------------------------
 ;; Checks
 ;; ---------------------------------------------------------------------------
 

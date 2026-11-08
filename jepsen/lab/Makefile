@@ -315,7 +315,7 @@ MATRIX_M5_DIFF  := map:none txn:none watch:kill-agent lease:none
         setup stage upload smoke quick test matrix matrix-multi matrix-m1 \
         matrix-m2 matrix-m5 matrix-m5b matrix-m5-diff soak soakfull soak-status soak-tail \
         soak-results soak-stop soak-wait nightly \
-        checkers env-reset \
+        checkers env-reset rejudge fast-soak fast-soak-wait fast-soak-results fast-soak-stop \
         soak soak-status soak-tail soak-stop soak-results soak-diag logs \
         docker-%
 
@@ -799,6 +799,30 @@ soak-kv-t: ## #272: KV-T v2 soak (kvv2 + mvcc checker; SOAK_TIME_LIMIT=259200 = 
 	    SOAK_EXTRA="--min-op-ok-ratio 0.9 $(SOAK_EXTRA)" --no-print-directory
 	@echo "KV-T v2 soak started (log soak/soak-kvt.log). Stop: make soak-kv-t-stop"
 
+fast-soak: ## #312: 加速浸泡（同 kvv2 workload + 扰动密度 ×4，缺陷 ~1h 暴露；FAST_SOAK_SECONDS=3600）
+	# 72h 是取证时长，不是验证时长：缺陷类别（单类 op 持续性失败、历史读
+	# 率超限、mvcc 违规）是**速率**现象 —— 同 workload 下把 rate 提到 4 op/s
+	# 并把 quiet/disrupt 压到 180/120s，1h 就有 ~14.4k op + 12 次扰动（72h
+	# run 是 13 万 op / 216 次扰动 = 3 次/h），单类 op 的样本很快过门槛。
+	# 它**不**能代替 72h 取证（时长类前提：时钟漂移、保留窗口跨小时、
+	# 长时间稳态），只用于「先确认这版代码/判据不会立刻红」。
+	$(MAKE) soak WORKLOAD=kvv2 KV_T=1 SOAK_NAME=kvt-fast \
+	    SOAK_NEMESIS=soak SOAK_RATE=4 CONCURRENCY=5n \
+	    SOAK_TIME_LIMIT=$(or $(FAST_SOAK_SECONDS),3600) \
+	    SOAK_QUIET=$(or $(FAST_SOAK_QUIET),180) \
+	    SOAK_DISRUPT=$(or $(FAST_SOAK_DISRUPT),120) \
+	    SOAK_EXTRA="--min-op-ok-ratio 0.9 $(SOAK_EXTRA)" --no-print-directory
+	@echo "fast soak started (log soak/soak-kvt-fast.log). Wait: make fast-soak-wait"
+
+fast-soak-wait: ## #312: block until the fast soak finishes
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt-fast ./scripts/coord-soak.sh wait $(SOAK_WAIT_INTERVAL))
+
+fast-soak-results: ## #312: summarize the fast soak results
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt-fast ./scripts/coord-soak.sh results)
+
+fast-soak-stop: ## #312: cancel the fast soak
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt-fast ./scripts/coord-soak.sh stop)
+
 soak-kv-t-status: ## #272: KV-T v2 soak progress
 	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh status)
 
@@ -813,6 +837,12 @@ soak-kv-t-stop: ## #272: cancel the KV-T v2 soak
 
 soak-kv-t-results: ## #272: summarize the KV-T v2 soak results
 	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh results)
+
+rejudge: ## #312: 用**当前** checker 离线复判既有 store（改判据不必重跑 72h）
+	# 示例：make rejudge                       （store/coord/latest）
+	#       make rejudge STORE=store/coord/2026-11-04T14:44:43.344872688Z
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/rejudge.clj $(or $(STORE),store/coord/latest))
 
 soak-status: ## Soak progress + latest log lines
 	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh status)
