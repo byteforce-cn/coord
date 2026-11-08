@@ -2337,6 +2337,15 @@ impl<B: StorageBackend> MvccStorage<B> {
                 }
                 continue;
             }
+            // T 时刻**确定不存在**：changelog 里 T 之前对该 Key 的最后一次变更就是
+            // 删除（因此 `view` 里没有值，但 `last_write` 有记录）。必须先看它：
+            // `create_revision` 在 delete → re-create 后仍保留**最初**创建 revision
+            // （`KvMetadata::mark_deleted`/`update`），所以「删过又重建」的 Key 用
+            // create_revision 证明不了“T 时不存在”，会被误判成不可复原。
+            // 实测（kvv2 fast-soak）：显式历史读 1.5% 的 HISTORY_UNAVAILABLE 来自这里。
+            if last_write.contains_key(&key) {
+                continue;
+            }
             // T 之后改过（含"T 之后被删除"）、且 T 之前的历史已被压缩：
             // 若无元数据可证它当时还不存在，该 Key 在 T 时刻的值不可复原。
             let created_after_target = self
@@ -7076,6 +7085,46 @@ mod tests {
         assert!(
             matches!(err, Error::RevisionCompacted { .. }),
             "err: {err:?}"
+        );
+    }
+
+    /// 回归（**范围路径**）：T 之前删除、T 之后重建的 Key 在 T 时刻**确定不存在**
+    /// （changelog 里有那次删除），不得因为 `create_revision` 在 delete/re-create
+    /// 后保留最初创建 revision 而误判成「不可复原」。
+    ///
+    /// 实测（kvv2 fast-soak）：`delete` + 重新 `put` 同一 Key 后，任何落在删除与
+    /// 重建之间的显式历史读都会返回 HISTORY_UNAVAILABLE（约 1.5%），而单键路径
+    /// （`get_at_revision`）在同一时刻正确返回「不存在」——两条路径口径必须一致。
+    #[test]
+    fn test_historical_range_read_treats_deleted_key_as_absent() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"k", b"v1", None).unwrap(); // rev 1: 创建
+        storage.delete(b"k").unwrap(); // rev 2: 删除
+        storage.put(b"filler", b"x", None).unwrap(); // rev 3
+        storage.put(b"k", b"v2", None).unwrap(); // rev 4: 重建
+
+        // T=3（删除之后、重建之前）：Key 确定不存在，范围读不得报不可复原。
+        assert_eq!(storage.get_at_revision(b"k", 3).unwrap(), None);
+        let results = storage.range_at_revision(b"k", b"l", 0, 3).unwrap();
+        assert!(
+            results.is_empty(),
+            "deleted-before-T key must be absent: {results:?}"
+        );
+
+        // T=1（删除之前）：仍是原始值。
+        assert_eq!(
+            storage.get_at_revision(b"k", 1).unwrap(),
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(
+            storage.range_at_revision(b"k", b"l", 0, 1).unwrap(),
+            vec![(b"k".to_vec(), b"v1".to_vec())]
+        );
+
+        // T=4：重建后的值。
+        assert_eq!(
+            storage.get_at_revision(b"k", 4).unwrap(),
+            Some(b"v2".to_vec())
         );
     }
 
