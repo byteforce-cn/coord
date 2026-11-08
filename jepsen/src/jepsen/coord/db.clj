@@ -306,6 +306,18 @@
       ;; Upload the binary (idempotent)
       (c/upload (:coord-bin db) (str (:coord-dir db) "/coord"))
       (c/exec :chmod :+x (str (:coord-dir db) "/coord"))
+      ;; Evidence identity (#303): the node-side hash is what the run actually
+      ;; executed. `Test version` only names the *jepsen* checkout, so a stale
+      ;; upload went undetected for a whole 72h round once. collect-evidence.sh
+      ;; compares this line with the control-side hash and refuses a MANIFEST
+      ;; when they disagree.
+      (let [hash (try
+                   (-> (c/exec :sha256sum (str (:coord-dir db) "/coord"))
+                       :out str/trim (str/split #"\s+") first)
+                   (catch Exception e
+                     (warn e "could not hash the node-side coord binary on" node)
+                     "unavailable"))]
+        (info "node coord binary sha256" node hash))
       ;; Config
       (write-config! db test node)
       ;; Log file

@@ -115,6 +115,45 @@ cmd_start() {
   echo "   extra: mixture-ratio=${mixture_ratio:-(default 4,2,2)} map-min-deletes=${map_min_deletes:-(off)} extra=${extra:-(none)}"
   echo "   log: $LOG"
 
+  # 证据身份（#303）：72h 一轮最贵的失败是「跑的二进制不对」——Test version 只
+  # 反映 jepsen 检出，不证明 server 二进制来自同一棵树。这里把控制机二进制哈希
+  # 与源码树固定到日志头，节点侧哈希由 db.clj 的 setup! 写进 jepsen.log，
+  # collect-evidence.sh 三者对不上就拒绝出 MANIFEST。
+  local ctl_bin="$PROJECT/coord" ctl_real="" ctl_sha="-" commit="-" tree="-"
+  local dirty="-"
+  if [ -f "$ctl_bin" ]; then
+    ctl_real="$(readlink -f "$ctl_bin")"
+    ctl_sha="$(sha256sum "$ctl_real" | cut -d' ' -f1)"
+  fi
+  if git -C "$PROJECT" rev-parse --git-dir >/dev/null 2>&1; then
+    commit="$(git -C "$PROJECT" rev-parse HEAD 2>/dev/null || echo -)"
+    tree="$(git -C "$PROJECT" write-tree 2>/dev/null || echo -)"
+    dirty="$(git -C "$PROJECT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  echo "   control-binary: ${ctl_sha} ${ctl_real:-$ctl_bin}"
+  echo "   control-commit: ${commit}"
+  echo "   control-tree:   ${tree}"
+  echo "   control-dirty:  ${dirty}"
+
+  # 取证 run 必须从**干净树 + 新鲜二进制**起跑（#174/#303 的教训：一整轮 72h
+  # 因 make binary 抢在 merge 前构建而作废）。两个判据都是 mtime/porcelain 级，
+  # 秒级可查；确需越界（开发/刻意复现）用 ALLOW_STALE_BINARY=1 / ALLOW_DIRTY_TREE=1。
+  if [ "$dirty" != "-" ] && [ "$dirty" != "0" ] && [ "${ALLOW_DIRTY_TREE:-0}" != "1" ]; then
+    echo "refusing to start: worktree has ${dirty} uncommitted path(s) — 取证 run 必须可复现" >&2
+    echo "  → 先提交/收敛改动，或 ALLOW_DIRTY_TREE=1 显式覆盖（该轮不能当 GA 证据）" >&2
+    exit 3
+  fi
+  if [ -n "$ctl_real" ] && [ "$commit" != "-" ]; then
+    local commit_ts bin_ts
+    commit_ts="$(git -C "$PROJECT" log -1 --format=%ct 2>/dev/null || echo 0)"
+    bin_ts="$(stat -c %Y "$ctl_real" 2>/dev/null || echo 0)"
+    if [ "$bin_ts" -lt "$commit_ts" ] && [ "${ALLOW_STALE_BINARY:-0}" != "1" ]; then
+      echo "refusing to start: $ctl_real (mtime $bin_ts) 早于 HEAD $commit ($commit_ts)" >&2
+      echo "  → 先 make binary/upload，或 ALLOW_STALE_BINARY=1 显式覆盖（会废掉本轮取证）" >&2
+      exit 3
+    fi
+  fi
+
   # Detach into its own session/process group so neither SSH nor SIGHUP can
   # kill it. The PID recorded is the session leader; `stop` kills the group.
   # The redirect is on `setsid` itself (NOT inside the bash -c string):
