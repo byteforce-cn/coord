@@ -491,7 +491,15 @@
                                     default-quiet-availability-min)
          quiet-min-sample       (or quiet-min-sample default-quiet-min-sample)
          min-op-ok-ratio        (or min-op-ok-ratio default-min-op-ok-ratio)
-         min-op-ok-ratio-by-op  (merge default-min-op-ok-ratio-by-op
+         ;; 按 op 的默认地板只能比全局地板**更松**（取较小者）：`--min-op-ok-ratio`
+         ;; 是显式的整体口径（例如 fast-soak 用 0.6 —— 密集扰动下读在窗口内故意
+         ;; 不重试），不能又被 v2-read 的 0.85 默认值顶回去。显式传入的
+         ;; `:min-op-ok-ratio-by-op` 仍然生效。
+         min-op-ok-ratio-by-op  (merge (into {}
+                                              (map (fn [[f floor]]
+                                                     [f (min (double floor)
+                                                             (double min-op-ok-ratio))]))
+                                              default-min-op-ok-ratio-by-op)
                                         min-op-ok-ratio-by-op)
          min-op-sample          (or min-op-sample default-min-op-sample)
          min-agent-requests     (or min-agent-requests default-min-agent-requests)
