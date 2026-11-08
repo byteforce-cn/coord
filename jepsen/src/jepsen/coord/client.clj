@@ -2173,7 +2173,12 @@
 (def ^:private v2-recent-ts
   "Recent successful commit timestamps: [{:ts n :at millis} …]. The kvv2
   generator only sends historical reads for ts values it has seen -- a read
-  that is guaranteed to fail would be a fake sample."
+  that is guaranteed to fail would be a fake sample.
+
+  Keep this ring larger than the longest configured history window: 400 entries
+  at the kvv2 rate (~0.3 ts/s) covers ~20 min, comfortably above the 600s
+  default. Shrinking the ring below the window would silently make older
+  timestamps unavailable to the generator."
   (atom []))
 
 (defn- record-v2-ts!
@@ -2184,12 +2189,20 @@
                              vec))))
 
 (defn recent-v2-ts
-  "A commit_ts observed within the last 600s, or nil."
-  []
-  (let [cutoff (- (System/currentTimeMillis) (* 600 1000))
-        xs (filter #(>= (long (:at %)) cutoff) @v2-recent-ts)]
-    (when (seq xs)
-      (:ts (rand-nth (vec xs))))))
+  "A commit_ts observed within the last `window-secs` (default 600), or nil.
+
+  The window is a *client* policy (`--v2-history-window-secs`), not the
+  server's retention: MVCC retention is counted in revisions
+  (`retention=100000 revs`), and at high write rates that is far less than the
+  nominal \"27.8h\" in the safe_ts comment. If the window outruns retention,
+  most historical reads land below the compaction watermark and come back as
+  HISTORY_UNAVAILABLE -- legal, but it starves the oracle (#311)."
+  ([] (recent-v2-ts 600))
+  ([window-secs]
+   (let [cutoff (- (System/currentTimeMillis) (* (long window-secs) 1000))
+         xs (filter #(>= (long (:at %)) cutoff) @v2-recent-ts)]
+     (when (seq xs)
+       (:ts (rand-nth (vec xs)))))))
 
 (defn- v2-error-class
   "Classifies a v2 failure: the `x-coord-error-code` trailer first, the gRPC
@@ -2249,15 +2262,31 @@
   (mod (inc (long idx)) (count @(:channels this))))
 
 (defn- v2-get-ts
-  "Allocates one timestamp (GetTs), rotating nodes on UNAVAILABLE."
+  "Allocates one timestamp (GetTs). Never throws: returns `{:ok ts}` or
+  `{:class kw :detail str}` after a bounded number of rotations.
+
+  Why a result instead of an exception: `invoke-coord!`'s re-auth branch acts on
+  op *results*, so a `UNAUTHENTICATED` here has to come back as `:fail
+  :unauthenticated`. Throwing escaped `invoke!` entirely, which jepsen logs as
+  \"Process N crashed\" and records as `indeterminate: …`; the worker then stops
+  issuing ops, silently shrinking the sample (#309). Rotating 16 times on a
+  CCT-level rejection is pure waste too: all nodes share the expired session."
   [this]
   (loop [idx (leader-start this :v2-tso) i 0]
     (let [{:keys [ok err]} (v2-call-on this idx p/tso-v2-get-ts-method
                                        (p/tso-get-ts-req) :v2-tso)]
       (cond
-        ok (p/tso-get-ts ok)
-        (> i 16) (throw err)
-        :else (recur (v2-rotate this idx) (inc i))))))
+        ok {:ok (p/tso-get-ts ok)}
+
+        ;; Session-level: rotating cannot help, `invoke-coord!` refreshes the CCT.
+        (= :unauthenticated (v2-error-class err))
+        {:class :unauthenticated :detail (str err)}
+
+        (> i 16)
+        {:class (v2-error-class err) :detail (str err)}
+
+        :else
+        (recur (v2-rotate this idx) (inc i))))))
 
 (defn- v2-put!
   "Direct write with TS allocation and the documented retry budget.
@@ -2286,44 +2315,62 @@
                :request-id req-id)
 
         :else
-        (let [ts (or ts (v2-get-ts this))
-              {:keys [ok err]} (v2-call-on this idx f (req-of ts) (:f op))]
-          (cond
-            ok
-            (do (record-v2-ts! ts)
-                (assoc op :type :ok :commit-ts ts :request-id req-id :retried retried))
-
-            :else
-            (case (v2-error-class err)
-              :commit-rejected
-              (recur idx (inc tries) nil (conj retried ts))
-
-              :safe-ts-lag
-              (assoc op :type :info :error :safe-ts-lag :attempted-ts [ts]
-                     :request-id req-id :retried retried)
-
-              (:epoch-stale :not-leader :unavailable)
-              (recur (v2-rotate this idx) (inc tries) ts (conj retried ts))
-
+        (let [alloc (if ts {:ok ts} (v2-get-ts this))]
+          (if-let [cls (:class alloc)]
+            ;; Timestamp allocation failed: the write was never sent, so this is
+            ;; NOT "maybe applied". Classify it like any other op result.
+            (case cls
               :unauthenticated
               (assoc op :type :fail :error :unauthenticated)
 
-              (assoc op :type :fail :error (str "v2 " (v2-error-class err))
-                     :code (p/error-code err) :detail (str err)))))))))
+              (:epoch-stale :not-leader :unavailable)
+              (recur (v2-rotate this idx) (inc tries) nil retried)
+
+              (assoc op :type :info :error (or cls :tso-unavailable)
+                     :request-id req-id :detail (:detail alloc) :retried retried))
+            (let [ts (:ok alloc)
+                  {:keys [ok err]} (v2-call-on this idx f (req-of ts) (:f op))]
+              (cond
+                ok
+                (do (record-v2-ts! ts)
+                    (assoc op :type :ok :commit-ts ts :request-id req-id
+                           :retried retried))
+
+                :else
+                (case (v2-error-class err)
+                  :commit-rejected
+                  (recur idx (inc tries) nil (conj retried ts))
+
+                  :safe-ts-lag
+                  (assoc op :type :info :error :safe-ts-lag :attempted-ts [ts]
+                         :request-id req-id :retried retried)
+
+                  (:epoch-stale :not-leader :unavailable)
+                  (recur (v2-rotate this idx) (inc tries) ts (conj retried ts))
+
+                  :unauthenticated
+                  (assoc op :type :fail :error :unauthenticated)
+
+                  (assoc op :type :fail :error (str "v2 " (v2-error-class err))
+                         :code (p/error-code err) :detail (str err)))))))))))
 
 (defn- invoke-v2-write [this op] (v2-put! this op))
 (defn- invoke-v2-delete [this op] (v2-put! this op))
 
 (defn- invoke-v2-ts
   [this op]
-  (try
-    (let [ts (v2-get-ts this)]
-      (record-v2-ts! ts)
-      (assoc op :type :ok :ts ts))
-    (catch StatusRuntimeException e
-      (if (= :unauthenticated (v2-error-class e))
-        (assoc op :type :fail :error :unauthenticated)
-        (assoc op :type :info :error :unavailable-maybe-applied)))))
+  (let [r (v2-get-ts this)]
+    (cond
+      (:ok r)
+      (do (record-v2-ts! (:ok r))
+          (assoc op :type :ok :ts (:ok r)))
+
+      (= :unauthenticated (:class r))
+      (assoc op :type :fail :error :unauthenticated)
+
+      :else
+      (assoc op :type :info :error (or (:class r) :tso-unavailable)
+             :detail (:detail r)))))
 
 (defn- invoke-v2-read
   "Snapshot / historical read. read_ts=0 means safe_ts; the echoed read_ts is
@@ -2360,8 +2407,12 @@
               (assoc op :type :info :error (v2-error-class err)
                      :requested-read-ts R :retried retried)
               :history-unavailable
+              ;; Legal (fail-closed), but the ratio is a sampling premise the
+              ;; checker enforces. Keep the server detail so a later failure
+              ;; can be attributed to the compaction watermark vs a split/merge
+              ;; import floor instead of being an untyped `:info` (#311).
               (assoc op :type :info :error :history-unavailable
-                     :requested-read-ts R :retried retried)
+                     :requested-read-ts R :detail (str err) :retried retried)
               :unauthenticated
               (assoc op :type :fail :error :unauthenticated)
               (recur (v2-rotate this idx) (inc tries) (conj retried err)))))))))
@@ -2558,6 +2609,28 @@
                            (p/kv2-range-req* {:key "/jepsen/v2/ready" :read-ts 0})))))
     (catch Exception e {:err e})))
 
+;; ---------------------------------------------------------------------------
+;; 增量 op 日志（长跑快速失败）
+;; ---------------------------------------------------------------------------
+
+(def ^:private ^Object op-log-lock
+  "`invoke!` 会从多个 worker 线程进来；写日志必须串行，否则 72h 的 op 日志会
+  交错成不可读的 EDN（watchdog 会解析失败，而失败又被当成「还没样本」）。"
+  (Object.))
+
+(defn- log-op!
+  "把一条 op（invoke 或完成）追加成一行 EDN；`path` 为 nil 时零开销。
+
+  为什么要单独写文件：jepsen 只在 run 结束才落 `history.edn`，而「快速失败」
+  的全部价值在于**跑到一半就能判**。watchdog 读这个文件调 `rejudge.clj`，
+  判据与收尾 checker 是同一份实现。"
+  [path op]
+  (when path
+    (locking op-log-lock
+      (with-open [w (clojure.java.io/writer (clojure.java.io/file path) :append true)]
+        (.write w (pr-str (into {} (remove (comp nil? val) op))))
+        (.write w "\n")))))
+
 (defrecord CoordClient [nodes root-password cct channels raw-channels leader-idx
                         last-rev last-watch-rev parse-values?
                         ;; M5a：鉴权用的端点（server）可以与 ops 端点（agent 隧道）
@@ -2575,7 +2648,9 @@
                         ;; 全量拒绝，setup! 的 v1 探针会 60 次后失败。
                         kv-t?
                         ;; #272：v2 workload 名（txnv2 需要在 setup! 里播种账本）。
-                        v2-workload]
+                        v2-workload
+                        ;; 增量 op 日志（长跑 watchdog 的输入；nil = 不写）。
+                        op-log]
   client/Client
   (open! [this test node]
     (info "Opening coord client on" node)
@@ -2697,7 +2772,23 @@
         this)))
 
   (invoke! [this test op]
-    (invoke-coord! this test op))
+    (log-op! op-log op)
+    (try
+      (let [result (invoke-coord! this test op)]
+        (log-op! op-log result)
+        result)
+      (catch StatusRuntimeException e
+        ;; Last-resort guard (#309): an unclassified gRPC error must become an op
+        ;; result, never escape into the generator. Escaping kills the worker
+        ;; process ("Process N crashed"), records `indeterminate: …` and stops
+        ;; that worker from issuing further ops -- a silent sample cut, not a
+        ;; verdict. Non-gRPC exceptions still propagate: they are client bugs.
+        (let [result (if (= :unauthenticated (v2-error-class e))
+                       (assoc op :type :fail :error :unauthenticated)
+                       (assoc op :type :info :error (v2-error-class e)
+                              :detail (str e)))]
+          (log-op! op-log result)
+          result))))
 
   (close! [this test]
     (doseq [^ManagedChannel ch (distinct (concat @(:raw-channels this)
@@ -2738,4 +2829,6 @@
                  (:mq-topic opts)
                  ;; #272：--kv-t（v2 数据面探针）与 v2 workload 名
                  (boolean (:kv-t opts))
-                 (:workload opts)))
+                 (:workload opts)
+                 ;; 增量 op 日志（`--op-log`；nil = 关闭，行为不变）
+                 (:op-log opts)))

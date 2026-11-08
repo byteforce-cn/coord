@@ -315,7 +315,8 @@ MATRIX_M5_DIFF  := map:none txn:none watch:kill-agent lease:none
         setup stage upload smoke quick test matrix matrix-multi matrix-m1 \
         matrix-m2 matrix-m5 matrix-m5b matrix-m5-diff soak soakfull soak-status soak-tail \
         soak-results soak-stop soak-wait nightly \
-        checkers env-reset \
+        checkers env-reset rejudge fast-soak fast-soak-wait fast-soak-results fast-soak-stop \
+        fast-soak-fail-fast \
         soak soak-status soak-tail soak-stop soak-results soak-diag logs \
         docker-%
 
@@ -488,6 +489,9 @@ checkers: ## T0.3: run every checker fixture suite on control (red refuses to st
 	    ./scripts/check-kv-t-wire.clj --selftest)
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    ./scripts/check-kv-t-wire.clj)
+	# #309：v2 时间戳分配不得把异常穿透 generator（8 条断言：分类/兜底/不吞 bug）。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    ./scripts/test-v2-get-ts-classification.clj)
 	# #272：MVCC 判据（快照读/事务原子性/TSO/safe_ts）的 15 个负控制先行 fixture。
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.mvcc scripts/mvcc-fixtures \
@@ -502,6 +506,11 @@ checkers: ## T0.3: run every checker fixture suite on control (red refuses to st
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.gates scripts/gates-fixtures-defaults \
 	    '{:nemesis :kill}')
+	# #308：kvv2 形状的 gates 负控制 —— 三条判据在 v2 op 名上必须真的判到
+	# （改回只认 :write/:read 这条 expect-valid 就会变红）。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.gates scripts/gates-v2-fixtures \
+	    '{:quiet-min-sample 2 :nemesis :kill :min-op-sample 2 :check-premise? false :require-samples? true}')
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.idem scripts/idem-fixtures \
 	    '{:min-replay-attempts 0}')
@@ -767,7 +776,10 @@ matrix-m5b: checkers ## M5b agent 本地数据面矩阵（cache/mq × none|kill-
 # ---------------------------------------------------------------------------
 
 soak: ## Start the soak in the background on control (SOAK_HOURS / SOAK_TIME_LIMIT, SOAK_RATE, SOAK_REGIONS...)
-	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME='$(SOAK_NAME)' ./scripts/coord-soak.sh start \
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME='$(SOAK_NAME)' \
+	    SOAK_WATCHDOG=$(or $(SOAK_WATCHDOG),0) \
+	    SOAK_WATCHDOG_INTERVAL=$(or $(SOAK_WATCHDOG_INTERVAL),300) \
+	    ./scripts/coord-soak.sh start \
 	    $(if $(SOAK_TIME_LIMIT),--time-limit $(SOAK_TIME_LIMIT),--hours $(SOAK_HOURS)) \
 	    --rate $(SOAK_RATE) --quiet $(SOAK_QUIET) --disrupt $(SOAK_DISRUPT) \
 	    $(if $(SOAK_NEMESIS),--nemesis $(SOAK_NEMESIS)) \
@@ -796,8 +808,37 @@ soak-kv-t: ## #272: KV-T v2 soak (kvv2 + mvcc checker; SOAK_TIME_LIMIT=259200 = 
 	# 打旧节点、换届后永久失败即为一例）。GA 长稳用 0.9 的 per-op 下界。
 	$(MAKE) soak WORKLOAD=kvv2 KV_T=1 SOAK_NAME=kvt \
 	    SOAK_NEMESIS=soak SOAK_RATE=0.5 \
+	    SOAK_WATCHDOG=1 SOAK_WATCHDOG_INTERVAL=$(or $(SOAK_WATCHDOG_INTERVAL),300) \
 	    SOAK_EXTRA="--min-op-ok-ratio 0.9 $(SOAK_EXTRA)" --no-print-directory
 	@echo "KV-T v2 soak started (log soak/soak-kvt.log). Stop: make soak-kv-t-stop"
+
+fast-soak: ## 加速浸泡（同 kvv2 workload + 扰动密度 ×4，缺陷 ~1h 暴露；FAST_SOAK_SECONDS=3600）
+	# 72h 是取证时长，不是验证时长：缺陷类别（单类 op 持续性失败、历史读
+	# 率超限、mvcc 违规）是**速率**现象 —— 同 workload 下把 rate 提到 4 op/s
+	# 并把 quiet/disrupt 压到 300/120s，1h 就有 ~14.4k op + ~8 次扰动（72h
+	# run 是 13 万 op / 216 次扰动 = 3 次/h），单类 op 的样本很快过门槛。
+	# 它**不**能代替 72h 取证（时长类前提：时钟漂移、保留窗口跨小时、
+	# 长时间稳态），只用于「先确认这版代码/判据不会立刻红」。
+	$(MAKE) soak WORKLOAD=kvv2 KV_T=1 SOAK_NAME=kvt-fast \
+	    SOAK_NEMESIS=soak SOAK_RATE=4 CONCURRENCY=5n \
+	    SOAK_WATCHDOG=1 SOAK_WATCHDOG_INTERVAL=$(or $(SOAK_WATCHDOG_INTERVAL),60) \
+	    SOAK_TIME_LIMIT=$(or $(FAST_SOAK_SECONDS),3600) \
+	    SOAK_QUIET=$(or $(FAST_SOAK_QUIET),300) \
+	    SOAK_DISRUPT=$(or $(FAST_SOAK_DISRUPT),120) \
+	    SOAK_EXTRA="--min-op-ok-ratio 0.9 $(SOAK_EXTRA)" --no-print-directory
+	@echo "fast soak started (log soak/soak-kvt-fast.log). Wait: make fast-soak-wait"
+
+fast-soak-wait: ## block until the fast soak finishes
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt-fast ./scripts/coord-soak.sh wait $(SOAK_WAIT_INTERVAL))
+
+fast-soak-results: ## summarize the fast soak results
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt-fast ./scripts/coord-soak.sh results)
+
+fast-soak-stop: ## cancel the fast soak
+	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt-fast ./scripts/coord-soak.sh stop)
+
+fast-soak-fail-fast: ## show the fast soak's fail-fast verdict (empty = it never fired)
+	$(call runctl, cd $(CTRL_PROJECT) && cat soak/fail-fast-kvt-fast.edn 2>/dev/null || echo "no fail-fast.edn")
 
 soak-kv-t-status: ## #272: KV-T v2 soak progress
 	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh status)
@@ -813,6 +854,12 @@ soak-kv-t-stop: ## #272: cancel the KV-T v2 soak
 
 soak-kv-t-results: ## #272: summarize the KV-T v2 soak results
 	$(call runctl, cd $(CTRL_PROJECT) && SOAK_NAME=kvt ./scripts/coord-soak.sh results)
+
+rejudge: ## 用**当前** checker 离线复判既有 store（改判据不必重跑 72h）
+	# 示例：make rejudge                       （store/coord/latest）
+	#       make rejudge STORE=store/coord/2026-11-04T14:44:43.344872688Z
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/rejudge.clj $(or $(STORE),store/coord/latest))
 
 soak-status: ## Soak progress + latest log lines
 	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh status)

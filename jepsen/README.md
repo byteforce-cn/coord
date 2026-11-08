@@ -266,6 +266,8 @@ short soak smoke run (e.g. `--time-limit 120`).
 | `MAP_MIN_DELETES` | map 面的 delete 样本门槛（2h 档用 200） |
 | `SOAK_MIX` | `--workload soakfull` 的面比例（默认 = 已实现的面按声明权重） |
 | `SOAK_EXTRA` | 通用透传：原样拼进 soak 的 lein 命令（新选项不必再改脚本三处） |
+| `SOAK_WATCHDOG` | `1` = 起跑时同时拉起运行中复判（默认 `0`；`soak-kv-t`/`fast-soak` 强制 `1`） |
+| `SOAK_WATCHDOG_INTERVAL` | watchdog 复判间隔秒数（默认 300；fast-soak 用 60） |
 | `SOAK_SECONDS`（nightly） | `nightly-soak-gates.sh` 第 4 步的时长（默认 7200 = 2h；72h = 259200） |
 
 > 离线：`coord-soak.sh` 的 `lein` 调用默认带 `-o`（控制机/容器没有
@@ -302,6 +304,49 @@ began). Property (c) is the stale-read bug class this lab caught.
 LEIN_ROOT=true lein run -m clojure.main \
   /tmp/validate.clj <path-to>/history.edn
 ```
+
+### 改判据怎么验证 —— 离线复判（不要重跑 72h）
+
+72h 是**取证**成本，不是**验证**成本：一轮 72h 的历史里已有十几万条 op，用
+当前 checker/gates 重判只要十几秒。`scripts/rejudge.clj`（`make rejudge`）
+就是这条路径，也是长跑 watchdog 的判据内核：
+
+```bash
+make rejudge                                   # store/coord/latest
+make rejudge STORE=store/coord/2026-11-04T14:44:43.344872688Z
+# 控制机上等价于：
+LEIN_ROOT=true lein -o run -m clojure.main scripts/rejudge.clj <store|history.edn>
+```
+
+输出逐 op 的 `invoke/ok/info/fail/ok-ratio`、历史读失败率、mvcc 判据
+（errors/sample/judged）、gates 的 `judged` 面，末行是
+`rejudge-verdict: valid | invalid | insufficient-sample`（+ `rejudge-reason`）。
+判据空转会被单独报出来（`rejudge-warning: gates-…-not-judged`），不再
+藏在「valid」里。
+
+验证成本阶梯（改哪一层就只验到哪一层）：
+
+| 改动 | 先验证 | 再验证 | 才需要 72h |
+|:--|:--|:--|:--|
+| checker / 门槛 / 阈值（test-side） | `make checkers`（fixture 负控制） | `make rejudge`（既有 store，秒级） | 否 —— 最终取证时顺带 |
+| client / workload 形状 | `make checkers` | `make fast-soak`（同 workload + 加密扰动，~1h） | 否（除非改的是取证口径） |
+| server 行为 | 单测 + `make matrix-m3`（45s/格） | `make fast-soak` | 是（最终证据） |
+
+### 运行中快速失败（watchdog）
+
+`make soak-kv-t` / `make fast-soak` 默认带 `SOAK_WATCHDOG=1`：客户端把每条
+op（invoke + 完成）追加到 `soak/soak-<name>-ops.edn`，`scripts/soak-watchdog.sh`
+每 300s（fast-soak 60s）用**当前** checker/gates 复判这份增量历史：
+
+- `:mvcc-violation` / `:history-unavailable-rate` / 判据空转 / RTO 类 ⇒ 立即停跑；
+- `:op-liveness` / `:quiet-availability` ⇒ 连续 2 次才停（分区窗口的瞬时下滑）；
+- `insufficient-sample`（前段样本没到门槛）不算红；
+- 复判器连续 3 次失败 ⇒ 也停（看不到判据 = fail-closed）。
+
+停跑时写 `soak/fail-fast-<name>.edn`（原因、当时的 op 比率、op 日志路径）并
+`coord-soak.sh stop`。`make fast-soak-fail-fast` 查看结论；正常跑完则没有这个
+文件。手动跑：`./scripts/soak-watchdog.sh <op-log> [interval]`（`WATCHDOG_ONCE=1`
+只判一次）。
 
 ### Checker gates — `src/jepsen/coord/gates.clj`
 

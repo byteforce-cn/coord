@@ -12,6 +12,17 @@
 #   <场景>      自由文本标签，如 soak-72h / m1-map / t5.2-agent-smoke
 #   STORE_DIR   默认 store/coord/latest
 #
+# 取证身份（#303，fail-closed）：MANIFEST 只记录**这次 run 实际跑的**二进制，
+# 不是「归档时仓库 HEAD」。三个来源必须一致：
+#   * 起跑日志（coord-soak.sh 的 `control-binary/commit/tree/dirty` 头）；
+#   * jepsen.log 里 db.clj setup! 写的节点侧 `node coord binary sha256 <node> <sha>`；
+#   * 控制机二进制哈希与节点哈希逐字节相同。
+# 任一项缺失或不一致 ⇒ 退出码 3，**不生成 MANIFEST**（72h 因跑错二进制作废过
+# 一整轮；事后补记的哈希没有取证价值）。
+#   历史 run（早于这三行）只能用 COORD_IDENTITY_OVERRIDE=<file> 事后重建：
+#   文件按 `key: value` 写 commit / tree / control-binary-sha256 /
+#   node-binary-sha256（可多行），原文件会被归档并在 MANIFEST 里标注来源。
+#
 # 产物：
 #   MANIFEST.md     环境 / commit / 命令行 / 参数 / 种子 / 版本 / 哈希 / 门槛结论
 #   run.log         jepsen.log（原样；**>50MiB 时**归档为 run.log.gz，MANIFEST 注明源大小）
@@ -52,7 +63,61 @@ if [[ -z "$REPO_ROOT" ]]; then
 fi
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${COORD_EVIDENCE_DIR:-$REPO_ROOT/../coord-evidence-out}/${TS}-${SCENARIO}"
+
+# ---------------------------------------------------------------------------
+# 取证身份（#303）
+# ---------------------------------------------------------------------------
+
+TEST_DIR="${TEST_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+SOAK_LOG="${SOAK_LOG:-}"
+if [[ -z "$SOAK_LOG" && -d "$TEST_DIR/soak" ]]; then
+    # 取最近修改的一份 soak 日志；也可用 SOAK_LOG 显式指定。
+    SOAK_LOG=$(ls -t "$TEST_DIR"/soak/soak*.log 2>/dev/null | head -1)
+fi
+
+identity_src="log"
+ctl_sha="" ctl_commit="" ctl_tree="" ctl_dirty="" node_shas="" IDENTITY_COPY_SRC=""
+if [[ -n "${COORD_IDENTITY_OVERRIDE:-}" ]]; then
+    [[ -f "$COORD_IDENTITY_OVERRIDE" ]] || {
+        echo "COORD_IDENTITY_OVERRIDE not found: $COORD_IDENTITY_OVERRIDE" >&2; exit 3; }
+    IDENTITY_COPY_SRC="$COORD_IDENTITY_OVERRIDE"
+    ident() { grep -E "^$1:" "$COORD_IDENTITY_OVERRIDE" | head -1 | cut -d: -f2- | tr -d ' '; }
+    ctl_commit="$(ident commit)"
+    ctl_tree="$(ident tree)"
+    ctl_sha="$(ident control-binary-sha256)"
+    node_shas="$(grep -E "^node-binary-sha256:" "$COORD_IDENTITY_OVERRIDE" \
+                 | cut -d: -f2- | tr -d ' ' | sort -u | tr '\n' ' ')"
+    identity_src="override(post-hoc) — 见 identity.txt"
+else
+    [[ -n "$SOAK_LOG" && -f "$SOAK_LOG" ]] || {
+        echo "evidence identity: no soak log (set SOAK_LOG)" >&2; exit 3; }
+    awk_hdr() { awk -v k="$1" '$1==k":" {print $2; exit}' "$SOAK_LOG"; }
+    ctl_sha="$(awk_hdr control-binary)"
+    ctl_commit="$(awk_hdr control-commit)"
+    ctl_tree="$(awk_hdr control-tree)"
+    ctl_dirty="$(awk_hdr control-dirty)"
+    node_shas="$(grep -oE 'node coord binary sha256 [^ ]+ [0-9a-f]{64}' "$STORE/jepsen.log" 2>/dev/null \
+                 | awk '{print $NF}' | sort -u | tr '\n' ' ')"
+fi
+
+identity_fail() {
+    echo "evidence identity: $*" >&2
+    echo "refusing to write MANIFEST (run identity is not verifiable, #303)" >&2
+    exit 3
+}
+[[ "$ctl_sha" =~ ^[0-9a-f]{64}$ ]] || identity_fail "control binary sha256 missing/invalid (${ctl_sha:-<empty>})"
+[[ "$ctl_commit" =~ ^[0-9a-f]{7,40}$ ]] || identity_fail "run commit missing/invalid (${ctl_commit:-<empty>})"
+[[ "$ctl_tree" =~ ^[0-9a-f]{7,40}$ ]] || identity_fail "run tree missing/invalid (${ctl_tree:-<empty>})"
+[[ -n "$node_shas" ]] || identity_fail "no node-side sha256 in jepsen.log (did db.clj setup! run?)"
+for n in $node_shas; do
+    [[ "$n" == "$ctl_sha" ]] || identity_fail "control ($ctl_sha) != node ($n)"
+done
+
+# 身份校验通过后才落盘：失败时不留半份归档（acceptance: MANIFEST 不生成）。
 mkdir -p "$OUT"
+if [[ -n "${IDENTITY_COPY_SRC:-}" ]]; then
+    cp "$IDENTITY_COPY_SRC" "$OUT/identity.txt"
+fi
 
 # ---------------------------------------------------------------------------
 # 采集
@@ -91,7 +156,6 @@ RUN_GZ=no
 if [[ "$RUN_SIZE" -gt 52428800 ]]; then RUN_GZ="pending"; fi
 
 # 门槛摘要（有 lein/clojure 时用 reader 取嵌套的 checker 结果，失败则退化为提示）
-TEST_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 run_summarizer() {
     # 同族问题：lab 里没有外网，plain `lein` 会在依赖解析上挂到 300s 超时，
     # 于是每份 MANIFEST 的门槛结论都停在 "unknown"（看起来像"没结论"，实际是
@@ -118,8 +182,9 @@ fi
 # MANIFEST
 # ---------------------------------------------------------------------------
 
-coord_commit=$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo unknown)
-tree_dirty=$(cd "$REPO_ROOT" && { git diff --quiet 2>/dev/null && echo clean || echo DIRTY; })
+archiving_commit=$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo unknown)
+coord_commit="$ctl_commit"
+tree_dirty=$(cd "$REPO_ROOT" && { git diff --quiet 2>/dev/null && echo clean || echo DIRTY; })  # 归档时检出
 coord_tag=$(cd "$REPO_ROOT" && git describe --tags --always 2>/dev/null || echo -)
 commit_date=$(cd "$REPO_ROOT" && git log -1 --format=%cI 2>/dev/null || echo -)
 
@@ -167,8 +232,13 @@ cat > "$OUT/MANIFEST.md" <<EOF
 | 场景 | \`${SCENARIO}\` |
 | UTC 时间戳 | \`${TS}\` |
 | run 开始 / 结束 | ${started} / ${finished} |
-| coord commit | \`${coord_commit}\` (${coord_tag}, ${commit_date}) |
-| 工作树 | **${tree_dirty}** |
+| coord run commit（#303） | \`${coord_commit}\` |
+| coord run tree | \`${ctl_tree}\` |
+| 控制机二进制 sha256 | \`${ctl_sha}\` |
+| 节点二进制 sha256 | \`${node_shas}\` |
+| 取证身份来源 | ${identity_src} |
+| 起跑时未提交改动数 | ${ctl_dirty:-unknown} |
+| 归档时检出 | \`${archiving_commit}\` (${coord_tag}, ${commit_date}) — **${tree_dirty}** |
 | coord-proto 哈希（16） | \`${proto_hash}\` |
 | coord 配置生成器哈希（16） | `${config_hash}` (jepsen/src/jepsen/coord/db.clj — 节点 TOML 由它生成) |
 | Jepsen 版本 | ${jepsen_version} |
@@ -201,8 +271,8 @@ cat > "$OUT/MANIFEST.md" <<EOF
 \`\`\`bash
 # 用记录下来的种子重建 jittered nemesis 排期（应与本次 run 一致）
 lein run -m clojure.main scripts/replay.clj ${STORE} --seed ${seed}
-# 重跑 checker（不需要集群）
-lein run -m clojure.main scripts/validate-soak-checker.clj ${STORE}
+# 用**当前** checker/gates 重判（不需要集群）
+lein run -m clojure.main scripts/rejudge.clj ${STORE}
 \`\`\`
 EOF
 

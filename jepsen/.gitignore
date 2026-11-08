@@ -16,3 +16,7 @@ soak-curves.pid
 # #272: the KV-T v2 soak keeps its own log/pid (SOAK_NAME=kvt)
 soak-*.pid
 soak-*.log
+
+# watchdog / op-log 运行产物（`--op-log` 与 fail-fast 结论，禁止入库）
+soak-*.edn
+fail-fast*.edn

@@ -1,0 +1,22 @@
+;; 没有显式历史读（read_ts 全为 0）⇒ 历史读率 `:judged false`：显式「不判」，
+;; 而不是静默地报 0%。这样的 run 不能引用历史读可用率作为证据。
+[ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 1},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 2},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 3},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 4},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 5},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 6},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 7},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 8},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 9},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 10},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 11},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 12},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 13},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 14},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 15},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 16},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 17},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 18},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :time 19},
+ {:type :ok,     :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 0, :value nil, :time 20}]

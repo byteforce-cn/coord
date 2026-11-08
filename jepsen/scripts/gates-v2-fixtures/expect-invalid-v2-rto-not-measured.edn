@@ -1,0 +1,9 @@
+;; 有扰动，但 kill-stop 落在写阶段之后（measurable? 全 false）⇒ RTO 一条都
+;; 没测到。availability 因为第一个窗口有 2 条样本而正常判定，确保这条红只
+;; 来自 :rto-not-measured。
+[{:type :invoke, :process 1, :f :v2-write, :key "zz-jepsen-v2-1", :value "w-1", :time 10}
+ {:type :ok,     :process 1, :f :v2-write, :key "zz-jepsen-v2-1", :value "w-1", :time 20}
+ {:type :invoke, :process 1, :f :v2-write, :key "zz-jepsen-v2-2", :value "w-2", :time 30}
+ {:type :ok,     :process 1, :f :v2-write, :key "zz-jepsen-v2-2", :value "w-2", :time 40}
+ {:type :info,   :process :nemesis, :f :kill, :time 110}
+ {:type :info,   :process :nemesis, :f :kill-stop, :time 200}]

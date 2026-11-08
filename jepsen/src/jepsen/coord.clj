@@ -896,15 +896,16 @@
 (defn- kvv2-gen
   "Direct writes + snapshot reads + TSO + a slice of historical reads.
 
-  Historical reads only use a commit_ts the client actually observed in the
-  last 600s; when there is none yet, that slot becomes a read_ts=0 read (a
-  read that is guaranteed to fail would be a fake sample)."
-  [_opts]
+  Historical reads only use a commit_ts the client actually observed within
+  `--v2-history-window-secs` (default 600s); when there is none yet, that slot
+  becomes a read_ts=0 read (a read that is guaranteed to fail would be a fake
+  sample)."
+  [opts]
   (let [w  (fn [_ _] {:type :invoke, :f :v2-write, :key (kvv2-key)
                       :value (str "w-" (rand-int 1000000))})
         d  (fn [_ _] {:type :invoke, :f :v2-delete, :key (kvv2-key)})
         r  (fn [_ _] {:type :invoke, :f :v2-read, :key (kvv2-key) :read-ts 0})
-        h  (fn [_ _] (if-let [ts (client/recent-v2-ts)]
+        h  (fn [_ _] (if-let [ts (client/recent-v2-ts (:v2-history-window-secs opts))]
                        {:type :invoke, :f :v2-read, :key (kvv2-key) :read-ts ts}
                        {:type :invoke, :f :v2-read, :key (kvv2-key) :read-ts 0}))
         ts (fn [_ _] {:type :invoke, :f :v2-ts})]
@@ -1241,7 +1242,10 @@
                    (contains? #{:kvv2 :txnv2} workload)
                    (mvcc/checker {:min-writes (or (:v2-min-writes opts) 100)
                                   :min-reads  (or (:v2-min-reads opts) 100)
-                                  :min-ts     (or (:v2-min-ts opts) 50)})
+                                  :min-ts     (or (:v2-min-ts opts) 50)
+                                  ;; 设计 §5.4 的 1% 上限；rejudge/测试可覆盖。
+                                  :max-history-unavailable-ratio
+                                  (:max-history-unavailable-ratio opts)})
 
                    ;; T1.4：幂等专项有专用 checker（op 形状不是 register）。
                    (= :idempotency workload)
@@ -1366,9 +1370,22 @@
                   ;; F-13：单类 op 的 :ok 率下界（防御「这个 workload 根本没跑」）
                   :min-op-ok-ratio        (:min-op-ok-ratio opts)
                   :min-op-sample          (:min-op-sample opts)
+                  ;; #308：长跑口径下，三条 gate 只要有样本却没判一条就 fail-closed。
+                  ;; 只在 soak（长跑/加速浸泡）上开：矩阵 run 的窗口本来就短，
+                  ;; 「样本不足 ⇒ 不判」是正常形态，不是缺陷。
+                  :require-samples?       (if (some? (:require-samples? opts))
+                                            (:require-samples? opts)
+                                            (and (soak? opts)
+                                                 (contains? #{:kvv2 :txnv2} (:workload opts))))
                   ;; A dedicated idempotency workload deliberately replays the
                   ;; same value, so the uniqueness premise does not hold there.
-                  :check-premise?         (not= :idempotency (:workload opts))
+                  ;; kvv2/txnv2 likewise: their payload is random data, not a
+                  ;; global sequence number -- MVCC places writes by commit_ts
+                  ;; (mvcc/checker judges TSO monotonicity). Disabling it is
+                  ;; explicit (`:disabled? true`), never a silent "writes 0".
+                  :check-premise?         (and (not= :idempotency (:workload opts))
+                                               (not (contains? #{:kvv2 :txnv2}
+                                                               (:workload opts))))
                   ;; AG-01：--via-agent 的 run 必须能回答「这次真的经过 agent 了吗」
                   ;; （否则端点写错 = 直连假绿）。抓取在 check 时做：agent 每 run
                   ;; 新进程，计数从 0 起，run 后抓到 > 0 才算证明。
@@ -1760,6 +1777,15 @@
     :default nil
     :parse-fn (fn [s] (Long/parseLong s))
     :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--v2-history-window-secs S"
+    "#272 (--workload kvv2): only send a historical read for a commit_ts
+    observed within the last S seconds (default 600). Must stay inside the
+    server's MVCC retention window, which is COUNTED IN REVISIONS
+    (`[storage] retention=100000 revs`): at ~334 rev/s that is ~300s, so a
+    600s client window samples mostly-compacted history (#311)."
+    :default 600
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be > 0"]]
    [nil "--checker CHECKER"
     "linear (knossos, default) or soak (O(n), for long 72h runs)"
     :default  nil
@@ -1807,6 +1833,12 @@
     :default  nil
     :parse-fn (fn [s] (Long/parseLong s))
     :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--op-log PATH"
+    "append every client op (invoke + completion) to PATH as one EDN map
+    per line. `scripts/soak-watchdog.sh` re-judges that growing history with the
+    current checker and stops the soak on the first violation, instead of
+    waiting for the end-of-run checker. Off by default."
+    :default nil]
    [nil "--min-op-ok-ratio RATIO"
     "G6 (F-13): minimum :ok ratio per client op type (default 0.1). A type with
     >= --min-op-sample completions below the ratio means that path never really

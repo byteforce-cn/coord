@@ -113,6 +113,44 @@
          (into {} (map (fn [[k rs]] [k (vec rs)]))))))
 
 ;; ---------------------------------------------------------------------------
+;; Historical-read sampling premise
+;; ---------------------------------------------------------------------------
+
+(def default-history-unavailable-cap
+  "设计 §5.4：历史读上的 `HISTORY_UNAVAILABLE` 是合法结果（fail-closed、不会
+  给错值），但必须计入失败率上限：超过它说明「历史读真的在采样」这个前提不
+  成立，整轮 run 不能当证据（不是正确性问题，是取证问题）。
+
+  分母只算**显式历史读**（`read_ts > 0`）：`read_ts = 0` 是 safe_ts 快照读，
+  而压缩水位恒 `< safe_ts`，它碰不到保留窗口，混进分母只会稀释比率。"
+  0.01)
+
+(defn history-unavailable-stats
+  "历史读失败率：`{:historical-reads n :unavailable m :ratio r :cap c
+  :judged bool}`。
+
+  `judged` 为 false 表示这段历史里没有显式历史读 —— 调用方必须显式说不判
+  （`:not-judged`），不能把 0/0 当 0%。这就是 #311 的核心：数字要进证据面，
+  而不是安静地缺席。"
+  ([history] (history-unavailable-stats history default-history-unavailable-cap))
+  ([history cap]
+   (let [read-ts-of (fn [op] (long (or (:requested-read-ts op) (:read-ts op) 0)))
+         historical (count (filter #(and (= :v2-read (:f %))
+                                         (= :invoke (:type %))
+                                         (pos? (read-ts-of %)))
+                                   history))
+         unavailable (count (filter #(and (= :v2-read (:f %))
+                                          (= :info (:type %))
+                                          (= :history-unavailable (:error %))
+                                          (pos? (read-ts-of %)))
+                                    history))]
+     {:historical-reads historical
+      :unavailable unavailable
+      :ratio (when (pos? historical) (/ (double unavailable) historical))
+      :cap (double cap)
+      :judged (pos? historical)})))
+
+;; ---------------------------------------------------------------------------
 ;; Checks
 ;; ---------------------------------------------------------------------------
 
@@ -343,8 +381,14 @@
 (defn checker
   "Builds the MVCC checker. Thresholds are fail-closed: below any of them the
   history is invalid (`:insufficient-sample`), because a run that barely
-  happened must never look green."
-  [{:keys [min-writes min-reads min-ts]
+  happened must never look green.
+
+  历史读失败率（设计 §5.4）也是判据：显式历史读到 `HISTORY_UNAVAILABLE` 是
+  合法结果，但超过 `:max-history-unavailable-ratio`（默认 1%）说明「历史读
+  真的在采样」这个前提不成立 ⇒ `:reason :history-unavailable-rate`。这条
+  指标过去只存在于设计文档里，72h run 上 10.08% 无人判红（#311）；现在它
+  进 `results.edn`（`:history`）并由 checker 判，不再靠人工算。"
+  [{:keys [min-writes min-reads min-ts max-history-unavailable-ratio]
     :or {min-writes 100 min-reads 100 min-ts 50}}]
   (reify jepsen.checker/Checker
     (check [_ _test history _opts]
@@ -360,6 +404,9 @@
                                     (count (:reads op))))
             tss (count (filter #(and (= :v2-ts (:f %)) (= :ok (:type %))) history))
             unknown (unknown-ts-txn-values history)
+            hist (history-unavailable-stats
+                  history
+                  (or max-history-unavailable-ratio default-history-unavailable-cap))
             errors (atom [])]
         (let [judged (merge (check-reads errors writes-by-key unknown history)
                             (check-final-convergence errors history)
@@ -371,19 +418,28 @@
               enough? (and (>= (:writes sample) min-writes)
                            (>= (:reads sample) min-reads)
                            (>= (:ts sample) min-ts))
+              hist-fail? (and (:judged hist)
+                              (> (double (:ratio hist)) (double (:cap hist))))
               errs @errors]
           (cond
             (seq errs)
-            {:valid? false :reason :mvcc-violation
+            {:valid? false :reason :mvcc-violation :history hist
              :mvcc {:sample sample :judged judged
                     :errors (take 20 errs) :errors-count (count errs)}}
 
             (not enough?)
-            {:valid? false :reason :insufficient-sample
+            {:valid? false :reason :insufficient-sample :history hist
              :mvcc {:sample sample :judged judged
                     :need {:writes min-writes :reads min-reads :ts min-ts}}}
 
+            ;; 采样前提不成立时，历史读本身仍然一条没错（HISTORY_UNAVAILABLE
+            ;; 是 fail-closed 的合法结果）；判红的是「这一轮没有在真正采历史读」。
+            hist-fail?
+            {:valid? false :reason :history-unavailable-rate :history hist
+             :mvcc {:sample sample :judged judged
+                    :errors [] :errors-count 0}}
+
             :else
-            {:valid? true
+            {:valid? true :history hist
              :mvcc {:sample sample :judged judged
                     :errors [] :errors-count 0}}))))))

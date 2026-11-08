@@ -1713,6 +1713,42 @@ impl CoordNode {
 ///
 /// 语义与水位观测日志详见 `CoordNode::ensure_linearizable_on` 的文档（region 0 的
 /// 日志格式保持稳定，soak 取证日志不变量不变）。
+/// Classifies a linearizable-read barrier failure into the client-visible status.
+///
+/// - `ForwardToLeader`: a **routing signal**, not an internal error. Wrapping it
+///   in INTERNAL makes v2 clients classify it as `:other` (non-retriable) and a
+///   single election pins Delete on the old node forever (v2 Delete's pre-read
+///   goes through this barrier; Put's `client_write` forwards by itself, so only
+///   the delete side is exposed). Same口径 as `map_client_write_error`:
+///   `UNAVAILABLE + NOT_LEADER`.
+/// - `QuorumNotEnough`: the leader's leadership probe could not reach a quorum.
+///   Transient availability, NOT a leadership change, so plain `UNAVAILABLE`
+///   (without NOT_LEADER); INTERNAL made one op in the 72h soak non-retriable
+///   (`v2 :other`, #304).
+/// - anything else stays INTERNAL (fail-closed, keeps real bugs visible).
+fn linearizable_read_status<C>(
+    e: &openraft::error::RaftError<C, openraft::error::LinearizableReadError<C>>,
+) -> tonic::Status
+where
+    C: openraft::RaftTypeConfig<NodeId = u64>,
+{
+    use openraft::error::{LinearizableReadError, RaftError};
+
+    let msg = format!("linearizable read failed: {e}");
+    match e {
+        RaftError::APIError(LinearizableReadError::ForwardToLeader(_)) => {
+            coord_core::error_code::attach(
+                tonic::Status::unavailable(msg),
+                coord_core::error_code::CoordErrorCode::NotLeader,
+            )
+        }
+        RaftError::APIError(LinearizableReadError::QuorumNotEnough(_)) => {
+            tonic::Status::unavailable(msg)
+        }
+        _ => tonic::Status::internal(msg),
+    }
+}
+
 pub async fn ensure_linearizable_barrier(
     node_id: u64,
     read_timeout: std::time::Duration,
@@ -1726,28 +1762,7 @@ pub async fn ensure_linearizable_barrier(
             tokio::time::timeout(timeout, raft.ensure_linearizable(ReadPolicy::ReadIndex))
                 .await
                 .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
-                .map_err(|e| {
-                    // follower 的 `ForwardToLeader` 是**路由信号**，不是内部错误：
-                    // 包装成 INTERNAL 会让 v2 客户端把它归为 `:other`（不可重试），
-                    // 一次换届后该节点上的 Delete 就永久失败（v2 Delete 的 pre-read
-                    // 走本屏障；Put 的 client_write 会自己转发，所以只有删除面暴露）。
-                    // 与 `map_client_write_error` 同口径：UNAVAILABLE + NOT_LEADER。
-                    let forward = matches!(
-                        &e,
-                        openraft::error::RaftError::APIError(
-                            openraft::error::LinearizableReadError::ForwardToLeader(_)
-                        )
-                    );
-                    let msg = format!("linearizable read failed: {e}");
-                    if forward {
-                        coord_core::error_code::attach(
-                            tonic::Status::unavailable(msg),
-                            coord_core::error_code::CoordErrorCode::NotLeader,
-                        )
-                    } else {
-                        tonic::Status::internal(msg)
-                    }
-                })?;
+                .map_err(|e| linearizable_read_status(&e))?;
 
         // ReadIndex 之后的一致性 / 身份校验（防陈旧读）
         let m = raft.metrics().borrow_watched().clone();
@@ -4018,6 +4033,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ──── 线性一致读屏障的错误分类（#304） ────
+
+    #[test]
+    fn test_quorum_loss_is_retriable_unavailable_not_internal() {
+        use openraft::error::{LinearizableReadError, QuorumNotEnough, RaftError};
+
+        let err: RaftError<
+            crate::raft::type_config::TypeConfig,
+            LinearizableReadError<crate::raft::type_config::TypeConfig>,
+        > = RaftError::APIError(LinearizableReadError::QuorumNotEnough(QuorumNotEnough {
+            cluster: "voters:[1,2,3]".to_string(),
+            got: Default::default(),
+        }));
+        let status = linearizable_read_status(&err);
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        // 不是 NOT_LEADER：leader 身份没变，是 quorum 不可达（v2 客户端两者都重试，
+        // 但把「换届」和「quorum 抖动」混成一个码会误导归因）。
+        assert!(
+            coord_core::error_code::error_code_of(&status).is_none(),
+            "quorum loss must not carry NOT_LEADER: {status:?}"
+        );
+    }
+
+    #[test]
+    fn test_forward_to_leader_stays_retriable_not_leader() {
+        use openraft::error::{ForwardToLeader, LinearizableReadError, RaftError};
+
+        let err: RaftError<
+            crate::raft::type_config::TypeConfig,
+            LinearizableReadError<crate::raft::type_config::TypeConfig>,
+        > = RaftError::APIError(LinearizableReadError::ForwardToLeader(
+            ForwardToLeader::empty(),
+        ));
+        let status = linearizable_read_status(&err);
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(
+            coord_core::error_code::error_code_of(&status).as_deref(),
+            Some(coord_core::error_code::CoordErrorCode::NotLeader.as_str()),
+            "{status:?}"
+        );
+    }
 
     // ──── v2 对象写路径：commit_ts 分配/重试（#166） ────
 

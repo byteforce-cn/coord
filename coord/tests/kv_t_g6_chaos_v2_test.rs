@@ -32,9 +32,12 @@ use std::time::{Duration, Instant};
 mod common;
 
 use common::v2_cluster::{
-    assert_no_forbidden_anchors, commit_txn, direct_put, maintenance_status, metric_value,
-    node_statuses, read_at, runtime, ReadAttempt, V2Cluster, V2ClusterOptions, FAILOVER_TIMEOUT,
+    allocate_ts, assert_no_forbidden_anchors, commit_txn, direct_put, maintenance_status,
+    metric_value, node_statuses, read_at, runtime, ReadAttempt, V2Cluster, V2ClusterOptions,
+    FAILOVER_TIMEOUT,
 };
+use coord_proto::kv::v2::kv_client::KvClient;
+use coord_proto::kv::v2::DeleteRequest as DeleteRequestV2;
 
 /// 已提交记录：`key -> (value, commit_ts, round)`。
 type Committed = BTreeMap<Vec<u8>, (Vec<u8>, i64, u64)>;
@@ -364,6 +367,182 @@ fn chaos_v2_partitioned_region0_leader_keeps_invariants() {
     assert_safe_ts_caught_up(&addrs, &key, &value, "post-heal");
 
     assert_no_forbidden_anchors(&cluster);
+}
+
+/// 直连某个节点发 v2 Put / Delete。返回原始 gRPC 状态：测试要按
+/// code/trailer 断言（`common::v2_cluster::rpc` 把错误压成了 String，丢掉 code）。
+async fn kv_write_on(
+    addr: &str,
+    method: &str,
+    key: &[u8],
+    value: &[u8],
+    commit_ts: u64,
+    request_id: &[u8],
+) -> Result<(), tonic::Status> {
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .expect("valid address")
+        .connect_timeout(Duration::from_secs(2))
+        .connect()
+        .await
+        .map_err(|e| tonic::Status::unavailable(format!("connect {addr}: {e}")))?;
+    let mut kv = KvClient::new(channel);
+    let call = async {
+        match method {
+            "delete" => kv
+                .delete(DeleteRequestV2 {
+                    key: key.to_vec(),
+                    commit_ts: commit_ts as i64,
+                    // prev_kv=true 才走 leader-only 的 pre-read 屏障（#304 的位置）。
+                    prev_kv: true,
+                    request_id: request_id.to_vec(),
+                    ..Default::default()
+                })
+                .await
+                .map(|_| ()),
+            _ => kv
+                .put(coord_proto::kv::v2::PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    commit_ts: commit_ts as i64,
+                    prev_kv: false,
+                    request_id: request_id.to_vec(),
+                    ..Default::default()
+                })
+                .await
+                .map(|_| ()),
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), call)
+        .await
+        .map_err(|_| tonic::Status::deadline_exceeded("kv write timed out"))?
+}
+
+/// `COMMIT_REJECTED` 表示「这个节点确实是 leader，但 commit_ts 落到了已 apply 的
+/// revision 后面」——换新 ts 重试即可（不是 follower 路由信号）。
+fn is_commit_rejected(e: &tonic::Status) -> bool {
+    coord_core::error_code::error_code_of(e).as_deref()
+        == Some(coord_core::error_code::CoordErrorCode::CommitRejected.as_str())
+}
+
+/// #304：被分区隔离的 region-1 leader 上，v2 Delete 的 pre-read 屏障
+/// （`ensure_linearizable` 的 leadership-quorum probe）拿不到多数派 ⇒ 必须返回
+/// **可重试**的 UNAVAILABLE，而不是 INTERNAL。v2 客户端把 INTERNAL 归为
+/// `:other`、不重试；72h soak 里唯一那条 `:fail` 就是这个（detail
+/// `INTERNAL: linearizable read failed: not enough for a quorum`）。
+#[test]
+#[ignore = "real-process fault injection; run by the CI chaos job"]
+fn chaos_v2_quorum_loss_on_delete_is_retriable() {
+    let cluster = V2Cluster::start_with(V2ClusterOptions {
+        partitionable: true,
+        ..Default::default()
+    });
+    let addrs = cluster.addrs();
+    let key = b"aq-quorum-loss".to_vec();
+
+    // 找出 region 1 的 leader，并用**同一个 commit_ts** 写一次：delete 的
+    // `prev_kv` 预读前还有 `guard_direct_write_commit_ts`，分区后 safe-ts fence
+    // 停住，新 ts 会被这个守卫先挡掉（SAFE_TS_LAG），到不了屏障。先让 fence
+    // 覆盖这个 ts，分区后才真的落到 #304 的屏障上。
+    let mut leader = None;
+    'probe: for node in &cluster.nodes {
+        // 空集群的 revision 可能已经 >= 首次分配到的 ts（bootstrap 写），
+        // 此时 COMMIT_REJECTED 说明「本节点是 leader，但 ts 陈旧」——重新取号、
+        // 同一个节点再试；follower 则换下一个节点。
+        for _ in 0..20 {
+            let ts = runtime().block_on(allocate_ts(&addrs));
+            match runtime().block_on(kv_write_on(
+                &node.addr(),
+                "put",
+                &key,
+                b"v0",
+                ts,
+                b"quorum-seed",
+            )) {
+                Ok(_) => {
+                    leader = Some((node.id, ts));
+                    break 'probe;
+                }
+                Err(e) if is_commit_rejected(&e) => continue,
+                Err(e) => {
+                    assert_eq!(
+                        e.code(),
+                        tonic::Code::Unavailable,
+                        "probe on node {}: {e:?}",
+                        node.id
+                    );
+                    continue 'probe;
+                }
+            }
+        }
+    }
+    let (leader_id, ts) = leader.expect("one node must be the region-1 leader");
+    let leader_addr = cluster
+        .nodes
+        .iter()
+        .find(|n| n.id == leader_id)
+        .expect("leader node")
+        .addr();
+
+    // 分区前先把 safe-ts fence 推到 ts：delete 的 `guard_direct_write_commit_ts`
+    // 在 pre-read 屏障**之前**执行，分区后 fence 不再前进，会先以 SAFE_TS_LAG
+    // 拒绝我们的 ts（那样就测不到屏障了）。read_ts=ts 的读会等到本节点
+    // safe_ts >= ts（服务端 `read_ts_wait_ms`）。
+    match runtime().block_on(read_at(&addrs, &key, ts as i64)) {
+        ReadAttempt::Found(..) | ReadAttempt::Empty(_) => {}
+        ReadAttempt::Rejected(e) => panic!("safe_ts never reached the seed ts {ts}: {e}"),
+    }
+
+    cluster.partition(leader_id);
+    // 分区策略经文件下发 ~50ms 生效；随后 pre-read 屏障的 leadership probe 会
+    // 超时并返回 QuorumNotEnough（客户端调用本身会等 probe 超时）。
+    std::thread::sleep(Duration::from_millis(300));
+
+    let err = runtime()
+        .block_on(kv_write_on(
+            &leader_addr,
+            "delete",
+            &key,
+            b"",
+            ts,
+            b"quorum-loss",
+        ))
+        .expect_err("an isolated leader cannot serve a leader-only delete pre-read");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Unavailable,
+        "quorum loss must be retriable, not INTERNAL: {err:?}"
+    );
+    assert!(
+        coord_core::error_code::error_code_of(&err).is_none(),
+        "quorum loss is not a leadership change (no NOT_LEADER): {err:?}"
+    );
+
+    // heal 后按不同 ts 重放同一条 delete：证明上面是可重试的瞬态，不是终态。
+    cluster.heal(leader_id);
+    cluster.wait_stable_leader(FAILOVER_TIMEOUT);
+    let deadline = Instant::now() + FAILOVER_TIMEOUT;
+    let mut last = String::new();
+    loop {
+        let ts = runtime().block_on(allocate_ts(&addrs));
+        let mut ok = false;
+        for addr in cluster.addrs() {
+            match runtime().block_on(kv_write_on(&addr, "delete", &key, b"", ts, b"quorum-loss")) {
+                Ok(_) => {
+                    ok = true;
+                    break;
+                }
+                Err(e) => last = format!("{addr}: {e:?}"),
+            }
+        }
+        if ok {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "delete never retried through: {last}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// 快照安装中断：让一个 follower 落后到必须收快照，然后在安装途中（限速放大窗口）

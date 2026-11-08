@@ -1,0 +1,22 @@
+;; 设计 §5.4 的采样前提：显式历史读的 HISTORY_UNAVAILABLE 率 > 1% ⇒ invalid。
+;; 这里 10/10 失败（合法结果，但前提不成立）—— 旧 checker 会判 valid（#311）。
+[ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 5, :time 1},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 5, :error :history-unavailable, :time 2},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 6, :time 3},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 6, :error :history-unavailable, :time 4},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 7, :time 5},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 7, :error :history-unavailable, :time 6},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 8, :time 7},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 8, :error :history-unavailable, :time 8},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 9, :time 9},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 9, :error :history-unavailable, :time 10},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 10, :time 11},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 10, :error :history-unavailable, :time 12},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 11, :time 13},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 11, :error :history-unavailable, :time 14},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 12, :time 15},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 12, :error :history-unavailable, :time 16},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 13, :time 17},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 13, :error :history-unavailable, :time 18},
+ {:type :invoke, :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :read-ts 14, :time 19},
+ {:type :info,   :process 1, :f :v2-read, :key "zz-jepsen-v2-1", :requested-read-ts 14, :error :history-unavailable, :time 20}]

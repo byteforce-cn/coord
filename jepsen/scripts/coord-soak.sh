@@ -115,13 +115,58 @@ cmd_start() {
   echo "   extra: mixture-ratio=${mixture_ratio:-(default 4,2,2)} map-min-deletes=${map_min_deletes:-(off)} extra=${extra:-(none)}"
   echo "   log: $LOG"
 
+  # 证据身份（#303）：72h 一轮最贵的失败是「跑的二进制不对」——Test version 只
+  # 反映 jepsen 检出，不证明 server 二进制来自同一棵树。这里把控制机二进制哈希
+  # 与源码树固定到日志头，节点侧哈希由 db.clj 的 setup! 写进 jepsen.log，
+  # collect-evidence.sh 三者对不上就拒绝出 MANIFEST。
+  local ctl_bin="$PROJECT/coord" ctl_real="" ctl_sha="-" commit="-" tree="-"
+  local dirty="-"
+  if [ -f "$ctl_bin" ]; then
+    ctl_real="$(readlink -f "$ctl_bin")"
+    ctl_sha="$(sha256sum "$ctl_real" | cut -d' ' -f1)"
+  fi
+  if git -C "$PROJECT" rev-parse --git-dir >/dev/null 2>&1; then
+    commit="$(git -C "$PROJECT" rev-parse HEAD 2>/dev/null || echo -)"
+    tree="$(git -C "$PROJECT" write-tree 2>/dev/null || echo -)"
+    dirty="$(git -C "$PROJECT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  echo "   control-binary: ${ctl_sha} ${ctl_real:-$ctl_bin}"
+  echo "   control-commit: ${commit}"
+  echo "   control-tree:   ${tree}"
+  echo "   control-dirty:  ${dirty}"
+
+  # 取证 run 必须从**干净树 + 新鲜二进制**起跑（#174/#303 的教训：一整轮 72h
+  # 因 make binary 抢在 merge 前构建而作废）。两个判据都是 mtime/porcelain 级，
+  # 秒级可查；确需越界（开发/刻意复现）用 ALLOW_STALE_BINARY=1 / ALLOW_DIRTY_TREE=1。
+  if [ "$dirty" != "-" ] && [ "$dirty" != "0" ] && [ "${ALLOW_DIRTY_TREE:-0}" != "1" ]; then
+    echo "refusing to start: worktree has ${dirty} uncommitted path(s) — 取证 run 必须可复现" >&2
+    echo "  → 先提交/收敛改动，或 ALLOW_DIRTY_TREE=1 显式覆盖（该轮不能当 GA 证据）" >&2
+    exit 3
+  fi
+  if [ -n "$ctl_real" ] && [ "$commit" != "-" ]; then
+    local commit_ts bin_ts
+    commit_ts="$(git -C "$PROJECT" log -1 --format=%ct 2>/dev/null || echo 0)"
+    bin_ts="$(stat -c %Y "$ctl_real" 2>/dev/null || echo 0)"
+    if [ "$bin_ts" -lt "$commit_ts" ] && [ "${ALLOW_STALE_BINARY:-0}" != "1" ]; then
+      echo "refusing to start: $ctl_real (mtime $bin_ts) 早于 HEAD $commit ($commit_ts)" >&2
+      echo "  → 先 make binary/upload，或 ALLOW_STALE_BINARY=1 显式覆盖（会废掉本轮取证）" >&2
+      exit 3
+    fi
+  fi
+
+  # 增量 op 日志（长跑 watchdog 的输入）：客户端把每条 op 的 invoke/完成追加到这里，watchdog 用
+  # 它复判「跑到一半」的历史。每次 start 重建（同名 soak 的旧日志不能混进来）。
+  local ops_log="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-ops.edn"
+  : > "$ops_log"
+  echo "   op-log:  $ops_log"
+
   # Detach into its own session/process group so neither SSH nor SIGHUP can
   # kill it. The PID recorded is the session leader; `stop` kills the group.
   # The redirect is on `setsid` itself (NOT inside the bash -c string):
   # with `cd && lein ...` bash cannot exec-replace itself, so a redirect
   # inside the string would leave the wrapper holding the SSH channel open
   # and `vagrant ssh` would hang until lein exits.
-  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis $nemesis --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --time-limit $time_limit --concurrency $concurrency" > "$LOG" 2>&1 < /dev/null &
+  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis $nemesis --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --op-log '$ops_log' --time-limit $time_limit --concurrency $concurrency" > "$LOG" 2>&1 < /dev/null &
   local pid=$!
   echo "$pid" > "$PIDFILE"
   sleep 5
@@ -129,6 +174,17 @@ cmd_start() {
     echo "started (pid $pid)"
     echo "monitor:  ./coord-soak.sh status | tail"
     echo "cancel:   ./coord-soak.sh stop"
+
+    # 运行中快速失败：SOAK_WATCHDOG=1 时用当前 checker 周期复判 op 日志，
+    # 判据红就停跑并写 fail-fast.edn（省下剩余的 72h 机时）。
+    local wd_pidfile="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-watchdog.pid"
+    local wd_log="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-watchdog.log"
+    rm -f "$wd_pidfile"
+    if [ "${SOAK_WATCHDOG:-0}" = "1" ]; then
+      setsid bash -c "cd '$PROJECT' && SOAK_NAME='$SOAK_NAME' ./scripts/soak-watchdog.sh '$ops_log' ${SOAK_WATCHDOG_INTERVAL:-300}" > "$wd_log" 2>&1 < /dev/null &
+      echo "$!" > "$wd_pidfile"
+      echo "watchdog: pid $! interval=${SOAK_WATCHDOG_INTERVAL:-300}s log=$wd_log"
+    fi
   else
     echo "process exited immediately — check $LOG" >&2
     rm -f "$PIDFILE"
@@ -181,6 +237,15 @@ cmd_stop() {
   sleep 3
   kill -KILL -- "-$pid" 2>/dev/null || true
   pkill -f 'jepsen.coord' 2>/dev/null || true
+  # watchdog 是独立 session：停 soak 后它也应在下一拍自行退出；这里兜底收尸，
+  # 避免下一条 soak（同名）被上一轮的 watchdog 误停。
+  local wd_pidfile="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-watchdog.pid"
+  if [ -f "$wd_pidfile" ]; then
+    local wd_pid
+    wd_pid="$(cat "$wd_pidfile" 2>/dev/null || true)"
+    [ -n "$wd_pid" ] && kill -TERM -- "-$wd_pid" 2>/dev/null || true
+    rm -f "$wd_pidfile"
+  fi
   rm -f "$PIDFILE"
   echo "stopped. results (if any): $STORE"
 }
