@@ -154,13 +154,19 @@ cmd_start() {
     fi
   fi
 
+  # 增量 op 日志（长跑 watchdog 的输入）：客户端把每条 op 的 invoke/完成追加到这里，watchdog 用
+  # 它复判「跑到一半」的历史。每次 start 重建（同名 soak 的旧日志不能混进来）。
+  local ops_log="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-ops.edn"
+  : > "$ops_log"
+  echo "   op-log:  $ops_log"
+
   # Detach into its own session/process group so neither SSH nor SIGHUP can
   # kill it. The PID recorded is the session leader; `stop` kills the group.
   # The redirect is on `setsid` itself (NOT inside the bash -c string):
   # with `cd && lein ...` bash cannot exec-replace itself, so a redirect
   # inside the string would leave the wrapper holding the SSH channel open
   # and `vagrant ssh` would hang until lein exits.
-  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis $nemesis --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --time-limit $time_limit --concurrency $concurrency" > "$LOG" 2>&1 < /dev/null &
+  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis $nemesis --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --op-log '$ops_log' --time-limit $time_limit --concurrency $concurrency" > "$LOG" 2>&1 < /dev/null &
   local pid=$!
   echo "$pid" > "$PIDFILE"
   sleep 5
@@ -168,6 +174,17 @@ cmd_start() {
     echo "started (pid $pid)"
     echo "monitor:  ./coord-soak.sh status | tail"
     echo "cancel:   ./coord-soak.sh stop"
+
+    # 运行中快速失败：SOAK_WATCHDOG=1 时用当前 checker 周期复判 op 日志，
+    # 判据红就停跑并写 fail-fast.edn（省下剩余的 72h 机时）。
+    local wd_pidfile="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-watchdog.pid"
+    local wd_log="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-watchdog.log"
+    rm -f "$wd_pidfile"
+    if [ "${SOAK_WATCHDOG:-0}" = "1" ]; then
+      setsid bash -c "cd '$PROJECT' && SOAK_NAME='$SOAK_NAME' ./scripts/soak-watchdog.sh '$ops_log' ${SOAK_WATCHDOG_INTERVAL:-300}" > "$wd_log" 2>&1 < /dev/null &
+      echo "$!" > "$wd_pidfile"
+      echo "watchdog: pid $! interval=${SOAK_WATCHDOG_INTERVAL:-300}s log=$wd_log"
+    fi
   else
     echo "process exited immediately — check $LOG" >&2
     rm -f "$PIDFILE"
@@ -220,6 +237,15 @@ cmd_stop() {
   sleep 3
   kill -KILL -- "-$pid" 2>/dev/null || true
   pkill -f 'jepsen.coord' 2>/dev/null || true
+  # watchdog 是独立 session：停 soak 后它也应在下一拍自行退出；这里兜底收尸，
+  # 避免下一条 soak（同名）被上一轮的 watchdog 误停。
+  local wd_pidfile="$SOAK_DIR/soak${SOAK_NAME:+-$SOAK_NAME}-watchdog.pid"
+  if [ -f "$wd_pidfile" ]; then
+    local wd_pid
+    wd_pid="$(cat "$wd_pidfile" 2>/dev/null || true)"
+    [ -n "$wd_pid" ] && kill -TERM -- "-$wd_pid" 2>/dev/null || true
+    rm -f "$wd_pidfile"
+  fi
   rm -f "$PIDFILE"
   echo "stopped. results (if any): $STORE"
 }

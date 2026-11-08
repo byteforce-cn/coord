@@ -1,4 +1,4 @@
-;; #312 —— 离线复判（offline re-judge）：拿一次 run 的历史，用**当前**的
+;; 离线复判（fast-fail 阶梯的 L1，offline re-judge）：拿一次 run 的历史，用**当前**的
 ;; checker / gates 重判，不重跑。
 ;;
 ;; 动机：72h 是**取证**成本，不是**验证**成本。过去改一个判据只能再跑一轮
@@ -25,6 +25,10 @@
 ;;   --min-op-ok-ratio R 单类 op 的 :ok 率下界（缺省沿用 store，否则 0.9）
 ;;   --min-writes/--min-reads/--min-ts   mvcc 样本门槛（缺省沿用 store）
 ;;   --history-max-ratio R  历史读失败率上限（缺省 0.01，见设计 §5.4）
+;;   --partial          这段历史还在增长（watchdog 的增量日志）：
+;;                      gates 的「有样本却没判」不算红（前段还没攒够样本），
+;;                      单类 op 的最小样本提到 100；mvcc 的 insufficient-sample
+;;                      仍然照报（它不是失败）。
 ;;
 ;; 输出：`key: value` 行（与 summarize-results.clj 同构），末行是
 ;;   `rejudge-verdict: valid | invalid | insufficient-sample`
@@ -82,6 +86,7 @@
                                                                (Long/parseLong (second args))))
         "--history-max-ratio"   (recur (drop 2 args) (assoc-in m [:opts :max-history-unavailable-ratio]
                                                                (Double/parseDouble (second args))))
+        "--partial"             (recur (rest args) (assoc m :partial true))
         (if (str/starts-with? a "--")
           (usage!)
           (recur (rest args) (assoc m :target a))))
@@ -198,7 +203,7 @@
 
 (defn- pct [x] (when (some? x) (format "%.2f%%" (* 100.0 (double x)))))
 
-(let [{:keys [target opts]} (parse-args *command-line-args*)]
+(let [{:keys [target opts partial]} (parse-args *command-line-args*)]
   (when-not target (usage!))
   (let [{:keys [test history]} (load-input target)
         test (or test {})
@@ -208,6 +213,7 @@
                                        :min-op-ok-ratio :quiet-min-sample
                                        :quiet-availability-min :soak-max-rto-seconds
                                        :v2-min-writes :v2-min-reads :v2-min-ts])
+                    (when partial {:require-samples? false :min-op-sample 100})
                     opts)
         _    (when-not (:workload opts)
                (binding [*out* *err*] (println "--workload is required for a bare history file"))
@@ -230,6 +236,7 @@
 
     (show "rejudge-target" target)
     (show "rejudge-workload" (:workload opts))
+    (when partial (show "rejudge-mode" "partial (growing op log)"))
     (show "rejudge-ops" (count history))
     (doseq [{:keys [op invoke ok info fail]} rows]
       (show (str "rejudge-op-" (name op))

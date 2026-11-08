@@ -1242,7 +1242,10 @@
                    (contains? #{:kvv2 :txnv2} workload)
                    (mvcc/checker {:min-writes (or (:v2-min-writes opts) 100)
                                   :min-reads  (or (:v2-min-reads opts) 100)
-                                  :min-ts     (or (:v2-min-ts opts) 50)})
+                                  :min-ts     (or (:v2-min-ts opts) 50)
+                                  ;; 设计 §5.4 的 1% 上限；rejudge/测试可覆盖。
+                                  :max-history-unavailable-ratio
+                                  (:max-history-unavailable-ratio opts)})
 
                    ;; T1.4：幂等专项有专用 checker（op 形状不是 register）。
                    (= :idempotency workload)
@@ -1370,8 +1373,10 @@
                   ;; #308：长跑口径下，三条 gate 只要有样本却没判一条就 fail-closed。
                   ;; 只在 soak（长跑/加速浸泡）上开：矩阵 run 的窗口本来就短，
                   ;; 「样本不足 ⇒ 不判」是正常形态，不是缺陷。
-                  :require-samples?       (and (soak? opts)
-                                               (contains? #{:kvv2 :txnv2} (:workload opts)))
+                  :require-samples?       (if (some? (:require-samples? opts))
+                                            (:require-samples? opts)
+                                            (and (soak? opts)
+                                                 (contains? #{:kvv2 :txnv2} (:workload opts))))
                   ;; A dedicated idempotency workload deliberately replays the
                   ;; same value, so the uniqueness premise does not hold there.
                   ;; kvv2/txnv2 likewise: their payload is random data, not a
@@ -1828,6 +1833,12 @@
     :default  nil
     :parse-fn (fn [s] (Long/parseLong s))
     :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--op-log PATH"
+    "append every client op (invoke + completion) to PATH as one EDN map
+    per line. `scripts/soak-watchdog.sh` re-judges that growing history with the
+    current checker and stops the soak on the first violation, instead of
+    waiting for the end-of-run checker. Off by default."
+    :default nil]
    [nil "--min-op-ok-ratio RATIO"
     "G6 (F-13): minimum :ok ratio per client op type (default 0.1). A type with
     >= --min-op-sample completions below the ratio means that path never really

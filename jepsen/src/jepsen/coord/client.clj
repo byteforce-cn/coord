@@ -2609,6 +2609,28 @@
                            (p/kv2-range-req* {:key "/jepsen/v2/ready" :read-ts 0})))))
     (catch Exception e {:err e})))
 
+;; ---------------------------------------------------------------------------
+;; 增量 op 日志（长跑快速失败）
+;; ---------------------------------------------------------------------------
+
+(def ^:private ^Object op-log-lock
+  "`invoke!` 会从多个 worker 线程进来；写日志必须串行，否则 72h 的 op 日志会
+  交错成不可读的 EDN（watchdog 会解析失败，而失败又被当成「还没样本」）。"
+  (Object.))
+
+(defn- log-op!
+  "把一条 op（invoke 或完成）追加成一行 EDN；`path` 为 nil 时零开销。
+
+  为什么要单独写文件：jepsen 只在 run 结束才落 `history.edn`，而「快速失败」
+  的全部价值在于**跑到一半就能判**。watchdog 读这个文件调 `rejudge.clj`，
+  判据与收尾 checker 是同一份实现。"
+  [path op]
+  (when path
+    (locking op-log-lock
+      (with-open [w (clojure.java.io/writer (clojure.java.io/file path) :append true)]
+        (.write w (pr-str (into {} (remove (comp nil? val) op))))
+        (.write w "\n")))))
+
 (defrecord CoordClient [nodes root-password cct channels raw-channels leader-idx
                         last-rev last-watch-rev parse-values?
                         ;; M5a：鉴权用的端点（server）可以与 ops 端点（agent 隧道）
@@ -2626,7 +2648,9 @@
                         ;; 全量拒绝，setup! 的 v1 探针会 60 次后失败。
                         kv-t?
                         ;; #272：v2 workload 名（txnv2 需要在 setup! 里播种账本）。
-                        v2-workload]
+                        v2-workload
+                        ;; 增量 op 日志（长跑 watchdog 的输入；nil = 不写）。
+                        op-log]
   client/Client
   (open! [this test node]
     (info "Opening coord client on" node)
@@ -2748,18 +2772,23 @@
         this)))
 
   (invoke! [this test op]
+    (log-op! op-log op)
     (try
-      (invoke-coord! this test op)
+      (let [result (invoke-coord! this test op)]
+        (log-op! op-log result)
+        result)
       (catch StatusRuntimeException e
         ;; Last-resort guard (#309): an unclassified gRPC error must become an op
         ;; result, never escape into the generator. Escaping kills the worker
         ;; process ("Process N crashed"), records `indeterminate: …` and stops
         ;; that worker from issuing further ops -- a silent sample cut, not a
         ;; verdict. Non-gRPC exceptions still propagate: they are client bugs.
-        (if (= :unauthenticated (v2-error-class e))
-          (assoc op :type :fail :error :unauthenticated)
-          (assoc op :type :info :error (v2-error-class e)
-                 :detail (str e))))))
+        (let [result (if (= :unauthenticated (v2-error-class e))
+                       (assoc op :type :fail :error :unauthenticated)
+                       (assoc op :type :info :error (v2-error-class e)
+                              :detail (str e)))]
+          (log-op! op-log result)
+          result))))
 
   (close! [this test]
     (doseq [^ManagedChannel ch (distinct (concat @(:raw-channels this)
@@ -2800,4 +2829,6 @@
                  (:mq-topic opts)
                  ;; #272：--kv-t（v2 数据面探针）与 v2 workload 名
                  (boolean (:kv-t opts))
-                 (:workload opts)))
+                 (:workload opts)
+                 ;; 增量 op 日志（`--op-log`；nil = 关闭，行为不变）
+                 (:op-log opts)))

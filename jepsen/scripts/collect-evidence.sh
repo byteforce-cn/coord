@@ -271,7 +271,7 @@ cat > "$OUT/MANIFEST.md" <<EOF
 \`\`\`bash
 # 用记录下来的种子重建 jittered nemesis 排期（应与本次 run 一致）
 lein run -m clojure.main scripts/replay.clj ${STORE} --seed ${seed}
-# 用**当前** checker/gates 重判（不需要集群；#312）
+# 用**当前** checker/gates 重判（不需要集群）
 lein run -m clojure.main scripts/rejudge.clj ${STORE}
 \`\`\`
 EOF
