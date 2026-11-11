@@ -184,7 +184,8 @@ impl KvTState {
             return Err(attach(
                 Status::new(
                     Code::FailedPrecondition,
-                    "kv_t disabled: [kv_t].enabled=false (KV-T is default-off; see ADR-0015)",
+                    "kv_t disabled: [kv_t].enabled resolves to false \
+                     (single-Raft cluster, or explicitly disabled; see ADR-0017)",
                 ),
                 CoordErrorCode::FailedPrecondition,
             ));
@@ -227,7 +228,7 @@ mod tests {
             let status = state.gate(cap).expect_err("disabled must reject");
             assert_eq!(status.code(), Code::FailedPrecondition);
             assert!(
-                status.message().contains("[kv_t].enabled=false"),
+                status.message().contains("kv_t disabled"),
                 "{:?}",
                 status.message()
             );

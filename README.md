@@ -138,7 +138,8 @@ cargo run -p coord -- agent --static-peers <server1>:50051,<server2>:50051
 cargo run -p coord -- agent --agent-config agent.toml   # services / tls / auth / replication
 ```
 
-On a v2 cluster (`[kv_t].enabled=true`), set `data_plane = "v2"` in `agent.toml`: the
+On a v2 cluster (`[kv_t]` enabled — the default for multi-Region clusters, ADR-0017),
+set `data_plane = "v2"` in `agent.toml`: the
 agent freezes its v1 data-plane proxies with the same `FAILED_PRECONDITION` policy and
 routes internal services through `coord.*.v2`. The default `v1` is byte-for-byte
 unchanged for existing clusters.
@@ -278,9 +279,11 @@ Version `0.3.5` (pre-1.0). The Raft engine (`openraft`) is an alpha dependency a
 
 The KV-T v2 data plane (ADR-0015) passed its GA gate on 2026-11-11: the 72h Jepsen
 run, per-gate evidence and the sign-off record are in
-[`docs/production/ops/kv-t-ga-gate.md`](docs/production/ops/kv-t-ga-gate.md). It stays
-opt-in (`[kv_t].enabled = true` plus `data_plane = "v2"` on the agent); the pre-1.0
-status above is unchanged.
+[`docs/production/ops/kv-t-ga-gate.md`](docs/production/ops/kv-t-ga-gate.md). Since GA
+`[kv_t].enabled` is tri-state (ADR-0017): a multi-Region (`[multi_raft]` + PD) cluster
+runs v2 by default while a single-Raft cluster stays on v1; set it to `false` to pin v2
+off, and the agent still needs `data_plane = "v2"`. The pre-1.0 status above is
+unchanged.
 
 ## Documentation
 

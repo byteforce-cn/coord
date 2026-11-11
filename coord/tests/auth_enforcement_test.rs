@@ -363,7 +363,7 @@ async fn test_auth_enforcement_full_matrix() {
     assert_eq!(range.into_inner().kvs.len(), 1);
 
     // KV-T G0（#134）：v2 能力映射与门禁顺序。
-    //   - 有权限但 `[kv_t].enabled=false` → FAILED_PRECONDITION（落在门禁上）；
+    //   - 有权限但 `[kv_t]` 有效值关闭 → FAILED_PRECONDITION（落在门禁上）；
     //   - 缺能力 → PERMISSION_DENIED（先于门禁；不能把"没权限"伪装成"没启用"）。
     let mut kv_v2 = KvV2Client::new(channel(&addr).await);
     let gated = kv_v2
@@ -386,7 +386,7 @@ async fn test_auth_enforcement_full_matrix() {
         "reader has data:kv:read; kv_t is disabled, so the gate must answer: {gated}"
     );
     assert!(
-        gated.message().contains("[kv_t].enabled=false"),
+        gated.message().contains("kv_t disabled"),
         "gate message must name the switch: {}",
         gated.message()
     );

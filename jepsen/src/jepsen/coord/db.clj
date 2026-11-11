@@ -188,6 +188,9 @@
      ;; R-SEC-04），此处为显式逃生阀。生产严禁开启。
      "allow_plaintext_remote = true\n"
      (when (:kv-t? db) (kv-t-toml))
+     ;; ADR-0017：未写 `[kv_t]` 的多 Region 配置会自动启用 v2，而 v2 冻结 v1 数据面。
+     ;; `--regions` 的 v1 工作负载不开 `--kv-t`，必须显式留在 v1。
+     (when (and multi-raft (not (:kv-t? db))) "\n[kv_t]\nenabled = false\n")
      (when multi-raft multi-raft))))
 
 (defn- write-config!

@@ -159,6 +159,7 @@ impl RealNode {
              [[multi_raft.initial_regions]]\nid = 2\nstart_key = \"b\"\nend_key = \"n\"\n\
              [[multi_raft.initial_regions]]\nid = 3\nstart_key = \"n\"\nend_key = \"\"\n\
              {pd_toml}\
+             [kv_t]\nenabled = false\n\
              [security]\nauth_enabled = false\n\
              auth_root_key = \"{}\"\n",
             "ab".repeat(32) // R-SEC-06：多节点集群需共享根密钥（测试用固定值）

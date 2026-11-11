@@ -8,7 +8,9 @@
   0 errors、op-liveness 94.5% ≥ 0.9。证据 MANIFEST 与复判命令见 §3-1；身份事后
   钉住（`override(post-hoc)`）的原因与 provenance 见 §3.7。
 - 本文是 GA 状态的**单一事实源**：gate 证据、未达标项、签字记录。语义口径仍以
-  `docs/adr/0015-kv-t.md` 为准；能力矩阵在 ADR D13；运维处置在 `runbook.md`。
+  `docs/adr/0015-kv-t.md` 为准；缺省开关口径由 `docs/adr/0017-kv-t-default-on.md` 定
+  （`[kv_t].enabled` 三态：不写时多 Region + PD 集群自动启用，跑过 `legacy_migration`
+  的 v1 集群必须显式二选一）；能力矩阵在 ADR D13；运维处置在 `runbook.md`。
 - 划线规则：**没有可复跑证据的项不写「通过」**；「未跑」必须留在未达标列。
 
 ## 1. Gate 总览

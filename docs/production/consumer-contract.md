@@ -87,11 +87,12 @@
   on a v2 cluster`，先于参数/leader/写闸判定），health 报 `NOT_SERVING`，
   v1 `coord.storage` 不注册；v2 见 §1.1。
 
-### 1.1 KV-T v2（`coord.<domain>.v2`，默认关闭）
+### 1.1 KV-T v2（`coord.<domain>.v2`，三态开关）
 
-默认 `[kv_t].enabled=false`：v2 服务注册（reflection 可见）但每个 RPC 返回
-`FAILED_PRECONDITION`；开启后按 gate 分批可用（G0–G6，ADR-0015 D10），未交付
-能力同样 `FAILED_PRECONDITION`。语义单一归属：ADR-0015 D2–D13 + v2 proto 头注。
+`[kv_t].enabled` 是三态（ADR-0017）：不写 = 多 Region + PD 集群自动启用 v2，单
+Raft 集群仍是 v1；显式 `false` 时 v2 服务注册（reflection 可见）但每个 RPC 返回
+`FAILED_PRECONDITION`。G0–G6 已全部交付（ADR-0015 D10），未交付能力同样
+`FAILED_PRECONDITION`。语义单一归属：ADR-0015 D2–D13 + v2 proto 头注。
 
 | RPC（组） | 能力 |
 |:--|:--|

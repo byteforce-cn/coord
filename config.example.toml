@@ -164,7 +164,15 @@ enabled = false
 #                                  #  <data_dir>/objects/keys/），到期轮换只影响
 #                                  # 新写入（旧 DEK 保留解密历史，对齐 /kv/）
 
-# KV-T（[kv_t] 段；默认关闭 = v1 行为字节级不变，ADR-0015 / ADR-0001）
+# KV-T（[kv_t] 段；三态默认，ADR-0017：多 Region + PD 自动启用，单 Raft 仍是 v1）
+#
+# enabled 的三态（ADR-0017）：
+#   未写（默认） = 自动：multi_raft.enabled 且 multi_raft.pd.enabled 时启用 v2，
+#                  否则走 v1（单 Raft 部署行为字节级不变）；
+#   true         = 强制启用（前置缺失即拒绝启动）；
+#   false        = 强制关闭（v2 服务注册但每个 RPC 返回 FAILED_PRECONDITION）。
+# 跑过 multi_raft.legacy_migration 的 v1 集群不会被隐式切成 v2：未写 enabled 时
+# 启动拒绝，必须显式 true（转 v2）或 false（留在 v1）。
 #
 # 开启后 v2 数据面（coord.{tso,kv,txn,watch,lease,storage}.v2）才可用；具体
 # 能力按 gate 分批交付（G0–G6），未交付的能力一律 FAILED_PRECONDITION。
@@ -175,7 +183,7 @@ enabled = false
 # 独立固定 Region（SplitChecker/MergeChecker 跳过，不参与任意 KV split/merge）。
 # 默认值逐字等于 ADR-0015 D9；改数值可以，改语义必须新增 ADR。
 [kv_t]
-enabled = false
+# enabled = false   # 本模板是单 Raft（[multi_raft].enabled = false），省略即 v1
 # tso_batch_size = 1024              # TSO 批大小（1..=65536；允许空洞，绝不复用）
 # commit_sequencer_batch = 256       # Commit Sequencer 单批决策条数
 # commit_log_shard_records = 1000000 # Commit Log shard 条数阈值（先到先 seal）

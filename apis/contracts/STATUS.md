@@ -40,12 +40,12 @@
 | 探活 | coord.maintenance | STABLE | - | 仅 Status（裁剪承诺） |
 | 健康检查 | grpc.health.v1 | STABLE | - | 标准协议 |
 
-## KV-T v2（ADR-0015；默认关闭）
+## KV-T v2（ADR-0015、ADR-0017；GA 2026-11-11）
 
-`[kv_t].enabled=false`（默认）时 v2 服务仍注册（reflection 可见），但每个 RPC 返回
-`FAILED_PRECONDITION`；v1 行为、磁盘布局与服务注册不变。契约包已随 G0 落地；
-实现按 G1–G6 gate 分批交付（ADR-0015 D10），未交付能力同样 `FAILED_PRECONDITION`。
-v2 集群不服务 v1 数据面、不做 v1→v2 迁移（ADR-0015 D13）。
+`[kv_t].enabled` 三态（ADR-0017）：不写 = 多 Region + PD 集群自动启用 v2，单 Raft
+集群仍是 v1；显式 `false` 时 v2 服务仍注册（reflection 可见）但每个 RPC 返回
+`FAILED_PRECONDITION`。v1 行为、磁盘布局与服务注册在 v1 下不变。G0–G6 已全部交付
+（ADR-0015 D10）；v2 集群不服务 v1 数据面、不做 v1→v2 迁移（ADR-0015 D13）。
 
 | 能力 | 契约包 | 状态 | 期限 | 实现落点/边界说明 |
 |:---|:---|:---:|:---|:---|

@@ -1,3 +1,17 @@
+## [contracts/v1.10.0] — 2026-11-11（Minor：KV-T GA 后默认启用口径）
+
+**发布口径**：**Minor**（不改动任何 proto 包/字段/枚举/错误码；
+`buf breaking` 基线与 wire 同步不变）。改的是**服务端缺省行为**。
+
+- 默认行为：`[kv_t].enabled` 改为三态（ADR-0017）——不写 = 多 Region
+  （`multi_raft` + PD）集群自动启用 v2，单 Raft 集群仍是 v1；`true` 强制启用
+  （前置缺失拒绝启动）；`false` 强制关闭（v2 服务注册，每个 RPC
+  `FAILED_PRECONDITION`）。
+- 跑过 `multi_raft.legacy_migration` 的 v1 集群不会被隐式切成 v2：未写 `enabled`
+  时启动拒绝，必须显式二选一（v2 冻结 v1 数据面，ADR-0015 D13）。
+- v1 契约面、错误码与 wire 行为不变；v1 多 Region 部署需显式写
+  `[kv_t] enabled = false`。
+
 ## [contracts/v1.9.0] — 2026-10-18（Minor：KV-T v2 契约面）
 
 **发布口径**：**Minor**（新增 6 个 `coord.<domain>.v2` 包 + 追加 8 个结构化错误码；

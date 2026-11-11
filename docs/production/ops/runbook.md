@@ -26,6 +26,10 @@
 > `docs/production/ops/kv-t-ga-gate.md` 为准；性能/容量数字见
 > `docs/production/ops/performance.md`。
 
+- **`[kv_t]` 三态（ADR-0017）**：未写 = 多 Region（`[multi_raft]` + PD）自动启用 v2，
+  单 Raft 集群仍是 v1。跑过 `legacy_migration` 的 v1 集群必须显式写
+  `[kv_t] enabled = false`（不写则拒绝启动）；把这类集群转 v2 写 `true`（不可逆：
+  v2 冻结 v1 数据面，且不做 v1→v2 迁移）。
 - **二进制**：`coord`（`Cargo.toml` 的 `workspace.package.version` 为准，当前 `0.3.5`）。
   版本自检：`coord --version` 必须与 `Cargo.toml:18` 一致。
 - **配置文件**：全局 `--config <path>`；CLI 参数覆盖配置文件同名字段。

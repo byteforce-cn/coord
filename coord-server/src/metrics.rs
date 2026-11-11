@@ -68,7 +68,7 @@ struct MetricsInner {
     pub seal_status: AtomicI64, // 0=Unsealed, 1=SealInProgress, 2=Sealed
 
     // ── KV-T（ADR-0015）──
-    /// KV-T 开关/门禁状态：0 = `[kv_t].enabled=false`，1 = 已开启（能力仍可能
+    /// KV-T 开关/门禁状态：0 = 有效值关闭（未写且非多 Region，或显式 false），1 = 已开启（能力仍可能
     /// 按 gate 未交付）。用于区分"配置没开"与"开了但请求被门禁拒绝"。
     pub kv_t_enabled: AtomicI64,
     /// 最近一次经本地缓存发放的 TSO（0 = 尚未发放）
@@ -958,7 +958,9 @@ impl Metrics {
         out.push_str("# TYPE coord_uptime_seconds gauge\n");
         out.push_str(&format!("coord_uptime_seconds {:.3}\n", uptime));
 
-        out.push_str("\n# HELP coord_kv_t_enabled KV-T master switch ([kv_t].enabled)\n");
+        out.push_str(
+            "\n# HELP coord_kv_t_enabled KV-T effective switch (tri-state [kv_t].enabled; ADR-0017)\n",
+        );
         out.push_str("# TYPE coord_kv_t_enabled gauge\n");
         out.push_str(&format!(
             "coord_kv_t_enabled {}\n",

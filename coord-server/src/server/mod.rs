@@ -473,7 +473,7 @@ impl CoordNode {
     /// 2. 本 Region 的决策游标越过这些决策之后，直写不可能越过 pending 决策。
     ///
     /// 等待上限 `[kv_t].read_ts_wait_ms`；没追上返回 `UNAVAILABLE + SAFE_TS_LAG`
-    /// （可重试），不静默放行。`[kv_t].enabled=false`、未交付 Txn 能力或没有
+    /// （可重试），不静默放行。`[kv_t]` 有效值关闭、未交付 Txn 能力或没有
     /// Commit Sequencer（不会产生决策）时不做任何事（v1 行为不变）。
     pub(crate) async fn guard_direct_write_commit_ts(
         &self,

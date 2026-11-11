@@ -35,7 +35,8 @@ bash java-example/scripts/verify-build.sh        # proto + 编译 + 单测
 
 ## KV-T v2 示例（`KvTV2Example`）
 
-需要一套真实 v2 集群（multi-raft + PD + object storage + `[kv_t].enabled=true`）：
+需要一套真实 v2 集群（multi-raft + PD + object storage；三者齐备时 `[kv_t]` 默认
+启用，ADR-0017）：
 
 ```bash
 cargo build --workspace --bins

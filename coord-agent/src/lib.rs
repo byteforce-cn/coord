@@ -1173,7 +1173,7 @@ impl AgentServer {
         };
 
         // v2 数据面就绪探测：v1-only 的 Server 也会让连接成功（TCP/Status），
-        // 但 coord.kv.v2 会因 [kv_t].enabled=false 返回 FAILED_PRECONDITION。
+        // 但 coord.kv.v2 会因 [kv_t] 有效值关闭返回 FAILED_PRECONDITION。
         // 不把 readiness 交给 TCP 探针：编排必须看到「v2 面真的可用」。
         if self.config.data_plane == AgentDataPlane::V2 {
             match inner.as_ref() {

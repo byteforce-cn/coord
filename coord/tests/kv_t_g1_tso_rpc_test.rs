@@ -147,7 +147,7 @@ mod tests {
             .await
             .expect_err("disabled must reject");
         assert_eq!(err.code(), Code::FailedPrecondition);
-        assert!(err.message().contains("[kv_t].enabled=false"));
+        assert!(err.message().contains("kv_t disabled"));
 
         let unimplemented = start_server(true, false).await;
         let err = client(unimplemented.addr)

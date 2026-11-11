@@ -156,7 +156,11 @@
             (apply = (map section cfgs)))
     (check! (str "multi-region n=" n ": table has exactly " n " initial_regions")
             (every? #(= n (count (re-seq #"\[\[multi_raft\.initial_regions\]\]" %)))
-                    cfgs))))
+                    cfgs))
+    ;; ADR-0017：[kv_t] 未写时多 Region 配置自动启用 v2（v1 数据面被冻结），
+    ;; 所以 `--regions` 的 v1 工作负载必须在生成的配置里显式关掉。
+    (check! (str "multi-region n=" n ": v1 workload opts out of [kv_t] explicitly")
+            (every? #(str/includes? % "[kv_t]\nenabled = false") cfgs))))
 
 ;; ---------------------------------------------------------------------------
 (let [n-fail (count @failures)]

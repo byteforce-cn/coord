@@ -385,7 +385,7 @@ mod tests {
             .await
             .expect_err("v2 must be gated");
         assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
-        assert!(err.message().contains("[kv_t].enabled=false"));
+        assert!(err.message().contains("kv_t disabled"));
 
         let mut v1 = kv_v1(server.addr).await;
         let put_resp = v1

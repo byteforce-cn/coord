@@ -43,12 +43,13 @@ KV/Txn/Lease/Watch 是平台实现底座，保留稳定承诺供 SDK 与数据�
 语义契约全文在 proto 注释中（`proto/coord/<domain>/v1/`）；目标日期的逾期检查逻辑见
 `scripts/check-wire-sync.sh`（约定详见 [WHITEPAPER.md](./WHITEPAPER.md)）。
 
-## KV-T v2（`coord.<domain>.v2`；ADR-0015，默认关闭）
+## KV-T v2（`coord.<domain>.v2`；ADR-0015、ADR-0017）
 
 `coord.tso.v2` / `coord.kv.v2` / `coord.txn.v2` / `coord.watch.v2` /
 `coord.lease.v2` / `coord.storage.v2`：全局 TSO、serializable 跨 Region 事务与
-严格透明 Watch 的 v2 契约面。默认 `[kv_t].enabled=false`：v2 服务注册但一律
-`FAILED_PRECONDITION`，v1 不变。
+严格透明 Watch 的 v2 契约面。`[kv_t].enabled` 是三态（ADR-0017）：不写 = 多 Region
+（`multi_raft` + PD）集群自动启用 v2，单 Raft 集群仍是 v1；显式 `false` 时 v2 服务
+仍注册但一律 `FAILED_PRECONDITION`，v1 不变。
 
 - v2 是 **greenfield**：v2 集群不服务 v1 数据面，不做 v1→v2 迁移
   （ADR-0015 D13）；v1 包冻结。

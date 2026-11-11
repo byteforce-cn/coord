@@ -126,6 +126,17 @@ impl Config {
         }
     }
 
+    /// `[kv_t].enabled` 的有效值（三态解析；ADR-0017）。
+    ///
+    /// 未写该键 = 自动：多 Region 装配（`multi_raft.enabled && multi_raft.pd.enabled`）
+    /// 时启用 v2；单 Raft 集群仍是 v1（行为字节级不变）。显式 `true`/`false` 原样
+    /// 生效（`true` 仍要求前置能力齐备）。
+    pub fn kv_t_enabled(&self) -> bool {
+        self.kv_t
+            .enabled
+            .unwrap_or(self.multi_raft.enabled && self.multi_raft.pd.enabled)
+    }
+
     /// 启动前配置校验（收集全部错误，一次报清）。
     ///
     /// 校验项：节点 ID；gRPC/Raft/HTTP 地址可解析且端口合法、互不冲突；
@@ -973,17 +984,21 @@ impl Default for SecurityConfig {
 
 /// KV-T 配置（`[kv_t]` 段）。
 ///
-/// 默认关闭（`enabled=false`）：v1 服务注册、磁盘布局与行为字节级不变
-/// （ADR-0001）。开启后 v2 服务才可用；具体能力按 gate 分批交付（G0–G6，
-/// ADR-0015 D10），未交付的能力一律 `FAILED_PRECONDITION`。
+/// `enabled` 是三态（ADR-0017）：未写 = 多 Region 装配时自动启用（单 Raft 集群仍是
+/// v1，服务注册、磁盘布局与行为字节级不变）；`true` = 强制启用（前置能力缺失即拒绝
+/// 启动）；`false` = 强制关闭（v2 一律 `FAILED_PRECONDITION`，v1 不变）。
 ///
-/// 语义与默认值单一归属：ADR-0015 D9/D12。本结构只做配置承载与边界校验，
+/// 启用后 v2 服务才可用；具体能力按 gate 分批交付（G0–G6，ADR-0015 D10），未交付的
+/// 能力一律 `FAILED_PRECONDITION`。
+///
+/// 语义与默认值单一归属：ADR-0015 D9/D12、ADR-0017。本结构只做配置承载与边界校验，
 /// 不在这里解释语义。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KvTConfig {
-    /// 总开关（false = v2 一律 `FAILED_PRECONDITION`；v1 不变）
-    pub enabled: bool,
+    /// 总开关（三态；ADR-0017）：`None` = 自动，`Some(true)` = 强制开，
+    /// `Some(false)` = 强制关（v2 一律 `FAILED_PRECONDITION`；v1 不变）
+    pub enabled: Option<bool>,
 
     /// TSO 批大小（默认 1024；上限 65536。批只保证唯一/单调，允许空洞）
     pub tso_batch_size: u32,
@@ -1023,7 +1038,7 @@ impl Default for KvTConfig {
     fn default() -> Self {
         // 默认值逐字等于 ADR-0015 D9（改数值允许，改语义必须新增 ADR）。
         Self {
-            enabled: false,
+            enabled: None,
             tso_batch_size: 1024,
             commit_sequencer_batch: 256,
             commit_log_shard_records: 1_000_000,
@@ -1040,8 +1055,8 @@ impl Default for KvTConfig {
 }
 
 impl KvTConfig {
-    /// 校验 KV-T 配置；`enabled=false` 时只校验数值边界（避免关闭时因
-    /// 无关字段阻塞启动），开启时额外要求前置能力齐备。
+    /// 校验 KV-T 配置；解析后的有效值为 `false` 时只校验数值边界（避免关闭时因
+    /// 无关字段阻塞启动），为 `true` 时额外要求前置能力齐备。
     ///
     /// 返回全部错误（一次报清），调用方与 `Config::validate` 合并。
     pub fn validate(
@@ -1052,6 +1067,8 @@ impl KvTConfig {
         allow_unmigrated: bool,
     ) -> Vec<String> {
         let mut errs = Vec::new();
+        // 三态解析（ADR-0017）：未写 = 多 Region 装配时启用。
+        let effective = self.enabled.unwrap_or(multi_raft_enabled && pd_enabled);
 
         if !(1..=65_536).contains(&self.tso_batch_size) {
             errs.push(format!(
@@ -1103,38 +1120,48 @@ impl KvTConfig {
             ));
         }
 
-        if self.enabled {
+        if effective {
             if !multi_raft_enabled {
-                errs.push(
+                errs.push(self.prerequisite_error(
                     "kv_t.enabled = true requires multi_raft.enabled = true \
-                     (KV-T runs on per-Region raft groups)"
-                        .to_string(),
-                );
+                     (KV-T runs on per-Region raft groups)",
+                ));
             }
             if !pd_enabled {
-                errs.push(
+                errs.push(self.prerequisite_error(
                     "kv_t.enabled = true requires multi_raft.pd.enabled = true \
-                     (Split/Merge and routing epochs need PD)"
-                        .to_string(),
-                );
+                     (Split/Merge and routing epochs need PD)",
+                ));
             }
             if legacy_migration {
-                errs.push(
+                errs.push(self.prerequisite_error(
                     "kv_t.enabled = true forbids multi_raft.legacy_migration = true: \
-                     v2 clusters are greenfield and never migrate v1 data (ADR-0015 D13)"
-                        .to_string(),
-                );
+                     v2 clusters are greenfield and never migrate v1 data (ADR-0015 D13)",
+                ));
             }
             if allow_unmigrated {
-                errs.push(
+                errs.push(self.prerequisite_error(
                     "kv_t.enabled = true forbids multi_raft.allow_unmigrated = true \
-                     (rescue switch is for v1 clusters only)"
-                        .to_string(),
-                );
+                     (rescue switch is for v1 clusters only)",
+                ));
             }
         }
 
         errs
+    }
+
+    /// 前置条件错误措辞：显式开启点名配置项；自动（未写）时同时给出退回 v1 的写法
+    /// ——否则 v1 迁移运维看到「kv_t.enabled = true requires …」会找不到是哪个键。
+    fn prerequisite_error(&self, message: &str) -> String {
+        if self.enabled.is_none() {
+            format!(
+                "{message}; [kv_t].enabled is unset and defaults to enabled on this \
+                 multi-Region configuration (ADR-0017) — set [kv_t].enabled = false to \
+                 stay on v1"
+            )
+        } else {
+            message.to_string()
+        }
     }
 }
 
@@ -2144,12 +2171,12 @@ scheduler_paused = true
         );
     }
 
-    // ──── KV-T（[kv_t]；ADR-0015 D9/D13）────
+    // ──── KV-T（[kv_t]；ADR-0015 D9/D13、ADR-0017）────
 
     #[test]
     fn test_kv_t_defaults_match_adr_d9() {
         let kv = Config::default().kv_t;
-        assert!(!kv.enabled, "默认必须关闭（ADR-0001）");
+        assert_eq!(kv.enabled, None, "默认三态自动（ADR-0017）");
         assert_eq!(kv.tso_batch_size, 1024);
         assert_eq!(kv.commit_sequencer_batch, 256);
         assert_eq!(kv.commit_log_shard_records, 1_000_000);
@@ -2221,7 +2248,7 @@ scheduler_paused = true
     #[test]
     fn test_kv_t_enabled_requires_multi_raft_and_pd() {
         let mut config = Config::default();
-        config.kv_t.enabled = true;
+        config.kv_t.enabled = Some(true);
         let errs = config.validate().unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("multi_raft.enabled")),
@@ -2238,7 +2265,7 @@ scheduler_paused = true
         for (label, apply) in [("legacy_migration", 0u8), ("allow_unmigrated", 1u8)] {
             let mut config = multi_raft_member_config(1);
             config.multi_raft.pd.enabled = true;
-            config.kv_t.enabled = true;
+            config.kv_t.enabled = Some(true);
             match apply {
                 0 => config.multi_raft.legacy_migration = true,
                 _ => config.multi_raft.allow_unmigrated = true,
@@ -2255,8 +2282,62 @@ scheduler_paused = true
     fn test_kv_t_enabled_with_prerequisites_is_valid() {
         let mut config = multi_raft_member_config(1);
         config.multi_raft.pd.enabled = true;
-        config.kv_t.enabled = true;
+        config.kv_t.enabled = Some(true);
         assert!(config.validate().is_ok(), "{:?}", config.validate().err());
+    }
+
+    /// ADR-0017：未写 `[kv_t].enabled` 时随多 Region 装配自动启用；单 Raft 仍是 v1。
+    #[test]
+    fn test_kv_t_default_is_auto_by_cluster_shape() {
+        // 单 Raft（默认配置）→ v1，而且默认值本身必须能通过校验（自洽）。
+        let single = Config::default();
+        assert_eq!(single.kv_t.enabled, None);
+        assert!(!single.kv_t_enabled());
+        assert!(single.validate().is_ok(), "{:?}", single.validate().err());
+
+        // 多 Region + PD → v2。
+        let mut multi = multi_raft_member_config(1);
+        multi.multi_raft.pd.enabled = true;
+        assert!(multi.kv_t_enabled());
+        assert!(multi.validate().is_ok(), "{:?}", multi.validate().err());
+
+        // 多 Region 但无 PD → 自动解析为关闭（PD 是 v2 前置）。
+        let mut no_pd = multi_raft_member_config(1);
+        no_pd.multi_raft.pd.enabled = false;
+        assert!(!no_pd.kv_t_enabled());
+        assert!(no_pd.validate().is_ok(), "{:?}", no_pd.validate().err());
+    }
+
+    /// 显式 `false` 压过自动推导：多 Region 集群也能留在 v1。
+    #[test]
+    fn test_kv_t_explicit_false_overrides_auto() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.pd.enabled = true;
+        config.kv_t.enabled = Some(false);
+        assert!(!config.kv_t_enabled());
+        assert!(config.validate().is_ok(), "{:?}", config.validate().err());
+    }
+
+    /// 自动启用与 v1 专用开关冲突时，错误必须点名「写 false 退回 v1」。
+    #[test]
+    fn test_kv_t_auto_prerequisite_error_names_the_opt_out() {
+        for (label, apply) in [("legacy_migration", 0u8), ("allow_unmigrated", 1u8)] {
+            let mut config = multi_raft_member_config(1);
+            config.multi_raft.pd.enabled = true;
+            match apply {
+                0 => config.multi_raft.legacy_migration = true,
+                _ => config.multi_raft.allow_unmigrated = true,
+            }
+            let errs = config.validate().unwrap_err();
+            let hit = errs
+                .iter()
+                .find(|e| e.contains(label))
+                .unwrap_or_else(|| panic!("缺少 {label}：{errs:?}"));
+            assert!(
+                hit.contains("[kv_t].enabled = false"),
+                "自动启用的错误必须给出退回 v1 的写法：{hit}"
+            );
+        }
     }
 
     #[test]
@@ -2298,11 +2379,16 @@ watch_retention = 7200
 max_txn_bytes = 1048576
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.kv_t.enabled);
+        assert_eq!(config.kv_t.enabled, Some(false));
         assert_eq!(config.kv_t.watch_retention, 7_200);
         assert_eq!(config.kv_t.max_txn_bytes, 1_048_576);
         // 未写出的字段取 D9 默认值。
         assert_eq!(config.kv_t.tso_batch_size, 1024);
+
+        // 不写 `enabled` = 三态自动（ADR-0017）：解析为 `None`，单 Raft 下有效值关。
+        let auto: Config = toml::from_str("[kv_t]\nwatch_retention = 7200\n").unwrap();
+        assert_eq!(auto.kv_t.enabled, None);
+        assert!(!auto.kv_t_enabled());
     }
 
     #[test]
