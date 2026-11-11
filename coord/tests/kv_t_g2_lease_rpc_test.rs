@@ -4,7 +4,7 @@
 //! - KV v2 `lease_id` 绑定，revoke/到期后按 key 所在 Region 清理；
 //! - 重复 Grant（同 request_id）/重复 Revoke 幂等；显式 id 冲突不覆盖；
 //! - revoker 启动扫描续跑已 revoke 但未清理的记录；
-//! - `[kv_t].enabled=false` 或 Lease 能力未交付时门禁 `FAILED_PRECONDITION`。
+//! - `[kv_t]` 有效值关闭或 Lease 能力未交付时门禁 `FAILED_PRECONDITION`。
 
 #[cfg(test)]
 mod tests {

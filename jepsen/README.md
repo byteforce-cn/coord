@@ -193,8 +193,10 @@ make soak-kv-t-status              # (log/pid: soak/soak-kvt.log|pid, kept apart
 `--kv-t` deploys the fixed two-region layout (`""->m`, `m->""`), enables
 `[multi_raft.pd]` with `scheduler_paused = true` (auto-split would surface as
 `HISTORY_UNAVAILABLE` inside the data-plane oracle) and `[kv_t]`. Without the
-flag the config is **byte-identical** to before (`scripts/test-kv-t-config.clj`
-pins that with an embedded golden).
+flag nothing enables v2: a multi-Region (`--regions N`) config carries an explicit
+`[kv_t] enabled = false` (ADR-0017), and the legacy single-Raft config is
+byte-identical to before (`scripts/test-kv-t-config.clj` and
+`scripts/test-multi-raft-config.clj` pin both).
 
 The workloads send `tso.v2 GetTs` for one timestamp per write, `kv.v2 Put/Delete`
 with that `commit_ts` and a stable `request_id`, `kv.v2 Range` with

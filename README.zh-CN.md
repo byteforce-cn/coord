@@ -129,7 +129,8 @@ cargo run -p coord -- agent --static-peers <server1>:50051,<server2>:50051
 cargo run -p coord -- agent --agent-config agent.toml   # services / tls / auth / replication
 ```
 
-v2 集群（`[kv_t].enabled=true`）的 `agent.toml` 必须设 `data_plane = "v2"`：Agent 对外
+v2 集群（`[kv_t]` 启用——多 Region 集群的默认值，ADR-0017）的 `agent.toml` 必须设
+`data_plane = "v2"`：Agent 对外
 v1 数据面按同一策略冻结（`FAILED_PRECONDITION`），内部服务改走 `coord.*.v2`。默认
 `v1` 对既有集群字节级不变。
 
@@ -263,8 +264,9 @@ Coord 处于 pre-1.0，并明确列出**不承诺**的事项；完整清单（�
 
 KV-T v2 数据面（ADR-0015）已于 2026-11-11 通过 GA gate：72h Jepsen run、逐 gate 证据与
 签字记录见 [`docs/production/ops/kv-t-ga-gate.md`](docs/production/ops/kv-t-ga-gate.md)。
-它仍是显式启用（`[kv_t].enabled = true`，Agent 配 `data_plane = "v2"`），上面的
-pre-1.0 状态不变。
+GA 后 `[kv_t].enabled` 是三态（ADR-0017）：多 Region（`[multi_raft]` + PD）集群默认
+启用 v2，单 Raft 集群仍是 v1；要钉住 v2 关闭写 `false`，Agent 仍需配
+`data_plane = "v2"`。上面的 pre-1.0 状态不变。
 
 ## 文档
 

@@ -127,19 +127,18 @@ impl RealNode {
             .arg(format!("127.0.0.1:{raft_port}"))
             .arg("--data-dir")
             .arg(data_dir);
-        // 诊断支持：设 MR_RUST_LOG / MR_DEBUG_LOG=1 时把子进程 stdout/stderr 落盘
-        // `<data_dir>/coord.log`（默认与历史行为一致：coord=warn + 丢弃）。
-        let mr_log = std::env::var("MR_DEBUG_LOG").is_ok();
-        let mr_rust_log = std::env::var("MR_RUST_LOG").unwrap_or_else(|_| "coord=warn".to_string());
-        cmd.env("RUST_LOG", &mr_rust_log);
-        if mr_log {
-            std::fs::create_dir_all(data_dir).unwrap();
-            let log_file = std::fs::File::create(data_dir.join("coord.log")).unwrap();
-            cmd.stdout(Stdio::from(log_file.try_clone().unwrap()))
-                .stderr(Stdio::from(log_file));
-        } else {
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
+        // 子进程 stdout/stderr 恒定落盘 `<data_dir>/coord.log`（与 `spawn_custom`
+        // 一致）：CI 上「起不来」必须能区分端口被占、配置校验拒绝与 panic，而
+        // `wait_ready` 超时会把这份日志的尾巴打进 panic 消息。
+        std::fs::create_dir_all(data_dir).unwrap();
+        let log_file = std::fs::File::create(data_dir.join("coord.log")).unwrap();
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("MR_RUST_LOG").unwrap_or_else(|_| "coord=warn".to_string()),
+        )
+        .env("RUST_BACKTRACE", "1")
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file));
 
         let cfg_dir = data_dir.join("conf");
         std::fs::create_dir_all(&cfg_dir).unwrap();
@@ -159,6 +158,7 @@ impl RealNode {
              [[multi_raft.initial_regions]]\nid = 2\nstart_key = \"b\"\nend_key = \"n\"\n\
              [[multi_raft.initial_regions]]\nid = 3\nstart_key = \"n\"\nend_key = \"\"\n\
              {pd_toml}\
+             [kv_t]\nenabled = false\n\
              [security]\nauth_enabled = false\n\
              auth_root_key = \"{}\"\n",
             "ab".repeat(32) // R-SEC-06：多节点集群需共享根密钥（测试用固定值）
@@ -186,6 +186,8 @@ impl RealNode {
     }
 
     /// 等待本节点 gRPC 可服务（status RPC 可达即算就绪）。
+    ///
+    /// 超时把子进程退出状态与日志尾一起带进 panic：只报「not ready」无法定位。
     async fn wait_ready(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
@@ -205,9 +207,30 @@ impl RealNode {
                     return;
                 }
             }
-            assert!(Instant::now() < deadline, "node {} not ready", self.id);
+            if Instant::now() >= deadline {
+                panic!(
+                    "node {} not ready after {:?} (log: {})\n--- tail ---\n{}",
+                    self.id,
+                    timeout,
+                    self.data_dir.join("coord.log").display(),
+                    self.log_tail(40)
+                );
+            }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
+    }
+
+    /// 子进程日志最后 `lines` 行（spawn 恒定落盘 `<data_dir>/coord.log`）。
+    fn log_tail(&self, lines: usize) -> String {
+        let log = std::fs::read_to_string(self.data_dir.join("coord.log")).unwrap_or_default();
+        log.lines()
+            .rev()
+            .take(lines)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn kill9(&mut self) {
@@ -1708,6 +1731,7 @@ async fn chaos_real_region_mode_kill_partition() {
              [[multi_raft.initial_regions]]\nid = 2\nstart_key = \"b\"\nend_key = \"n\"\n\
              [[multi_raft.initial_regions]]\nid = 3\nstart_key = \"n\"\nend_key = \"\"\n\
              {PD_TOML}\
+             [kv_t]\nenabled = false\n\
              [security]\nauth_enabled = false\nauth_root_key = \"{root_key}\"\n",
             if nid == 1 { "true" } else { "false" },
             raft_ports[i],

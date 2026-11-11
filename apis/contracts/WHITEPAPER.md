@@ -390,13 +390,14 @@ v1 的「Txn 条件不满足 = 非错误」**不适用于 v2 OCC**：v2 没有 `
   （`server/mod.rs:155-173`）。网络重试/超时重发场景建议始终携带。
 - 不带 `request_id` 的写重试**不保证幂等**。
 
-### 8.6 KV-T v2（默认关闭）
+### 8.6 KV-T v2（三态开关；ADR-0017）
 
-`coord.{tso,kv,txn,watch,lease,storage}.v2`（ADR-0015）是数据面的 v2 语义，
-默认关闭（`[kv_t].enabled=false`）。可见行为：
+`coord.{tso,kv,txn,watch,lease,storage}.v2`（ADR-0015）是数据面的 v2 语义。
+`[kv_t].enabled` 是三态（ADR-0017）：不写 = 多 Region + PD 集群自动启用，单 Raft
+集群仍是 v1；显式 `false` 关闭。可见行为：
 
 - 关闭时 v2 服务仍注册（reflection 可见），每个 RPC 返回 `FAILED_PRECONDITION`；
-  开启但对应 gate 未交付时同样 `FAILED_PRECONDITION`（消息点名契约包）。
+  未交付的 gate 能力同样 `FAILED_PRECONDITION`（消息点名契约包）。
 - v2 读写的 revision = 全局 `commit_ts`；`Range.read_ts=0` 取服务端 `safe_ts`；
   `read_ts > safe_ts` 等待至多 `read_ts_wait_ms`，超时 `SAFE_TS_LAG`。
 - v2 事务承诺 **serializable**（OCC + 全局 Commit Sequencer），**不承诺**

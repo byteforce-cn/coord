@@ -3,8 +3,9 @@
 Java SDK for the Coord platform — the agent-side service surfaces (registry,
 config, lock, election, idgen, event, cache, MQ, scheduler, workflow, policy,
 PKI, transit, circuit breaker, rate limiter, feature flags, object store) plus
-the KV-T v2 data plane (TSO/KV/Lease/Txn/Watch/Storage; requires
-`[kv_t].enabled=true` and an agent that forwards the v2 services).
+the KV-T v2 data plane (TSO/KV/Lease/Txn/Watch/Storage; requires a v2 cluster
+(`[kv_t]` enabled — the default on multi-Region clusters, ADR-0017 — and an agent
+that forwards the v2 services).
 Maven coordinates: `cn.byteforce:coord-java-sdk` (Java 21+).
 
 > This README is a starting point only. The **normative consumer semantics**
@@ -92,7 +93,7 @@ try (CoordClient client = CoordClient.create(config)) {
         client.mq().ack("orders", "orders-svc", m.partition(), m.offset());
     }
 
-    // KV-T v2 (requires [kv_t].enabled=true and a v2-aware agent)
+    // KV-T v2 (requires a v2 cluster — `[kv_t]` enabled — and a v2-aware agent)
     long commitTs = client.tsoV2().getTimestamp();
     client.kvV2().put("/app/k".getBytes(), "v".getBytes(), commitTs, false, new byte[0]);
     var ranged = client.kvV2().range("/app/k".getBytes());
@@ -155,7 +156,7 @@ is terminal.
 | Transit | `client.transit()` | envelope encryption + purpose-bound HMAC (`hmacSignWithPurpose` / `hmacVerifyWithPurpose`; persist the returned `keyId`); `rewrap` migrates DEKs during KEK rotation |
 | CircuitBreaker / RateLimiter / FeatureFlags | `client.circuitBreaker()`, `client.rateLimiter()`, `client.featureFlags()` | breaker/limiter are local (per-agent); feature flags live in the shared KV — `putFlag` / `putPercentageFlag` / `deleteFlag` / `listFlags` (management plane; takes effect immediately) |
 | ObjectStore | `client.objectStore()` | see `docs/production/volume-object-storage.md` |
-| KV-T v2 | `client.tsoV2()`, `client.kvV2()`, `client.leaseV2()`, `client.txnV2()`, `client.watchV2()`, `client.storageV2()` | `[kv_t].enabled=true`; writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; txn conflicts are results (replay with a new `startTs`); watch is at-least-once with cursor resume; storage buffers up to 256 MiB |
+| KV-T v2 | `client.tsoV2()`, `client.kvV2()`, `client.leaseV2()`, `client.txnV2()`, `client.watchV2()`, `client.storageV2()` | `[kv_t]` enabled (default on multi-Region clusters, ADR-0017); writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; txn conflicts are results (replay with a new `startTs`); watch is at-least-once with cursor resume; storage buffers up to 256 MiB |
 | Health | `client.healthCheck()` | agent health check |
 
 ## Errors

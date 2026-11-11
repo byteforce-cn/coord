@@ -55,6 +55,7 @@ pub struct V2Node {
     kvt_extra: String,
     pd_extra: String,
     toml_extra: String,
+    explicit_kv_t_enabled: bool,
 }
 
 /// 集群装配选项：默认值与历史夹具逐字一致（不可分区、无额外配置）。
@@ -68,6 +69,11 @@ pub struct V2ClusterOptions {
     pub partitionable: bool,
     /// 追加到 `[kv_t]` 段的键（每行自带换行；空 = 默认值）。
     pub kvt: &'static str,
+    /// 是否在 `[kv_t]` 段写 `enabled = true`。
+    ///
+    /// 默认 `true`（历史夹具逐字不变）。`false` = 不写该键，走三态自动
+    /// （ADR-0017：多 Region + PD 装配时启用 v2），用来钉住缺省语义。
+    pub explicit_kv_t_enabled: bool,
     /// 追加到配置末尾的其它段（例如 `[raft]` 调参）。
     pub toml: &'static str,
     /// 允许用 [`V2Cluster::resume_scheduler`] / [`V2Cluster::pause_scheduler`]
@@ -87,6 +93,7 @@ impl Default for V2ClusterOptions {
         Self {
             partitionable: false,
             kvt: "",
+            explicit_kv_t_enabled: true,
             toml: "",
             pd_control: false,
             pd: "",
@@ -128,7 +135,7 @@ impl V2Node {
              # 设计变成 HISTORY_UNAVAILABLE（属 split/merge 连续性套件），混进来\
              # 会被误判成数据丢失。\n\
              scheduler_paused = {scheduler_paused}\n{pd}\
-             [kv_t]\nenabled = true\n{kvt}\
+             [kv_t]\n{kv_t_enabled}{kvt}\
 {toml}",
             id = self.id,
             http = self.http_port,
@@ -136,6 +143,11 @@ impl V2Node {
             root_key = "ab".repeat(32),
             bootstrap = bootstrap,
             kvt = self.kvt_extra,
+            kv_t_enabled = if self.explicit_kv_t_enabled {
+                "enabled = true\n"
+            } else {
+                ""
+            },
             pd = self.pd_extra,
             scheduler_paused = self.scheduler_paused,
             toml = self.toml_extra,
@@ -276,6 +288,7 @@ impl V2Cluster {
                 partition_file: partition_file.clone(),
                 pd_scheduler_file: pd_scheduler_file.clone(),
                 scheduler_paused: options.scheduler_paused,
+                explicit_kv_t_enabled: options.explicit_kv_t_enabled,
                 kvt_extra: options.kvt.to_string(),
                 pd_extra: options.pd.to_string(),
                 toml_extra: options.toml.to_string(),

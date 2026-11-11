@@ -2161,6 +2161,23 @@ fn derive_region_seeds(
         .collect())
 }
 
+/// `[kv_t]` 三态默认的隐式启用闸（ADR-0017）。
+///
+/// 未写 `[kv_t].enabled` 时多 Region 配置自动启用 v2；但已迁移的 v1 集群（迁移标记
+/// 已写）隐式切换会静默冻结其 v1 数据面（ADR-0015 D12），所以必须由运维在
+/// `[kv_t].enabled = true`（转 v2）与 `false`（留在 v1）之间显式选择。
+fn kv_t_implicit_activation_refusal(
+    auto: bool,
+    effective: bool,
+    migrated: bool,
+) -> Option<&'static str> {
+    (auto && effective && migrated).then_some(
+        "refusing to implicitly enable [kv_t] on a cluster migrated from v1 (migration \
+         marker present): KV-T freezes the v1 data plane. Set [kv_t].enabled = true to \
+         move this cluster to v2, or [kv_t].enabled = false to stay on v1 (ADR-0017)",
+    )
+}
+
 // ──── Server 启动逻辑 ────
 
 async fn run_server(
@@ -2174,6 +2191,7 @@ async fn run_server(
     if let Err(errs) = cfg.validate() {
         return Err(format!("invalid configuration:\n  - {}", errs.join("\n  - ")).into());
     }
+    let kv_t_enabled = cfg.kv_t_enabled();
     let node_id = cfg.node.id;
     let grpc_addr = cfg.resolve_grpc_addr();
     let data_dir = cfg.resolve_data_dir();
@@ -2193,7 +2211,7 @@ async fn run_server(
     // 3. 单一 MvccStorage 实例：CoordNode 读路径、StateMachine 写路径、
     //    Compaction、Snapshot 全链路共享。v1 的 revision ≡ log index；
     //    `[kv_t].enabled=true` 的 v2 集群按显式 commit_ts 记 revision（ADR-0015 D3）。
-    let revision_mode = if cfg.kv_t.enabled {
+    let revision_mode = if kv_t_enabled {
         RevisionMode::CommitTs
     } else {
         RevisionMode::LogIndex
@@ -2233,6 +2251,13 @@ async fn run_server(
     if cfg.multi_raft.enabled {
         let migrated = coord_server::migration::has_migration_marker(&mvcc)
             .map_err(|e| format!("read migration marker: {e}"))?;
+        // 3.55a `[kv_t]` 未写（自动）只在 greenfield 上成立：v2 会冻结 v1 数据面
+        //       （ADR-0015 D12），对已迁移的 v1 集群隐式启用等于静默切换数据面。
+        if let Some(reason) =
+            kv_t_implicit_activation_refusal(cfg.kv_t.enabled.is_none(), kv_t_enabled, migrated)
+        {
+            return Err(reason.into());
+        }
         if !migrated {
             let has_legacy = coord_server::migration::has_legacy_user_data(&mvcc)
                 .map_err(|e| format!("scan legacy user data: {e}"))?;
@@ -2242,7 +2267,18 @@ async fn run_server(
                 cfg.multi_raft.legacy_migration,
                 cfg.multi_raft.allow_unmigrated,
             ) {
-                return Err(format!("refusing to start with multi_raft enabled: {reason}").into());
+                // 迁移/救援两个开关在 v2 下都被禁用（ADR-0015 D13），所以自动启用
+                // 时必须告知退回 v1 的写法，否则错误指向的处置不可执行。
+                let hint = if kv_t_enabled && cfg.kv_t.enabled.is_none() {
+                    " (with [kv_t] unset, KV-T is implicitly enabled on this multi-Region \
+                     cluster and v2 never migrates v1 data; set [kv_t].enabled = false to \
+                     stay on v1 — ADR-0017)"
+                } else {
+                    ""
+                };
+                return Err(
+                    format!("refusing to start with multi_raft enabled: {reason}{hint}").into(),
+                );
             }
         }
     }
@@ -2337,7 +2373,7 @@ async fn run_server(
     // 也不启动任何 v2 worker（ADR-0001）。
     let (lease_v2_revoke_tx, lease_v2_revoke_rx) =
         tokio::sync::mpsc::unbounded_channel::<(i64, u64)>();
-    if cfg.kv_t.enabled {
+    if kv_t_enabled {
         sm_store.set_lease_v2_revoke_tx(lease_v2_revoke_tx);
     }
 
@@ -2822,14 +2858,14 @@ async fn run_server(
     //
     //     已有权威表时只校验、不重新切分：拒绝路径不能先建目录/写 PD 元数据，
     //     所以读本地 region 0 store（启动前已打开）在这里做前置判定。
-    let region_table_at_boot = if cfg.kv_t.enabled && cfg.object_storage.enabled {
+    let region_table_at_boot = if kv_t_enabled && cfg.object_storage.enabled {
         mvcc.region_table()
             .map_err(|e| format!("read region table: {e}"))?
     } else {
         RegionTable::default()
     };
     region_seeds = derive_region_seeds(
-        cfg.kv_t.enabled,
+        kv_t_enabled,
         cfg.object_storage.enabled,
         region_seeds,
         &region_peers,
@@ -3108,7 +3144,7 @@ async fn run_server(
     // 能力继续保持 FAILED_PRECONDITION，直到对应 gate 把能力加入 implemented。
     node.set_kvt_state(
         coord_server::kvt::KvTState::new(
-            cfg.kv_t.enabled,
+            kv_t_enabled,
             coord_server::kvt::KvTRuntimeConfig {
                 tso_batch_size: cfg.kv_t.tso_batch_size,
                 commit_sequencer_batch: cfg.kv_t.commit_sequencer_batch,
@@ -3135,7 +3171,7 @@ async fn run_server(
             coord_server::kvt::KvTCapability::Storage,
         ]),
     );
-    metrics.set_kv_t_enabled(cfg.kv_t.enabled);
+    metrics.set_kv_t_enabled(kv_t_enabled);
     node.set_metrics(Arc::clone(&metrics));
 
     // split/merge 的跨节点 drain handler：本节点会话表就绪后注入；未启用
@@ -3237,7 +3273,7 @@ async fn run_server(
 
     // 6.6a 权威 Region 表（#159）：region 0 是元数据权威，各节点本地 apply 后
     //      通过 `refresh_region_table` 收敛路由。`[kv_t]` 关闭时不写表。
-    if cfg.kv_t.enabled {
+    if kv_t_enabled {
         let regions: Vec<RegionMeta> = region_seeds
             .iter()
             .map(|seed| RegionMeta {
@@ -3290,7 +3326,7 @@ async fn run_server(
     // 6.6a Commit Log shard 协调器（#154）：region 0 是 shard 元数据权威，
     //      每个 shard 一个独立 Raft 组。只在 kv_t + Multi-Raft 装配时构造；
     //      关闭态不产生任何目录/任务（ADR-0001）。
-    if cfg.kv_t.enabled {
+    if kv_t_enabled {
         if let (Some(manager), Some(raft)) = (node.region_manager.as_ref(), node.raft.as_ref()) {
             node.set_commit_log_shards(Arc::new(
                 coord_server::kvt::commit_log_shards::CommitLogShardManager::new(
@@ -3309,7 +3345,7 @@ async fn run_server(
     }
     // 校验索引与决策日志同事务推进；这里只补旧快照/索引缺失留下的缺口。
     // 失败即拒绝启动：残缺索引会让后续 OCC 冲突判断失效。
-    if cfg.kv_t.enabled {
+    if kv_t_enabled {
         let catch_up = mvcc
             .catch_up_sequencer_index(cfg.kv_t.commit_sequencer_batch as usize)
             .map_err(|e| format!("KV-T validation index catch-up failed: {e}"))?;
@@ -3325,7 +3361,7 @@ async fn run_server(
     }
     // 本地 TSO 批次缓存 + Commit Sequencer：只有开启且 region 0 raft 已装配才
     // 构造（关闭时不起后台任务、不改启动路径，ADR-0001）。
-    if cfg.kv_t.enabled {
+    if kv_t_enabled {
         if let Some(raft) = node.raft.clone() {
             let storage = Arc::clone(&node.storage);
             let tso = coord_server::raft::tso::TsoClient::new(
@@ -3354,16 +3390,16 @@ async fn run_server(
             ));
         }
     }
-    if cfg.kv_t.enabled {
+    if kv_t_enabled {
         tracing::warn!(
-            "KV-T enabled ([kv_t].enabled=true): TSO (coord.tso.v2), KV (coord.kv.v2), \
+            "KV-T enabled (effective [kv_t], ADR-0017): TSO (coord.tso.v2), KV (coord.kv.v2), \
              Txn (coord.txn.v2 Begin/Read/Commit/Abort, OCC + Commit Sequencer) and Lease \
              (coord.lease.v2) are available; Watch/Storage v2 stay \
              FAILED_PRECONDITION/UNIMPLEMENTED until their gate lands"
         );
     } else {
         tracing::info!(
-            "KV-T disabled ([kv_t].enabled=false): v1 behavior unchanged; v2 RPCs return \
+            "KV-T disabled (effective [kv_t] = false): v1 behavior unchanged; v2 RPCs return \
              FAILED_PRECONDITION"
         );
     }
@@ -3382,7 +3418,7 @@ async fn run_server(
         drop(lease_revoke_rx);
     }
     // v2 Lease：到期清理 + 跨 Region revoke（仅 [kv_t].enabled；关闭时通道已丢弃）。
-    if cfg.kv_t.enabled && node.raft.is_some() {
+    if kv_t_enabled && node.raft.is_some() {
         node.start_kvt_lease_expiry_worker();
         node.start_kvt_lease_revoker(lease_v2_revoke_rx);
         // 会话 TTL 回收：周期与 TTL 挂钩，避免 TTL 很短时过期会话长期滞留内存。
@@ -3502,7 +3538,7 @@ async fn run_server(
     //
     // v2 集群不注册 v1 `coord.storage`（B-KVT-2）：v1 写路径以 raft log index 当
     // revision，会与 v2 Region 的 commit_ts 撞 changelog 键。
-    let storage_svc = if cfg.object_storage.enabled && !cfg.kv_t.enabled {
+    let storage_svc = if cfg.object_storage.enabled && !kv_t_enabled {
         let obj_decode_limit = cfg.object_storage.chunk_size_bytes + 64 * 1024;
         Some(StorageServer::from_arc(Arc::clone(&node)).max_decoding_message_size(obj_decode_limit))
     } else {
@@ -3607,7 +3643,6 @@ async fn run_server(
     // v2 集群不服务 v1 数据面（ADR-0015 D13）：v1 服务仍注册（reflection 可见），
     // 但 handler 一律 FAILED_PRECONDITION，health 必须同步报 NOT_SERVING——否则
     // 编排/负载均衡会把流量继续送到已冻结的服务上。
-    let kv_t_enabled = cfg.kv_t.enabled;
     // R-OBS-10：storage 磁盘大小 / key 数采样
     let mvcc_for_metrics = Arc::clone(&mvcc);
     tokio::spawn(async move {
@@ -3845,26 +3880,26 @@ async fn run_server(
     // 7.5a KV-T CommitDecision 应用器（#148）：region 0 决策日志 → 本地领导的
     //      数据 Region raft；Commit 只等决策落盘，apply 异步追赶。关闭 kv_t /
     //      无 Multi-Raft 时不启动（v1 行为不变）。
-    let _decision_applier =
-        if cfg.kv_t.enabled && node.region_manager.is_some() && node.raft.is_some() {
-            tracing::info!(
-                "KV-T commit decision applier started (interval={:?})",
-                coord_server::kvt::decision_apply::DECISION_APPLY_INTERVAL
-            );
-            Some(coord_server::kvt::decision_apply::start_applier(
-                Arc::clone(&node),
-                coord_server::kvt::decision_apply::DECISION_APPLY_INTERVAL,
-            ))
-        } else {
-            None
-        };
+    let _decision_applier = if kv_t_enabled && node.region_manager.is_some() && node.raft.is_some()
+    {
+        tracing::info!(
+            "KV-T commit decision applier started (interval={:?})",
+            coord_server::kvt::decision_apply::DECISION_APPLY_INTERVAL
+        );
+        Some(coord_server::kvt::decision_apply::start_applier(
+            Arc::clone(&node),
+            coord_server::kvt::decision_apply::DECISION_APPLY_INTERVAL,
+        ))
+    } else {
+        None
+    };
 
     // 7.5 KV-T safe_ts 推进器（#142）：region 0 leader 发布 TSO 分配高水位
     //     fence，各节点把本地领导的 Region 水位抬到 fence。关闭 kv_t / 无
     //     Multi-Raft 时不启动（v1 行为不变）。
     // 7.5b Commit Log shard 协调任务（#154）：装配 shard raft 组、推进
     //      open/预创建/seal 元数据、把数据 Region outbox 搬进 shard 组。
-    let _commit_log_shards = if cfg.kv_t.enabled && node.commit_log_shards().is_some() {
+    let _commit_log_shards = if kv_t_enabled && node.commit_log_shards().is_some() {
         tracing::info!("KV-T commit log shard manager started");
         Some(coord_server::kvt::commit_log_shards::start_shard_manager(
             Arc::clone(&node),
@@ -3874,19 +3909,19 @@ async fn run_server(
         None
     };
 
-    let _safe_ts_advancer =
-        if cfg.kv_t.enabled && node.region_manager.is_some() && node.raft.is_some() {
-            tracing::info!(
-                "KV-T safe-ts advancer started (interval={:?})",
-                coord_server::kvt::safe_ts::SAFE_TS_ADVANCE_INTERVAL
-            );
-            Some(coord_server::kvt::safe_ts::start_advancer(
-                Arc::clone(&node),
-                coord_server::kvt::safe_ts::SAFE_TS_ADVANCE_INTERVAL,
-            ))
-        } else {
-            None
-        };
+    let _safe_ts_advancer = if kv_t_enabled && node.region_manager.is_some() && node.raft.is_some()
+    {
+        tracing::info!(
+            "KV-T safe-ts advancer started (interval={:?})",
+            coord_server::kvt::safe_ts::SAFE_TS_ADVANCE_INTERVAL
+        );
+        Some(coord_server::kvt::safe_ts::start_advancer(
+            Arc::clone(&node),
+            coord_server::kvt::safe_ts::SAFE_TS_ADVANCE_INTERVAL,
+        ))
+    } else {
+        None
+    };
 
     // 8. 启动 Changelog Compaction 后台任务（leader 经 raft 提案
     //    compact revision（节点一致）+ 定时 redb 文件级 compact 空间回收）
@@ -3904,7 +3939,7 @@ async fn run_server(
     // safe_ts 只在 kv_t 开启时约束 compaction；关闭时传 None，v1 的
     //「current_revision - retention」逐字节不变（ADR-0001）。
     let safe_ts_source: Option<Arc<dyn coord_server::storage::compaction::SafeTsSource>> =
-        if cfg.kv_t.enabled {
+        if kv_t_enabled {
             Some(node.clone())
         } else {
             None
@@ -4052,7 +4087,7 @@ async fn run_server(
                     chunk_store: Arc::clone(store),
                     limits: Arc::clone(limits),
                     interval_secs: cfg.object_storage.gc_interval_secs,
-                    v2: cfg.kv_t.enabled.then(|| Arc::clone(&node)),
+                    v2: kv_t_enabled.then(|| Arc::clone(&node)),
                 }),
             );
             tracing::info!("Object gc loop started (legacy/root)");
@@ -4073,7 +4108,7 @@ async fn run_server(
                                 chunk_store: Arc::clone(store),
                                 limits: Arc::clone(limits),
                                 interval_secs: cfg.object_storage.gc_interval_secs,
-                                v2: cfg.kv_t.enabled.then(|| Arc::clone(&node)),
+                                v2: kv_t_enabled.then(|| Arc::clone(&node)),
                             }),
                         );
                         tracing::info!("Region {rid} object gc loop started");
@@ -4874,7 +4909,17 @@ async fn run_dev(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_loopback_host, load_or_create_root_key};
+    use super::{is_loopback_host, kv_t_implicit_activation_refusal, load_or_create_root_key};
+
+    /// ADR-0017：自动启用只在 greenfield 上成立，已迁移的 v1 集群必须显式二选一。
+    #[test]
+    fn test_kv_t_implicit_activation_refused_on_migrated_v1_cluster() {
+        assert!(kv_t_implicit_activation_refusal(true, true, true).is_some());
+        // 显式 true/false、greenfield、未生效（单 Raft）都放行。
+        assert!(kv_t_implicit_activation_refusal(false, true, true).is_none());
+        assert!(kv_t_implicit_activation_refusal(true, true, false).is_none());
+        assert!(kv_t_implicit_activation_refusal(true, false, true).is_none());
+    }
 
     #[test]
     fn test_is_loopback_host() {

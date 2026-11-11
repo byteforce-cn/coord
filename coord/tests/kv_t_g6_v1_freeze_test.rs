@@ -3,7 +3,7 @@
 //! `[kv_t].enabled=true` 的集群只服务 `coord.<domain>.v2`；v1 KV/Txn/Lease/Watch
 //! 的每个 RPC 在 handler 入口返回 `FAILED_PRECONDITION`（策略拒绝，不是
 //! `UNIMPLEMENTED`/`UNAVAILABLE`），结构化 trailer 为
-//! `x-coord-error-code: FAILED_PRECONDITION`；`[kv_t].enabled=false` 的 v1 行为不变。
+//! `x-coord-error-code: FAILED_PRECONDITION`；`[kv_t]` 有效值关闭时 v1 行为不变。
 
 use std::net::SocketAddr;
 use std::sync::Arc;

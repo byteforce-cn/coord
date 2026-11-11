@@ -1,6 +1,6 @@
 //! KV-T G0 验收（issue #133/#134）：
 //! - v2 服务始终注册、reflection 可见；
-//! - `[kv_t].enabled=false` 时每个 v2 RPC 返回 `FAILED_PRECONDITION`（不是
+//! - `[kv_t]` 有效值关闭时每个 v2 RPC 返回 `FAILED_PRECONDITION`（不是
 //!   `UNIMPLEMENTED`/`UNAVAILABLE`）；
 //! - 开启但能力未交付（G0）同样 `FAILED_PRECONDITION`，消息点名契约包；
 //! - v1 服务在两种状态下都不受影响。
@@ -126,7 +126,7 @@ mod tests {
             .expect("v1 Range must keep working");
         assert_eq!(resp.into_inner().kvs.len(), 1);
 
-        assert_v2_gated(addr, "[kv_t].enabled=false").await;
+        assert_v2_gated(addr, "kv_t disabled").await;
         handle.abort();
     }
 
