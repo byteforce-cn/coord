@@ -315,9 +315,13 @@
       ;; upload went undetected for a whole 72h round once. collect-evidence.sh
       ;; compares this line with the control-side hash and refuses a MANIFEST
       ;; when they disagree.
+      ;; c/exec returns the command's stdout **string** (it has no `:out` key),
+      ;; so the earlier `(:out ...)` form always trimmed nil and every run
+      ;; recorded "unavailable" — collect-evidence.sh then (correctly) refused
+      ;; to emit a MANIFEST.
       (let [hash (try
                    (-> (c/exec :sha256sum (str (:coord-dir db) "/coord"))
-                       :out str/trim (str/split #"\s+") first)
+                       str/trim (str/split #"\s+") first)
                    (catch Exception e
                      (warn e "could not hash the node-side coord binary on" node)
                      "unavailable"))]
