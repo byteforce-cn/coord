@@ -52,7 +52,7 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    `c105e9a1`（tree `889452f1`）、bin `f94abe5d`（控制机与三节点同哈希），参数
    `--soak-quiet 1800 --soak-disrupt 600 --rate 0.5 --concurrency 1n
    --min-op-ok-ratio 0.9 --mvcc-retention-revs 600000 --v2-history-window-secs 120`，
-   seed `1884715972`。判据（`jepsen/soak/soak-kvt.log` + `results.edn`）：
+   seed `1884715972`。判据（本轮 store 的 `jepsen.log` 与 `results.edn`）：
    - 历史读（`read_ts>0`）失败 **0/12 849 = 0.00%**（上限 1%；#311 的判据首次在
      有效采样下判绿）。mvcc 一致性 **0 errors**（writes 68 034 / reads 42 668 /
      ts 12 924；`final-reads 1 280`）。
