@@ -276,6 +276,12 @@ current status and the work required to close each item — is
 
 Version `0.3.5` (pre-1.0). The Raft engine (`openraft`) is an alpha dependency and Coord is **not yet recommended for production**. The consistency core is continuously exercised by the in-repo Jepsen project and CI; see [Testing & verification](#testing--verification) and [Limitations / non-goals](#limitations--non-goals) before adopting.
 
+The KV-T v2 data plane (ADR-0015) passed its GA gate on 2026-11-11: the 72h Jepsen
+run, per-gate evidence and the sign-off record are in
+[`docs/production/ops/kv-t-ga-gate.md`](docs/production/ops/kv-t-ga-gate.md). It stays
+opt-in (`[kv_t].enabled = true` plus `data_plane = "v2"` on the agent); the pre-1.0
+status above is unchanged.
+
 ## Documentation
 
 - Protocol contracts & capability commitments: [`apis/contracts/`](apis/contracts/README.md)

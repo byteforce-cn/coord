@@ -166,7 +166,8 @@ PERF_GATE=1 cargo test -p coord --release --test kv_t_g6_perf_v2_test perf_split
 |:--|:--|
 | CI 冒烟（120s，真实 3 进程，v1） | 每个 PR 的 `chaos (kill9 + soak, real processes)` job 执行 `chaos_soak_distributed`；`scripts/collect-evidence.sh soak-smoke` 可产出证据目录 |
 | v2 冒烟（45s + 2 次 region 0 leader kill，真实 3 进程） | `KVT_SOAK_SECS=45 KVT_SOAK_FAULT_SECS=15 cargo test -p coord --release --test kv_t_g6_soak_v2_test soak_v2_mixed_workload_stays_consistent -- --ignored --nocapture --test-threads=1`（每次 PR 的混沌 job 同时跑 v2 决策面故障套件；本行是长窗口冒烟命令） |
-| **72h 生产浸泡（v2）** | ✅ **通过**：2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z（259 200 s，main `c53bbfb`），`soak-report.md` 结论「通过（无一致性违规）」；103 630 轮、TSO 2.555 亿、863 次 kill -9 region 0 leader 注入后恢复、watchdog 0 次、节点日志 0 ERROR、无 `passed unapplied decision` / `decision apply stopped` / `behind the applied revision` 锚点。看门狗（卡住 → 告警 → abort）见 PR #266；证据目录 `/tmp/coord-soak72/`（报告全文贴在 #174） |
+| 72h 生产浸泡（v2，bash soak；早期支撑证据） | ✅ 通过：2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z（259 200 s，main `c53bbfb`），`soak-report.md` 结论「通过（无一致性违规）」；103 630 轮、TSO 2.555 亿、863 次 kill -9 region 0 leader 注入后恢复、watchdog 0 次、节点日志 0 ERROR、无 `passed unapplied decision` / `decision apply stopped` / `behind the applied revision` 锚点。看门狗（卡住 → 告警 → abort）见 PR #266；证据目录 `/tmp/coord-soak72/`（报告全文贴在 #174） |
+| **72h 生产浸泡（v2，Jepsen；GA 证据）** | ✅ **通过**：2026-11-08T06:17:09Z → 2026-11-11T06:19:54Z（72h02m，commit `c105e9a1` / tree `889452f1` / bin `f94abe5d`），261 954 ops、mvcc 0 errors、历史读 0/12 849、quiet 可用率 0 违规（最差 99.80%）、RTO p95 98.35s ≤ 120s、op-liveness 94.5% ≥ 0.9；`make rejudge` = valid，MANIFEST `overall-valid: true`。逐判据数字、复判命令与证据目录见 `kv-t-ga-gate.md` §3-1 |
 
 ```bash
 # KV-T GA 的证据口径是 v2 数据面的 72h 浸泡：
@@ -179,9 +180,9 @@ COORD_EVIDENCE_DIR=/path/to/artifact-store SOAK_SUITE=v2 SOAK_DURATION_SECS=2592
 ```
 
 在 72h 证据入库（或挂到发布工件）之前，任何「长稳已达标」的表述都不成立。
-本次实例的证据是 `/tmp/coord-soak72/`（报告 + driver.log + 三节点日志），报告全文
-贴在 #174；最终 GA 提交上的长稳证据由 Jepsen v2（#272）承担（维护者 2026-10-28
-裁定，见 `kv-t-ga-gate.md` §3.1）。
+GA 的长稳证据是上表最后一行的 Jepsen v2 72h run：门槛判据（linearizability /
+mvcc / 历史读失败率 / quiet 可用率 / RTO / op-liveness）与 MANIFEST 见
+`kv-t-ga-gate.md` §3-1；早期 bash soak 的实例证据在 `/tmp/coord-soak72/`。
 
 ## 8. 调参口径（只改数值）
 
