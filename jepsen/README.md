@@ -424,3 +424,11 @@ lein run -m clojure.main scripts/summarize-results.clj store/coord/latest
 (`MANIFEST.md`, `run.log`, `results.edn`, `history.edn` (gzipped above 5MiB),
 `summary.txt`, `sha256sums.txt`). A run without a MANIFEST is not evidence: it
 cannot be cited in an adoption review.
+
+The identity triple comes from the soak log (`coord-soak.sh` writes
+`control-binary/commit/tree/dirty`) and the per-node `sha256sum` lines in
+`jepsen.log`. The pipeline itself has negative controls:
+`bash scripts/check-evidence-identity.sh` proves that a consistent identity
+yields a MANIFEST, a hash mismatch or a missing header is refused (exit 3, no
+archive), and an explicit `COORD_IDENTITY_OVERRIDE` is archived and marked
+`override(post-hoc)`.

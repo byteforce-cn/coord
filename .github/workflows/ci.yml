@@ -260,6 +260,11 @@ jobs:
           fi
           git checkout -- "$target"
           echo "OK: capability-registry gate correctly turned red on the injected gap"
+      - name: Assert the evidence-identity pipeline fails closed
+        # #303 的采集器与 coord-soak.sh 的起跑头是一对：生产者只把身份头 echo 到
+        # 终端时，采集器会对着一轮干净的 72h 拒绝出 MANIFEST（本轮真实发生）。
+        # 这里把「哈希不一致 / 没有头 / override」三种形态都注入一遍。
+        run: bash scripts/check-evidence-identity.sh
   frontend-lint:
     name: frontend lint (coord-ui)
     runs-on: ubuntu-latest

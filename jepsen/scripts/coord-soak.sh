@@ -109,11 +109,6 @@ cmd_start() {
   fi
 
   local time_limit=${time_limit:-$((hours * 3600))}
-  echo "== starting coord soak =="
-  echo "   time-limit=${time_limit}s (${hours}h) rate=$rate workload=$workload checker=$checker nemesis=$nemesis regions=${regions:-(single-Raft)}"
-  echo "   quiet=${quiet}s disrupt=${disrupt}s concurrency=$concurrency seed=${seed:-(random)}"
-  echo "   extra: mixture-ratio=${mixture_ratio:-(default 4,2,2)} map-min-deletes=${map_min_deletes:-(off)} extra=${extra:-(none)}"
-  echo "   log: $LOG"
 
   # 证据身份（#303）：72h 一轮最贵的失败是「跑的二进制不对」——Test version 只
   # 反映 jepsen 检出，不证明 server 二进制来自同一棵树。这里把控制机二进制哈希
@@ -130,10 +125,6 @@ cmd_start() {
     tree="$(git -C "$PROJECT" write-tree 2>/dev/null || echo -)"
     dirty="$(git -C "$PROJECT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   fi
-  echo "   control-binary: ${ctl_sha} ${ctl_real:-$ctl_bin}"
-  echo "   control-commit: ${commit}"
-  echo "   control-tree:   ${tree}"
-  echo "   control-dirty:  ${dirty}"
 
   # 取证 run 必须从**干净树 + 新鲜二进制**起跑（#174/#303 的教训：一整轮 72h
   # 因 make binary 抢在 merge 前构建而作废）。两个判据都是 mtime/porcelain 级，
@@ -172,7 +163,24 @@ cmd_start() {
   # 标志，残留会把旧结论当成这一轮的（实测：fast-soak 一起来就"红"在一个小时前
   # 的文件上）。
   rm -f "$SOAK_DIR/fail-fast${SOAK_NAME:+-$SOAK_NAME}.edn"
-  echo "   op-log:  $ops_log"
+
+  # 起跑头**必须写进日志文件**：collect-evidence.sh 从 $LOG 解析
+  # control-binary/commit/tree/dirty。只 echo 到终端时，取证管道会把每一轮都
+  # 判成「身份缺失」——#303 修好的采集器在下一轮就是这么 fail-closed 的。
+  # tee 同时负责把旧日志截断（一次 run 一份日志）。
+  local header
+  header="$(printf '%s\n' \
+    "== starting coord soak ==" \
+    "   time-limit=${time_limit}s (${hours}h) rate=$rate workload=$workload checker=$checker nemesis=$nemesis regions=${regions:-(single-Raft)}" \
+    "   quiet=${quiet}s disrupt=${disrupt}s concurrency=$concurrency seed=${seed:-(random)}" \
+    "   extra: mixture-ratio=${mixture_ratio:-(default 4,2,2)} map-min-deletes=${map_min_deletes:-(off)} extra=${extra:-(none)}" \
+    "   log: $LOG" \
+    "   control-binary: ${ctl_sha} ${ctl_real:-$ctl_bin}" \
+    "   control-commit: ${commit}" \
+    "   control-tree:   ${tree}" \
+    "   control-dirty:  ${dirty}" \
+    "   op-log:  $ops_log")"
+  printf '%s\n' "$header" | tee "$LOG"
 
   # Detach into its own session/process group so neither SSH nor SIGHUP can
   # kill it. The PID recorded is the session leader; `stop` kills the group.
@@ -180,7 +188,7 @@ cmd_start() {
   # with `cd && lein ...` bash cannot exec-replace itself, so a redirect
   # inside the string would leave the wrapper holding the SSH channel open
   # and `vagrant ssh` would hang until lein exits.
-  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis $nemesis --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --op-log '$ops_log' --time-limit $time_limit --concurrency $concurrency" > "$LOG" 2>&1 < /dev/null &
+  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis $nemesis --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --op-log '$ops_log' --time-limit $time_limit --concurrency $concurrency" >> "$LOG" 2>&1 < /dev/null &
   local pid=$!
   echo "$pid" > "$PIDFILE"
   sleep 5

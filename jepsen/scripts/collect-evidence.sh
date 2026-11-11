@@ -240,7 +240,7 @@ cat > "$OUT/MANIFEST.md" <<EOF
 | 起跑时未提交改动数 | ${ctl_dirty:-unknown} |
 | 归档时检出 | \`${archiving_commit}\` (${coord_tag}, ${commit_date}) — **${tree_dirty}** |
 | coord-proto 哈希（16） | \`${proto_hash}\` |
-| coord 配置生成器哈希（16） | `${config_hash}` (jepsen/src/jepsen/coord/db.clj — 节点 TOML 由它生成) |
+| coord 配置生成器哈希（16） | \`${config_hash}\` (jepsen/src/jepsen/coord/db.clj — 节点 TOML 由它生成) |
 | Jepsen 版本 | ${jepsen_version} |
 | Clojure 版本 | ${clj_version} |
 | JVM | ${java_version} |
