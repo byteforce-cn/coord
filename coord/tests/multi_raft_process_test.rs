@@ -1709,6 +1709,7 @@ async fn chaos_real_region_mode_kill_partition() {
              [[multi_raft.initial_regions]]\nid = 2\nstart_key = \"b\"\nend_key = \"n\"\n\
              [[multi_raft.initial_regions]]\nid = 3\nstart_key = \"n\"\nend_key = \"\"\n\
              {PD_TOML}\
+             [kv_t]\nenabled = false\n\
              [security]\nauth_enabled = false\nauth_root_key = \"{root_key}\"\n",
             if nid == 1 { "true" } else { "false" },
             raft_ports[i],
