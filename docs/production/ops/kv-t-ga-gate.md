@@ -1,11 +1,12 @@
 # KV-T GA Gate（G0–G6 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-08（重跑起跑 + 快速失败/保留窗口/范围历史读三处修复）
+> Owner: maintainers ｜ Last verified: 2026-11-11（G6 72h 取证通过并签字；取证管道自检落地）
 
-- **状态**：**NO-GO（未签）**。G0–G5 已交付；G6 的 72h run 已跑完（2026-11-04T14:44:43Z →
-  11-07T14:52:12Z），但按设计判据**不达标**（§3-1）。原因不是「跑得不够久」，而是取证口径：
-  历史读失败率 10.08% ≫ 设计 1% 上限、3/108 个 quiet 窗口可用率 <0.95；且旧报告里的
-  `:valid? true` 是 premise/availability/RTO 空转造成的假绿（§3.6）。
+- **状态**：**GO（已签，2026-11-11）**。G0–G6 全部交付；最终 72h run
+  `2026-11-08T06:17:09Z → 2026-11-11T06:19:54Z` 按设计判据全绿（§3-1）：历史读失败
+  0/12 849、quiet 可用率 0 违规（最差窗口 99.80%）、RTO p95 98.35s ≤ 120s、mvcc
+  0 errors、op-liveness 94.5% ≥ 0.9。证据 MANIFEST 与复判命令见 §3-1；身份事后
+  钉住（`override(post-hoc)`）的原因与 provenance 见 §3.7。
 - 本文是 GA 状态的**单一事实源**：gate 证据、未达标项、签字记录。语义口径仍以
   `docs/adr/0015-kv-t.md` 为准；能力矩阵在 ADR D13；运维处置在 `runbook.md`。
 - 划线规则：**没有可复跑证据的项不写「通过」**；「未跑」必须留在未达标列。
@@ -20,7 +21,7 @@
 | G3 Serializable | OCC + sequencer；冲突不写决策 | ✅ | `kv_t_g3_commit_decision_test`、`kv_t_g3_txn_commit_test`、`kv_t_g3_delete_range_test`；`coord-server/tests/kv_t_g3_sequencer_test.rs`（write skew / phantom / 顺序） |
 | G4 Watch/Commit Log | 全局序/原子批/历史窗口 | ✅ | `kv_t_g4_watch_coordinator_test`、`kv_t_g4_watch_rpc_test`、`kv_t_g4_commit_log_shards_test`；`test_watch_history_unavailable` |
 | G5 Split/Merge | 动态表/epoch；不丢不重 | ✅ | `kv_t_g5_continuity_test`、`kv_t_g5_routing_epoch_test`、`kv_t_g5_write_fence_test`、`kv_t_g5_cross_node_drain_test`、`kv_t_g5_storage_v2_test`；split/merge migrator 套件 |
-| **G6 GA** | e2e/备份/SDK/Agent/混沌/性能/文档全绿 + 签字 | ⛔ **未达标（72h 已跑完，判据红：§3-1）** | 见 §2、§3 |
+| **G6 GA** | e2e/备份/SDK/Agent/混沌/性能/文档全绿 + 签字 | ✅ | 72h run 全绿（§3-1）；签字见 §4 |
 
 CI 基线：main 的 `workspace tests`、三片 test shard、两个 chaos job、`java example integration`、
 `cargo audit + deny`、`fmt + clippy`、`check-doc-refs` 全绿（run 40180615805 重跑后；
@@ -38,55 +39,45 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
 | Agent 数据面 v2（#170） | ✅ | `kv_t_g6_agent_services_v2_test::test_v2_cluster_serves_all_builtin_services`（15 个非 MQ 内建服务在真实 v2 集群注册并各调一次；idgen 走 segment ⇒ v2 Txn CAS）；`agent_v2_*_proxy_test`、`agent_v2_mode_test` |
 | Workflow/MQ fail-closed（#171） | ✅ | `agent_workflow_durable_gate_test`（6 例：v2 拒绝 mq / workflow_durable，纯 KV workflow 可用）；`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
 | Rust client / Java SDK v2（#172） | ✅ | Rust：`cargo test -p coord-client`（含 `lease_v2_background_keep_alive_renews_and_stops`、`storage_v2_open_put_*`）；Java：`KvTV2ClusterIntegrationTest`（`mvn -Pit`，真实 v2 集群）；`java-example` v2 示例 `KvTV2Example`（`bash java-example/scripts/run-v2-example.sh`，非 v2 集群退出码 2，无 v1 降级）；跨语言互操作 `KvTInteropIntegrationTest` + `kvt_interop_peer`（`bash scripts/check-kvt-interop.sh`：Rust 写 → Java 按精确 `commit_ts` 读，再反向；对账 value/`mod_revision`/`create_revision` 与 Watch 批 `commit_ts`） |
-| 性能/容量/长稳（#174） | ⚠️ 部分 | 已测（`performance.md` §2–§7，命令可复跑）：存储写/读/fanout/多 Region 基线；sequencer 吞吐 152/115 txn/s（批均值 1.0）、OCC 冲突率 93.8%、watch 端到端 p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9 绿。容量无 GC 按 D10 记为 `boundaries.md` B-KVT-13（停，不静默）。**72h v2 bash soak 已通过**（2026-10-25T15:05:11Z → 2026-10-28T15:18:46Z，main `c53bbfb`；103 630 轮、TSO 2.556 亿、863 次 kill -9 region 0 leader 注入、watchdog 0 次、节点日志 0 ERROR、无不变量锚点；报告见 #174 评论）。**split/merge 停顿已测**（§3.5-6：统计/采样/leader 上报 + 自动 split 打通；数字见 `performance.md` §6.6）。剩余未达标：GA 最终长稳证据由 Jepsen v2（#272）承担。**2026-10-29 的 72h run 抓到一个删除面缺陷**（test version `f3da517`，merge `6e38522`）：`mvcc` 一致性判据 0 errors（writes 63 006 / reads 42 183 / ts 12 857），但 `v2-delete` 4 467/6 311 fail（ok 1 596，25.3%），错误全是 `v2 :other`；`gates` 的 per-op liveness 0.1 地板没有判红（§3.5-9）。**该 run 不作为 GA 证据。** 修复已合入 main `b49b213`（#298：follower 的 `ForwardToLeader` → `UNAVAILABLE + NOT_LEADER`；#299：wasmtime 48.0.8 让 `cargo audit` 恢复绿），`soak-kv-t` 收紧到 `--min-op-ok-ratio 0.9`。**首轮 72h 重跑判红，但归因为取证二进制陈旧**：2026-11-01T08:13:22Z → 11-04T08:18Z 的 run（Test version `b49b213`）`v2-delete` ok 2 338/6 455（36.2%）、失败全是 `v2 :other`；节点 `/opt/coord/coord` = `101b98b8…`，与「当前 main 反向 patch #298 修复后重建」逐字节相同 ⇒ 修复未被这轮执行到，该 run 只作「抓到缺陷」证据。**最终 72h run 已跑完，按当前判据不达标（不作为 GA 证据）**：bin `09138e63` / main `7c6dc77a`（tree `dd2803cc`），2026-11-04T14:44:43Z → 11-07T14:52:12Z（72h07m）。mvcc 一致性判据 **0 errors**（writes 68 935 / reads 43 493 / ts 13 063；`final-reads 1 280`）、216 次扰动（72 kill + 72 pause + 72 partition）、节点日志 0 ERROR、op-liveness 95.92%（write 96.9% / delete 96.9% / read 93.3%）。**不达标的三条**：① 历史读 `HISTORY_UNAVAILABLE` 1 301/12 908 = **10.08%**，设计 §5.4 上限 1%（#311）；② **3/108 个 quiet 窗口**可用率 <0.95（94.98% / 93.81% / 91.30%，失败全是 `SAFE_TS_LAG`）（#308 修好后才能看到）；③ 唯一一条 `:fail` 是 #304（分区隔离的 leader 上 delete 的 pre-read 屏障 `QuorumNotEnough` 被映射成 `INTERNAL`）。此外 14 次 generator crash（9× CCT expired、5× not leader，#309）削样本。旧 `results.edn` 的 `:valid? true` 只由 mvcc + op-liveness 支撑：premise/availability/RTO 当时全部空转（§3.6）。复判命令：`make rejudge`（15.5s 重判这份 262k op 的历史）。 |
+| 性能/容量/长稳（#174） | ✅ | 性能与容量数字：`performance.md` §2–§7（sequencer 152/115 txn/s、OCC 冲突率 93.8%、watch e2e p50 540 ms、写放大 72.4×、`PERF_GATE=1 bash scripts/bench-ci.sh` 9/9）；容量无 GC 按 D10 停在 `boundaries.md` B-KVT-13。长稳：Jepsen v2 **72h 通过**（run `2026-11-08T06:17:09Z → 11-11T06:19:54Z`，commit `c105e9a1` / tree `889452f1` / bin `f94abe5d`；261 954 ops、mvcc 0 errors、历史读 0/12 849、quiet 0 违规、RTO p95 98.35s、liveness 94.5%，`make rejudge` = `valid`）——判据、seed 与 MANIFEST 见 §3-1。此前判红/作废的轮次与修复见 §3.5/§3.6/§3.7（保留窗口与历史读窗口 #317/#318、`SAFE_TS_LAG` 裁定 #308、#304、#309、取证管道）。 |
 | 混沌/Jepsen（#175） | ✅ | v1 真实故障矩阵在 CI 绿（`chaos_real`、`multi_raft_process_test`）。v2 3 进程矩阵 `kv_t_g6_chaos_v2_test`（CI `chaos-kill9-soak` job，整文件跑）：`chaos_v2_mixed_writes_survive_decision_leader_loss`（kill -9 / SIGSTOP region 0 leader + 混合事务/直写，37 次连续绿）；`chaos_v2_partitioned_region0_leader_keeps_invariants`（对称网络分区隔离 region 0 leader：debug 构建的 `COORD_TEST_RAFT_PARTITION_FILE` 钩子在 raft RPC 层双向阻断，多数派换主、分区窗口内写入、heal 后收敛）；`chaos_v2_shard_seal_stall_keeps_watch_continuous`（`commit_log_shard_records=8` / `shard_secs=1` 下 SIGSTOP region 0 leader ⇒ TSO/sequencer/shard seal 停摆；恢复后 Watch 从 baseline+1 严格递增、无重无丢，sealed shard 指标增长）；`chaos_v2_interrupted_snapshot_install_recovers`（follower 落后 → 快照安装途中冻结 + kill -9 → 重启追平、全部 `commit_ts` 可读）。本轮矩阵抓出并修复两个 GA 阻塞缺陷（见 §3.5），`test_lease_cleanup_is_per_region` 的 CI 间歇超时也一并修掉（PR #268）。**仍未做**：split/merge 迁移中断的进程级注入（§3.3 的 D10 裁定）。 |
 | Ops runbook/监控（#176） | ✅ | `monitoring/prometheus-rules.yml` + `docs/production/ops/runbook.md`；`bash scripts/check-gate-drills.sh`（每条告警必须有可达 runbook 锚点） |
 | ADR accepted / 文档一致 | ✅ | ADR-0015 状态 accepted；`scripts/check-doc-refs.sh` 0 悬空 |
-| 发布 sign-off | ⛔ | §4 未填 |
+| 发布 sign-off | ✅ | §4：2026-11-11 GO（证据 MANIFEST、未关闭项见该行） |
 
-## 3. 关闭 G6 的硬条件（当前未满足）
+## 3. 关闭 G6 的硬条件（当前状态：已满足）
 
-1. #174：**72h run 已跑完，按设计判据不达标（不是「再跑一轮就好」）**。
-   run `2026-11-04T14:44:43Z → 11-07T14:52:12Z`，bin `09138e63`（tree `dd2803cc` =
-   main `7c6dc77a` 的 tree；节点侧 `/opt/coord/coord` 三个节点同哈希，取证三元组
-   已核对）。`make rejudge` 用当前 checker/gates 复判（262 090 条 op，15.5s）：
-   `rejudge-verdict: invalid`、`rejudge-reason: :history-unavailable-rate
-   :quiet-availability`。三条不达标：
-   - **历史读失败率 10.08% ≫ 1%**（设计 §5.4 的采样前提；#311）。根因是保留窗口
-     按 revision 计数（`retention=100000 revs`，本负载 ≈334 rev/s ⇒ ~300s），而
-     客户端历史窗口默认 600s（`--v2-history-window-secs`，此前硬编码）；逐小时 1.1%–18.2%，稳态滴漏。**重跑前必须对齐**：
-     把 `--v2-history-window-secs` 收到保留窗口以内（并/或提高 retention），再起
-     72h。**裁定（2026-11-08）**：客户端窗口 600s → **120s**，
-     `[storage] changelog_retention_revisions` 100 000 → **600 000**（新配置项，
-     默认值不变；72h 口径 ≈30min、fast-soak 口径 ≈5min，均覆盖 120s 窗口），由
-     `make soak-kv-t` / `make fast-soak` 的 `SOAK_EXTRA` 固定传入。
-   - **3/108 个 quiet 窗口可用率 <0.95**（94.98% / 93.81% / 91.30%），失败全部是
-     `SAFE_TS_LAG`。这是 #308 修好 v2 op 覆盖后才可见的真实可用性信号；签字前
-     要么让重跑达到 0.95，要么把「`SAFE_TS_LAG` 是否计入可用率」写成显式裁定
-     （当前按 v1 同口径计入，不静默放宽）。
-   - **唯一 `:fail` = #304**：分区隔离的 leader 上 delete 的 pre-read 屏障
-     `LinearizableReadError::QuorumNotEnough` 被映射成 `INTERNAL`，v2 客户端归为
-     `:other`（不重试）。本仓库已改为 `UNAVAILABLE`（不带 NOT_LEADER），并有
-     单测 + 进程级分区回归（`chaos_v2_quorum_loss_on_delete_is_retriable`）。
-   另外 14 次 generator crash（#309，已改为不抛异常）在重跑中应消失/降为 `:info`。
-   取证规则不变：长稳证据必须同时记录 **run commit / 控制机二进制哈希 / 节点哈希**；
-   三者不一致即作废，`collect-evidence.sh` 现在会**拒绝**出 MANIFEST（#303）。
-   历史 run（本轮的日志里没有哈希头）只能用 `COORD_IDENTITY_OVERRIDE` 事后钉住，
-   并在 MANIFEST 里标注 `override(post-hoc)`。
+1. #174：**72h 长稳证据已通过**（`make rejudge` = `valid`）。
+   run `2026-11-08T06:17:09Z → 2026-11-11T06:19:54Z`（72h02m），commit
+   `c105e9a1`（tree `889452f1`）、bin `f94abe5d`（控制机与三节点同哈希），参数
+   `--soak-quiet 1800 --soak-disrupt 600 --rate 0.5 --concurrency 1n
+   --min-op-ok-ratio 0.9 --mvcc-retention-revs 600000 --v2-history-window-secs 120`，
+   seed `1884715972`。判据（本轮 store 的 `jepsen.log` 与 `results.edn`）：
+   - 历史读（`read_ts>0`）失败 **0/12 849 = 0.00%**（上限 1%；#311 的判据首次在
+     有效采样下判绿）。mvcc 一致性 **0 errors**（writes 68 034 / reads 42 668 /
+     ts 12 924；`final-reads 1 280`）。
+   - quiet 可用率 **109/110 窗口判、0 违规**（门槛 0.95，最差 99.80%；1 个窗口
+     样本不足被跳过）。`SAFE_TS_LAG` 按 #308 的显式裁定从分母剔除并单独计数
+     （`excluded-by-error 406`），真正的 `UNAVAILABLE` 仍计入（负控制见 §3.6-5）。
+   - RTO **p95 98.35s ≤ 120s**（108 个采样、0 unrecovered；max 124.4s 只记录、
+     不参与判定）。
+   - op-liveness **94.5% ≥ 0.9**（write 95.3% / read 91.6% / ts 99.99% /
+     delete 95.2%；0 `:fail`，`v2 :other` = 0）。
+   - 节点日志 0 ERROR；watchdog 0 次 fail-fast。
 
-   **重跑（2026-11-08T06:17:09Z 起，进行中）**：commit `c105e9a1`（tree
-   `889452f1`）、bin `f94abe5d`（三节点同哈希，`control-dirty: 0`），参数
-   `--mvcc-retention-revs 600000 --v2-history-window-secs 120 --min-op-ok-ratio 0.9`，
-   ETA `2026-11-11T06:17Z`；watchdog 300s 周期复判（红了立即停跑并写
-   `soak/fail-fast-kvt.edn`）。起跑前用同一套参数跑了 30min `fast-soak` 预检：
-   `:history 0/710 = 0.00%`、mvcc 0 errors、gates 4/4 availability + RTO p95 1.13s、
-   `results.edn :valid? true`。预检还抓出两个真实缺陷（`#317` 数据 Region 的
-   retention 没接上配置、`#318` 范围历史读把「T 前删除、T 后重建」的 key 误判成
-   不可复原——它虚高了上一轮的 10.08%），修复后才起跑。
+   证据：`/tmp/coord-evidence-72h/20261111T104403Z-soak-kv-t-72h/`（`MANIFEST.md`、
+   `identity.txt`、`results.edn`、`history.edn.gz`、`run.log`、`summary.txt`；
+   `sha256sums.txt` 校验通过，`overall-valid: true` / `gates-valid: true`），
+   MANIFEST 摘要贴在 #174/#177。复跑判据：
+   `cd jepsen/lab && make rejudge JEPSEN_PROVIDER=docker`（15.5s 重判 261 954 op）。
+   身份说明：本轮起跑时 #303 的生产侧尚未真正落地（日志无身份头、节点哈希
+   `unavailable`），MANIFEST 用 `COORD_IDENTITY_OVERRIDE` 事后钉住并标注
+   `override(post-hoc)`；provenance（run 日志 `Test version`、三节点仍在的二进制
+   哈希与 mtime、最后一次 server 源码提交）逐条写在 `identity.txt`，原因见 §3.7。
 2. #174：**split/merge 停顿已测**（`performance.md` §6.6，release、真实 3 进程、
    PD 驱动 split）：统计/采样/leader 上报落地后（§3.5-6），`perf_split_write_pause`
-   不再依赖 debug-only 的调度暂停钩子，直接测持续写入期间的 split 写停顿。剩余
-   未达标项只剩 GA 最终长稳证据（由 Jepsen v2 承担，见 §3-1）。
+   不再依赖 debug-only 的调度暂停钩子，直接测持续写入期间的 split 写停顿。
+   GA 长稳证据见 §3-1（已通过）。
 3. #175：**split/merge 迁移中断的进程级注入按 D10 明确停止**（不是「已覆盖」的
    代称）：executor 级失败注入已覆盖「迁移失败 → 保留 intent、不动表、释放
    write fence、不 cutover」（`kv_t_g5_split_merge_test::test_migration_failure_keeps_intent_for_recovery`、
@@ -97,7 +88,8 @@ Java v2/interop 见 #262，chaos/soak/perf 见 #263）。**已知不稳定项**�
    （见 §2）。
 4. 容量无 GC 已在 `boundaries.md` B-KVT-13 明确停止（D10：停，不静默）；给
    `start_ts` 定下限后再做 GC 属后续版本。
-5. 本节 1–4 全绿后填 §4 签字；**不得用沉没成本跳过**（ADR-0015 D10）。
+5. 本节 1–4 全绿，§4 已于 2026-11-11 签字 GO；**不得用沉没成本跳过**
+   （ADR-0015 D10）。
 
 ## 3.5 故障矩阵抓出的缺陷（均已修）
 
@@ -249,15 +241,42 @@ checker 结果新增 `:judged`（`final-reads` / `txn-atomic-pairs` / `ledger-su
 判据一红就停跑并写 `soak/fail-fast-<name>.edn`（只对 `op-liveness` /
 `quiet-availability` 容忍连续 2 次）。验证阶梯见 `jepsen/README.md`。
 
+## 3.7 取证管道的缺陷（已修）
+
+72h run 收尾时发现 #303 的采集器从未端到端跑通过——判据没有放宽，坏的是
+「证据怎么产生」这一层：
+
+1. **起跑身份头只进终端，不进日志**：`coord-soak.sh` 把
+   `control-binary/commit/tree/dirty` echo 到 stdout，而 `collect-evidence.sh`
+   从 `$SOAK_LOG` 解析 ⇒ 每一轮都「缺头」。修复：头用 `tee` 写进日志（同时截断
+   旧日志），run 输出改 `>>`。负控制 `bash scripts/check-evidence-identity.sh`
+   （CI `gate self-check`）：缺头必须 exit 3、不出 MANIFEST。
+2. **节点哈希永远是 `unavailable`**：`db.clj` 读 `(:out (c/exec ...))`，而
+   `c/exec` 返回 stdout 字符串 ⇒ `nil` 上 NPE ⇒ 每个节点记 `unavailable`，
+   采集器（正确地）拒绝出 MANIFEST。修复：直接 trim 字符串；身份 smoke 实测
+   三节点 = 控制机哈希。
+3. **MANIFEST 的配置生成器哈希为空**：未转义的反引号在 unquoted heredoc 里被
+   当作命令执行（`command not found`），该行落空。修复：转义；自检断言该行是
+   16 位 hex。
+4. **本轮的 72h 身份是事后钉住的**（原因即 1+2）：`override(post-hoc)`。
+   `identity.txt` 的 provenance 不是重抄的横幅——run 日志自带
+   `Test version c105e9a…`；tree 是 `c105e9a^{tree}`；控制机二进制 mtime
+   `05:01:19Z` 早于 06:17 起跑、晚于最后一次 server 源码提交（`88003c6`，04:40Z）；
+   三节点 `/opt/coord/coord` 在 2026-11-11T10:26Z（任何新 `setup!` 之前）仍是同一
+   sha256、同一 mtime（teardown 不删该文件，`c/upload` 保留 mtime）。修复后用一次
+   60s `kvv2` smoke 做了端到端验证：日志有头、三节点哈希 = 控制机、
+   `collect-evidence.sh` 不带 override 出 MANIFEST（PR #327）。
+
 ## 4. 签字记录
 
-> 2026-11-07：§3-1 的 72h run 已跑完；按**当前**判据复判为 `invalid`（历史读率 10.08%、
-> 3/108 个 quiet 窗口 <0.95），本轮**不签字**。签字前须完成 §3-1 的对齐并重跑，
-> 填日期、依据 run（commit/tree/三个哈希）、未关闭项与签字人。
+> 2026-11-11：§3-1 的最终 72h run 按**当前**判据全绿（`make rejudge` = `valid`），
+> G0–G6 证据齐备，签字 **GO**。证据身份是 `override(post-hoc)`（原因与 provenance
+> 见 §3.7）；列在「未关闭项」里的都是 GA 之后的 follow-up，不影响本次 GA 口径。
 
 | 日期 | 结论 | 依据 commit / CI run | 未关闭项 | 签字人 |
 |:--|:--|:--|:--|:--|
-| 2026-11-08 | **重跑中（未签）** | commit `c105e9a1` / tree `889452f1` / bin `f94abe5d`；起跑 `06:17:09Z`，ETA `2026-11-11T06:17Z`；watchdog 300s | 等跑完回填 §3-1/§4 | — |
+| 2026-11-11 | **GO（已签）** | run `2026-11-08T06:17:09Z → 11-11T06:19:54Z`，commit `c105e9a1` / tree `889452f1` / bin `f94abe5d`（控制机 = 三节点）；`make rejudge` = `valid`；MANIFEST `/tmp/coord-evidence-72h/20261111T104403Z-soak-kv-t-72h/`（`override(post-hoc)`，§3.7） | GA 后 follow-up：容量 GC（`boundaries.md` B-KVT-13，D10 停）、split/merge 迁移中断的进程级注入（§3-3，D10 停）、`kv_t_g2_lease_rpc_test` 偶发超时（§1） | maintainers |
+| 2026-11-08 | **重跑中（已由 11-11 GO 取代）** | commit `c105e9a1` / tree `889452f1` / bin `f94abe5d`；起跑 `06:17:09Z`，ETA `2026-11-11T06:17Z`；watchdog 300s | 等跑完回填 §3-1/§4 | — |
 | 2026-11-07 | **不达标（未签）** | run `2026-11-04T14:44:43Z`，bin `09138e63`，tree `dd2803cc`；`make rejudge` = `invalid`（`:history-unavailable-rate :quiet-availability`） | §3-1 三条：历史读率、quiet 可用率、重跑对齐 | — |
 
 ## 5. 回退/降级口径
