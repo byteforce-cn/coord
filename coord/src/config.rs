@@ -51,6 +51,10 @@ pub struct Config {
     /// KV-T 配置（`[kv_t]` 段；默认关闭 = v1 行为字节级不变，ADR-0015/ADR-0001）
     #[serde(default)]
     pub kv_t: KvTConfig,
+
+    /// MQ v2 配置（`[mq_v2]` 段；默认关闭，ADR-0016 D11）
+    #[serde(default)]
+    pub mq_v2: MqV2Config,
 }
 
 impl Config {
@@ -602,6 +606,10 @@ impl Config {
             self.multi_raft.legacy_migration,
             self.multi_raft.allow_unmigrated,
         ));
+
+        // 12e. MQ v2（[mq_v2]）：默认关闭；开启时必须已有 v2 基座（ADR-0016 D11）。
+        //      未开启时仍校验数值边界——写错的键不该因为“现在没开”被静默忽略。
+        errs.extend(self.mq_v2.validate(self.kv_t_enabled()));
 
         // 13. R-RFT-19：raft 调优段合法性（选举窗口 min ≤ max；时间参数 > 0）
         for (label, ms) in [
@@ -1162,6 +1170,161 @@ impl KvTConfig {
         } else {
             message.to_string()
         }
+    }
+}
+
+/// MQ v2 配置（`[mq_v2]` 段）。
+///
+/// 默认关闭（ADR-0001/ADR-0016 D11）：关闭时服务壳仍注册（reflection 可见）但每个
+/// RPC 一概 `FAILED_PRECONDITION`；不切保留区间、不起分片、不启后台任务，v1 MQ 的
+/// wire/磁盘/默认行为字节级不变。
+///
+/// 开启时必须在 v2 基座上（`[kv_t]` 有效值为 true），否则启动失败并点名两个配置项。
+/// 分片区间（`/_mq/log/<id>/`、`/_mq/group/<id>/`）在启动时切出，切不出就 fail-closed。
+///
+/// 语义与默认值单一归属：ADR-0016 D2/D7/D11；本结构只做配置承载与边界校验。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MqV2Config {
+    /// 总开关（默认 false）
+    pub enabled: bool,
+
+    /// 日志分片数（默认 8）：每个分片一个 Raft 组，承载若干分区
+    pub log_shards: u32,
+
+    /// 消费组分片数（默认 4）：按组名哈希
+    pub group_shards: u32,
+
+    /// 每个日志分片承载的分区数上限（默认 1024）
+    pub max_partitions_per_shard: u32,
+
+    /// topic 默认保留期（秒；默认 604800 = 7d，范围 1h–30d）
+    pub default_retention_secs: u64,
+
+    /// topic 默认容量配额（字节；默认 1GiB，0 = 不限）
+    pub max_topic_bytes: u64,
+
+    /// 单条消息上限（字节；默认 1MiB，上限 8MiB）
+    pub max_message_bytes: u32,
+
+    /// 段封口大小（字节；默认 64MiB）
+    pub segment_bytes: u64,
+
+    /// 单次 Poll 返回字节上限（默认 4MiB，按整条消息截断）
+    pub poll_max_bytes: u32,
+
+    /// 单次 Poll 返回消息数上限（默认 1000）
+    pub poll_max_messages: u32,
+
+    /// 长轮询等待上限（毫秒；默认 30000；契约上限 30s）
+    pub long_poll_max_ms: u32,
+
+    /// 消费组会话超时（毫秒；默认 30000）
+    pub group_session_timeout_ms: u32,
+}
+
+impl Default for MqV2Config {
+    fn default() -> Self {
+        // 默认值逐字等于设计文档 §5.9（改数值允许，改语义必须新增 ADR）。
+        Self {
+            enabled: false,
+            log_shards: 8,
+            group_shards: 4,
+            max_partitions_per_shard: 1024,
+            default_retention_secs: 604_800,
+            max_topic_bytes: 1024 * 1024 * 1024,
+            max_message_bytes: 1024 * 1024,
+            segment_bytes: 64 * 1024 * 1024,
+            poll_max_bytes: 4 * 1024 * 1024,
+            poll_max_messages: 1_000,
+            long_poll_max_ms: 30_000,
+            group_session_timeout_ms: 30_000,
+        }
+    }
+}
+
+impl MqV2Config {
+    /// 校验 MQ v2 配置。
+    ///
+    /// 数值边界总是校验（写错的键不该因为当前关闭而静默生效）；前置条件只在
+    /// `enabled=true` 时要求——关闭时零副作用，不因未启用 v2 基座而拒绝启动。
+    pub fn validate(&self, kv_t_enabled: bool) -> Vec<String> {
+        let mut errs = Vec::new();
+
+        if !(1..=64).contains(&self.log_shards) {
+            errs.push(format!(
+                "mq_v2.log_shards must be in 1..=64 (got {})",
+                self.log_shards
+            ));
+        }
+        if !(1..=32).contains(&self.group_shards) {
+            errs.push(format!(
+                "mq_v2.group_shards must be in 1..=32 (got {})",
+                self.group_shards
+            ));
+        }
+        if self.max_partitions_per_shard == 0 {
+            errs.push("mq_v2.max_partitions_per_shard must be > 0".to_string());
+        }
+        // D7：保留期 1h–30d；边界包含端点。
+        if !(3_600..=2_592_000).contains(&self.default_retention_secs) {
+            errs.push(format!(
+                "mq_v2.default_retention_secs must be in 3600..=2592000 seconds \
+                 (1h–30d, got {})",
+                self.default_retention_secs
+            ));
+        }
+        if self.max_topic_bytes > 1 << 40 {
+            errs.push(format!(
+                "mq_v2.max_topic_bytes must be <= 1TiB (got {})",
+                self.max_topic_bytes
+            ));
+        }
+        if !(1..=8 * 1024 * 1024).contains(&self.max_message_bytes) {
+            errs.push(format!(
+                "mq_v2.max_message_bytes must be in 1..=8388608 (1B–8MiB, got {})",
+                self.max_message_bytes
+            ));
+        }
+        if !(1024 * 1024..=1024 * 1024 * 1024).contains(&self.segment_bytes) {
+            errs.push(format!(
+                "mq_v2.segment_bytes must be in 1048576..=1073741824 (1MiB–1GiB, got {})",
+                self.segment_bytes
+            ));
+        }
+        if self.poll_max_bytes == 0 {
+            errs.push("mq_v2.poll_max_bytes must be > 0".to_string());
+        }
+        if !(1..=10_000).contains(&self.poll_max_messages) {
+            errs.push(format!(
+                "mq_v2.poll_max_messages must be in 1..=10000 (got {})",
+                self.poll_max_messages
+            ));
+        }
+        // 契约承诺 `wait_ms` 上限 30s（ADR-0016 D5）；配置不能把上限抬过契约。
+        if self.long_poll_max_ms > 30_000 {
+            errs.push(format!(
+                "mq_v2.long_poll_max_ms must be <= 30000 (contract limit, got {})",
+                self.long_poll_max_ms
+            ));
+        }
+        if !(1_000..=300_000).contains(&self.group_session_timeout_ms) {
+            errs.push(format!(
+                "mq_v2.group_session_timeout_ms must be in 1000..=300000 (got {})",
+                self.group_session_timeout_ms
+            ));
+        }
+
+        if self.enabled && !kv_t_enabled {
+            errs.push(
+                "mq_v2.enabled = true requires [kv_t] enabled on this cluster \
+                 (MQ v2 runs on v2 Regions; ADR-0016 D11) — set [kv_t].enabled = true \
+                 or [mq_v2].enabled = false"
+                    .to_string(),
+            );
+        }
+
+        errs
     }
 }
 
@@ -2193,7 +2356,6 @@ scheduler_paused = true
     }
 
     #[test]
-    #[test]
     fn test_changelog_retention_revisions_defaults_and_bounds() {
         // 默认与 v0.3.x 行为一致；证据 run 可通过 [storage] 显式调大（#311）。
         assert_eq!(
@@ -2227,6 +2389,7 @@ scheduler_paused = true
         assert_eq!(default.storage.changelog_retention_revisions, 100_000);
     }
 
+    #[test]
     fn test_kv_t_watch_retention_bounds_are_inclusive() {
         for (value, ok) in [
             (3_600u64, true),
@@ -2243,6 +2406,123 @@ scheduler_paused = true
                 if ok { "合法" } else { "非法" }
             );
         }
+    }
+
+    // ──── MQ v2（[mq_v2]；ADR-0016 D2/D7/D11）────
+
+    #[test]
+    fn test_mq_v2_defaults_match_design() {
+        let mq = Config::default().mq_v2;
+        assert!(!mq.enabled, "默认关闭（ADR-0001/ADR-0016 D11）");
+        assert_eq!(mq.log_shards, 8);
+        assert_eq!(mq.group_shards, 4);
+        assert_eq!(mq.max_partitions_per_shard, 1024);
+        assert_eq!(mq.default_retention_secs, 604_800);
+        assert_eq!(mq.max_topic_bytes, 1024 * 1024 * 1024);
+        assert_eq!(mq.max_message_bytes, 1024 * 1024);
+        assert_eq!(mq.segment_bytes, 64 * 1024 * 1024);
+        assert_eq!(mq.poll_max_bytes, 4 * 1024 * 1024);
+        assert_eq!(mq.poll_max_messages, 1_000);
+        assert_eq!(mq.long_poll_max_ms, 30_000);
+        assert_eq!(mq.group_session_timeout_ms, 30_000);
+        // 默认关闭：v2 基座缺失不应阻塞 v1 启动。
+        assert!(mq.validate(false).is_empty());
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_mq_v2_retention_bounds_are_inclusive() {
+        for (value, ok) in [
+            (3_600u64, true),
+            (2_592_000, true),
+            (3_599, false),
+            (2_592_001, false),
+        ] {
+            let mq = MqV2Config {
+                default_retention_secs: value,
+                ..Default::default()
+            };
+            assert_eq!(
+                mq.validate(false).is_empty(),
+                ok,
+                "default_retention_secs={value} 应为 {}",
+                if ok { "合法" } else { "非法" }
+            );
+        }
+    }
+
+    #[test]
+    fn test_mq_v2_limits_are_enforced_and_name_the_field() {
+        for (mutate, field) in [
+            (
+                (|mq: &mut MqV2Config| mq.log_shards = 0) as fn(&mut MqV2Config),
+                "mq_v2.log_shards",
+            ),
+            (|mq| mq.group_shards = 33, "mq_v2.group_shards"),
+            (
+                |mq| mq.max_partitions_per_shard = 0,
+                "mq_v2.max_partitions_per_shard",
+            ),
+            (
+                |mq| mq.max_message_bytes = 8 * 1024 * 1024 + 1,
+                "mq_v2.max_message_bytes",
+            ),
+            (
+                |mq| mq.segment_bytes = 1024 * 1024 - 1,
+                "mq_v2.segment_bytes",
+            ),
+            (|mq| mq.poll_max_bytes = 0, "mq_v2.poll_max_bytes"),
+            (
+                |mq| mq.poll_max_messages = 10_001,
+                "mq_v2.poll_max_messages",
+            ),
+            (|mq| mq.long_poll_max_ms = 30_001, "mq_v2.long_poll_max_ms"),
+            (
+                |mq| mq.group_session_timeout_ms = 999,
+                "mq_v2.group_session_timeout_ms",
+            ),
+            (
+                |mq| mq.max_topic_bytes = (1 << 40) + 1,
+                "mq_v2.max_topic_bytes",
+            ),
+        ] {
+            let mut mq = MqV2Config::default();
+            mutate(&mut mq);
+            let errs = mq.validate(false);
+            assert!(
+                errs.iter().any(|e| e.contains(field)),
+                "{field} 越界应点名报错，实际 {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mq_v2_enabled_requires_kv_t() {
+        let mq = MqV2Config {
+            enabled: true,
+            ..Default::default()
+        };
+        let errs = mq.validate(false);
+        assert_eq!(errs.len(), 1, "只报前置条件一条：{errs:?}");
+        assert!(errs[0].contains("mq_v2.enabled"), "{}", errs[0]);
+        assert!(errs[0].contains("[kv_t]"), "{}", errs[0]);
+        assert!(mq.validate(true).is_empty());
+    }
+
+    #[test]
+    fn test_mq_v2_section_parses_from_toml_and_gates_on_kv_t() {
+        // 单 Raft 默认配置 = kv_t 未启用；开启 mq_v2 必须被启动校验拦住。
+        let config: Config = toml::from_str("[mq_v2]\nenabled = true\nlog_shards = 4\n")
+            .expect("mq_v2 section parses");
+        assert!(config.mq_v2.enabled);
+        assert_eq!(config.mq_v2.log_shards, 4);
+        assert_eq!(config.mq_v2.group_shards, 4, "未写字段用默认值");
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("mq_v2.enabled") && e.contains("[kv_t]")),
+            "缺少 mq_v2/kv_t 前置错误：{errs:?}"
+        );
     }
 
     #[test]
