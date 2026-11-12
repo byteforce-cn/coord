@@ -476,16 +476,17 @@ fn carve_fixed_ranges(
     }
     carved.sort_by(|a, b| a.start_key.cmp(&b.start_key));
     *regions = carved;
-    Ok(ranges
-        .iter()
-        .map(|(start, _)| {
-            regions
-                .iter()
-                .find(|m| &m.start_key == start)
-                .expect("carved shard region must exist")
-                .region_id
-        })
-        .collect())
+    let mut carved_ids = Vec::with_capacity(ranges.len());
+    for (start, _) in &ranges {
+        let region = regions
+            .iter()
+            .find(|m| &m.start_key == start)
+            .ok_or_else(|| {
+                Error::Storage("carved MQ shard region missing from the rebuilt table".to_string())
+            })?;
+        carved_ids.push(region.region_id);
+    }
+    Ok(carved_ids)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
