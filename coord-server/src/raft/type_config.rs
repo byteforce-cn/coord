@@ -838,6 +838,11 @@ pub enum Command {
     ///
     /// **末尾追加**；重复 apply 返回首次写入的 DLQ 位点。
     MqMoveToDlq(crate::storage::mq_log::MqMoveToDlq),
+    /// MQ v2 topic 元数据（仅 region 0 system raft 提出，M1-4）。
+    ///
+    /// **末尾追加**；重名不同配置/代际过期等用户级拒绝只体现在 outcome 里，
+    /// 不失败 apply。表随 `/_sys/*` 进快照。
+    MqTopic(crate::storage::mq_topic::MqTopicOp),
 }
 
 impl std::fmt::Display for Command {
@@ -1006,6 +1011,7 @@ impl std::fmt::Display for Command {
                 "MqMoveToDlq(shard={}, topic={}, partition={}, offset={})",
                 op.shard_id, op.topic_id, op.partition, op.offset
             ),
+            Command::MqTopic(op) => write!(f, "MqTopic({op:?})"),
         }
     }
 }
@@ -1154,6 +1160,10 @@ pub enum Response {
     MqMoveToDlq {
         outcome: crate::storage::mq_log::MqMoveToDlqOutcome,
     },
+    /// MQ v2 topic 元数据结果（用户级拒绝也在 outcome 里）。
+    MqTopic {
+        outcome: crate::storage::mq_topic::MqTopicOutcome,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -1260,6 +1270,7 @@ impl std::fmt::Display for Response {
                 result.dropped_segments, result.dropped_records, result.earliest_offset
             ),
             Response::MqMoveToDlq { outcome } => write!(f, "MqMoveToDlq({outcome:?})"),
+            Response::MqTopic { outcome } => write!(f, "MqTopic({outcome:?})"),
         }
     }
 }
