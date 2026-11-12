@@ -827,6 +827,12 @@ impl StateMachineStore {
                     .map_err(io_err)?;
                 Ok((Response::MqTopic { outcome }, None))
             }
+            Command::MqGroup(op) => {
+                // 组状态是消费组分片自己的状态域：不写 changelog、不上 KV
+                // Watch；成员/位点与 apply 水位同事务落盘。
+                let result = sm.apply_mq_group_op(op, applied).map_err(io_err)?;
+                Ok((Response::MqGroup { result }, None))
+            }
             Command::RegionMeta(op) => {
                 // 表级拒绝随 outcome 返回（不失败 apply）；region 0 元数据记录，
                 // 不上 Watch、不推进业务 revision。
@@ -2738,5 +2744,99 @@ mod tests {
         }
         let table = store.state_machine.mq_topic_table().unwrap();
         assert!(table.topic("orders").is_some());
+    }
+
+    /// MQ v2 组命令走消费组分片状态机：join 落成员/分配、ack 落位点、
+    /// 同一日志重复 apply 返回首次结果，且不上 KV Watch。
+    #[test]
+    fn test_apply_mq_group_commands_join_ack_and_replay() {
+        use crate::storage::mq_group::{
+            MqGroupAck, MqGroupAckEntry, MqGroupJoin, MqGroupOp, MqGroupResult, MqGroupTopic,
+        };
+
+        let (_tmp, store) = setup_store();
+        let apply = |cmd: Command, index: u64| {
+            store
+                .execute_command(store.state_machine.as_ref(), &cmd, index, applied_at(index))
+                .expect("mq group command must not be a raft error")
+        };
+        let join = Command::MqGroup(MqGroupOp::Join(MqGroupJoin {
+            shard_id: 1,
+            group: "billing".to_string(),
+            member_id: String::new(),
+            topics: vec![MqGroupTopic {
+                topic: "orders".to_string(),
+                topic_id: 9,
+                partitions: 2,
+            }],
+            session_timeout_ms: 30_000,
+            now_ms: 1_700_000_000_000,
+        }));
+
+        let (response, event) = apply(join.clone(), 1);
+        assert!(event.is_none(), "MQ 组命令不上 KV Watch");
+        let member_id = match response {
+            Response::MqGroup {
+                result: MqGroupResult::Joined(joined),
+            } => {
+                assert_eq!(joined.generation, 1);
+                assert_eq!(joined.assignments.len(), 2);
+                joined.member_id
+            }
+            other => panic!("expected Joined, got {other:?}"),
+        };
+
+        // 同一条日志重复 apply：返回首次结果，不重复加成员。
+        let (replayed, _) = apply(join, 1);
+        match replayed {
+            Response::MqGroup {
+                result: MqGroupResult::Joined(joined),
+            } => assert_eq!(joined.member_id, member_id),
+            other => panic!("expected replayed Joined, got {other:?}"),
+        }
+        assert_eq!(
+            store
+                .state_machine
+                .mq_group("billing")
+                .unwrap()
+                .unwrap()
+                .members
+                .len(),
+            1
+        );
+
+        let (response, _) = apply(
+            Command::MqGroup(MqGroupOp::Ack(MqGroupAck {
+                shard_id: 1,
+                group: "billing".to_string(),
+                member_id: member_id.clone(),
+                generation: 1,
+                entries: vec![MqGroupAckEntry {
+                    topic_id: 9,
+                    partition: 0,
+                    offset: 4,
+                }],
+                now_ms: 1_700_000_000_100,
+            })),
+            2,
+        );
+        match response {
+            Response::MqGroup {
+                result: MqGroupResult::Acked(acked),
+            } => assert_eq!(acked.results[0].committed_offset, 5),
+            other => panic!("expected Acked, got {other:?}"),
+        }
+        let offsets = store.state_machine.mq_group_offsets("billing").unwrap();
+        assert_eq!(offsets.len(), 1);
+        assert_eq!(offsets[0].committed_offset, 5);
+        assert_eq!(
+            store
+                .state_machine
+                .get_applied_log_id()
+                .unwrap()
+                .unwrap()
+                .index,
+            2
+        );
     }
 }
