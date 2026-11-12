@@ -16,7 +16,7 @@
 | Gate | 出口口径 | 状态 | 证据（可复跑） |
 |:--|:--|:--|:--|
 | M0 契约冻结 | ADR/契约/配置/服务壳；默认拒绝 | ✅ | 见 §2 |
-| M1 日志/元数据/容量 | 分片/段日志/组状态机/topic 元数据/保留 | 🟡 进行中 | M1-1/M1-2/M1-3/M1-4 已落地：`cargo test -p coord-server --lib storage::mq_group`（12 例）、`cargo test -p coord-server --lib test_apply_mq_group_commands`、`cargo test -p coord-server --lib storage::mq_log`、`cargo test -p coord-server --lib storage::mq_topic`、`cargo test -p coord-server --lib carve_mq`、`cargo test -p coord --bins derive_`；`check-panics` 0 |
+| M1 日志/元数据/容量 | 分片/段日志/组状态机/topic 元数据/保留 | ✅ | M1-1–M1-6 存储层全部落地：`cargo test -p coord-server --lib storage::mq_log`（14 例：保留截止/配额释放/truncate 重放/重启/副本一致）、`storage::mq_group`（13 例：代际分配/整批 Ack/过期回收/重启/快照）、`storage::mq_topic`（5 例）、`carve_mq`、`cargo test -p coord --bins derive_`、`cargo test -p coord-server --lib test_apply_mq_group_commands`；`check-panics` 0。周期 reaper/指标接线随 M2-1 分片 Leader 循环；整节点备份演练属 M6-5 |
 | M2 Publish | 路由/批量/offset/幂等/配额 | ⏳ 未开始 | — |
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ⏳ 未开始 | — |
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ⏳ 未开始 | — |
