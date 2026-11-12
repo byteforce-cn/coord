@@ -825,6 +825,19 @@ pub enum Command {
     /// 记录不再被 ship/Watch 读取。删除必须与 apply 同序，否则副本的 outbox
     /// 会分叉；`max_rows` 随命令携带，重放节点不读本地配置。
     TrimCommitLogOutbox { through_ts: u64, max_rows: u32 },
+    /// MQ v2 向日志分片追加一批请求（仅该分片的 raft 组提出，M1-2）。
+    ///
+    /// **末尾追加**；同一 Raft 条目里的多个请求各自成败（ADR-0016 D4）。
+    /// 上限/配额与 `now_ms` 随命令携带，apply 不读本地配置/时钟。
+    MqAppendBatch(crate::storage::mq_log::MqAppendBatch),
+    /// MQ v2 按整段回收主日志（仅日志分片 raft 提出）。
+    ///
+    /// **末尾追加**；至少保留最新段，重复 apply 为 no-op。
+    MqTruncate(crate::storage::mq_log::MqTruncate),
+    /// MQ v2 把一条消息移入 DLQ 并写主日志 tombstone（仅日志分片 raft 提出）。
+    ///
+    /// **末尾追加**；重复 apply 返回首次写入的 DLQ 位点。
+    MqMoveToDlq(crate::storage::mq_log::MqMoveToDlq),
 }
 
 impl std::fmt::Display for Command {
@@ -977,6 +990,22 @@ impl std::fmt::Display for Command {
                 f,
                 "TrimCommitLogOutbox(through_ts={through_ts}, max_rows={max_rows})"
             ),
+            Command::MqAppendBatch(op) => write!(
+                f,
+                "MqAppendBatch(shard={}, requests={})",
+                op.shard_id,
+                op.requests.len()
+            ),
+            Command::MqTruncate(op) => write!(
+                f,
+                "MqTruncate(shard={}, topic={}, partition={}, up_to={})",
+                op.shard_id, op.topic_id, op.partition, op.up_to_offset
+            ),
+            Command::MqMoveToDlq(op) => write!(
+                f,
+                "MqMoveToDlq(shard={}, topic={}, partition={}, offset={})",
+                op.shard_id, op.topic_id, op.partition, op.offset
+            ),
         }
     }
 }
@@ -1113,6 +1142,18 @@ pub enum Response {
         trimmed_before: u64,
         removed: u64,
     },
+    /// MQ v2 append 结果：与命令中的请求一一对应、同序。
+    MqAppendBatch {
+        response: crate::storage::mq_log::MqAppendBatchResponse,
+    },
+    /// MQ v2 整段回收结果。
+    MqTruncate {
+        result: crate::storage::mq_log::MqTruncateResult,
+    },
+    /// MQ v2 移入 DLQ 结果。
+    MqMoveToDlq {
+        outcome: crate::storage::mq_log::MqMoveToDlqOutcome,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -1210,6 +1251,15 @@ impl std::fmt::Display for Response {
                 f,
                 "CommitLogOutboxTrimmed(trimmed_before={trimmed_before}, removed={removed})"
             ),
+            Response::MqAppendBatch { response } => {
+                write!(f, "MqAppendBatch(requests={})", response.requests.len())
+            }
+            Response::MqTruncate { result } => write!(
+                f,
+                "MqTruncate(dropped_segments={}, dropped_records={}, earliest={})",
+                result.dropped_segments, result.dropped_records, result.earliest_offset
+            ),
+            Response::MqMoveToDlq { outcome } => write!(f, "MqMoveToDlq({outcome:?})"),
         }
     }
 }

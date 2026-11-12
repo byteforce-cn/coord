@@ -806,6 +806,20 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::MqAppendBatch(op) => {
+                // MQ 日志是独立状态域：不写 changelog、不推 KV revision；结果
+                // 与 requests 一一对应（单请求失败只体现在 outcome 里）。
+                let response = sm.apply_mq_append_batch(op, applied).map_err(io_err)?;
+                Ok((Response::MqAppendBatch { response }, None))
+            }
+            Command::MqTruncate(op) => {
+                let result = sm.apply_mq_truncate(op, applied).map_err(io_err)?;
+                Ok((Response::MqTruncate { result }, None))
+            }
+            Command::MqMoveToDlq(op) => {
+                let outcome = sm.apply_mq_move_to_dlq(op, applied).map_err(io_err)?;
+                Ok((Response::MqMoveToDlq { outcome }, None))
+            }
             Command::RegionMeta(op) => {
                 // 表级拒绝随 outcome 返回（不失败 apply）；region 0 元数据记录，
                 // 不上 Watch、不推进业务 revision。
@@ -2564,6 +2578,114 @@ mod tests {
             row[MAGIC.len()],
             VERSION_V2,
             "META_MEMBERSHIP 必须为 V2 信封"
+        );
+    }
+
+    /// MQ v2 命令走 `execute_command` 的确定性路径：offset 由 apply 分配、
+    /// 同一条日志重复 apply 返回首次结果、后续命令继续 next_offset。
+    #[test]
+    fn test_apply_mq_commands_assign_offsets_and_replay_idempotently() {
+        use crate::storage::mq_log::{
+            MqAppendBatch, MqAppendEntry, MqAppendOutcome, MqAppendRequest, MqMoveToDlq,
+            MqMoveToDlqOutcome, MqTruncate,
+        };
+        use std::collections::BTreeMap;
+
+        let (_tmp, store) = setup_store();
+        let apply = |cmd: Command, index: u64| {
+            store
+                .execute_command(store.state_machine.as_ref(), &cmd, index, applied_at(index))
+                .expect("mq command must not be a raft error")
+        };
+        let entry = |payload: &[u8]| MqAppendEntry {
+            key: b"k".to_vec(),
+            payload: payload.to_vec(),
+            idempotency_key: String::new(),
+            headers: BTreeMap::new(),
+            producer: "test".to_string(),
+        };
+        let batch = Command::MqAppendBatch(MqAppendBatch {
+            shard_id: 0,
+            now_ms: 1_700_000_000_000,
+            requests: vec![MqAppendRequest {
+                topic_id: 9,
+                partition: 0,
+                max_message_bytes: 1024,
+                max_bytes: 1 << 20,
+                segment_bytes: 1 << 20,
+                entries: vec![entry(b"a"), entry(b"b")],
+            }],
+        });
+
+        let offsets = |response: &Response| match response {
+            Response::MqAppendBatch { response } => match &response.requests[0] {
+                MqAppendOutcome::Applied(appended) => appended
+                    .entries
+                    .iter()
+                    .map(|e| e.offset)
+                    .collect::<Vec<_>>(),
+                other => panic!("expected applied, got {other:?}"),
+            },
+            other => panic!("expected MqAppendBatch, got {other:?}"),
+        };
+
+        let (response, event) = apply(batch.clone(), 1);
+        assert!(event.is_none(), "MQ 命令不上 KV Watch");
+        assert_eq!(offsets(&response), vec![0, 1]);
+
+        // 同一条日志重复 apply：返回首次结果，不重复追加。
+        let (replayed, _) = apply(batch, 1);
+        assert_eq!(offsets(&replayed), vec![0, 1]);
+        assert_eq!(
+            store
+                .state_machine
+                .mq_partition_meta(9, 0)
+                .unwrap()
+                .unwrap()
+                .next_offset,
+            2
+        );
+
+        let (response, _) = apply(
+            Command::MqTruncate(MqTruncate {
+                shard_id: 0,
+                topic_id: 9,
+                partition: 0,
+                up_to_offset: 1,
+            }),
+            2,
+        );
+        match response {
+            Response::MqTruncate { result } => assert_eq!(result.dropped_segments, 0),
+            other => panic!("expected MqTruncate, got {other:?}"),
+        }
+
+        let (response, _) = apply(
+            Command::MqMoveToDlq(MqMoveToDlq {
+                shard_id: 0,
+                topic_id: 9,
+                partition: 0,
+                offset: 1,
+                reason: "poison".to_string(),
+                detail: String::new(),
+                now_ms: 5,
+            }),
+            3,
+        );
+        match response {
+            Response::MqMoveToDlq { outcome } => {
+                assert_eq!(outcome, MqMoveToDlqOutcome::Moved { dlq_offset: 0 });
+            }
+            other => panic!("expected MqMoveToDlq, got {other:?}"),
+        }
+        assert_eq!(
+            store
+                .state_machine
+                .get_applied_log_id()
+                .unwrap()
+                .unwrap()
+                .index,
+            3
         );
     }
 }
