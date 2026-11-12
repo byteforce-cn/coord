@@ -1523,7 +1523,11 @@ impl<B: StorageBackend> MvccStorage<B> {
     ///
     /// 只前进不后退：重放/合成测试可能传入更低的 applied，revision 单调是
     /// ADR-0015 D11.2 的不变量。
-    fn note_log_index_revision(&self, tx: &mut dyn WriteTx, revision: Revision) -> Result<()> {
+    pub(crate) fn note_log_index_revision(
+        &self,
+        tx: &mut dyn WriteTx,
+        revision: Revision,
+    ) -> Result<()> {
         if self.revision_mode == RevisionMode::LogIndex {
             let current = Self::current_revision_in_tx(tx, RevisionMode::LogIndex)?;
             if revision > current {

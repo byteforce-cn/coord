@@ -14,6 +14,7 @@ pub mod commit_log_shard;
 pub mod compaction;
 pub mod disk_watermark;
 pub mod envelope;
+pub mod mq_topic;
 pub mod mvcc;
 pub mod object_store;
 pub mod redb_backend;
