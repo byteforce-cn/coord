@@ -23,6 +23,27 @@ use crate::storage::object_store::{key_in_object_space, OBJECT_PREFIX, OBJECT_SP
 /// region 0 存整张表的单键。
 pub const REGION_TABLE_KEY: &[u8] = b"/_sys/pd/regions";
 
+/// MQ v2 的固定保留空间（`[/_mq/, /_mq0)`；ADR-0016 D2）。
+///
+/// `/` 的下一个字节是 `0`，因此 `/_mq0` 是 `/` 前缀区间的最小上界——与
+/// `[/obj/, /obj0)` 同一手法。日志分片与消费组分片都住在这块空间里，**不参与**
+/// 任意 KV split/merge，也不由用户写入。
+pub const MQ_PREFIX: &[u8] = b"/_mq/";
+/// MQ 保留空间的上界（不含）。
+pub const MQ_SPACE_END: &[u8] = b"/_mq0";
+/// 日志分片的前缀（`/_mq/log/<shard>/`）。
+pub const MQ_LOG_PREFIX: &[u8] = b"/_mq/log/";
+/// 消费组分片的前缀（`/_mq/group/<shard>/`）。
+pub const MQ_GROUP_PREFIX: &[u8] = b"/_mq/group/";
+/// 日志分片区间上界前缀（`/_mq/log0`）。
+const MQ_LOG_SPACE_END: &[u8] = b"/_mq/log0";
+/// 消费组分片区间上界前缀（`/_mq/group0`）。
+const MQ_GROUP_SPACE_END: &[u8] = b"/_mq/group0";
+
+/// 分片 id 的定宽（`00`..`63`）：区间按 `start_key` 字典序平铺，宽度可变会
+/// 让 `/_mq/log/10/` 排在 `/_mq/log/2/` 前面而破坏相邻性。
+const MQ_SHARD_WIDTH: usize = 2;
+
 /// 一次 Region 表变更（由 `RegionMetaOp::Apply` 成批承载）。
 /// Split/Merge 计划的方向（journal 与执行器共用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +109,11 @@ pub fn plan_split(
             "split key is inside the reserved /obj/ namespace".to_string(),
         ));
     }
+    if key_in_mq_space(split_key) {
+        return Err(Error::InvalidArgument(
+            "split key is inside the reserved /_mq/ namespace".to_string(),
+        ));
+    }
 
     let mut shrunk = parent.clone();
     shrunk.end_key = split_key.to_vec();
@@ -147,6 +173,11 @@ pub fn plan_merge(table: &RegionTable, left: RegionId, right: RegionId) -> Resul
     if is_object_region(&left_meta) || is_object_region(&right_meta) {
         return Err(Error::InvalidArgument(
             "merge would absorb the fixed /obj/ region".to_string(),
+        ));
+    }
+    if is_mq_region(&left_meta) || is_mq_region(&right_meta) {
+        return Err(Error::InvalidArgument(
+            "merge would absorb a fixed /_mq/ shard region".to_string(),
         ));
     }
 
@@ -254,6 +285,208 @@ pub fn carve_object_region(
     carved.sort_by(|a, b| a.start_key.cmp(&b.start_key));
     *regions = carved;
     Ok(first_new_id)
+}
+
+/// 日志分片的前缀（`/_mq/log/<shard>/`，分片 id 定宽两位）。
+pub fn mq_log_shard_prefix(shard: u32) -> Vec<u8> {
+    format!("/_mq/log/{shard:0width$}/", width = MQ_SHARD_WIDTH).into_bytes()
+}
+
+/// 消费组分片的前缀（`/_mq/group/<shard>/`）。
+pub fn mq_group_shard_prefix(shard: u32) -> Vec<u8> {
+    format!("/_mq/group/{shard:0width$}/", width = MQ_SHARD_WIDTH).into_bytes()
+}
+
+/// 日志分片 Region 的区间 `[start, end)`（`total` = `[mq_v2].log_shards`）。
+///
+/// 区间按分片 id 升序**首尾相接**，末端到 `/_mq/log0`：Region 表要求平铺无空洞，
+/// 因此不能用"前缀 + `0`"式的独立区间（中间会留下无人认领的键）。
+pub fn mq_log_shard_range(shard: u32, total: u32) -> (Vec<u8>, Vec<u8>) {
+    let start = mq_log_shard_prefix(shard);
+    let end = if shard + 1 < total {
+        mq_log_shard_prefix(shard + 1)
+    } else {
+        MQ_LOG_SPACE_END.to_vec()
+    };
+    (start, end)
+}
+
+/// 消费组分片 Region 的区间 `[start, end)`（`total` = `[mq_v2].group_shards`）。
+pub fn mq_group_shard_range(shard: u32, total: u32) -> (Vec<u8>, Vec<u8>) {
+    let start = mq_group_shard_prefix(shard);
+    let end = if shard + 1 < total {
+        mq_group_shard_prefix(shard + 1)
+    } else {
+        MQ_GROUP_SPACE_END.to_vec()
+    };
+    (start, end)
+}
+
+/// 是否是 MQ v2 的固定分片 Region。
+///
+/// 判据是分片前缀 `/_mq/log/<id>/` / `/_mq/group/<id>/`，不是整个 `/_mq/`：
+/// 切分后保留空间两端的残余区间（如 `[/_mq/log0, …)`）起点也带 `/_mq`，但它们是
+/// 普通 KV 区间，必须仍可被调度（否则表里会留下无法 split/merge 的死区）。
+pub fn is_mq_region(meta: &RegionMeta) -> bool {
+    meta.start_key.starts_with(MQ_LOG_PREFIX) || meta.start_key.starts_with(MQ_GROUP_PREFIX)
+}
+
+/// key 是否落在 MQ v2 保留空间内（`/_mq/...`）。
+pub fn key_in_mq_space(key: &[u8]) -> bool {
+    key.starts_with(MQ_PREFIX)
+}
+
+/// 把 MQ v2 的日志/消费组分片区间从启动种子区间里切出来（ADR-0016 D2）。
+///
+/// 纯计算：`first_new_id` 由调用方给（种子最大 id + 1，所有节点算出的值相同）。
+/// 返回 `(log_shard_ids, group_shard_ids)`，按分片 id 升序。全部区间已存在时幂等
+/// 返回现有 id；**部分存在** ⇒ 配置与拓扑不一致（fail-closed，不做静默补齐——
+/// 补齐会在旧分片上留下另一半数据）。
+pub fn carve_mq_regions(
+    regions: &mut Vec<RegionMeta>,
+    first_new_id: RegionId,
+    log_shards: u32,
+    group_shards: u32,
+) -> Result<(Vec<RegionId>, Vec<RegionId>)> {
+    if first_new_id == 0 {
+        return Err(Error::InvalidArgument(
+            "region id 0 is reserved for the system raft".to_string(),
+        ));
+    }
+    if !(1..=64).contains(&log_shards) || !(1..=32).contains(&group_shards) {
+        return Err(Error::InvalidArgument(format!(
+            "MQ shard counts out of range: log_shards={log_shards} (1..=64), \
+             group_shards={group_shards} (1..=32)"
+        )));
+    }
+    let mut next_id = first_new_id;
+    let log_ranges = (0..log_shards)
+        .map(|shard| mq_log_shard_range(shard, log_shards))
+        .collect();
+    let log = carve_fixed_ranges(
+        regions,
+        &mut next_id,
+        MQ_LOG_PREFIX,
+        MQ_LOG_SPACE_END,
+        "log",
+        log_ranges,
+    )?;
+    let group_ranges = (0..group_shards)
+        .map(|shard| mq_group_shard_range(shard, group_shards))
+        .collect();
+    let group = carve_fixed_ranges(
+        regions,
+        &mut next_id,
+        MQ_GROUP_PREFIX,
+        MQ_GROUP_SPACE_END,
+        "group",
+        group_ranges,
+    )?;
+    Ok((log, group))
+}
+
+/// 把一个保留空间切成若干首尾相接的固定 Region。
+///
+/// 语义与 [`carve_object_region`] 一致：父区间离开原地，左/右残余各自保留原 id
+/// 与 epoch；分片 Region 拿 `next_id` 递增。父区间正好等于保留空间时不留残余。
+fn carve_fixed_ranges(
+    regions: &mut Vec<RegionMeta>,
+    next_id: &mut RegionId,
+    space_start: &[u8],
+    space_end: &[u8],
+    label: &str,
+    ranges: Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<Vec<RegionId>> {
+    let mut claimed = Vec::new();
+    for (start, end) in &ranges {
+        if let Some(meta) = regions
+            .iter()
+            .find(|m| &m.start_key == start && &m.end_key == end)
+        {
+            claimed.push(meta.region_id);
+        }
+    }
+    if claimed.len() == ranges.len() {
+        return Ok(claimed);
+    }
+    if !claimed.is_empty() {
+        return Err(Error::InvalidArgument(format!(
+            "MQ {label} shard regions are only partially seeded ({} of {}); \
+             [mq_v2] shard counts must not change on an initialized cluster",
+            claimed.len(),
+            ranges.len()
+        )));
+    }
+
+    let parent_index = regions
+        .iter()
+        .position(|m| {
+            m.start_key.as_slice() <= space_start
+                && (m.end_key.is_empty() || m.end_key.as_slice() >= space_end)
+        })
+        .ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "region seeds do not cover the fixed MQ {label} interval [{}, {})",
+                String::from_utf8_lossy(space_start),
+                String::from_utf8_lossy(space_end)
+            ))
+        })?;
+    let parent = regions[parent_index].clone();
+    // 残余区间必须与分片区间**首尾相接**：`[/_mq/log/, /_mq/log/00/)` 这类缝隙
+    // 若留给分片外的空白会破坏 Region 表的平铺不变量，所以左残余收在第一个分片
+    // 的起点、右残余从最后一个分片的终点开始。
+    let first_start = ranges[0].0.clone();
+    let last_end = ranges[ranges.len() - 1].1.clone();
+
+    let mut carved = Vec::with_capacity(regions.len() + ranges.len() + 2);
+    for (index, meta) in regions.iter().enumerate() {
+        if index != parent_index {
+            carved.push(meta.clone());
+            continue;
+        }
+        if parent.start_key.as_slice() < first_start.as_slice() {
+            let mut left = meta.clone();
+            left.end_key = first_start.clone();
+            carved.push(left);
+        }
+        for (start, end) in &ranges {
+            carved.push(RegionMeta {
+                region_id: *next_id,
+                start_key: start.clone(),
+                end_key: end.clone(),
+                epoch: parent.epoch,
+                peers: parent.peers.clone(),
+                approximate_size: 0,
+                approximate_keys: 0,
+            });
+            *next_id += 1;
+        }
+        if parent.end_key.is_empty() || parent.end_key.as_slice() > last_end.as_slice() {
+            carved.push(RegionMeta {
+                region_id: *next_id,
+                start_key: last_end.clone(),
+                end_key: parent.end_key.clone(),
+                epoch: parent.epoch,
+                peers: parent.peers.clone(),
+                approximate_size: 0,
+                approximate_keys: 0,
+            });
+            *next_id += 1;
+        }
+    }
+    carved.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+    *regions = carved;
+    let mut carved_ids = Vec::with_capacity(ranges.len());
+    for (start, _) in &ranges {
+        let region = regions
+            .iter()
+            .find(|m| &m.start_key == start)
+            .ok_or_else(|| {
+                Error::Storage("carved MQ shard region missing from the rebuilt table".to_string())
+            })?;
+        carved_ids.push(region.region_id);
+    }
+    Ok(carved_ids)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -900,6 +1133,100 @@ mod tests {
             6,
             "absorbed version must not regress"
         );
+    }
+
+    #[test]
+    fn mq_shard_ranges_tile_the_reserved_space() {
+        for (log_shards, group_shards) in [(1u32, 1u32), (3, 2), (8, 4), (64, 32)] {
+            let mut regions = vec![meta(1, b"", b"")];
+            let (log, group) = carve_mq_regions(&mut regions, 2, log_shards, group_shards)
+                .expect("carve mq regions");
+            assert_eq!(log.len() as u32, log_shards);
+            assert_eq!(group.len() as u32, group_shards);
+
+            // 平铺/无重叠/无空洞由 `init` 的 validate 单点断言。
+            let mut table = RegionTable::default();
+            table.init(regions.clone()).expect("carved table must tile");
+            assert_eq!(
+                table.regions.iter().filter(|m| is_mq_region(m)).count() as u32,
+                log_shards + group_shards
+            );
+
+            // 每个分片前缀都恰好落在自己的区间里。
+            for shard in 0..log_shards {
+                let (start, end) = mq_log_shard_range(shard, log_shards);
+                let prefix = mq_log_shard_prefix(shard);
+                assert!(prefix.starts_with(&start) && prefix.as_slice() < end.as_slice());
+                let owner = table
+                    .regions
+                    .iter()
+                    .find(|m| {
+                        m.start_key.as_slice() <= prefix.as_slice()
+                            && (m.end_key.is_empty() || prefix.as_slice() < m.end_key.as_slice())
+                    })
+                    .expect("shard prefix must have exactly one owner");
+                assert_eq!(owner.start_key, start, "shard {shard} owner drift");
+            }
+            for shard in 0..group_shards {
+                let (start, _) = mq_group_shard_range(shard, group_shards);
+                let prefix = mq_group_shard_prefix(shard);
+                assert!(prefix.starts_with(&start));
+            }
+        }
+    }
+
+    #[test]
+    fn carve_mq_regions_is_idempotent() {
+        let mut regions = vec![meta(1, b"", b"")];
+        let (log, group) = carve_mq_regions(&mut regions, 2, 3, 2).expect("first carve");
+        let snapshot = regions.clone();
+        let (log_again, group_again) =
+            carve_mq_regions(&mut regions, 2, 3, 2).expect("restart on the same topology");
+        assert_eq!(log, log_again);
+        assert_eq!(group, group_again);
+        assert_eq!(
+            regions, snapshot,
+            "idempotent carve must not rewrite regions"
+        );
+    }
+
+    #[test]
+    fn carve_mq_regions_rejects_partial_or_changed_shard_counts() {
+        let mut regions = vec![meta(1, b"", b"")];
+        carve_mq_regions(&mut regions, 2, 3, 2).expect("first carve");
+        let err = carve_mq_regions(&mut regions, 2, 2, 2).unwrap_err();
+        assert!(err.to_string().contains("partially seeded"), "err: {err}");
+        let err = carve_mq_regions(&mut regions, 2, 3, 3).unwrap_err();
+        assert!(err.to_string().contains("partially seeded"), "err: {err}");
+        assert!(carve_mq_regions(&mut regions, 2, 65, 2).is_err());
+        assert!(carve_mq_regions(&mut regions, 0, 1, 1).is_err());
+    }
+
+    #[test]
+    fn mq_space_is_closed_to_kv_split_and_merge() {
+        // 遗留表：普通 Region 跨越保留空间（分片尚未切出）时，split key 落进
+        // /_mq/ 一律拒绝——否则会在分片区里造出 KV 边界。
+        let legacy = table_with(vec![meta(1, b"", b"")]);
+        let err = plan_split(&legacy, 1, b"/_mq/log/00/x", 100).unwrap_err();
+        assert!(err.to_string().contains("/_mq/"), "err: {err}");
+        assert!(plan_split(&legacy, 1, b"/kv/key", 100).is_ok());
+
+        // 切出分片后：分片 Region 既不能被 split 制造边界，也不能被 merge 吸收。
+        let mut regions = vec![meta(1, b"", b"")];
+        carve_mq_regions(&mut regions, 2, 2, 1).expect("carve");
+        let table = table_with(regions);
+        let shard_meta = table
+            .regions
+            .iter()
+            .find(|m| is_mq_region(m))
+            .expect("mq region")
+            .clone();
+        let shard = shard_meta.region_id;
+        let inside = [shard_meta.start_key.clone(), b"x".to_vec()].concat();
+        let err = plan_split(&table, shard, &inside, 100).unwrap_err();
+        assert!(err.to_string().contains("/_mq/"), "err: {err}");
+        let err = plan_merge(&table, 1, shard).unwrap_err();
+        assert!(err.to_string().contains("/_mq/"), "err: {err}");
     }
 
     #[test]

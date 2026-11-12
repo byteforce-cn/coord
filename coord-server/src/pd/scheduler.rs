@@ -22,7 +22,7 @@ use coord_core::types::{NodeID, RegionId, RegionMeta};
 use super::operator::Operator;
 use super::types::{NodeState, PdConfig};
 use crate::storage::object_store::key_in_object_space;
-use crate::storage::region_table::is_object_region;
+use crate::storage::region_table::{is_mq_region, is_object_region, key_in_mq_space};
 
 // ============================================================================
 // Split Checker
@@ -61,7 +61,11 @@ impl SplitChecker {
     /// Region 无论多热都不 split，采样点落进保留空间的计划也不产生——换一个
     /// split_key 是静默改计划，交给运维按容量另行设计。
     pub fn check(&self, region: &RegionMeta, split_key: Vec<u8>) -> Option<Operator> {
-        if is_object_region(region) || key_in_object_space(&split_key) {
+        if is_object_region(region)
+            || key_in_object_space(&split_key)
+            || is_mq_region(region)
+            || key_in_mq_space(&split_key)
+        {
             return None;
         }
         let exceeds_size = region.approximate_size >= self.size_threshold;
@@ -104,7 +108,11 @@ impl Scheduler for SplitChecker {
                 };
                 // 固定对象 Region 与保留空间内的 split_key 不产生 operator
                 // （executor 也会拒绝；这里提前避免 Failed 噪音与调度 churn）。
-                if is_object_region(region) || key_in_object_space(&split_key) {
+                if is_object_region(region)
+                    || key_in_object_space(&split_key)
+                    || is_mq_region(region)
+                    || key_in_mq_space(&split_key)
+                {
                     continue;
                 }
 
@@ -155,7 +163,11 @@ impl MergeChecker {
         }
         // 固定对象 Region 不参与任意 KV merge（对象 manifest/chunk 不随 split/merge
         // 迁移，ADR-0015 D6/D11.9）；executor 的 `plan_merge` 同样拒绝。
-        if is_object_region(left) || is_object_region(right) {
+        if is_object_region(left)
+            || is_object_region(right)
+            || is_mq_region(left)
+            || is_mq_region(right)
+        {
             return None;
         }
 
@@ -970,6 +982,45 @@ mod tests {
                 Some(Operator::SplitRegion { .. })
             ),
             "a split key outside the reserved namespace is still allowed"
+        );
+    }
+
+    #[test]
+    fn test_mq_shard_regions_are_never_split_or_merged() {
+        let config = PdConfig::default();
+        let split = SplitChecker::new(&config);
+        let shard = make_region(
+            9,
+            u64::MAX / 2,
+            u64::MAX,
+            b"/_mq/log/00/".to_vec(),
+            b"/_mq/log/01/".to_vec(),
+            vec![],
+        );
+        assert!(
+            split.check(&shard, b"/_mq/log/00/m".to_vec()).is_none(),
+            "fixed MQ shard region never splits, whatever the thresholds"
+        );
+        // 遗留表：普通 Region 跨越保留空间时，落进 /_mq/ 的采样点也不产生计划。
+        let straddling = make_region(1, u64::MAX / 2, 0, b"".to_vec(), b"".to_vec(), vec![]);
+        assert!(split.check(&straddling, b"/_mq/x".to_vec()).is_none());
+        assert!(matches!(
+            split.check(&straddling, b"k".to_vec()),
+            Some(Operator::SplitRegion { .. })
+        ));
+
+        let merge = MergeChecker::new(&config);
+        let left = make_region(
+            1,
+            5 * 1024 * 1024,
+            0,
+            b"".to_vec(),
+            b"/_mq/log/".to_vec(),
+            vec![],
+        );
+        assert!(
+            merge.check(&left, &shard).is_none(),
+            "merge must not absorb a fixed MQ shard region"
         );
     }
 
