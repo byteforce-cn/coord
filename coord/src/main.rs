@@ -2104,11 +2104,12 @@ async fn seed_region_table(
 fn derive_region_seeds(
     kv_t_enabled: bool,
     object_storage_enabled: bool,
+    mq_v2_shards: Option<(u32, u32)>,
     seeds: Vec<RegionSeed>,
     peers: &[Peer],
     table: &RegionTable,
 ) -> Result<Vec<RegionSeed>, String> {
-    if !(kv_t_enabled && object_storage_enabled) {
+    if !kv_t_enabled || (!object_storage_enabled && mq_v2_shards.is_none()) {
         return Ok(seeds);
     }
     let mut metas: Vec<RegionMeta> = seeds
@@ -2123,34 +2124,90 @@ fn derive_region_seeds(
             approximate_keys: 0,
         })
         .collect();
-    let first_new_id = metas.iter().map(|m| m.region_id).max().unwrap_or(0) + 1;
+    let next_id = |metas: &[RegionMeta]| metas.iter().map(|m| m.region_id).max().unwrap_or(0) + 1;
+
+    if object_storage_enabled {
+        let object_region_id = next_id(&metas);
+        let object_region =
+            coord_server::storage::region_table::carve_object_region(&mut metas, object_region_id)
+                .map_err(|e| {
+                    format!("carve [/obj/, /obj0) out of multi_raft.initial_regions: {e}")
+                })?;
+        tracing::info!(
+            object_region,
+            "fixed /obj/ region carved out of multi_raft.initial_regions"
+        );
+    }
+    if let Some((log_shards, group_shards)) = mq_v2_shards {
+        let mq_region_id = next_id(&metas);
+        let (log_ids, group_ids) = coord_server::storage::region_table::carve_mq_regions(
+            &mut metas,
+            mq_region_id,
+            log_shards,
+            group_shards,
+        )
+        .map_err(|e| {
+            format!("carve [/_mq/log/, /_mq/log0) / [/_mq/group/, /_mq/group0) out of multi_raft.initial_regions: {e}")
+        })?;
+        tracing::info!(
+            log_shards = log_ids.len(),
+            group_shards = group_ids.len(),
+            "fixed /_mq/ shard regions carved out of multi_raft.initial_regions (ADR-0016 D2)"
+        );
+    }
+
     if table.version != 0 {
-        let fixed = table
-            .regions
-            .iter()
-            .find(|m| coord_server::storage::region_table::is_object_region(m))
-            .ok_or_else(|| {
-                "region table is already initialized without the fixed /obj/ region; \
-                 enabling [object_storage] on an existing [kv_t] cluster is not supported \
-                 (no silent topology rewrite)"
-                    .to_string()
-            })?;
-        if fixed.region_id != first_new_id {
-            return Err(format!(
-                "fixed /obj/ region id drifted: the table has region {}, but \
-                 multi_raft.initial_regions implies {first_new_id}; initial_regions must not \
-                 change after the region table is seeded",
-                fixed.region_id
-            ));
+        // 已有权威表：固定区间必须已在表里且与本次推导逐字一致（id 与边界都算），
+        // 否则重启会静默改写拓扑。固定区间包括 `/obj/` 与全部 `/_mq/` 分片。
+        for derived in metas.iter().filter(|m| {
+            coord_server::storage::region_table::is_object_region(m)
+                || coord_server::storage::region_table::is_mq_region(m)
+        }) {
+            let existing = table
+                .regions
+                .iter()
+                .find(|m| m.start_key == derived.start_key && m.end_key == derived.end_key)
+                .ok_or_else(|| {
+                    format!(
+                        "region table is already initialized without the fixed interval \
+                         [{}, {}); enabling this reserved space on an existing [kv_t] cluster \
+                         is not supported (no silent topology rewrite)",
+                        String::from_utf8_lossy(&derived.start_key),
+                        String::from_utf8_lossy(&derived.end_key)
+                    )
+                })?;
+            if existing.region_id != derived.region_id {
+                return Err(format!(
+                    "fixed region [{}, {}) id drifted: the table has region {}, but \
+                     multi_raft.initial_regions implies {}; initial_regions must not change \
+                     after the region table is seeded",
+                    String::from_utf8_lossy(&derived.start_key),
+                    String::from_utf8_lossy(&derived.end_key),
+                    existing.region_id,
+                    derived.region_id
+                ));
+            }
+        }
+        if mq_v2_shards.is_some() {
+            let expected = metas
+                .iter()
+                .filter(|m| coord_server::storage::region_table::is_mq_region(m))
+                .count();
+            let actual = table
+                .regions
+                .iter()
+                .filter(|m| coord_server::storage::region_table::is_mq_region(m))
+                .count();
+            if expected != actual {
+                return Err(format!(
+                    "region table has {actual} /_mq/ shard region(s), but [mq_v2] implies \
+                     {expected}; [mq_v2] shard counts must not change after the region table \
+                     is seeded"
+                ));
+            }
         }
     }
-    let object_region =
-        coord_server::storage::region_table::carve_object_region(&mut metas, first_new_id)
-            .map_err(|e| format!("carve [/obj/, /obj0) out of multi_raft.initial_regions: {e}"))?;
-    tracing::info!(
-        object_region,
-        "fixed /obj/ region carved out of multi_raft.initial_regions"
-    );
+
     Ok(metas
         .into_iter()
         .map(|m| RegionSeed {
@@ -2858,15 +2915,21 @@ async fn run_server(
     //
     //     已有权威表时只校验、不重新切分：拒绝路径不能先建目录/写 PD 元数据，
     //     所以读本地 region 0 store（启动前已打开）在这里做前置判定。
-    let region_table_at_boot = if kv_t_enabled && cfg.object_storage.enabled {
-        mvcc.region_table()
-            .map_err(|e| format!("read region table: {e}"))?
-    } else {
-        RegionTable::default()
-    };
+    let mq_v2_shards = cfg
+        .mq_v2
+        .enabled
+        .then_some((cfg.mq_v2.log_shards, cfg.mq_v2.group_shards));
+    let region_table_at_boot =
+        if kv_t_enabled && (cfg.object_storage.enabled || mq_v2_shards.is_some()) {
+            mvcc.region_table()
+                .map_err(|e| format!("read region table: {e}"))?
+        } else {
+            RegionTable::default()
+        };
     region_seeds = derive_region_seeds(
         kv_t_enabled,
         cfg.object_storage.enabled,
+        mq_v2_shards,
         region_seeds,
         &region_peers,
         &region_table_at_boot,
@@ -5203,6 +5266,7 @@ mod startup_region_tests {
             let derived = derive_region_seeds(
                 kv_t,
                 object,
+                None,
                 seeds.clone(),
                 &peers(),
                 &RegionTable::default(),
@@ -5217,6 +5281,7 @@ mod startup_region_tests {
         let derived = derive_region_seeds(
             true,
             true,
+            None,
             vec![seed(1, b"", b"")],
             &peers(),
             &RegionTable::default(),
@@ -5239,8 +5304,9 @@ mod startup_region_tests {
             meta(2, b"/obj/", b"/obj0"),
             meta(3, b"/obj0", b""),
         ]);
-        let derived = derive_region_seeds(true, true, vec![seed(1, b"", b"")], &peers(), &table)
-            .expect("same ids on restart");
+        let derived =
+            derive_region_seeds(true, true, None, vec![seed(1, b"", b"")], &peers(), &table)
+                .expect("same ids on restart");
         assert_eq!(
             ranges(&derived)[1],
             (2, b"/obj/".to_vec(), b"/obj0".to_vec())
@@ -5250,8 +5316,8 @@ mod startup_region_tests {
     #[test]
     fn derive_rejects_an_initialized_table_without_the_fixed_region() {
         let table = table_of(vec![meta(1, b"", b"")]);
-        let err =
-            derive_region_seeds(true, true, vec![seed(1, b"", b"")], &peers(), &table).unwrap_err();
+        let err = derive_region_seeds(true, true, None, vec![seed(1, b"", b"")], &peers(), &table)
+            .unwrap_err();
         assert!(err.contains("/obj/"), "err: {err}");
         assert!(err.contains("not supported"), "err: {err}");
     }
@@ -5264,11 +5330,110 @@ mod startup_region_tests {
             meta(5, b"/obj/", b"/obj0"),
             meta(6, b"/obj0", b""),
         ]);
-        let err =
-            derive_region_seeds(true, true, vec![seed(1, b"", b"")], &peers(), &table).unwrap_err();
+        let err = derive_region_seeds(true, true, None, vec![seed(1, b"", b"")], &peers(), &table)
+            .unwrap_err();
         assert!(
             err.contains("initial_regions must not change"),
             "err: {err}"
+        );
+    }
+
+    #[test]
+    fn derive_carves_mq_shard_regions_and_keeps_the_table_tiled() {
+        let derived = derive_region_seeds(
+            true,
+            false,
+            Some((2, 1)),
+            vec![seed(1, b"", b"")],
+            &peers(),
+            &RegionTable::default(),
+        )
+        .expect("carve mq shards");
+        let mq_regions: Vec<&RegionSeed> = derived
+            .iter()
+            .filter(|s| {
+                s.start_key.starts_with(b"/_mq/log/") || s.start_key.starts_with(b"/_mq/group/")
+            })
+            .collect();
+        assert_eq!(mq_regions.len(), 3, "2 log + 1 group shard: {derived:?}");
+        // 整张表可由 `init` 校验：平铺、无重叠、首尾为空。
+        let mut table = RegionTable::default();
+        table
+            .init(
+                derived
+                    .iter()
+                    .map(|s| coord_core::types::RegionMeta {
+                        region_id: s.region_id,
+                        start_key: s.start_key.clone(),
+                        end_key: s.end_key.clone(),
+                        epoch: RegionEpoch::initial(),
+                        peers: peers(),
+                        approximate_size: 0,
+                        approximate_keys: 0,
+                    })
+                    .collect(),
+            )
+            .expect("mq shard seeds must tile the keyspace");
+    }
+
+    #[test]
+    fn derive_reuses_a_seeded_table_with_mq_shard_regions() {
+        let first = derive_region_seeds(
+            true,
+            false,
+            Some((2, 1)),
+            vec![seed(1, b"", b"")],
+            &peers(),
+            &RegionTable::default(),
+        )
+        .expect("carve");
+        let table = table_of(
+            first
+                .iter()
+                .map(|s| meta(s.region_id, &s.start_key, &s.end_key))
+                .collect(),
+        );
+        let second = derive_region_seeds(
+            true,
+            false,
+            Some((2, 1)),
+            vec![seed(1, b"", b"")],
+            &peers(),
+            &table,
+        )
+        .expect("restart on the same topology");
+        assert_eq!(ranges(&first), ranges(&second));
+    }
+
+    #[test]
+    fn derive_rejects_changed_mq_shard_counts_after_the_table_was_seeded() {
+        let first = derive_region_seeds(
+            true,
+            false,
+            Some((2, 1)),
+            vec![seed(1, b"", b"")],
+            &peers(),
+            &RegionTable::default(),
+        )
+        .expect("carve");
+        let table = table_of(
+            first
+                .iter()
+                .map(|s| meta(s.region_id, &s.start_key, &s.end_key))
+                .collect(),
+        );
+        let err = derive_region_seeds(
+            true,
+            false,
+            Some((4, 1)),
+            vec![seed(1, b"", b"")],
+            &peers(),
+            &table,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("/_mq/") || err.contains("shard"),
+            "err must name the MQ topology drift: {err}"
         );
     }
 }
