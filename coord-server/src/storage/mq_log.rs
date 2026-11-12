@@ -117,6 +117,16 @@ pub struct MqPartitionMeta {
     pub idem_bytes: u64,
 }
 
+/// 分区的可读边界：`earliest` = 最早仍可读的 offset，`next` = 下一条将被分配的 offset。
+///
+/// `Poll` 用 `next` 判空/长轮询，用 `earliest` 把低于窗口的请求映射成
+/// `OFFSET_OUT_OF_RANGE`（不静默 clamp，ADR-0016 D5）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MqPartitionBounds {
+    pub earliest_offset: u64,
+    pub next_offset: u64,
+}
+
 /// 一个段：`[start_offset, end_offset)`，按 append 顺序封口。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MqSegmentMeta {
@@ -560,6 +570,49 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    /// 读分区可读边界；分区不存在（从未 append）= `None`。
+    pub fn mq_partition_bounds(
+        &self,
+        topic_id: u64,
+        partition: u32,
+    ) -> Result<Option<MqPartitionBounds>> {
+        self.backend().read(|tx| {
+            Ok(read_meta::<MqPartitionMeta>(
+                tx,
+                TABLE_MQ_META,
+                &partition_meta_key(topic_id, partition),
+            )?
+            .map(|meta| MqPartitionBounds {
+                earliest_offset: meta.earliest_offset,
+                next_offset: meta.next_offset,
+            }))
+        })
+    }
+
+    /// 枚举本分片已有元数据的分区（按 key 升序 = topic_id/partition 升序）。
+    ///
+    /// 保留 reaper 用它逐分区算 `up_to_offset`（分片内分区数受
+    /// `max_partitions_per_shard` 约束）。
+    pub fn mq_partitions(&self) -> Result<Vec<(u64, u32)>> {
+        self.backend().read(|tx| {
+            let rows = tx.iter_prefix(TABLE_MQ_META, &[META_PARTITION])?;
+            let mut partitions = Vec::with_capacity(rows.len());
+            for (key, _) in rows {
+                let Some(rest) = key.strip_prefix(&[META_PARTITION]) else {
+                    continue;
+                };
+                let (Some(topic_id), Some(partition)) = (
+                    rest.get(..8).and_then(|bytes| bytes.try_into().ok()),
+                    rest.get(8..).and_then(|bytes| bytes.try_into().ok()),
+                ) else {
+                    continue;
+                };
+                partitions.push((u64::from_be_bytes(topic_id), u32::from_be_bytes(partition)));
+            }
+            Ok(partitions)
+        })
+    }
+
     /// 本分片内某 topic 的记账汇总。
     pub fn mq_topic_usage(&self, topic_id: u64) -> Result<MqTopicUsage> {
         self.backend().read(|tx| {
@@ -821,6 +874,31 @@ fn open_segment_for(
     meta.log_bytes = meta.log_bytes.saturating_add(size);
 }
 
+/// 保留策略：算出可回收的整段前缀边界（`up_to_offset`）。
+///
+/// 只考虑已封口段（`segments[..len-1]`）：至少保留最新段（与
+/// `apply_mq_truncate` 同口径）。`retention_secs == 0` = 不限保留；段按
+/// `opened_at_ms` 升序，遇到第一个未过期段即停。时间由调用方传入（Leader 的
+/// `now_ms`），apply 不读时钟。
+pub fn mq_retention_cutoff(
+    segments: &[MqSegmentMeta],
+    now_ms: i64,
+    retention_secs: u64,
+) -> Option<u64> {
+    if retention_secs == 0 || segments.len() < 2 {
+        return None;
+    }
+    let retention_ms = i64::try_from(retention_secs).ok()?.saturating_mul(1_000);
+    let mut cutoff = None;
+    for segment in &segments[..segments.len() - 1] {
+        if now_ms.saturating_sub(segment.opened_at_ms) < retention_ms {
+            break;
+        }
+        cutoff = Some(segment.end_offset);
+    }
+    cutoff
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,9 +908,14 @@ mod tests {
 
     fn setup() -> (TempDir, MvccStorage<RedbBackend>) {
         let dir = TempDir::new().unwrap();
-        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
-        let storage = MvccStorage::new(backend).unwrap();
+        let storage = open(&dir);
         (dir, storage)
+    }
+
+    /// 打开（或重开）同一目录上的存储；重启测试复用。
+    fn open(dir: &TempDir) -> MvccStorage<RedbBackend> {
+        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
+        MvccStorage::new(backend).unwrap()
     }
 
     fn applied(index: u64) -> AppliedLogId {
@@ -869,12 +952,24 @@ mod tests {
         index: u64,
         entries: Vec<MqAppendEntry>,
     ) -> MqAppendBatchResponse {
+        append_at(storage, index, 1_700_000_000_000, 1 << 20, entries)
+    }
+
+    fn append_at(
+        storage: &MvccStorage<RedbBackend>,
+        index: u64,
+        now_ms: i64,
+        segment_bytes: u64,
+        entries: Vec<MqAppendEntry>,
+    ) -> MqAppendBatchResponse {
+        let mut request = request(entries);
+        request.segment_bytes = segment_bytes;
         storage
             .apply_mq_append_batch(
                 &MqAppendBatch {
                     shard_id: 0,
-                    now_ms: 1_700_000_000_000,
-                    requests: vec![request(entries)],
+                    now_ms,
+                    requests: vec![request],
                 },
                 applied(index),
             )
@@ -1172,5 +1267,313 @@ mod tests {
         assert!(usage.log_bytes > 0);
         assert!(usage.idem_bytes > 0);
         assert_eq!(usage.dlq_bytes, 0);
+    }
+
+    /// 保留策略只回收已封口且过期的整段前缀，最新段永远保留。
+    #[test]
+    fn retention_cutoff_keeps_the_latest_segment() {
+        let (_dir, storage) = setup();
+        let day = 86_400_000i64;
+        let t0 = 1_700_000_000_000i64;
+        // segment_bytes = 1 ⇒ 每条消息单独封口，三段分别开在三天。
+        append_at(&storage, 1, t0, 1, vec![entry(b"a", b"1")]);
+        append_at(&storage, 2, t0 + 10 * day, 1, vec![entry(b"b", b"2")]);
+        append_at(&storage, 3, t0 + 20 * day, 1, vec![entry(b"c", b"3")]);
+        let meta = storage.mq_partition_meta(7, 0).unwrap().unwrap();
+        assert_eq!(meta.segments.len(), 3);
+
+        assert_eq!(
+            mq_retention_cutoff(&meta.segments, t0 + 20 * day, 604_800),
+            Some(2),
+            "前两段超过 7d，回收边界 = 第二段 end_offset"
+        );
+        assert_eq!(
+            mq_retention_cutoff(&meta.segments, t0 + 10 * day, 604_800),
+            Some(1)
+        );
+        assert_eq!(
+            mq_retention_cutoff(&meta.segments, t0 + day, 604_800),
+            None,
+            "没有过期段 ⇒ 不提案"
+        );
+        assert_eq!(
+            mq_retention_cutoff(&meta.segments, t0 + 100 * day, 0),
+            None,
+            "0 = 不限保留"
+        );
+
+        let result = storage
+            .apply_mq_truncate(
+                &MqTruncate {
+                    shard_id: 0,
+                    topic_id: 7,
+                    partition: 0,
+                    up_to_offset: 2,
+                },
+                applied(4),
+            )
+            .unwrap();
+        assert_eq!(result.dropped_segments, 2);
+        assert_eq!(result.dropped_records, 2);
+        assert_eq!(result.earliest_offset, 2);
+        assert_eq!(result.next_offset, 3);
+        let meta = storage.mq_partition_meta(7, 0).unwrap().unwrap();
+        assert_eq!(meta.segments.len(), 1);
+        assert_eq!(meta.earliest_offset, 2);
+        assert_eq!(
+            mq_retention_cutoff(&meta.segments, t0 + 30 * day, 604_800),
+            None,
+            "至少保留最新段"
+        );
+    }
+
+    /// 回收释放配额、幂等索引随段回收：被回收 offset 的键不再命中去重。
+    #[test]
+    fn truncate_frees_quota_and_prunes_idempotency_entries() {
+        let (_dir, storage) = setup();
+        let t0 = 1_700_000_000_000i64;
+        for index in 0..3u64 {
+            let mut entry = entry(b"k", &[0u8; 512]);
+            entry.idempotency_key = format!("idem-{index}");
+            append_at(&storage, index + 1, t0 + index as i64, 1, vec![entry]);
+        }
+        let usage_before = storage.mq_topic_usage(7).unwrap();
+        assert!(usage_before.log_bytes > 0);
+        assert!(usage_before.idem_bytes > 0);
+
+        // 同一配额上限：回收前整批拒绝。
+        let mut pending = request(vec![entry(b"new", &[0u8; 512])]);
+        pending.max_message_bytes = 4096;
+        pending.max_bytes = usage_before.total() + 1;
+        let response = storage
+            .apply_mq_append_batch(
+                &MqAppendBatch {
+                    shard_id: 0,
+                    now_ms: t0 + 10,
+                    requests: vec![pending.clone()],
+                },
+                applied(10),
+            )
+            .unwrap();
+        assert!(matches!(
+            &response.requests[0],
+            MqAppendOutcome::Rejected(MqAppendRejection::QuotaExceeded { .. })
+        ));
+
+        let result = storage
+            .apply_mq_truncate(
+                &MqTruncate {
+                    shard_id: 0,
+                    topic_id: 7,
+                    partition: 0,
+                    up_to_offset: 2,
+                },
+                applied(11),
+            )
+            .unwrap();
+        assert_eq!(result.dropped_segments, 2);
+        let meta = storage.mq_partition_meta(7, 0).unwrap().unwrap();
+        assert_eq!(meta.earliest_offset, 2);
+        let usage_after = storage.mq_topic_usage(7).unwrap();
+        assert!(usage_after.total() < usage_before.total());
+        assert_eq!(usage_after.log_bytes, meta.log_bytes);
+        assert!(
+            usage_after.idem_bytes < usage_before.idem_bytes,
+            "低于 earliest 的幂等索引必须随段回收"
+        );
+
+        // 同一上限现在通过：回收的字节真的释放了配额。
+        let response = storage
+            .apply_mq_append_batch(
+                &MqAppendBatch {
+                    shard_id: 0,
+                    now_ms: t0 + 20,
+                    requests: vec![pending],
+                },
+                applied(12),
+            )
+            .unwrap();
+        assert!(matches!(&response.requests[0], MqAppendOutcome::Applied(_)));
+
+        // 被回收 offset 的幂等键不再命中：重新使用得到新 offset。
+        let mut reuse = entry(b"k", &[0u8; 512]);
+        reuse.idempotency_key = "idem-0".to_string();
+        let response = append_at(&storage, 13, t0 + 30, 1 << 20, vec![reuse]);
+        match &response.requests[0] {
+            MqAppendOutcome::Applied(appended) => {
+                assert_eq!(appended.entries[0].offset, 4);
+                assert!(!appended.entries[0].deduplicated);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+    }
+
+    /// 同一条日志的 truncate 重放：不重复删除、earliest 不回退。
+    #[test]
+    fn truncate_replay_is_idempotent() {
+        let (_dir, storage) = setup();
+        let t0 = 1_700_000_000_000i64;
+        for index in 0..3u64 {
+            append_at(
+                &storage,
+                index + 1,
+                t0 + index as i64,
+                1,
+                vec![entry(b"k", b"v")],
+            );
+        }
+        let command = MqTruncate {
+            shard_id: 0,
+            topic_id: 7,
+            partition: 0,
+            up_to_offset: 2,
+        };
+        let first = storage.apply_mq_truncate(&command, applied(10)).unwrap();
+        assert_eq!(first.dropped_segments, 2);
+        assert_eq!(first.earliest_offset, 2);
+
+        let replay = storage.apply_mq_truncate(&command, applied(10)).unwrap();
+        assert_eq!(replay.dropped_segments, 0);
+        assert_eq!(replay.earliest_offset, 2);
+        assert_eq!(replay.next_offset, 3);
+
+        let again = storage.apply_mq_truncate(&command, applied(11)).unwrap();
+        assert_eq!(again.dropped_segments, 0);
+        assert_eq!(again.earliest_offset, 2);
+        assert_eq!(
+            storage
+                .mq_partition_meta(7, 0)
+                .unwrap()
+                .unwrap()
+                .earliest_offset,
+            2
+        );
+    }
+
+    /// earliest/latest 随 append 与 truncate 前进；分区枚举供 reaper 使用。
+    #[test]
+    fn partition_bounds_track_earliest_and_latest() {
+        let (_dir, storage) = setup();
+        let t0 = 1_700_000_000_000i64;
+        assert!(storage.mq_partition_bounds(7, 0).unwrap().is_none());
+        assert!(storage.mq_partitions().unwrap().is_empty());
+
+        append(&storage, 1, vec![entry(b"a", b"1"), entry(b"b", b"2")]);
+        let bounds = storage.mq_partition_bounds(7, 0).unwrap().unwrap();
+        assert_eq!(bounds.earliest_offset, 0);
+        assert_eq!(bounds.next_offset, 2);
+
+        let mut other = request(vec![entry(b"a", b"1")]);
+        other.partition = 1;
+        storage
+            .apply_mq_append_batch(
+                &MqAppendBatch {
+                    shard_id: 0,
+                    now_ms: t0,
+                    requests: vec![other],
+                },
+                applied(2),
+            )
+            .unwrap();
+        assert_eq!(storage.mq_partitions().unwrap(), vec![(7, 0), (7, 1)]);
+
+        // 先把分区 0 切成两段，再回收第一段。
+        append_at(&storage, 3, t0 + 1, 1, vec![entry(b"c", b"3")]);
+        storage
+            .apply_mq_truncate(
+                &MqTruncate {
+                    shard_id: 0,
+                    topic_id: 7,
+                    partition: 0,
+                    up_to_offset: 2,
+                },
+                applied(4),
+            )
+            .unwrap();
+        let bounds = storage.mq_partition_bounds(7, 0).unwrap().unwrap();
+        assert_eq!(bounds.earliest_offset, 2);
+        assert_eq!(bounds.next_offset, 3);
+    }
+
+    /// 进程重启（同目录重开）后 offset/段/DLQ 与关闭前一致，继续追加不倒退。
+    #[test]
+    fn reopening_the_storage_preserves_offsets_segments_and_dlq() {
+        let dir = TempDir::new().unwrap();
+        let state_before = {
+            let storage = open(&dir);
+            append(&storage, 1, vec![entry(b"a", b"one"), entry(b"b", b"two")]);
+            storage
+                .apply_mq_move_to_dlq(
+                    &MqMoveToDlq {
+                        shard_id: 0,
+                        topic_id: 7,
+                        partition: 0,
+                        offset: 1,
+                        reason: "poison".to_string(),
+                        detail: "bad".to_string(),
+                        now_ms: 2,
+                    },
+                    applied(2),
+                )
+                .unwrap();
+            (
+                storage.mq_partition_meta(7, 0).unwrap().unwrap(),
+                storage.mq_records(7, 0, 0, 10).unwrap(),
+                storage.mq_dlq_records(7, 0, 0, 10).unwrap(),
+            )
+        };
+
+        let storage = open(&dir);
+        assert_eq!(
+            storage.mq_partition_meta(7, 0).unwrap().unwrap(),
+            state_before.0
+        );
+        assert_eq!(storage.mq_records(7, 0, 0, 10).unwrap(), state_before.1);
+        assert_eq!(storage.mq_dlq_records(7, 0, 0, 10).unwrap(), state_before.2);
+        let response = append_at(
+            &storage,
+            3,
+            1_700_000_000_500,
+            1 << 20,
+            vec![entry(b"c", b"three")],
+        );
+        assert_eq!(offsets(&response), vec![2]);
+    }
+
+    /// 副本对同一命令序列 apply 得到相同状态；换届后在副本上继续追加 offset 接着走。
+    #[test]
+    fn replica_applies_the_same_log_to_the_same_state() {
+        let (_leader_dir, leader) = setup();
+        let (_follower_dir, follower) = setup();
+        for index in 1..=2u64 {
+            let command = MqAppendBatch {
+                shard_id: 0,
+                now_ms: 1_700_000_000_000 + index as i64,
+                requests: vec![request(vec![entry(b"k", b"payload")])],
+            };
+            leader
+                .apply_mq_append_batch(&command, applied(index))
+                .unwrap();
+            follower
+                .apply_mq_append_batch(&command, applied(index))
+                .unwrap();
+        }
+        assert_eq!(
+            leader.mq_partition_meta(7, 0).unwrap(),
+            follower.mq_partition_meta(7, 0).unwrap()
+        );
+        assert_eq!(
+            leader.mq_records(7, 0, 0, 10).unwrap(),
+            follower.mq_records(7, 0, 0, 10).unwrap()
+        );
+
+        let response = append_at(
+            &follower,
+            3,
+            1_700_000_000_100,
+            1 << 20,
+            vec![entry(b"k", b"after-failover")],
+        );
+        assert_eq!(offsets(&response), vec![2]);
     }
 }

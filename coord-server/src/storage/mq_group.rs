@@ -785,9 +785,14 @@ mod tests {
 
     fn setup() -> (TempDir, MvccStorage<RedbBackend>) {
         let dir = TempDir::new().unwrap();
-        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
-        let storage = MvccStorage::new(backend).unwrap();
+        let storage = open(&dir);
         (dir, storage)
+    }
+
+    /// 打开（或重开）同一目录上的存储；重启测试复用。
+    fn open(dir: &TempDir) -> MvccStorage<RedbBackend> {
+        let backend = RedbBackend::open(dir.path(), &StorageConfig::default()).unwrap();
+        MvccStorage::new(backend).unwrap()
     }
 
     fn applied(index: u64) -> AppliedLogId {
@@ -1541,6 +1546,70 @@ mod tests {
         };
         assert_eq!(acked.results[0].committed_offset, 10);
         assert_eq!(storage2.mq_group_names("").unwrap(), vec!["billing"]);
+    }
+
+    #[test]
+    fn group_state_and_offsets_survive_reopen() {
+        let dir = TempDir::new().unwrap();
+        let (member_id, state_before, offsets_before) = {
+            let storage = open(&dir);
+            let member = joined(apply(
+                &storage,
+                MqGroupOp::Join(join(
+                    "billing",
+                    "",
+                    vec![topic("orders", 1, 2)],
+                    30_000,
+                    1_000,
+                )),
+                1,
+            ));
+            apply(
+                &storage,
+                MqGroupOp::Ack(ack(
+                    "billing",
+                    &member.member_id,
+                    member.generation,
+                    vec![MqGroupAckEntry {
+                        topic_id: 1,
+                        partition: 0,
+                        offset: 4,
+                    }],
+                    1_500,
+                )),
+                2,
+            );
+            (
+                member.member_id,
+                storage.mq_group("billing").unwrap().unwrap(),
+                storage.mq_group_offsets("billing").unwrap(),
+            )
+        };
+
+        let storage = open(&dir);
+        assert_eq!(storage.mq_group("billing").unwrap().unwrap(), state_before);
+        assert_eq!(storage.mq_group_offsets("billing").unwrap(), offsets_before);
+
+        // 重开后的下一条 Ack 继续推进位点，不回退/不复用。
+        let acked = match apply(
+            &storage,
+            MqGroupOp::Ack(ack(
+                "billing",
+                &member_id,
+                state_before.generation,
+                vec![MqGroupAckEntry {
+                    topic_id: 1,
+                    partition: 0,
+                    offset: 9,
+                }],
+                2_000,
+            )),
+            3,
+        ) {
+            MqGroupResult::Acked(acked) => acked,
+            other => panic!("expected Acked, got {other:?}"),
+        };
+        assert_eq!(acked.results[0].committed_offset, 10);
     }
 
     #[test]
