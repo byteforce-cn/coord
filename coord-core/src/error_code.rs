@@ -86,6 +86,40 @@ pub enum CoordErrorCode {
     /// `read_ts` 等待 safe_ts 超时（Region apply 落后）。gRPC `UNAVAILABLE`。
     /// **可重试**：退避重试。
     SafeTsLag,
+
+    // ──── MQ v2（ADR-0016）────
+    /// topic 不存在或已删除（旧 `topic_id` 在 DeleteTopic 后立即生效）。
+    /// gRPC `NOT_FOUND`。**不可重试**（除非同名重建后刷新元数据；旧代际仍不行）。
+    TopicNotFound,
+    /// 同名 topic 已存在且配置不同。gRPC `ALREADY_EXISTS`。**不可重试**：
+    /// 改用已存在的 topic 或先删除。
+    TopicExists,
+    /// `topic_epoch`/`expected_topic_epoch` 与当前代际不一致（删除/重建已推进）。
+    /// gRPC `ABORTED`。**可重试**：刷新 topic 元数据后重试。
+    TopicEpochStale,
+    /// partition 越界/不存在。gRPC `NOT_FOUND`。**不可重试**。
+    PartitionNotFound,
+    /// `start_offset` 低于最早可用 offset（保留已删除前缀）。gRPC `OUT_OF_RANGE`。
+    /// **不可重试**：按 trailer 的 earliest/latest 选 reset 策略（禁用静默 clamp）。
+    OffsetOutOfRange,
+    /// 消费组不存在（未 Join 过或位点已过 TTL 被回收）。gRPC `NOT_FOUND`。
+    /// **可重试**：重新 `JoinGroup`。
+    GroupNotFound,
+    /// `member_id` 不在该组，或该分区未分配给该成员。gRPC `FAILED_PRECONDITION`。
+    /// **可重试**：重新 `JoinGroup` 拿新分配。
+    NotGroupMember,
+    /// `generation` 过期（成员变化/会话过期已推进代际）。gRPC `ABORTED`。
+    /// **可重试**：重新 `JoinGroup`。
+    GroupEpochStale,
+    /// 组正在再平衡（成员变化中）。gRPC `ABORTED`。**可重试**：退避后重新
+    /// `JoinGroup`。
+    RebalanceInProgress,
+    /// 单条消息超过 `max_message_bytes`。gRPC `INVALID_ARGUMENT`。**不可重试**：
+    /// 缩小消息；整批不追加。
+    MessageTooLarge,
+    /// 超过 topic 容量配额（段 + DLQ + 幂等索引）。gRPC `RESOURCE_EXHAUSTED`。
+    /// **不可重试**（直到保留回收/扩容）：整批不追加，不静默丢历史。
+    QuotaExceeded,
 }
 
 impl CoordErrorCode {
@@ -112,6 +146,17 @@ impl CoordErrorCode {
         Self::EpochStale,
         Self::HistoryUnavailable,
         Self::SafeTsLag,
+        Self::TopicNotFound,
+        Self::TopicExists,
+        Self::TopicEpochStale,
+        Self::PartitionNotFound,
+        Self::OffsetOutOfRange,
+        Self::GroupNotFound,
+        Self::NotGroupMember,
+        Self::GroupEpochStale,
+        Self::RebalanceInProgress,
+        Self::MessageTooLarge,
+        Self::QuotaExceeded,
     ];
 
     /// wire 值（= Java `ErrorCode.protoName`）。
@@ -138,6 +183,17 @@ impl CoordErrorCode {
             Self::EpochStale => "EPOCH_STALE",
             Self::HistoryUnavailable => "HISTORY_UNAVAILABLE",
             Self::SafeTsLag => "SAFE_TS_LAG",
+            Self::TopicNotFound => "TOPIC_NOT_FOUND",
+            Self::TopicExists => "TOPIC_EXISTS",
+            Self::TopicEpochStale => "TOPIC_EPOCH_STALE",
+            Self::PartitionNotFound => "PARTITION_NOT_FOUND",
+            Self::OffsetOutOfRange => "OFFSET_OUT_OF_RANGE",
+            Self::GroupNotFound => "GROUP_NOT_FOUND",
+            Self::NotGroupMember => "NOT_GROUP_MEMBER",
+            Self::GroupEpochStale => "GROUP_EPOCH_STALE",
+            Self::RebalanceInProgress => "REBALANCE_IN_PROGRESS",
+            Self::MessageTooLarge => "MESSAGE_TOO_LARGE",
+            Self::QuotaExceeded => "QUOTA_EXCEEDED",
         }
     }
 
@@ -192,6 +248,15 @@ impl CoordErrorCode {
             Self::CommitRejected => Code::FailedPrecondition,
             Self::HistoryUnavailable => Code::OutOfRange,
             Self::SafeTsLag => Code::Unavailable,
+            Self::TopicNotFound | Self::PartitionNotFound | Self::GroupNotFound => Code::NotFound,
+            Self::TopicExists => Code::AlreadyExists,
+            Self::TopicEpochStale | Self::GroupEpochStale | Self::RebalanceInProgress => {
+                Code::Aborted
+            }
+            Self::OffsetOutOfRange => Code::OutOfRange,
+            Self::NotGroupMember => Code::FailedPrecondition,
+            Self::MessageTooLarge => Code::InvalidArgument,
+            Self::QuotaExceeded => Code::ResourceExhausted,
         }
     }
 
@@ -347,6 +412,30 @@ mod tests {
             assert_eq!(error_code_of(&status).as_deref(), Some(code.as_str()));
         }
         assert!(!CoordErrorCode::NotFound.is_v2_specific());
+    }
+
+    /// MQ v2（ADR-0016）的码是契约的一部分：状态映射与 proto 头注/
+    /// WHITEPAPER 逐字一致；trailer 必须能被 `from_wire` 反解。
+    #[test]
+    fn mq_v2_codes_use_the_contract_status_codes() {
+        for (code, expected) in [
+            (CoordErrorCode::TopicNotFound, Code::NotFound),
+            (CoordErrorCode::TopicExists, Code::AlreadyExists),
+            (CoordErrorCode::TopicEpochStale, Code::Aborted),
+            (CoordErrorCode::PartitionNotFound, Code::NotFound),
+            (CoordErrorCode::OffsetOutOfRange, Code::OutOfRange),
+            (CoordErrorCode::GroupNotFound, Code::NotFound),
+            (CoordErrorCode::NotGroupMember, Code::FailedPrecondition),
+            (CoordErrorCode::GroupEpochStale, Code::Aborted),
+            (CoordErrorCode::RebalanceInProgress, Code::Aborted),
+            (CoordErrorCode::MessageTooLarge, Code::InvalidArgument),
+            (CoordErrorCode::QuotaExceeded, Code::ResourceExhausted),
+        ] {
+            let status = code.into_status(code.as_str());
+            assert_eq!(status.code(), expected, "{code:?} status code");
+            assert_eq!(error_code_of(&status).as_deref(), Some(code.as_str()));
+            assert_eq!(CoordErrorCode::from_wire(code.as_str()), Some(code));
+        }
     }
 
     #[test]

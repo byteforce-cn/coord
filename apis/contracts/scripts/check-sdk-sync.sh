@@ -22,6 +22,11 @@
 #        由 CoordClient 的 healthCheck() 使用）；
 #   3) 反向：`sdk.internal.proto` 的使用面**只能**是 allowlist 里的文件 ——
 #      否则说明有新的文件漂到内部面而没被登记（登记本身就是"这是刻意的"的证据）。
+#   4) 反向覆盖：每个契约包必须有 SDK impl —— **PROPOSED 包除外**。
+#      PROPOSED 是 M0 冻结、GA 前不构成承诺面的包（如 `coord.mq.v2`，ADR-0016）；
+#      状态来源是 STATUS.md 本身，不是本脚本的又一张手写清单：包在 STATUS.md 里
+#      从 PROPOSED 翻成 COMMITTED 的那一刻，豁免自动消失、反向覆盖回到强制。
+#      （手工豁免清单会漂移；STATUS.md 是契约状态的单一事实源。）
 #
 # 与其他校验的分工
 # ----------------
@@ -146,8 +151,27 @@ echo "OK: ${used}/${#GA_IMPLS[@]} 个契约 impl 使用契约命名空间"
 #      层 1 `coord/<domain>/v1/*.proto` → 包 `coord.<domain>.v1`（契约层，必须有个 impl）
 #      层 2 无 `.v1` 后缀（STABLE 底座原语 + `coord.storage`）→ 仅 `coord.storage`
 #            要求 impl（底座原语由 SDK 内部原语面消费，不是独立客户端能力）
-echo "── 4) 反向覆盖：每个契约包都必须有 SDK impl ──"
+echo "── 4) 反向覆盖：每个契约包都必须有 SDK impl（PROPOSED 除外）──"
 CONTRACT_PROTO_DIR="$REPO_ROOT/apis/contracts/proto"
+STATUS_FILE="$REPO_ROOT/apis/contracts/STATUS.md"
+# PROPOSED 包：M0 冻结、GA 前不构成承诺面（见文件头）。解析失败即置红，
+# 不允许"读不到状态就当作全部豁免"。
+proposed_pkgs=()
+if [[ -f "$STATUS_FILE" ]]; then
+  mapfile -t proposed_pkgs < <(grep -oE '\| coord\.[a-z.0-9]+ \| PROPOSED \|' "$STATUS_FILE" \
+    | sed -E 's/\| (coord\.[a-z.0-9]+) \| PROPOSED \|.*/\1/') 
+else
+  echo "FAIL: STATUS.md 不存在：$STATUS_FILE（无法判定 PROPOSED 豁免）" >&2
+  fail=1
+fi
+is_proposed() {
+  local pkg="$1" p
+  for p in "${proposed_pkgs[@]}"; do
+    [[ "$p" == "$pkg" ]] && return 0
+  done
+  return 1
+}
+
 expected_pkgs=()
 while IFS= read -r f; do
   pkg="$(sed -n 's/^[[:space:]]*package[[:space:]]\+\([^;]*\);.*/\1/p' "$f" | head -1)"
@@ -166,6 +190,10 @@ while IFS= read -r f; do
 done < <(find "$CONTRACT_PROTO_DIR" -name '*.proto' | sort)
 
 for pkg in "${expected_pkgs[@]}"; do
+  if is_proposed "$pkg"; then
+    echo "SKIP(PROPOSED): $pkg —— GA 前不要求 SDK impl（STATUS.md 状态为 PROPOSED）"
+    continue
+  fi
   # 归一化：契约 proto 的包名是 `coord.<domain>...`，GA_IMPLS 里写的是
   # Java 命名空间后缀 `contracts.<domain>...`。两边都剥掉前缀后逐字比较，
   # 这样清单与契约目录的**唯一**约定就是 domain 段本身。

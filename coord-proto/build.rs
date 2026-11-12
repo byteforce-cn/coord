@@ -45,6 +45,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "src/proto/coord/watch/v2/watch.proto",
                 "src/proto/coord/lease/v2/lease.proto",
                 "src/proto/coord/storage/v2/storage.proto",
+                // ── MQ v2 契约面（package coord.mq.v2；ADR-0016，M0 冻结为 PROPOSED）──
+                // 与 KV-T v2 同一纪律：两侧副本同路径逐字相同，`check-wire-descriptor.sh`
+                // 按 package 做 strict 比对（删字段/改号即红）。
+                "src/proto/coord/mq/v2/mq.proto",
                 // ── 内部面：Handshake / Health / Replica（不建对外契约包）
                 "src/proto/agent_api.proto",
                 "src/proto/plugin.proto",

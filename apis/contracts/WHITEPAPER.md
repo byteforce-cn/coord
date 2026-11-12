@@ -261,6 +261,11 @@ MAJOR：破坏性变更（非必要不使用；须提前 ≥ 3 个月发布废�
        且新旧包双跑 ≥ 12 个月）
 ```
 
+- **PROPOSED 状态（绿场新包）**：wire 已冻结但实现/GA 未到，登记在 `STATUS.md`
+  的 PROPOSED 段——不是承诺面，不参与目标日期/SDK impl 强制；翻成 COMMITTED 时
+  补期限并恢复双向强制。PROPOSED 与 EXPERIMENTAL 的区别：前者形状已定、后者
+  形状未定。当前只有 `coord.mq.v2`（ADR-0016）。
+
 - 每次 MINOR 及以上发版，proto 产物推送至企业 Artifact 仓库，并更新《协议变更公示板》。
 - 客户端依赖规则：锁定到 MINOR（如 `contracts/v1.x`），自动吸收 PATCH。
 - 服务端兼容性承诺：服务端同时支持 **N 与 N-1** 两个 MINOR 版本生成的客户端。
@@ -313,6 +318,29 @@ v2 数据面（`coord.kv.v2` / `coord.txn.v2` / `coord.watch.v2` / `coord.lease.
 
 v1 的「Txn 条件不满足 = 非错误」**不适用于 v2 OCC**：v2 没有 `Compare`，
 冲突必须让调用方换时间戳重跑，因此是错误（见 `coord/txn/v2/txn.proto` 头注）。
+
+### 6.1.2 MQ v2（ADR-0016）新增结构化码
+
+`coord.mq.v2` 在 M0 冻结、当前状态为 **PROPOSED**（见 STATUS.md；GA 前不构成
+承诺面）。码值仍按跨语言逐字一致维护（Rust `CoordErrorCode` ↔ Java `ErrorCode`），
+因为一旦 M7 翻转 COMMITTED，码表就是承诺；提前落地避免那时再改 wire。
+
+| 码 | gRPC Status | 语义 | 客户端动作 |
+|:---|:---|:---|:---|
+| `TOPIC_NOT_FOUND` | `NOT_FOUND` | topic 不存在/已删除（旧 `topic_id` 立即生效） | 不可重试（重建后旧代际仍不行） |
+| `TOPIC_EXISTS` | `ALREADY_EXISTS` | 同名 topic 已存在且配置不同 | 改用已存在 topic 或先删除 |
+| `TOPIC_EPOCH_STALE` | `ABORTED` | `topic_epoch`/`expected_topic_epoch` 与当前代际不一致 | 刷新元数据后重试 |
+| `PARTITION_NOT_FOUND` | `NOT_FOUND` | partition 越界/不存在 | 不可重试 |
+| `OFFSET_OUT_OF_RANGE` | `OUT_OF_RANGE` | `start_offset` 低于最早可用（保留已删前缀）；trailer 带 earliest/latest | 按 reset 策略（earliest/latest/fail），不静默 clamp |
+| `GROUP_NOT_FOUND` | `NOT_FOUND` | 组不存在（未 Join 或位点已过 TTL） | 重新 `JoinGroup` |
+| `NOT_GROUP_MEMBER` | `FAILED_PRECONDITION` | 不是组成员，或分区未分配给该成员 | 重新 `JoinGroup` |
+| `GROUP_EPOCH_STALE` | `ABORTED` | `generation` 过期 | 重新 `JoinGroup` |
+| `REBALANCE_IN_PROGRESS` | `ABORTED` | 组正在再平衡 | 退避后重新 `JoinGroup` |
+| `MESSAGE_TOO_LARGE` | `INVALID_ARGUMENT` | 单条超过 `max_message_bytes`（整批不追加） | 缩小消息，不可重试 |
+| `QUOTA_EXCEEDED` | `RESOURCE_EXHAUSTED` | 超过 topic 容量配额（整批不追加） | 等回收/扩容，不可重试 |
+
+`NOT_LEADER`（`UNAVAILABLE` + `coord-leader-hint`）是 MQ v2 的路由信号（ADR-0016
+D4），复用既有码而非新增。
 
 ### 6.2 客户端重试纪律（承诺的语义基础）
 

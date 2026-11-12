@@ -203,8 +203,9 @@ Raft 集群仍是 v1；显式 `false` 时 v2 服务注册（reflection 可见）
   仍继续推送。`coord.storage.v2` 保持整对象缓冲（≤256MiB）并校验声明的
   `total_size`（不符不发上游），`read_ts`/`commit_ts` 原样透传。未迁移的 Agent
   内部数据面调用在 v2 集群上按 v1 冻结口径 fail-closed，不静默降级。
-- **不承诺**：v1 数据迁移 / v1 facade；MQ v1 在 v2 集群不可用；MQ v2 未 GA；
-  严格外部实时序（`boundaries.md` B-KVT-1..8）。
+- **不承诺**：v1 数据迁移 / v1 facade；MQ v1 在 v2 集群不可用；MQ v2 为
+  **PROPOSED**（契约 `coord.mq.v2` 已在 M0 冻结，实现按 M0–M7 推进，GA 前不构成
+  承诺面，见 `ops/mq-v2-gate.md`）；严格外部实时序（`boundaries.md` B-KVT-1..8）。
 
 ## 2. Registry / Config（场景 ①）
 
@@ -326,6 +327,26 @@ Raft 集群仍是 v1；显式 `false` 时 v2 服务注册（reflection 可见）
   committed，下限 0）、`coord_agent_mq_consumer_offset`、
   `coord_agent_mq_next_offset`；告警 `CoordMqConsumerLag`（处置见 runbook §6）。
 - 滞后持续增长 = 生产快于消费（扩消费者）；停滞且 > 0 = 消费者停摆。
+
+### 5.6 MQ v2（`coord.mq.v2`，PROPOSED）
+
+MQ v2 是 G7 的 greenfield 面（ADR-0016）：服务端分区日志 + 服务端消费组，
+**只服务 v2 集群**；v1 MQ 在 v2 集群仍 fail-closed，也没有 v1→v2 迁移。
+契约在 M0 冻结，当前状态 **PROPOSED**（`STATUS.md`）；实现完成并签字前不要当
+稳定面消费（gate 证据见 `ops/mq-v2-gate.md`）。
+
+- **服务面**：`[mq_v2].enabled=false`（默认）时服务注册但每个 RPC 返回
+  `FAILED_PRECONDITION`；`enabled=true` 要求 `[kv_t].enabled=true`，否则启动失败
+  并点名配置项。
+- **至少一次**：只有 `Poll` + `Ack`（`Ack.offset` = 已处理完的最后一条，服务端把
+  committed 推进到 `offset+1`）；`Subscribe` 仍是 best-effort，背压丢弃、不推进位点。
+- **路由**：分区属于日志分片（Region），写/读必须到分片 Leader；组操作到消费组
+  分片 Leader。非 Leader 返 `NOT_LEADER`（`UNAVAILABLE`）+ `coord-leader-hint`。
+- **代际**：`Ack`/`AckBatch` 必带 `member_id` + `generation`；成员变化/会话过期
+  推进代际，旧代际返 `GROUP_EPOCH_STALE`（重新 `JoinGroup`）。
+- **epoch**：数据面请求带 `topic_epoch`（`0` = 不校验，SDK 必须带）；删除后同名
+  重建得到新 `topic_id`，旧代际读写一律 `TOPIC_NOT_FOUND`。
+- **错误码**：11 个 MQ v2 码见 WHITEPAPER §6.1.2；按码分支，禁止解析文案。
 
 ## 6. Cache（缓存）
 

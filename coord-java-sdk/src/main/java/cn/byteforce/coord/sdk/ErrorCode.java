@@ -67,6 +67,30 @@ public enum ErrorCode {
     /** read_ts 等待 safe_ts 超时。gRPC UNAVAILABLE；退避重试。 */
     SAFE_TS_LAG("SAFE_TS_LAG"),
 
+    // ──── MQ v2（ADR-0016）────
+    /** topic 不存在/已删除。gRPC NOT_FOUND；不可重试（重建后旧代际仍不行）。 */
+    TOPIC_NOT_FOUND("TOPIC_NOT_FOUND"),
+    /** 同名 topic 已存在且配置不同。gRPC ALREADY_EXISTS；不可重试。 */
+    TOPIC_EXISTS("TOPIC_EXISTS"),
+    /** topic_epoch 与当前代际不一致。gRPC ABORTED；刷新元数据后重试。 */
+    TOPIC_EPOCH_STALE("TOPIC_EPOCH_STALE"),
+    /** partition 越界/不存在。gRPC NOT_FOUND；不可重试。 */
+    PARTITION_NOT_FOUND("PARTITION_NOT_FOUND"),
+    /** start_offset 低于最早可用 offset。gRPC OUT_OF_RANGE；按 reset 策略处理。 */
+    OFFSET_OUT_OF_RANGE("OFFSET_OUT_OF_RANGE"),
+    /** 消费组不存在。gRPC NOT_FOUND；重新 JoinGroup。 */
+    GROUP_NOT_FOUND("GROUP_NOT_FOUND"),
+    /** 不是组成员或分区未分配给该成员。gRPC FAILED_PRECONDITION；重新 JoinGroup。 */
+    NOT_GROUP_MEMBER("NOT_GROUP_MEMBER"),
+    /** generation 过期。gRPC ABORTED；重新 JoinGroup。 */
+    GROUP_EPOCH_STALE("GROUP_EPOCH_STALE"),
+    /** 组正在再平衡。gRPC ABORTED；退避后重新 JoinGroup。 */
+    REBALANCE_IN_PROGRESS("REBALANCE_IN_PROGRESS"),
+    /** 单条消息超过 max_message_bytes。gRPC INVALID_ARGUMENT；整批不追加。 */
+    MESSAGE_TOO_LARGE("MESSAGE_TOO_LARGE"),
+    /** 超过 topic 容量配额。gRPC RESOURCE_EXHAUSTED；整批不追加。 */
+    QUOTA_EXCEEDED("QUOTA_EXCEEDED"),
+
     // ──── Client-local codes (never emitted by the server) ────
     PROTOCOL_MISMATCH("PROTOCOL_MISMATCH"),
     AGENT_UNAVAILABLE("AGENT_UNAVAILABLE"),

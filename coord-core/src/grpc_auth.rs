@@ -210,6 +210,31 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.mq.v1.MQ/MoveToDlq" => Some("coord:mq:dlq"),
         "/coord.mq.v1.MQ/DeleteTopic" => Some("coord:mq:manage"),
 
+        // MQ v2（ADR-0016；PROPOSED）——能力名与 v1 同义复用（同一份消息权限）。
+        // 能力门禁在服务壳之前判定：先 PERMISSION_DENIED（无能力）再
+        // FAILED_PRECONDITION（有能力但未启用），不泄露内部开关状态。
+        "/coord.mq.v2.MQ/CreateTopic" => Some("coord:mq:manage"),
+        "/coord.mq.v2.MQ/DescribeTopic" => Some("coord:mq:manage"),
+        "/coord.mq.v2.MQ/ListTopics" => Some("coord:mq:manage"),
+        "/coord.mq.v2.MQ/UpdateTopic" => Some("coord:mq:manage"),
+        "/coord.mq.v2.MQ/DeleteTopic" => Some("coord:mq:manage"),
+        "/coord.mq.v2.MQ/GetTopicDeletion" => Some("coord:mq:manage"),
+        "/coord.mq.v2.MQ/Publish" => Some("coord:mq:publish"),
+        "/coord.mq.v2.MQ/PublishBatch" => Some("coord:mq:publish"),
+        "/coord.mq.v2.MQ/Poll" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/Ack" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/AckBatch" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/JoinGroup" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/Heartbeat" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/LeaveGroup" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/GetCommittedOffsets" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/DescribeGroup" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/ListGroups" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/GetTopicLeader" => Some("coord:mq:consume"),
+        "/coord.mq.v2.MQ/Subscribe" => Some("coord:mq:subscribe"),
+        "/coord.mq.v2.MQ/MoveToDlq" => Some("coord:mq:dlq"),
+        "/coord.mq.v2.MQ/PollDlq" => Some("coord:mq:dlq"),
+
         // Replica —— 副本（内部面，但经 agent 暴露）
         "/coord.agent.Replica/Apply" => Some("coord:replica:write"),
         "/coord.agent.Replica/IsrHeartbeat" => Some("coord:replica:write"),
@@ -369,6 +394,7 @@ pub fn is_streaming_rpc(rpc_method: &str) -> bool {
             | "/coord.election.v1.LeaderElection/Watch"
             | "/coord.event.v1.Event/Subscribe"
             | "/coord.mq.v1.MQ/Subscribe"
+            | "/coord.mq.v2.MQ/Subscribe"
             | "/coord.storage.Storage/Put"
             | "/coord.storage.Storage/Get"
             | "/coord.maintenance.Maintenance/Snapshot"
@@ -841,6 +867,46 @@ mod tests {
             "/coord.mq.v1.MQ/GetTopicLeader",
         ] {
             assert_eq!(rpc_capability(rpc), Some("coord:mq:consume"), "{rpc}");
+        }
+    }
+
+    /// MQ v2（ADR-0016）的能力面：19 个 RPC 全部登记，且分权口径与 v1 一致
+    /// （毒消息处置不附带 topic 管理权）。
+    #[test]
+    fn mq_v2_rpcs_are_mapped_with_the_same_capability_split_as_v1() {
+        for rpc in [
+            "/coord.mq.v2.MQ/CreateTopic",
+            "/coord.mq.v2.MQ/DescribeTopic",
+            "/coord.mq.v2.MQ/ListTopics",
+            "/coord.mq.v2.MQ/UpdateTopic",
+            "/coord.mq.v2.MQ/DeleteTopic",
+            "/coord.mq.v2.MQ/GetTopicDeletion",
+        ] {
+            assert_eq!(rpc_capability(rpc), Some("coord:mq:manage"), "{rpc}");
+        }
+        for rpc in ["/coord.mq.v2.MQ/Publish", "/coord.mq.v2.MQ/PublishBatch"] {
+            assert_eq!(rpc_capability(rpc), Some("coord:mq:publish"), "{rpc}");
+        }
+        for rpc in [
+            "/coord.mq.v2.MQ/Poll",
+            "/coord.mq.v2.MQ/Ack",
+            "/coord.mq.v2.MQ/AckBatch",
+            "/coord.mq.v2.MQ/JoinGroup",
+            "/coord.mq.v2.MQ/Heartbeat",
+            "/coord.mq.v2.MQ/LeaveGroup",
+            "/coord.mq.v2.MQ/GetCommittedOffsets",
+            "/coord.mq.v2.MQ/DescribeGroup",
+            "/coord.mq.v2.MQ/ListGroups",
+            "/coord.mq.v2.MQ/GetTopicLeader",
+        ] {
+            assert_eq!(rpc_capability(rpc), Some("coord:mq:consume"), "{rpc}");
+        }
+        assert_eq!(
+            rpc_capability("/coord.mq.v2.MQ/Subscribe"),
+            Some("coord:mq:subscribe")
+        );
+        for rpc in ["/coord.mq.v2.MQ/MoveToDlq", "/coord.mq.v2.MQ/PollDlq"] {
+            assert_eq!(rpc_capability(rpc), Some("coord:mq:dlq"), "{rpc}");
         }
     }
 

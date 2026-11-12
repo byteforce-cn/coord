@@ -1,0 +1,697 @@
+syntax = "proto3";
+
+// ============================================================
+// coord.mq.v2 —— MQ v2：服务端分区日志、消费组与工作流触发
+//
+// 状态：PROPOSED（M0 冻结；M7 GA 前不构成承诺面）
+// 语义单一归属：docs/adr/0016-mq-v2.md（ADR-0016）；
+// 工作项与验收：docs/superpowers/specs/2026-10-29-mq-v2-design.md。
+//
+// 定位
+// ------------------------------------------------------------
+//   - greenfield v2 契约：只服务 v2 集群。不双跑 v1、不做 v1→v2 数据迁移
+//     （ADR-0015 D13 / ADR-0016 D1）；v1 `coord.mq.v1` 的 wire 与语义不变。
+//   - `[mq_v2].enabled=false`（默认）时本服务仍注册（reflection 可见），每个 RPC
+//     一律 `FAILED_PRECONDITION`；不切保留区间、不起分片/后台任务。
+//   - **不承诺**：Kafka wire 兼容、exactly-once、跨分区事务、全局顺序、
+//     消息压缩、分层存储、按 key 压缩（compacted）topic、自动分区再平衡/
+//     在线 split/merge。只承诺**分区内**有序 + 至少一次消费。
+//
+// 路由与 Leader
+// ------------------------------------------------------------
+//   - 分区属于某个日志分片（`[mq_v2].log_shards`）；分片是正式 Region，有 Raft
+//     Leader。分区数据面（Publish/PublishBatch/Poll/MoveToDlq/PollDlq/
+//     Subscribe）必须发到该分片 Leader；组操作（JoinGroup/Heartbeat/
+//     LeaveGroup/Ack/AckBatch/GetCommittedOffsets/DescribeGroup/ListGroups）
+//     必须发到该组的消费组分片 Leader（按组名哈希，`[mq_v2].group_shards`）。
+//   - 非 Leader 返回 `NOT_LEADER`（gRPC `UNAVAILABLE`）+ trailing metadata
+//     `coord-leader-hint: <addr>`；客户端刷新后改发 Leader，**不要**向非 Leader
+//     重放写操作。
+//   - `DescribeTopic`/`ListTopics`/`GetTopicLeader`/`GetTopicDeletion` 任意节点
+//     可答；`GetTopicLeader` 给出分区 → 分片/Leader 的快照。
+//
+// offset 与投递语义
+// ------------------------------------------------------------
+//   - offset 每分区 `int64`（承载 u64），从 0 开始、严格递增、**绝不复用**；
+//     由 Raft apply 分配，不使用时间戳/MVCC revision 排序。分区内顺序 = offset
+//     顺序；`timestamp_ms` 只作观测/审计，不是排序依据。
+//   - 已提交位点（committed offset）= **下一条待消费**的 offset。`Ack(offset)`
+//     表示"offset 这条已处理完"，服务端把 committed 推进到 `offset + 1`；
+//     committed 单调不减，重复或更旧的 Ack 是幂等成功（不回退）。
+//   - `Poll.start_offset` 未设置等价于 0；显式设置且低于最早可用 offset ⇒
+//     `OFFSET_OUT_OF_RANGE`（trailer 带 earliest/latest，**不静默 clamp**）；
+//     高于最新 ⇒ 空批（设置了 `wait_ms` 时等待到超时）。
+//   - `Poll` + `Ack` 是唯一的至少一次路径；`Subscribe` 是 best-effort 推送
+//     （背压丢弃、不重投、不推进位点），**不是** at-least-once 通道。
+//   - 重复投递是正常形态：消费者必须按 `(topic, partition, offset)` 幂等。
+//   - 生产幂等：`idempotency_key` 非空时按 `(topic_id, partition, key)` 去重，
+//     重复请求返回**首次** offset 且 `deduplicated=true`；空键不去重。去重窗口
+//     = topic 保留期（至少 1h），窗口外同键可重新使用。
+//
+// topic_epoch 与删除/重建
+// ------------------------------------------------------------
+//   - 数据面请求可带 `topic_epoch`；SDK 必须带。`0` = 不校验（兼容简单脚本）；
+//     与当前 epoch 不匹配 ⇒ `TOPIC_EPOCH_STALE`，防止删后重建时旧客户端写进新
+//     topic。管理面用 `expected_topic_epoch`（0 = 不校验）。
+//   - `DeleteTopic` 只标记删除并返回 `delete_id`：之后旧 `topic_id` 的读写一律
+//     `TOPIC_NOT_FOUND`（立即，不等回收）。同名可立即重建，得到新 `topic_id`；
+//     旧数据按旧 topic_id 隔离回收，**不会复活**。回收进度用
+//     `GetTopicDeletion` 查询。
+//
+// 上限与记账
+// ------------------------------------------------------------
+//   - 记账口径 = 日志段物理字节 + DLQ 字节 + 幂等索引；DLQ 在主段保留期内
+//     双份计费（tombstone 不缩短原段保留）。
+//   - 配额/大小在 append apply 内严格检查：`PublishBatch` 以**单个分区请求**
+//     为原子单位，任一条超限 ⇒ 整批不追加（`QUOTA_EXCEEDED` /
+//     `MESSAGE_TOO_LARGE` / `RESOURCE_EXHAUSTED`），不产生部分提交。
+//   - 保留按**整段**回收（`TopicConfig.retention_secs`，默认 7d，1h–30d），
+//     至少保留最新段；`earliest_offset` 随段前进。
+//   - 上限（`[mq_v2]`）：`max_message_bytes` 默认 1MiB（上限 8MiB）；
+//     `segment_bytes` 默认 64MiB；`poll_max_messages` 默认 1000；
+//     `poll_max_bytes` 默认 4MiB；`long_poll_max_ms` 默认 30000；
+//     `group_session_timeout_ms` 默认 30000；`max_topic_bytes` 默认 1GiB；
+//     `max_partitions_per_shard` 默认 1024。单次 `PublishBatch` ≤ 64 条
+//     （超出 `INVALID_ARGUMENT`）。
+//
+// 错误码（trailer `x-coord-error-code`；只按码分支，禁止解析消息文本）
+// ------------------------------------------------------------
+//   - `NOT_LEADER`（`UNAVAILABLE`）：不是目标分片 Leader；带
+//     `coord-leader-hint`。
+//   - `TOPIC_NOT_FOUND`（`NOT_FOUND`）：topic 不存在、已删除，或请求带的
+//     `topic_epoch` 属于已删除代际。
+//   - `TOPIC_EXISTS`（`ALREADY_EXISTS`）：同名 topic 已存在且配置不同；
+//     `CreateTopic` 同 `request_id` 重放不算（返回首次结果）。
+//   - `TOPIC_EPOCH_STALE`（`ABORTED`）：`topic_epoch`/`expected_topic_epoch`
+//     与当前代际不一致；刷新元数据后重试。
+//   - `PARTITION_NOT_FOUND`（`NOT_FOUND`）：partition 越界/不存在。
+//   - `OFFSET_OUT_OF_RANGE`（`OUT_OF_RANGE`）：`start_offset` 低于最早可用
+//     offset（保留已删除）；trailer 带 earliest/latest，**不静默 clamp**。
+//   - `GROUP_NOT_FOUND`（`NOT_FOUND`）：组不存在（未 Join 过或已回收）。
+//   - `NOT_GROUP_MEMBER`（`FAILED_PRECONDITION`）：`member_id` 不在该组，
+//     或该分区未分配给该成员。
+//   - `GROUP_EPOCH_STALE`（`ABORTED`）：`generation` 过期（成员变化/会话过期
+//     已推进代际）；重新 `JoinGroup` 后重试。
+//   - `REBALANCE_IN_PROGRESS`（`ABORTED`）：组正在再平衡；退避后重新
+//     `JoinGroup`。
+//   - `MESSAGE_TOO_LARGE`（`INVALID_ARGUMENT`）：单条消息超过
+//     `max_message_bytes`；整批不追加。
+//   - `QUOTA_EXCEEDED`（`RESOURCE_EXHAUSTED`）：超过 `TopicConfig.max_bytes`；
+//     整批不追加，不静默丢历史。
+//
+// 能力（缺能力 `PERMISSION_DENIED`；有权限但未启用 `FAILED_PRECONDITION`）
+// ------------------------------------------------------------
+//   - `coord:mq:manage`：CreateTopic/UpdateTopic/DeleteTopic/GetTopicDeletion/
+//     DescribeTopic/ListTopics。
+//   - `coord:mq:publish`：Publish/PublishBatch。
+//   - `coord:mq:consume`：Poll/Ack/AckBatch/JoinGroup/Heartbeat/LeaveGroup/
+//     GetCommittedOffsets/DescribeGroup/ListGroups/GetTopicLeader。
+//   - `coord:mq:subscribe`：Subscribe。
+//   - `coord:mq:dlq`：MoveToDlq/PollDlq。
+// ============================================================
+
+package coord.mq.v2;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.mq.v2";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/mq/v2;mqv2";
+
+service MQ {
+  // 建 topic（管理路径）。
+  //
+  // `request_id` 非空时幂等：同请求重放返回首次的 `topic_id`/`topic_epoch`，
+  // 不重复建。同名 topic 已存在且配置不同 ⇒ `TOPIC_EXISTS`。
+  // 分区按"最少分区数"分到各日志分片（`[mq_v2].max_partitions_per_shard`
+  // 封顶）；建后分区数不可变（v2.0 不做在线 split/merge）。
+  rpc CreateTopic(CreateTopicRequest) returns (CreateTopicResponse);
+
+  // 查 topic 元数据与分区路由（任意节点可答）。
+  rpc DescribeTopic(DescribeTopicRequest) returns (DescribeTopicResponse);
+
+  // 列 topic（前缀 + 分页；任意节点可答）。
+  rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse);
+
+  // 更新 topic 的保留/配额/消息上限（管理路径）。
+  //
+  // `expected_topic_epoch` 非 0 时做 CAS：不匹配 ⇒ `TOPIC_EPOCH_STALE`。
+  // 分区数不可变；`max_partitions` 只限制后续创建时的分区数上限。
+  rpc UpdateTopic(UpdateTopicRequest) returns (UpdateTopicResponse);
+
+  // 删除 topic（管理路径）：标记删除 + 异步回收。
+  //
+  // 返回后旧 `topic_id` 的读写立即 `TOPIC_NOT_FOUND`；回收进度用
+  // `GetTopicDeletion` 查。同名可立即重建（新 `topic_id`）。
+  rpc DeleteTopic(DeleteTopicRequest) returns (DeleteTopicResponse);
+
+  // 查删除回收进度（任意节点可答）。
+  rpc GetTopicDeletion(GetTopicDeletionRequest) returns (GetTopicDeletionResponse);
+
+  // 发布单条消息。
+  //
+  // 响应即已提交：Raft 多数派提交并 apply 后才返回 offset（不是写本地缓存）。
+  // `idempotency_key` 非空时按 `(topic_id, partition, key)` 去重，重复请求
+  // 返回首次 offset 且 `deduplicated=true`。
+  rpc Publish(PublishRequest) returns (PublishResponse);
+
+  // 发布一批消息（单分区）。
+  //
+  // 原子性以**本次请求**为单位：任一条超限/超配额 ⇒ 整批不追加；同批内重复
+  // `idempotency_key` 按首次处理。不同请求之间互不影响。
+  rpc PublishBatch(PublishBatchRequest) returns (PublishBatchResponse);
+
+  // 按 offset 拉取（日志分片 Leader 只读，不发 Raft 提案）。
+  //
+  // 长轮询：`wait_ms` 内无新消息则到点返回空批；`wait_ms` 上限
+  // `[mq_v2].long_poll_max_ms`（默认 30s），超出 `INVALID_ARGUMENT`。
+  // 只返回**已提交**消息；`start_offset` 低于最早可用 ⇒
+  // `OFFSET_OUT_OF_RANGE`（trailer 带 earliest/latest）。
+  rpc Poll(PollRequest) returns (PollResponse);
+
+  // 提交单条位点（消费组分片 Leader）。
+  //
+  // 校验必须带 `member_id` + `generation`；代际过期 ⇒ `GROUP_EPOCH_STALE`，
+  // 非本成员/未分配该分区 ⇒ `NOT_GROUP_MEMBER`。committed 推进到
+  // `offset + 1`，单调不回退（重复/更旧的 Ack 幂等成功）。
+  rpc Ack(AckRequest) returns (AckResponse);
+
+  // 批量提交位点（同一 `group`/`member_id`/`generation`）。
+  //
+  // 校验失败整批拒绝（不部分提交）；成功时逐条返回新的 committed。
+  rpc AckBatch(AckBatchRequest) returns (AckBatchResponse);
+
+  // 加入消费组（组不存在则创建）。
+  //
+  // 成员变化/会话过期推进 `generation`；返回该成员的分区分配（range 策略）
+  // 与已提交位点。v2.0 没有客户端 assignor / SyncGroup。
+  rpc JoinGroup(JoinGroupRequest) returns (JoinGroupResponse);
+
+  // 会话续期。返回当前 `generation`；`rebalance_required=true` 时调用方必须
+  // 重新 `JoinGroup`。代际已过期 ⇒ `GROUP_EPOCH_STALE`。
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // 主动离组（触发再平衡）。
+  rpc LeaveGroup(LeaveGroupRequest) returns (LeaveGroupResponse);
+
+  // 查位点（未提交的分区 `committed=false`、`offset=0`）。
+  rpc GetCommittedOffsets(GetCommittedOffsetsRequest) returns (GetCommittedOffsetsResponse);
+
+  // 查组状态/成员/分配/lag（组 Leader 可答）。
+  rpc DescribeGroup(DescribeGroupRequest) returns (DescribeGroupResponse);
+
+  // 列组（前缀 + 分页）。
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+
+  // best-effort 推送订阅。
+  //
+  // 边界（显式声明）：订阅者 channel 打满时消息**丢弃**，不报错、不重投、
+  // 不推进已提交位点。需要至少一次必须用 `Poll` + `Ack`。
+  rpc Subscribe(SubscribeRequest) returns (stream Message);
+
+  // 显式移入死信（管理路径，不要求 `coord:mq:manage`）。
+  //
+  // 把 `(topic, partition, offset)` 复制到该分区 DLQ，并在主日志该 offset 写
+  // tombstone（`Poll` 跳过）。重复调用幂等：返回首次的 `dlq_offset` 且
+  // `already_moved=true`。
+  rpc MoveToDlq(MoveToDlqRequest) returns (MoveToDlqResponse);
+
+  // 读死信队列（独立 offset 与保留期；消息带原 topic/partition/offset 与
+  // reason/detail）。
+  rpc PollDlq(PollDlqRequest) returns (PollDlqResponse);
+
+  // 查分区 → 分片/Leader 快照（任意节点可答）。
+  rpc GetTopicLeader(GetTopicLeaderRequest) returns (GetTopicLeaderResponse);
+}
+
+// ============================================================
+// Topic 生命周期
+// ============================================================
+
+// topic 级配置。字段为 0/空 = 用服务端默认（`[mq_v2]`）。
+message TopicConfig {
+  // 保留期（秒）；合法区间 3600–2592000（1h–30d）。按整段回收，至少保留
+  // 最新段。
+  int64 retention_secs = 1;
+
+  // 容量配额（字节，记账含段 + DLQ + 幂等索引）；0 = 不限。
+  uint64 max_bytes = 2;
+
+  // 单条消息上限（字节）；0 = 用 `[mq_v2].max_message_bytes`，
+  // 上限 8MiB。
+  uint32 max_message_bytes = 3;
+
+  // 段封口大小（字节）；0 = 用 `[mq_v2].segment_bytes`。
+  uint64 segment_bytes = 4;
+
+  // DLQ 保留期（秒）；0 = 跟随 `retention_secs`。
+  int64 dlq_retention_secs = 5;
+}
+
+message CreateTopicRequest {
+  // topic 名；非空、`[A-Za-z0-9._-]`、≤ 255 字节。
+  string topic = 1;
+
+  // 分区数；1–`[mq_v2].max_partitions_per_shard * log_shards`，且每个分片不超过
+  // `max_partitions_per_shard`。建后不可变。
+  int32 partitions = 2;
+
+  // 幂等键：非空时同请求重放返回首次的 topic_id/topic_epoch。
+  string request_id = 3;
+
+  TopicConfig config = 4;
+}
+
+message CreateTopicResponse {
+  string topic = 1;
+  // topic 身份（不复用）；删除后重建得到新值。
+  uint64 topic_id = 2;
+  // 代际：删除/重建推进；数据面请求携带，用于拒绝旧客户端。
+  uint64 topic_epoch = 3;
+  int32 partition_count = 4;
+  TopicConfig config = 5;
+}
+
+message DescribeTopicRequest {
+  string topic = 1;
+}
+
+message DescribeTopicResponse {
+  string topic = 1;
+  uint64 topic_id = 2;
+  uint64 topic_epoch = 3;
+  int32 partition_count = 4;
+  TopicConfig config = 5;
+  int64 created_at_ms = 6;
+  repeated PartitionInfo partitions = 7;
+}
+
+message PartitionInfo {
+  int32 partition = 1;
+  // 所属日志分片（Region id）。
+  uint32 shard_id = 2;
+  // 分片 Leader 地址（host:port）；空 = 调用方自行 `GetTopicLeader` 刷新。
+  string leader_addr = 3;
+  // 最早可用 offset（保留已删除的前缀）。
+  int64 earliest_offset = 4;
+  // 下一条将被分配的 offset（= 最新已提交 + 1）。
+  int64 next_offset = 5;
+  // 记账字节（段 + DLQ + 幂等索引）。
+  uint64 log_bytes = 6;
+}
+
+message ListTopicsRequest {
+  string prefix = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListTopicsResponse {
+  repeated TopicSummary topics = 1;
+  string next_page_token = 2;
+}
+
+message TopicSummary {
+  string topic = 1;
+  uint64 topic_id = 2;
+  uint64 topic_epoch = 3;
+  int32 partition_count = 4;
+  TopicConfig config = 5;
+}
+
+message UpdateTopicRequest {
+  string topic = 1;
+  // 非 0 时做 CAS：与当前代际不一致 ⇒ `TOPIC_EPOCH_STALE`。
+  uint64 expected_topic_epoch = 2;
+  // 只更新设置的字段（0/空 = 保持当前值）。
+  TopicConfig config = 3;
+}
+
+message UpdateTopicResponse {
+  string topic = 1;
+  uint64 topic_epoch = 2;
+  TopicConfig config = 3;
+}
+
+message DeleteTopicRequest {
+  string topic = 1;
+  uint64 expected_topic_epoch = 2;
+}
+
+message DeleteTopicResponse {
+  // 回收任务 id；`GetTopicDeletion` 用它查进度。
+  string delete_id = 1;
+  // 被删除代际（此后旧 topic_id 的读写一律 `TOPIC_NOT_FOUND`）。
+  uint64 deleted_topic_epoch = 2;
+}
+
+message GetTopicDeletionRequest {
+  string delete_id = 1;
+}
+
+message GetTopicDeletionResponse {
+  string delete_id = 1;
+  string topic = 2;
+  uint64 topic_id = 3;
+  TopicDeletionState state = 4;
+  uint32 partitions_total = 5;
+  uint32 partitions_reclaimed = 6;
+  uint64 messages_removed = 7;
+  uint64 bytes_reclaimed = 8;
+}
+
+enum TopicDeletionState {
+  TOPIC_DELETION_STATE_UNSPECIFIED = 0;
+  // 已标记删除，回收进行中。
+  TOPIC_DELETION_STATE_PENDING = 1;
+  // 全部分区回收完成（含组位点清理）。
+  TOPIC_DELETION_STATE_DONE = 2;
+  // 回收失败（可重试；进度字段保留最后一次成功计数）。
+  TOPIC_DELETION_STATE_FAILED = 3;
+}
+
+// ============================================================
+// 发布
+// ============================================================
+
+message PublishRequest {
+  string topic = 1;
+  int32 partition = 2;
+  // 0 = 不校验；非 0 且与当前代际不一致 ⇒ `TOPIC_EPOCH_STALE`。
+  uint64 topic_epoch = 3;
+  bytes key = 4;
+  bytes payload = 5;
+  // 非空时按 `(topic_id, partition, key)` 去重，窗口 = topic 保留期。
+  string idempotency_key = 6;
+  // 透传的 header（只作记录/触发过滤，不参与排序）。
+  map<string, string> headers = 7;
+  // 生产标识（审计用，可为空）。
+  string producer = 8;
+}
+
+message PublishResponse {
+  int64 offset = 1;
+  // 服务端墙钟毫秒（观测/审计；不是排序依据）。
+  int64 timestamp_ms = 2;
+  // true = 命中幂等索引，返回首次 offset，未重复追加。
+  bool deduplicated = 3;
+}
+
+message PublishBatchRequest {
+  // 整批必须是同一 topic/partition。
+  string topic = 1;
+  int32 partition = 2;
+  uint64 topic_epoch = 3;
+  // 1–64 条；任一条失败整批不追加。
+  repeated BatchEntry entries = 4;
+}
+
+message BatchEntry {
+  bytes key = 1;
+  bytes payload = 2;
+  string idempotency_key = 3;
+  map<string, string> headers = 4;
+  string producer = 5;
+}
+
+message PublishBatchResponse {
+  // 与请求 `entries` 一一对应、同序。
+  repeated PublishResponse results = 1;
+}
+
+// ============================================================
+// 消费
+// ============================================================
+
+message PollRequest {
+  string topic = 1;
+  int32 partition = 2;
+  uint64 topic_epoch = 3;
+  // 未设置 = 0；显式且低于最早可用 ⇒ `OFFSET_OUT_OF_RANGE`（不 clamp）。
+  optional int64 start_offset = 4;
+  // 0 = `[mq_v2].poll_max_messages`。
+  int32 max_messages = 5;
+  // 0 = `[mq_v2].poll_max_bytes`；响应按消息整条截断，不切消息。
+  int32 max_bytes = 6;
+  // 长轮询等待上限；0 = 立即返回；上限 `[mq_v2].long_poll_max_ms`。
+  int32 wait_ms = 7;
+}
+
+message PollResponse {
+  repeated Message messages = 1;
+  // 下次拉取建议的 offset（= 最后一条 + 1；空批 = 请求的 start）。
+  int64 next_offset = 2;
+  int64 earliest_offset = 3;
+  // 下一条将被分配的 offset（= 最新已提交 + 1）。
+  int64 latest_offset = 4;
+}
+
+message Message {
+  string topic = 1;
+  int32 partition = 2;
+  // 主日志 offset。DLQ 消息这里是**原**主日志 offset（DLQ 自身的位点见
+  // `PollDlq` 响应的 `next_dlq_offset`）。
+  int64 offset = 3;
+  int64 timestamp_ms = 4;
+  bytes key = 5;
+  bytes payload = 6;
+  map<string, string> headers = 7;
+  string producer = 8;
+  // 仅 `PollDlq` 填充：移入原因（如 `poison` / `workflow_max_attempts`）。
+  string dlq_reason = 9;
+  string dlq_detail = 10;
+}
+
+message AckRequest {
+  string topic = 1;
+  int32 partition = 2;
+  uint64 topic_epoch = 3;
+  string group = 4;
+  string member_id = 5;
+  uint64 generation = 6;
+  // 已处理完的最后一条 offset（含）；committed 推进到 `offset + 1`。
+  int64 offset = 7;
+}
+
+message AckResponse {
+  // 推进后的 committed（= 下一条待消费）。
+  int64 committed_offset = 1;
+}
+
+message AckBatchRequest {
+  string group = 1;
+  string member_id = 2;
+  uint64 generation = 3;
+  // 1–256 条；同一组的分区可跨 topic。
+  repeated AckEntry acks = 4;
+}
+
+message AckEntry {
+  string topic = 1;
+  int32 partition = 2;
+  uint64 topic_epoch = 3;
+  int64 offset = 4;
+}
+
+message AckResult {
+  string topic = 1;
+  int32 partition = 2;
+  int64 committed_offset = 3;
+}
+
+message AckBatchResponse {
+  // 与请求 `acks` 一一对应、同序。
+  repeated AckResult results = 1;
+}
+
+message SubscribeRequest {
+  string topic = 1;
+  uint64 topic_epoch = 2;
+  // 组名（仅作观测/分配提示；推送语义仍是 best-effort，不参与代际 fencing）。
+  string group = 3;
+  // 空 = 全部分区。
+  repeated int32 partitions = 4;
+  // 0 = 分区最新（`latest`）；显式低于最早可用 ⇒ 流以 `OFFSET_OUT_OF_RANGE`
+  // 结束。
+  int64 start_offset = 5;
+}
+
+// ============================================================
+// 消费组
+// ============================================================
+
+message JoinGroupRequest {
+  string group = 1;
+  // 空 = 新成员；非空 = 重连（会话未过期则续约，不推进代际）。
+  string member_id = 2;
+  // 订阅的 topic 列表；必须已存在（fail-closed，不自动建）。
+  repeated string topics = 3;
+  // 0 = `[mq_v2].group_session_timeout_ms`。
+  int32 session_timeout_ms = 4;
+}
+
+message JoinGroupResponse {
+  string member_id = 1;
+  uint64 generation = 2;
+  repeated GroupAssignment assignments = 3;
+  int32 heartbeat_interval_ms = 4;
+  int32 session_timeout_ms = 5;
+}
+
+message GroupAssignment {
+  string topic = 1;
+  int32 partition = 2;
+  // 该分配上的已提交位点（= 下一条待消费）；无提交记录时为 0。
+  int64 committed_offset = 3;
+}
+
+message HeartbeatRequest {
+  string group = 1;
+  string member_id = 2;
+  uint64 generation = 3;
+}
+
+message HeartbeatResponse {
+  uint64 generation = 1;
+  // true = 成员变化/会话过期已推进代际，调用方必须重新 `JoinGroup`。
+  bool rebalance_required = 2;
+}
+
+message LeaveGroupRequest {
+  string group = 1;
+  string member_id = 2;
+  uint64 generation = 3;
+}
+
+message LeaveGroupResponse {}
+
+message GetCommittedOffsetsRequest {
+  string group = 1;
+  // 空 = 该组的全部分配。
+  repeated TopicPartition partitions = 2;
+}
+
+message TopicPartition {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+message CommittedOffset {
+  string topic = 1;
+  int32 partition = 2;
+  // 下一条待消费 offset；`committed=false` 时无意义（返回 0）。
+  int64 offset = 3;
+  bool committed = 4;
+}
+
+message GetCommittedOffsetsResponse {
+  repeated CommittedOffset offsets = 1;
+}
+
+message DescribeGroupRequest {
+  string group = 1;
+}
+
+message DescribeGroupResponse {
+  string group = 1;
+  uint64 generation = 2;
+  GroupState state = 3;
+  repeated GroupMember members = 4;
+  repeated GroupPartitionLag partitions = 5;
+}
+
+message GroupMember {
+  string member_id = 1;
+  repeated string topics = 2;
+  repeated GroupAssignment assignments = 3;
+  int64 last_heartbeat_ms = 4;
+}
+
+message GroupPartitionLag {
+  string topic = 1;
+  int32 partition = 2;
+  int64 committed_offset = 3;
+  int64 next_offset = 4;
+  // `max(next_offset - committed_offset, 0)`；未提交时 = next_offset。
+  int64 lag = 5;
+}
+
+enum GroupState {
+  GROUP_STATE_UNSPECIFIED = 0;
+  // 无成员（位点保留到 TTL）。
+  GROUP_STATE_EMPTY = 1;
+  GROUP_STATE_STABLE = 2;
+  // 成员变化后等待成员重新 Join。
+  GROUP_STATE_PREPARING_REBALANCE = 3;
+  // 会话全部过期且位点已过 TTL（组会被回收）。
+  GROUP_STATE_DEAD = 4;
+}
+
+message ListGroupsRequest {
+  string prefix = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListGroupsResponse {
+  repeated string groups = 1;
+  string next_page_token = 2;
+}
+
+// ============================================================
+// 死信
+// ============================================================
+
+message MoveToDlqRequest {
+  string topic = 1;
+  int32 partition = 2;
+  uint64 topic_epoch = 3;
+  int64 offset = 4;
+  // 可读原因（稳定锚点，如 `poison` / `workflow_max_attempts`）。
+  string reason = 5;
+  string detail = 6;
+}
+
+message MoveToDlqResponse {
+  // DLQ 内首次写入的位置。
+  int64 dlq_offset = 1;
+  // true = 该 offset 已在 DLQ（重复调用幂等）。
+  bool already_moved = 2;
+}
+
+message PollDlqRequest {
+  string topic = 1;
+  int32 partition = 2;
+  uint64 topic_epoch = 3;
+  // 未设置 = 0（DLQ 起点）。
+  optional int64 start_offset = 4;
+  // 0 = `[mq_v2].poll_max_messages`。
+  int32 max_messages = 5;
+}
+
+message PollDlqResponse {
+  repeated Message messages = 1;
+  int64 next_dlq_offset = 2;
+}
+
+// ============================================================
+// 路由
+// ============================================================
+
+message GetTopicLeaderRequest {
+  string topic = 1;
+}
+
+message GetTopicLeaderResponse {
+  string topic = 1;
+  uint64 topic_id = 2;
+  uint64 topic_epoch = 3;
+  repeated PartitionLeader partitions = 4;
+}
+
+message PartitionLeader {
+  int32 partition = 1;
+  uint32 shard_id = 2;
+  // 分片 Leader 地址（host:port）；空 = 无可用 Leader（选举中）。
+  string leader_addr = 3;
+  int64 earliest_offset = 4;
+  int64 next_offset = 5;
+}
