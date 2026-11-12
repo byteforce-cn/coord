@@ -148,6 +148,11 @@ pub mod mq {
     pub mod v1 {
         tonic::include_proto!("coord.mq.v1");
     }
+
+    /// MQ v2（ADR-0016）：服务端分区日志/消费组；M0 冻结，GA 前不构成承诺面。
+    pub mod v2 {
+        tonic::include_proto!("coord.mq.v2");
+    }
 }
 
 pub mod workflow {

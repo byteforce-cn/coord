@@ -1,9 +1,11 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-10-29（设计/拆分入库，M0 未启动）
+> Owner: maintainers ｜ Last verified: 2026-11-12（M0-2 契约冻结在途）
 >
-> **状态：未启动（NO-GO）**。M0 契约冻结尚未开始；M7 GA 不早于 KV-T GA
-> （`docs/adr/0015-kv-t.md` D8）。本文是 MQ v2 gate 状态的**单一事实源**；语义以
+> **状态：M0 进行中（GO）**。M0-1 ADR/设计/任务树已完成（#178 链接 8 个 phase
+> issue：M0 #332 / M1 #333 / M2 #334 / M3 #335 / M4 #336 / M5 #337 / M6 #338 /
+> M7 #339）；M0-2 契约冻结进行中。M7 GA 不早于 KV-T GA（`docs/adr/0015-kv-t.md` D8），
+> 该前置已于 2026-11-11 签字。本文是 MQ v2 gate 状态的**单一事实源**；语义以
 > `docs/adr/0016-mq-v2.md` 为准，工作项与依赖以
 > `docs/superpowers/specs/2026-10-29-mq-v2-design.md` 为准。
 >
@@ -13,7 +15,7 @@
 
 | Gate | 出口口径 | 状态 | 证据（可复跑） |
 |:--|:--|:--|:--|
-| M0 契约冻结 | ADR/契约/配置/服务壳；默认拒绝 | ⏳ 未开始 | 见 §2 |
+| M0 契约冻结 | ADR/契约/配置/服务壳；默认拒绝 | 🟡 进行中 | 见 §2 |
 | M1 日志/元数据/容量 | 分片/段日志/组状态机/topic 元数据/保留 | ⏳ 未开始 | — |
 | M2 Publish | 路由/批量/offset/幂等/配额 | ⏳ 未开始 | — |
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ⏳ 未开始 | — |
@@ -26,8 +28,8 @@
 
 | 项 | 状态 | 证据 / 未达标原因 |
 |:--|:--|:--|
-| M0-1 ADR/设计/任务树 | 🟡 本次 PR（合入后生效） | ADR-0016 accepted；本文件；设计文档；#178 链接 8 个 phase issue |
-| M0-2 `coord.mq.v2` 契约冻结 | ⏳ 未开始 | 需要 proto 两侧副本、descriptor/wire/error-code 校验 |
+| M0-1 ADR/设计/任务树 | ✅ | ADR-0016 accepted；设计文档 + 本文件入库；#178 评论链接 8 个 phase issue（#332–#339） |
+| M0-2 `coord.mq.v2` 契约冻结 | 🟡 本次 PR（合入后生效） | 两侧 proto 副本 + build 接线；`check-wire-sync.sh` / `check-wire-descriptor.sh`（strict）/ `buf lint` / `check-error-code-contract.sh` / `check-sdk-sync.sh`（PROPOSED 豁免）绿；11 个码 Rust↔Java 逐字一致 |
 | M0-3 `[mq_v2]` 配置/启动校验 | ⏳ 未开始 | 默认关闭；requires `[kv_t]`；区间/分片校验 |
 | M0-4 服务壳/能力/代理骨架 | ⏳ 未开始 | 关闭时 `FAILED_PRECONDITION`；v1 字节级不变 |
 

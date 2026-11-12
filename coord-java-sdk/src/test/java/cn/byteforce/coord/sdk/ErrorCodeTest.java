@@ -38,7 +38,19 @@ class ErrorCodeTest {
             "COMMIT_REJECTED",
             "EPOCH_STALE",
             "HISTORY_UNAVAILABLE",
-            "SAFE_TS_LAG");
+            "SAFE_TS_LAG",
+            // ── MQ v2（ADR-0016）──
+            "TOPIC_NOT_FOUND",
+            "TOPIC_EXISTS",
+            "TOPIC_EPOCH_STALE",
+            "PARTITION_NOT_FOUND",
+            "OFFSET_OUT_OF_RANGE",
+            "GROUP_NOT_FOUND",
+            "NOT_GROUP_MEMBER",
+            "GROUP_EPOCH_STALE",
+            "REBALANCE_IN_PROGRESS",
+            "MESSAGE_TOO_LARGE",
+            "QUOTA_EXCEEDED");
 
     @Test
     void shouldHaveAllRequiredErrorCodes() {
@@ -66,6 +78,18 @@ class ErrorCodeTest {
                 ErrorCode.EPOCH_STALE,
                 ErrorCode.HISTORY_UNAVAILABLE,
                 ErrorCode.SAFE_TS_LAG,
+                // ──── MQ v2（ADR-0016）────
+                ErrorCode.TOPIC_NOT_FOUND,
+                ErrorCode.TOPIC_EXISTS,
+                ErrorCode.TOPIC_EPOCH_STALE,
+                ErrorCode.PARTITION_NOT_FOUND,
+                ErrorCode.OFFSET_OUT_OF_RANGE,
+                ErrorCode.GROUP_NOT_FOUND,
+                ErrorCode.NOT_GROUP_MEMBER,
+                ErrorCode.GROUP_EPOCH_STALE,
+                ErrorCode.REBALANCE_IN_PROGRESS,
+                ErrorCode.MESSAGE_TOO_LARGE,
+                ErrorCode.QUOTA_EXCEEDED,
                 // ──── SDK 本地码 ────
                 ErrorCode.PROTOCOL_MISMATCH,
                 ErrorCode.AGENT_UNAVAILABLE,

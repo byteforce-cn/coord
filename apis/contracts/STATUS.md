@@ -5,7 +5,10 @@
 > **列结构是机器契约，勿改动**：`| 能力 | 契约包 | 状态 | 期限 | 实现落点/边界说明 |`
 >
 > 状态：`STABLE` 稳定承诺 ｜ `COMMITTED` 承诺中（期限 = 目标日期，到期未落地契约包即 CI 失败）｜
-> `EXPERIMENTAL` 实验期承诺（期限 = 转正评估，不得以稳定面消费）
+> `EXPERIMENTAL` 实验期承诺（期限 = 转正评估，不得以稳定面消费）｜
+> `PROPOSED` 已冻结待落地（wire 已冻结但**不构成承诺面**，期限列写 `-`；不要求 SDK impl，
+> 翻成 `COMMITTED` 后回到期限/SDK 双向强制）。PROPOSED 不是 EXPERIMENTAL：前者是
+> “对外形状定了、实现与 GA 未到”，后者是“形状未定、只做试验”。
 
 ## 能力承诺面（COMMITTED）
 
@@ -55,6 +58,18 @@
 | Watch v2 | coord.watch.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/watch/v2/`；G4（Commit Log/Coordinator/RPC）；按 `commit_ts` 全局有序、事务原子批、窗口不足 `HISTORY_UNAVAILABLE`；`Watch` 双向流（Create/Cancel/ack/cursor 续订）与 `coord-client` 的 `watch_v2()` 断线重连已落地，订阅指标见 consumer-contract |
 | Lease v2 | coord.lease.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/lease/v2/`；G2（region 0 租约表 + 跨区 revoke 最终一致清理）；`LeaseTimeToLive` 能力 `data:lease:read` |
 | Storage v2 | coord.storage.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/storage/v2/`；G5（manifest commit_ts + `/obj/` 固定区间）；`/obj/` 不参与任意 KV split；Put/Get/Stat/Delete 已在 v2 集群可用（`read_ts` 快照读 manifest，chunk 字节不版本化 ⇒ 历史 chunk 不可用时 `OUT_OF_RANGE`） |
+
+## MQ v2（PROPOSED；ADR-0016）
+
+MQ v2 是 G7 的 greenfield 面：只服务 v2 集群，不双跑 v1、不迁移 v1 数据（ADR-0015 D13 /
+ADR-0016 D1）。契约在 M0 冻结（wire 不再变），实现按
+`docs/superpowers/specs/2026-10-29-mq-v2-design.md` 的 M0–M7 推进；GA 前保持
+`PROPOSED`，M7-2 翻 `COMMITTED` 并补期限。gate 状态见
+`docs/production/ops/mq-v2-gate.md`。
+
+| 能力 | 契约包 | 状态 | 期限 | 实现落点/边界说明 |
+|:---|:---|:---:|:---|:---|
+| 消息队列 v2（服务端分区日志/消费组） | coord.mq.v2 | PROPOSED | - | 契约包：`proto/coord/mq/v2/`；M0 冻结（19 个 RPC + 11 个结构化错误码）；`[mq_v2].enabled=false` 时服务注册但一律 `FAILED_PRECONDITION`；分区内有序 + 至少一次（`Poll`+`Ack`），`Subscribe` 仅 best-effort；无 exactly-once / Kafka 兼容 / 自动分区再平衡 |
 
 ## 实验承诺区（EXPERIMENTAL）
 

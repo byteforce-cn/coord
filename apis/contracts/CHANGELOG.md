@@ -1,3 +1,30 @@
+## [contracts/v1.11.0] — 2026-11-12（Minor：MQ v2 契约冻结为 PROPOSED）
+
+**发布口径**：**Minor**（新增 1 个 `coord.mq.v2` 包 + 追加 11 个结构化错误码；
+未改动任何既有包/字段/枚举；`buf breaking` 基线仍为 `contracts/v1.6.1`，CI 强制）。
+
+**新增契约包（PROPOSED，不是承诺面）**
+
+- `coord.mq.v2`：service `MQ`，19 个 RPC（topic 生命周期、Publish/PublishBatch、
+  Poll/Ack/AckBatch、组协调、Subscribe、DLQ、`GetTopicLeader`/
+  `GetTopicDeletion`）；语义与边界见 proto 头注（ADR-0016 单一归属）。
+- `STATUS.md` 新增 `PROPOSED` 状态段：wire 已冻结、不构成承诺面、不要求 SDK impl；
+  翻 `COMMITTED` 时补期限并恢复双向强制（`check-sdk-sync.sh` 按 STATUS.md 判定）。
+- 契约/实现两侧副本同路径逐字相同，descriptor 仍按 `.v2` 做 strict 比对。
+
+**新增错误码（追加，不改既有值）**
+
+`TOPIC_NOT_FOUND` / `TOPIC_EXISTS` / `TOPIC_EPOCH_STALE` / `PARTITION_NOT_FOUND` /
+`OFFSET_OUT_OF_RANGE` / `GROUP_NOT_FOUND` / `NOT_GROUP_MEMBER` /
+`GROUP_EPOCH_STALE` / `REBALANCE_IN_PROGRESS` / `MESSAGE_TOO_LARGE` /
+`QUOTA_EXCEEDED`，状态与重试动作见 WHITEPAPER §6.1.2。
+
+**兼容性与默认行为**
+
+- v1 MQ（`coord.mq.v1`）与所有既有包 wire 不变；MQ v2 只服务 v2 集群，
+  无双跑、无迁移（ADR-0015 D13 / ADR-0016 D1）。
+- 默认 `[mq_v2].enabled=false`；GA 前不对外承诺能力（M7 翻 COMMITTED）。
+
 ## [contracts/v1.10.0] — 2026-11-11（Minor：KV-T GA 后默认启用口径）
 
 **发布口径**：**Minor**（不改动任何 proto 包/字段/枚举/错误码；
