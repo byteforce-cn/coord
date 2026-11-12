@@ -1,0 +1,190 @@
+//! `coord.mq.v2` 的 tonic 服务壳（ADR-0016 M0-4）。
+//!
+//! 每个 handler 先过 [`MqV2State::gate`]：关闭或能力未交付 → `FAILED_PRECONDITION`。
+//! 门禁通过但 handler 尚未实现 → `UNIMPLEMENTED`（实现进度问题，不是配置问题；
+//! 混成同一个码会让运维无法判断该改配置还是该升级版本）——与 KV-T v2 同一口径。
+//!
+//! 服务**始终注册**：关闭时 reflection 仍然可见，客户端在连接阶段就能发现"这个
+//! 集群没有 MQ v2"，而不是拿到 `UNAVAILABLE` 后误判为网络故障。
+
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status};
+
+use coord_core::error_code::{attach, CoordErrorCode};
+use coord_proto::mq::v2 as mq_v2;
+use coord_proto::mq::v2::mq_server::Mq;
+
+use super::MqV2Capability;
+use crate::server::CoordNode;
+
+/// 门禁通过但 handler 尚未接线时的响应（M0 壳阶段不会到达：能力集合为空）。
+fn unimplemented(capability: MqV2Capability) -> Status {
+    attach(
+        Status::unimplemented(format!(
+            "coord.mq.v2 {} handler is not wired yet (gate pending; see \
+             docs/production/ops/mq-v2-gate.md)",
+            capability.label()
+        )),
+        CoordErrorCode::Internal,
+    )
+}
+
+/// 先过门禁，再按"未实现"返回（M0 的每个 handler 都是这两步）。
+macro_rules! gated {
+    ($self:ident, $cap:expr) => {{
+        $self.mq_v2().gate($cap)?;
+        Err(unimplemented($cap))
+    }};
+}
+
+#[tonic::async_trait]
+impl Mq for CoordNode {
+    async fn create_topic(
+        &self,
+        _request: Request<mq_v2::CreateTopicRequest>,
+    ) -> Result<Response<mq_v2::CreateTopicResponse>, Status> {
+        gated!(self, MqV2Capability::Topic)
+    }
+
+    async fn describe_topic(
+        &self,
+        _request: Request<mq_v2::DescribeTopicRequest>,
+    ) -> Result<Response<mq_v2::DescribeTopicResponse>, Status> {
+        gated!(self, MqV2Capability::Topic)
+    }
+
+    async fn list_topics(
+        &self,
+        _request: Request<mq_v2::ListTopicsRequest>,
+    ) -> Result<Response<mq_v2::ListTopicsResponse>, Status> {
+        gated!(self, MqV2Capability::Topic)
+    }
+
+    async fn update_topic(
+        &self,
+        _request: Request<mq_v2::UpdateTopicRequest>,
+    ) -> Result<Response<mq_v2::UpdateTopicResponse>, Status> {
+        gated!(self, MqV2Capability::Topic)
+    }
+
+    async fn delete_topic(
+        &self,
+        _request: Request<mq_v2::DeleteTopicRequest>,
+    ) -> Result<Response<mq_v2::DeleteTopicResponse>, Status> {
+        gated!(self, MqV2Capability::Topic)
+    }
+
+    async fn get_topic_deletion(
+        &self,
+        _request: Request<mq_v2::GetTopicDeletionRequest>,
+    ) -> Result<Response<mq_v2::GetTopicDeletionResponse>, Status> {
+        gated!(self, MqV2Capability::Topic)
+    }
+
+    async fn publish(
+        &self,
+        _request: Request<mq_v2::PublishRequest>,
+    ) -> Result<Response<mq_v2::PublishResponse>, Status> {
+        gated!(self, MqV2Capability::Publish)
+    }
+
+    async fn publish_batch(
+        &self,
+        _request: Request<mq_v2::PublishBatchRequest>,
+    ) -> Result<Response<mq_v2::PublishBatchResponse>, Status> {
+        gated!(self, MqV2Capability::Publish)
+    }
+
+    async fn poll(
+        &self,
+        _request: Request<mq_v2::PollRequest>,
+    ) -> Result<Response<mq_v2::PollResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    async fn ack(
+        &self,
+        _request: Request<mq_v2::AckRequest>,
+    ) -> Result<Response<mq_v2::AckResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    async fn ack_batch(
+        &self,
+        _request: Request<mq_v2::AckBatchRequest>,
+    ) -> Result<Response<mq_v2::AckBatchResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    async fn join_group(
+        &self,
+        _request: Request<mq_v2::JoinGroupRequest>,
+    ) -> Result<Response<mq_v2::JoinGroupResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    async fn heartbeat(
+        &self,
+        _request: Request<mq_v2::HeartbeatRequest>,
+    ) -> Result<Response<mq_v2::HeartbeatResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    async fn leave_group(
+        &self,
+        _request: Request<mq_v2::LeaveGroupRequest>,
+    ) -> Result<Response<mq_v2::LeaveGroupResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    async fn get_committed_offsets(
+        &self,
+        _request: Request<mq_v2::GetCommittedOffsetsRequest>,
+    ) -> Result<Response<mq_v2::GetCommittedOffsetsResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    async fn describe_group(
+        &self,
+        _request: Request<mq_v2::DescribeGroupRequest>,
+    ) -> Result<Response<mq_v2::DescribeGroupResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    async fn list_groups(
+        &self,
+        _request: Request<mq_v2::ListGroupsRequest>,
+    ) -> Result<Response<mq_v2::ListGroupsResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+
+    type SubscribeStream = ReceiverStream<Result<mq_v2::Message, Status>>;
+
+    async fn subscribe(
+        &self,
+        _request: Request<mq_v2::SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        gated!(self, MqV2Capability::Subscribe)
+    }
+
+    async fn move_to_dlq(
+        &self,
+        _request: Request<mq_v2::MoveToDlqRequest>,
+    ) -> Result<Response<mq_v2::MoveToDlqResponse>, Status> {
+        gated!(self, MqV2Capability::Dlq)
+    }
+
+    async fn poll_dlq(
+        &self,
+        _request: Request<mq_v2::PollDlqRequest>,
+    ) -> Result<Response<mq_v2::PollDlqResponse>, Status> {
+        gated!(self, MqV2Capability::Dlq)
+    }
+
+    async fn get_topic_leader(
+        &self,
+        _request: Request<mq_v2::GetTopicLeaderRequest>,
+    ) -> Result<Response<mq_v2::GetTopicLeaderResponse>, Status> {
+        gated!(self, MqV2Capability::Consume)
+    }
+}

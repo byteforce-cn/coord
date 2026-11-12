@@ -284,6 +284,11 @@ pub struct CoordNode {
     pub chunk_store: Option<Arc<crate::storage::object_store::ChunkStore>>,
     /// KV-T 门禁状态（默认 disabled；`[kv_t].enabled=true` 时由 main 注入）。
     kvt: crate::kvt::KvTState,
+    /// MQ v2 门禁状态（默认 disabled；`[mq_v2].enabled=true` 时由 main 注入）。
+    ///
+    /// 关闭态不切保留区间、不起分片/后台任务；服务壳仍注册，全部 RPC
+    /// `FAILED_PRECONDITION`（ADR-0016 D11）。
+    mq_v2: crate::mq_v2::MqV2State,
     /// KV-T 本地 TSO 批次缓存（仅 enabled 且 region 0 raft 已装配时注入）。
     ///
     /// 保持 `Option` 而非延迟构造：关闭时不得有任何 v2 装配痕迹（ADR-0001）。
@@ -384,6 +389,7 @@ impl CoordNode {
             object_limits: None,
             chunk_store: None,
             kvt: crate::kvt::KvTState::disabled(),
+            mq_v2: crate::mq_v2::MqV2State::disabled(),
             tso_client: None,
             commit_sequencer: None,
             metrics: None,
@@ -611,6 +617,19 @@ impl CoordNode {
     /// 当前 KV-T 门禁状态（v2 服务壳使用）。
     pub fn kvt(&self) -> &crate::kvt::KvTState {
         &self.kvt
+    }
+
+    /// 注入 MQ v2 运行时状态（`[mq_v2]`）。
+    ///
+    /// 默认 disabled：不注入时服务仍注册，但每个 RPC 返回
+    /// `FAILED_PRECONDITION`（ADR-0016 M0-4）。必须在 `Arc::new(node)` 之前调用。
+    pub fn set_mq_v2_state(&mut self, state: crate::mq_v2::MqV2State) {
+        self.mq_v2 = state;
+    }
+
+    /// 当前 MQ v2 门禁状态（`coord.mq.v2` 服务壳使用）。
+    pub fn mq_v2(&self) -> &crate::mq_v2::MqV2State {
+        &self.mq_v2
     }
 
     /// 把本节点 region 0 已 apply 的权威 Region 表收敛到路由表（#159）。

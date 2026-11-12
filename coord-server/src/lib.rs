@@ -24,6 +24,7 @@ pub mod kvt;
 pub mod lease;
 pub mod metrics;
 pub mod migration;
+pub mod mq_v2;
 pub mod pd;
 pub mod raft;
 pub mod security;
