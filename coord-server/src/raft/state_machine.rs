@@ -820,6 +820,13 @@ impl StateMachineStore {
                 let outcome = sm.apply_mq_move_to_dlq(op, applied).map_err(io_err)?;
                 Ok((Response::MqMoveToDlq { outcome }, None))
             }
+            Command::MqTopic(op) => {
+                // topic 表是 region 0 控制面元数据：不写 changelog、不上 Watch。
+                let outcome = sm
+                    .apply_mq_topic_op(op, revision, applied)
+                    .map_err(io_err)?;
+                Ok((Response::MqTopic { outcome }, None))
+            }
             Command::RegionMeta(op) => {
                 // 表级拒绝随 outcome 返回（不失败 apply）；region 0 元数据记录，
                 // 不上 Watch、不推进业务 revision。
@@ -2687,5 +2694,49 @@ mod tests {
                 .index,
             3
         );
+    }
+
+    /// MQ v2 topic 命令走 region 0 状态机：outcome 落响应、表可读、不上 Watch。
+    #[test]
+    fn test_apply_mq_topic_command_creates_the_table_row() {
+        use crate::storage::mq_topic::{MqTopicConfig, MqTopicCreate, MqTopicOp, MqTopicOutcome};
+
+        let (_tmp, store) = setup_store();
+        let config = MqTopicConfig {
+            retention_secs: 604_800,
+            max_bytes: 1 << 20,
+            max_message_bytes: 1024,
+            segment_bytes: 1 << 20,
+            dlq_retention_secs: 604_800,
+        };
+        let command = Command::MqTopic(MqTopicOp::Create(MqTopicCreate {
+            name: "orders".to_string(),
+            partitions: 2,
+            config,
+            request_id: "req-1".to_string(),
+            now_ms: 1_700_000_000_000,
+            log_shards: 4,
+            max_partitions_per_shard: 1024,
+        }));
+        let (response, event) = store
+            .execute_command(store.state_machine.as_ref(), &command, 1, applied_at(1))
+            .expect("mq topic command must apply");
+        assert!(event.is_none(), "topic 元数据不上 KV Watch");
+        match response {
+            Response::MqTopic {
+                outcome:
+                    MqTopicOutcome::Created {
+                        topic_id,
+                        partitions,
+                        ..
+                    },
+            } => {
+                assert_eq!(topic_id, 1);
+                assert_eq!(partitions, 2);
+            }
+            other => panic!("expected Created, got {other:?}"),
+        }
+        let table = store.state_machine.mq_topic_table().unwrap();
+        assert!(table.topic("orders").is_some());
     }
 }
