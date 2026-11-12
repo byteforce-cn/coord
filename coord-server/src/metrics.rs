@@ -77,6 +77,11 @@ struct MetricsInner {
     pub tso_batch_remaining: AtomicU64,
     /// 批次 refill 失败次数（含重试与最终失败）
     pub tso_refill_failures_total: AtomicU64,
+
+    // ── MQ v2（ADR-0016）──
+    /// MQ v2 开关：0 = `[mq_v2].enabled=false`（服务壳注册但全部拒绝），
+    /// 1 = 已开启（能力仍可能按 gate 未交付）。区分"没开"与"开了但 gate 拒绝"。
+    pub mq_v2_enabled: AtomicI64,
     /// 客户端观测到的 leadership 丢失次数（旧批随后被丢弃）
     pub tso_leader_changes_total: AtomicU64,
     /// v2 KV 写被 `CommitRejected` 拒绝次数（D11.4；不静默写）
@@ -280,6 +285,7 @@ impl Default for MetricsInner {
             lease_expired_total: AtomicU64::new(0),
             seal_status: AtomicI64::new(0),
             kv_t_enabled: AtomicI64::new(0),
+            mq_v2_enabled: AtomicI64::new(0),
             tso_current: AtomicU64::new(0),
             tso_batch_remaining: AtomicU64::new(0),
             tso_refill_failures_total: AtomicU64::new(0),
@@ -653,6 +659,13 @@ impl Metrics {
             .store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
     }
 
+    /// 记录 MQ v2 开关状态（启动时由 `[mq_v2].enabled` 设置）。
+    pub fn set_mq_v2_enabled(&self, enabled: bool) {
+        self.inner
+            .mq_v2_enabled
+            .store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+    }
+
     /// 记录最近一次发放的 TSO（gauge）。
     pub fn set_tso_current(&self, ts: u64) {
         self.inner.tso_current.store(ts, Ordering::Relaxed);
@@ -965,6 +978,13 @@ impl Metrics {
         out.push_str(&format!(
             "coord_kv_t_enabled {}\n",
             inner.kv_t_enabled.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_mq_v2_enabled MQ v2 switch ([mq_v2].enabled; ADR-0016)\n");
+        out.push_str("# TYPE coord_mq_v2_enabled gauge\n");
+        out.push_str(&format!(
+            "coord_mq_v2_enabled {}\n",
+            inner.mq_v2_enabled.load(Ordering::Relaxed)
         ));
 
         out.push_str("\n# HELP coord_tso_current Last TSO issued by the local batch cache\n");
