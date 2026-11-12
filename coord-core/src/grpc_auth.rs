@@ -394,6 +394,7 @@ pub fn is_streaming_rpc(rpc_method: &str) -> bool {
             | "/coord.election.v1.LeaderElection/Watch"
             | "/coord.event.v1.Event/Subscribe"
             | "/coord.mq.v1.MQ/Subscribe"
+            | "/coord.mq.v2.MQ/Subscribe"
             | "/coord.storage.Storage/Put"
             | "/coord.storage.Storage/Get"
             | "/coord.maintenance.Maintenance/Snapshot"
