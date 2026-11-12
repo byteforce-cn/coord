@@ -18,6 +18,7 @@ use coord_core::storage::StorageBackend;
 
 use super::commit_log::COMMIT_LOG_PREFIX;
 use super::envelope;
+use super::mq_log::{TABLE_MQ_DLQ, TABLE_MQ_IDEM, TABLE_MQ_LOG, TABLE_MQ_META};
 use super::mvcc::{
     encode_kv_key, encode_kv_meta_key, AppliedLogId, KvMetadata, MvccStorage, RevisionMode,
     CHANGELOG_PREFIX, META_COMMIT_LOG_TRIMMED_BEFORE, META_COMPACT_REVISION, META_CURRENT_REVISION,
@@ -84,6 +85,25 @@ pub struct SnapshotData {
     /// 这些行不在 `TABLE_KV` 里，必须单列携带：shard Raft 组装快照/恢复时若丢失，
     /// Watch 读到的历史会与 region 0 的 shard 表/水位矛盾（静默跳过事件）。整表替换。
     pub commit_log_entries: Vec<SnapshotRawEntry>,
+    /// MQ v2 主日志段行（`TABLE_MQ_LOG`）。段是状态机状态（ADR-0004），
+    /// 快照/备份必须整体携带；导入时整表替换。
+    pub mq_log_entries: Vec<SnapshotRawEntry>,
+    /// MQ v2 幂等索引行（`TABLE_MQ_IDEM`）：丢了会让重复发布重新计费/重复追加。
+    pub mq_idem_entries: Vec<SnapshotRawEntry>,
+    /// MQ v2 死信行（`TABLE_MQ_DLQ`）。
+    pub mq_dlq_entries: Vec<SnapshotRawEntry>,
+    /// MQ v2 分片/分区/topic 元数据行（`TABLE_MQ_META`）：offset、段边界、
+    /// 记账与 apply 水位；缺失会让 offset 倒退。
+    pub mq_meta_entries: Vec<SnapshotRawEntry>,
+}
+
+fn raw_rows(rows: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<SnapshotRawEntry> {
+    rows.into_iter()
+        .map(|(internal_key, value)| SnapshotRawEntry {
+            internal_key,
+            value,
+        })
+        .collect()
 }
 
 /// R-RFT-06：快照中的原始内部条目（非用户 KV 域）
@@ -118,11 +138,12 @@ pub struct SnapshotKvMeta {
 
 impl SnapshotData {
     /// 当前快照格式版本（版本号 +1；0.1.x 数据不承诺兼容）。
+    /// v8：携带 MQ v2 段/幂等/DLQ/元数据表（M1-2）——offset 与段不随恢复倒退。
     /// v7：携带 Commit Log 表（#169）——shard 快照/备份恢复后 Watch 历史不丢。
     /// v6：携带 `current_revision`（#140）——装快照后 revision 不倒退。
-    /// v6 及更早格式已退役：`from_bytes` 仅接受 v7，旧字节显式拒绝
+    /// v7 及更早格式已退役：`from_bytes` 仅接受 v8，旧字节显式拒绝
     /// （无迁移阶梯）。
-    const CURRENT_VERSION: u32 = 7;
+    const CURRENT_VERSION: u32 = 8;
 
     /// 创建空快照
     pub fn new(last_included_index: u64, last_included_term: u64) -> Self {
@@ -144,6 +165,10 @@ impl SnapshotData {
             sys_entries: Vec::new(),
             changelog_entries: Vec::new(),
             commit_log_entries: Vec::new(),
+            mq_log_entries: Vec::new(),
+            mq_idem_entries: Vec::new(),
+            mq_dlq_entries: Vec::new(),
+            mq_meta_entries: Vec::new(),
         }
     }
 
@@ -206,6 +231,10 @@ pub fn export_snapshot_data<B: StorageBackend>(
         sys_rows,
         changelog_rows,
         commit_log_rows,
+        mq_log_rows,
+        mq_idem_rows,
+        mq_dlq_rows,
+        mq_meta_rows,
     ) = backend.read(|tx| {
         let applied = tx.get(TABLE_META, META_LAST_APPLIED)?;
         let current_revision = tx.get(TABLE_META, META_CURRENT_REVISION)?;
@@ -224,6 +253,11 @@ pub fn export_snapshot_data<B: StorageBackend>(
         // 装快照后的历史读/watch 重放依赖它，不能缺席（见 SnapshotData 字段注释）。
         let changelog_rows = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
         let commit_log_rows = tx.iter_prefix(TABLE_COMMIT_LOG, COMMIT_LOG_PREFIX)?;
+        // MQ v2：段/幂等/DLQ/元数据整表导出（导入侧整表替换）。
+        let mq_log_rows = tx.iter_prefix(TABLE_MQ_LOG, b"")?;
+        let mq_idem_rows = tx.iter_prefix(TABLE_MQ_IDEM, b"")?;
+        let mq_dlq_rows = tx.iter_prefix(TABLE_MQ_DLQ, b"")?;
+        let mq_meta_rows = tx.iter_prefix(TABLE_MQ_META, b"")?;
         Ok((
             applied,
             current_revision,
@@ -236,6 +270,10 @@ pub fn export_snapshot_data<B: StorageBackend>(
             sys_rows,
             changelog_rows,
             commit_log_rows,
+            mq_log_rows,
+            mq_idem_rows,
+            mq_dlq_rows,
+            mq_meta_rows,
         ))
     })?;
 
@@ -341,6 +379,11 @@ pub fn export_snapshot_data<B: StorageBackend>(
         })
         .collect();
 
+    data.mq_log_entries = raw_rows(mq_log_rows);
+    data.mq_idem_entries = raw_rows(mq_idem_rows);
+    data.mq_dlq_entries = raw_rows(mq_dlq_rows);
+    data.mq_meta_entries = raw_rows(mq_meta_rows);
+
     Ok(data)
 }
 
@@ -418,6 +461,23 @@ pub fn import_snapshot_data<B: StorageBackend>(
             tx.remove(TABLE_COMMIT_LOG, key)?;
         }
 
+        // MQ v2 四张表同样整体替换：段/offset/幂等/DLQ 与快照一一对应。
+        for (table, prefix) in [
+            (TABLE_MQ_LOG, b"".as_slice()),
+            (TABLE_MQ_IDEM, b"".as_slice()),
+            (TABLE_MQ_DLQ, b"".as_slice()),
+            (TABLE_MQ_META, b"".as_slice()),
+        ] {
+            let existing: Vec<Vec<u8>> = tx
+                .iter_prefix(table, prefix)?
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            for key in &existing {
+                tx.remove(table, key)?;
+            }
+        }
+
         // 写入 KV 数据
         for pair in &data.kv_pairs {
             let internal_key = encode_kv_key(&pair.key);
@@ -463,6 +523,18 @@ pub fn import_snapshot_data<B: StorageBackend>(
 
         for entry in &data.commit_log_entries {
             tx.insert(TABLE_COMMIT_LOG, &entry.internal_key, &entry.value)?;
+        }
+        for entry in &data.mq_log_entries {
+            tx.insert(TABLE_MQ_LOG, &entry.internal_key, &entry.value)?;
+        }
+        for entry in &data.mq_idem_entries {
+            tx.insert(TABLE_MQ_IDEM, &entry.internal_key, &entry.value)?;
+        }
+        for entry in &data.mq_dlq_entries {
+            tx.insert(TABLE_MQ_DLQ, &entry.internal_key, &entry.value)?;
+        }
+        for entry in &data.mq_meta_entries {
+            tx.insert(TABLE_MQ_META, &entry.internal_key, &entry.value)?;
         }
         // 快照整体替换了 outbox：旧的裁剪水位不再描述新状态（保留它会让
         // 快照带回来的低位行永久不删）。下一次 tick 从 region 0 的回收水位重建。

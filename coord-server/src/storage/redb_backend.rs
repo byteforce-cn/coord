@@ -50,6 +50,18 @@ const TABLE_KV_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv_me
 /// Commit Log 表（#153）：Key=bytes, Value=bytes（zstd 帧）
 const TABLE_COMMIT_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("commit_log");
 
+/// MQ v2 主日志段表（ADR-0016 M1-2）：Key=bytes, Value=bytes（信封 postcard）。
+const TABLE_MQ_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mq_log");
+
+/// MQ v2 幂等索引表。
+const TABLE_MQ_IDEM: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mq_idem");
+
+/// MQ v2 死信表。
+const TABLE_MQ_DLQ: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mq_dlq");
+
+/// MQ v2 分片/分区/topic 元数据表。
+const TABLE_MQ_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mq_meta");
+
 /// 根据表名返回对应的 TableDefinition。
 /// 显式标注 'static 生命周期以防止 Rust 的 lifetime elision 将返回类型生命周期
 /// 绑定到输入参数（name: &str）上。
@@ -63,6 +75,10 @@ fn resolve_table(name: &str) -> Result<TableDefinition<&'static [u8], &'static [
         "changelog" => Ok(TABLE_CHANGELOG),
         "kv_meta" => Ok(TABLE_KV_META),
         "commit_log" => Ok(TABLE_COMMIT_LOG),
+        "mq_log" => Ok(TABLE_MQ_LOG),
+        "mq_idem" => Ok(TABLE_MQ_IDEM),
+        "mq_dlq" => Ok(TABLE_MQ_DLQ),
+        "mq_meta" => Ok(TABLE_MQ_META),
         unknown => Err(coord_core::error::Error::InvalidArgument(format!(
             "unknown table: {}",
             unknown
@@ -116,6 +132,10 @@ impl StorageBackend for RedbBackend {
                 let _ = write_tx.open_table(TABLE_CHANGELOG);
                 let _ = write_tx.open_table(TABLE_KV_META);
                 let _ = write_tx.open_table(TABLE_COMMIT_LOG);
+                let _ = write_tx.open_table(TABLE_MQ_LOG);
+                let _ = write_tx.open_table(TABLE_MQ_IDEM);
+                let _ = write_tx.open_table(TABLE_MQ_DLQ);
+                let _ = write_tx.open_table(TABLE_MQ_META);
             }
             write_tx.commit().map_err(|e| {
                 coord_core::error::Error::Storage(format!("failed to commit init tx: {}", e))
