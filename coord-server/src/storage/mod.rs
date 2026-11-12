@@ -14,6 +14,7 @@ pub mod commit_log_shard;
 pub mod compaction;
 pub mod disk_watermark;
 pub mod envelope;
+pub mod mq_group;
 pub mod mq_log;
 pub mod mq_topic;
 pub mod mvcc;

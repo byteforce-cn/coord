@@ -843,6 +843,23 @@ pub enum Command {
     /// **末尾追加**；重名不同配置/代际过期等用户级拒绝只体现在 outcome 里，
     /// 不失败 apply。表随 `/_sys/*` 进快照。
     MqTopic(crate::storage::mq_topic::MqTopicOp),
+    /// MQ v2 消费组命令（仅消费组分片 raft 提出，M1-3）。
+    ///
+    /// **末尾追加**；`now_ms`/订阅的分区数随命令携带，新成员 id 由 apply 生成，
+    /// 重放节点不读本地时钟/配置。组行与位点行落在 `mq_meta` 表（随快照携带）。
+    MqGroup(crate::storage::mq_group::MqGroupOp),
+}
+
+/// 组命令的稳定短标签（raft 日志/诊断输出用；不参与语义）。
+fn mq_group_op_label(op: &crate::storage::mq_group::MqGroupOp) -> &'static str {
+    use crate::storage::mq_group::MqGroupOp;
+    match op {
+        MqGroupOp::Join(_) => "join",
+        MqGroupOp::Heartbeat(_) => "heartbeat",
+        MqGroupOp::Leave(_) => "leave",
+        MqGroupOp::Reap(_) => "reap",
+        MqGroupOp::Ack(_) => "ack",
+    }
 }
 
 impl std::fmt::Display for Command {
@@ -1012,6 +1029,12 @@ impl std::fmt::Display for Command {
                 op.shard_id, op.topic_id, op.partition, op.offset
             ),
             Command::MqTopic(op) => write!(f, "MqTopic({op:?})"),
+            Command::MqGroup(op) => write!(
+                f,
+                "MqGroup(shard={}, {})",
+                op.shard_id(),
+                mq_group_op_label(op)
+            ),
         }
     }
 }
@@ -1164,6 +1187,10 @@ pub enum Response {
     MqTopic {
         outcome: crate::storage::mq_topic::MqTopicOutcome,
     },
+    /// MQ v2 消费组结果（用户级拒绝也在 result 里）。
+    MqGroup {
+        result: crate::storage::mq_group::MqGroupResult,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -1271,6 +1298,7 @@ impl std::fmt::Display for Response {
             ),
             Response::MqMoveToDlq { outcome } => write!(f, "MqMoveToDlq({outcome:?})"),
             Response::MqTopic { outcome } => write!(f, "MqTopic({outcome:?})"),
+            Response::MqGroup { result } => write!(f, "MqGroup({result:?})"),
         }
     }
 }
