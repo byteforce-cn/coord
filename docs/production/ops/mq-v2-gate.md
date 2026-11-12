@@ -1,10 +1,12 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-12（M0 四项全部落地）
+> Owner: maintainers ｜ Last verified: 2026-11-12（M0/M1 落地）
 >
-> **状态：M0 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
+> **状态：M0、M1 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
-> 均已合入。M7 GA 不早于 KV-T GA（`docs/adr/0015-kv-t.md` D8），该前置已于
+> 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
+> 耐久性）的存储层证据见 §1。周期 reaper 与指标接线随 M2-1（分片 Leader 循环）。
+> M7 GA 不早于 KV-T GA（`docs/adr/0015-kv-t.md` D8），该前置已于
 > 2026-11-11 签字。本文是 MQ v2 gate 状态的**单一事实源**；语义以
 > `docs/adr/0016-mq-v2.md` 为准，工作项与依赖以
 > `docs/superpowers/specs/2026-10-29-mq-v2-design.md` 为准。
