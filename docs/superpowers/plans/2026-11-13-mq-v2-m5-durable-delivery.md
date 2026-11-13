@@ -78,7 +78,7 @@ durable/审批在 v2 上装配并通过 kill -9 证据。
 4. `ensure_topic` 的失败文案必须带 topic 名与 MQ v2 门禁提示：
    `with_context` 风格：`format!("workflow durable: ensure events topic '{topic}' failed: {err}")`。
 
-- [ ] **Step 1: 写失败单测（纯映射，不需要服务器）**
+- [x] **Step 1: 写失败单测（纯映射，不需要服务器）**
 
 ```rust
 #[test]
@@ -98,24 +98,24 @@ fn publish_request_carries_the_event_id_as_the_idempotency_key() {
 
 （`for_test` = 只填 topic、`inner` 不可用；`outbox_record` 是测试内构造函数。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-agent --lib services::mq_v2_delivery`
 Expected: 编译失败（`MqV2OutboxSink` 不存在）。
 
-- [ ] **Step 3: 实现 `MqV2OutboxSink`**
+- [x] **Step 3: 实现 `MqV2OutboxSink`**
 
 `ensure_topic` 用 `inner.client.mq_v2().create_topic(&MqCreateTopic { topic, partitions: DURABLE_TOPIC_PARTITIONS, request_id, config: Some(MqTopicConfig { retention_secs: 7d, max_message_bytes: 1MiB, ..Default::default() }) })`；
 `TOPIC_EXISTS` 时 `get_topic_leader(topic)`。`wait_until_ready` 循环 100ms 重试直到 30s：
 `Error::V2 { code: TopicEpochStale | TopicNotFound }` 之外的 `Unavailable/DeadlineExceeded/
 ClusterUnavailable` 都算瞬时；`FailedPrecondition`（MQ v2 关闭）立即失败。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-agent --lib services::mq_v2_delivery`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add coord-agent/src/services/mq_v2_delivery.rs coord-agent/src/services/mod.rs
@@ -149,7 +149,7 @@ git commit -m "feat(mq-v2): v2 outbox sink and events topic bootstrap (M5-1)"
 3. `emit` 为 best-effort（与 v1 一致，忽略错误）：`publish(topic, 0, encode_event(...))`。
 4. 超时/空批按 20ms 轮询到截止，返回 `None`（与 v1 一致）。
 
-- [ ] **Step 1: 写失败单测**
+- [x] **Step 1: 写失败单测**
 
 ```rust
 #[test]
@@ -171,22 +171,22 @@ fn event_provider_reuses_the_subscription_key_of_the_v1_provider() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-agent --lib services::mq_v2_delivery`
 Expected: 编译失败（`decode_event`/`event_matches` 不存在）。
 
-- [ ] **Step 3: 实现 provider 与共享函数**
+- [x] **Step 3: 实现 provider 与共享函数**
 
 v1 `MqEventProvider` 的 `Self::encode_event`/`Self::decode_event` 与内联匹配改为调用共享
 自由函数（`super::mq_event_provider::*`）；`subscription_key` 改为 `pub(crate)`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-agent --lib services::mq_v2_delivery services::mq_event_provider`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add coord-agent/src/services/mq_v2_delivery.rs coord-agent/src/services/mq_event_provider.rs
@@ -221,7 +221,7 @@ git commit -m "feat(mq-v2): v2 event provider for durable listen (M5-1)"
 4. 审批桥、租约、step store、`KvOutboxStore`、`KvWorkflowStore` 原样复用（同一
    `AgentInner` ⇒ v2 适配层）。
 
-- [ ] **Step 1: 改失败测试**
+- [x] **Step 1: 改失败测试**
 
 `test_v2_data_plane_rejects_workflow_durable` 改为两个用例：
 
@@ -239,19 +239,19 @@ async fn test_v2_durable_requires_a_server_connection() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord-agent --test agent_workflow_durable_gate_test`
 Expected: 第一个用例失败（v2 分支仍报 "v2 data plane"）。
 
-- [ ] **Step 3: 实现装配 helper、v2 构造器与启动接线**
+- [x] **Step 3: 实现装配 helper、v2 构造器与启动接线**
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord-agent --test agent_workflow_durable_gate_test`
 Expected: PASS（4 个用例）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add coord-agent/src/services/workflow.rs coord-agent/src/lib.rs \
@@ -294,20 +294,20 @@ git commit -m "feat(mq-v2): assemble durable workflow on the v2 data plane (M5-2
 - `kill -9` Agent，重启同一配置/数据目录；等 relay 日志；`GetStatus` 仍 `COMPLETED`；
   再 poll topic ⇒ `completed` 事件仍恰好 1 条（无重复、无丢失）。
 
-- [ ] **Step 1: 写测试（两个用例）**
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 1: 写测试（两个用例）**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p coord --test mq_v2_m5_durable_test -- --test-threads=1`
 Expected: 编译失败（`new_with_kv_store_durable_v2` 在 Task 3 已实现 ⇒ 第一个用例应通过；
 第二个用例在 Task 3 完成前无法启动 Agent，先记录失败）。
 
-- [ ] **Step 3: 修到绿（按失败点最小改动，不改语义）**
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 3: 修到绿（按失败点最小改动，不改语义）**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p coord --test mq_v2_m5_durable_test -- --test-threads=1`
 Expected: PASS（2 个用例）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add coord/tests/mq_v2_m5_durable_test.rs
@@ -325,12 +325,12 @@ git commit -m "test(mq-v2): durable state+outbox and kill -9 evidence on v2 (M5-
 - Modify: `docs/production/workflow-semantics.md` §8（可用/不可用清单）
 - Modify: `docs/superpowers/specs/2026-10-29-mq-v2-design.md` 头注（M5 进行中）
 
-- [ ] **Step 1: 更新 gate/buildings 文档，跑引用检查**
+- [x] **Step 1: 更新 gate/buildings 文档，跑引用检查**
 
 Run: `bash scripts/check-doc-refs.sh`
 Expected: `dangling refs: 0`。
 
-- [ ] **Step 2: 跑本机全量门禁（提 PR 前）**
+- [x] **Step 2: 跑本机全量门禁（提 PR 前）**
 
 ```bash
 cargo fmt --all -- --check
@@ -340,7 +340,7 @@ cargo audit
 cargo deny check
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/
