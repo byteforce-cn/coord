@@ -12,8 +12,11 @@ use tonic::Status;
 
 use crate::raft::type_config::Command;
 use crate::server::CoordNode;
-use crate::storage::mq_topic::{MqTopicConfig, MqTopicOp, MqTopicUpdate};
+use crate::storage::mq_topic::{
+    MqTopicConfig, MqTopicDelete, MqTopicDeletionState, MqTopicOp, MqTopicUpdate,
+};
 
+use super::now_ms;
 use super::topics::{topic_config_to_proto, topic_not_found, validate_topic_config};
 
 impl CoordNode {
@@ -173,6 +176,110 @@ impl CoordNode {
                 "unexpected UpdateTopic outcome: {other:?}"
             ))),
         }
+    }
+}
+
+impl CoordNode {
+    /// `DeleteTopic`：标记删除（立即 `TOPIC_NOT_FOUND`），数据由 reaper 异步回收。
+    pub(crate) async fn mq_delete_topic(
+        &self,
+        request: mq_v2::DeleteTopicRequest,
+    ) -> Result<mq_v2::DeleteTopicResponse, Status> {
+        let table = self.mq_topic_table()?;
+        let Some(meta) = table.topic(&request.topic) else {
+            return Err(topic_not_found(&request.topic));
+        };
+        if request.expected_topic_epoch != 0 && request.expected_topic_epoch != meta.epoch {
+            return Err(attach(
+                Status::aborted(format!(
+                    "topic {} epoch {} is stale (current epoch {})",
+                    request.topic, request.expected_topic_epoch, meta.epoch
+                )),
+                CoordErrorCode::TopicEpochStale,
+            ));
+        }
+        let raft = self.raft.as_ref().ok_or_else(|| {
+            attach(
+                Status::failed_precondition(
+                    "mq_v2 DeleteTopic requires a region 0 raft (multi_raft assembly missing)",
+                ),
+                CoordErrorCode::FailedPrecondition,
+            )
+        })?;
+        let now = now_ms();
+        let delete_id = u64::try_from(now).map_err(|_| {
+            Status::internal("system clock is before the unix epoch; cannot build a delete id")
+        })?;
+        let command = Command::MqTopic(MqTopicOp::Delete(MqTopicDelete {
+            name: request.topic.clone(),
+            delete_id,
+            now_ms: now,
+        }));
+        let response = self.client_write_with_timeout(raft, command, 0).await?;
+        use crate::storage::mq_topic::MqTopicOutcome;
+        match response.response() {
+            crate::raft::type_config::Response::MqTopic { outcome } => match outcome {
+                MqTopicOutcome::Deleted {
+                    delete_id,
+                    deleted_epoch,
+                    ..
+                } => Ok(mq_v2::DeleteTopicResponse {
+                    delete_id: delete_id.to_string(),
+                    deleted_topic_epoch: *deleted_epoch,
+                }),
+                MqTopicOutcome::NotFound => Err(topic_not_found(&request.topic)),
+                MqTopicOutcome::EpochStale { current_epoch } => Err(attach(
+                    Status::aborted(format!(
+                        "topic {} epoch is stale (current epoch {current_epoch})",
+                        request.topic
+                    )),
+                    CoordErrorCode::TopicEpochStale,
+                )),
+                other => Err(Status::internal(format!(
+                    "unexpected DeleteTopic outcome: {other:?}"
+                ))),
+            },
+            other => Err(Status::internal(format!(
+                "unexpected raft response for DeleteTopic: {other:?}"
+            ))),
+        }
+    }
+
+    /// `GetTopicDeletion`：查异步回收进度（`delete_id` 是 `DeleteTopic` 返回的字符串）。
+    pub(crate) fn mq_get_topic_deletion(
+        &self,
+        delete_id: &str,
+    ) -> Result<mq_v2::GetTopicDeletionResponse, Status> {
+        let id = delete_id.parse::<u64>().map_err(|_| {
+            attach(
+                Status::invalid_argument(format!("invalid delete_id: {delete_id:?}")),
+                CoordErrorCode::InvalidArgument,
+            )
+        })?;
+        let table = self.mq_topic_table()?;
+        let Some(deletion) = table.deletion_by_id(id) else {
+            return Err(attach(
+                Status::not_found(format!("topic deletion not found: {delete_id}")),
+                CoordErrorCode::TopicNotFound,
+            ));
+        };
+        let state = match deletion.state {
+            MqTopicDeletionState::Pending => mq_v2::TopicDeletionState::Pending,
+            MqTopicDeletionState::Done => mq_v2::TopicDeletionState::Done,
+            MqTopicDeletionState::Failed => mq_v2::TopicDeletionState::Failed,
+        };
+        Ok(mq_v2::GetTopicDeletionResponse {
+            delete_id: deletion.delete_id.to_string(),
+            topic: deletion.name.clone(),
+            topic_id: deletion.topic_id,
+            state: state as i32,
+            partitions_total: deletion.partitions_total,
+            partitions_reclaimed: deletion
+                .partitions_total
+                .saturating_sub(deletion.pending_partitions.len() as u32),
+            messages_removed: deletion.messages_removed,
+            bytes_reclaimed: deletion.bytes_reclaimed,
+        })
     }
 }
 

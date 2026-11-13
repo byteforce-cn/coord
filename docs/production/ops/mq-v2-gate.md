@@ -1,8 +1,8 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M3 落地；M4 进行中）
+> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M4 落地）
 >
-> **状态：M0、M1、M2、M3 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
+> **状态：M0、M1、M2、M3、M4 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
 > 耐久性）的存储层证据见 §1；M2-1–M2-5（写路径、offset/幂等、上限/原子性、
@@ -25,7 +25,7 @@
 | M1 日志/元数据/容量 | 分片/段日志/组状态机/topic 元数据/保留 | ✅ | M1-1–M1-6 存储层全部落地：`cargo test -p coord-server --lib storage::mq_log`（14 例：保留截止/配额释放/truncate 重放/重启/副本一致）、`storage::mq_group`（13 例：代际分配/整批 Ack/过期回收/重启/快照）、`storage::mq_topic`（5 例）、`carve_mq`、`cargo test -p coord --bins derive_`、`cargo test -p coord-server --lib test_apply_mq_group_commands`；`check-panics` 0。周期 reaper/指标接线随 M2-1 分片 Leader 循环；整节点备份演练属 M6-5 |
 | M2 Publish | 路由/批量/offset/幂等/配额 | ✅ | 见 §2b |
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ✅ | 见 §2c |
-| M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ⏳ 进行中（M4-1/M4-3 ✅） | 见 §2d |
+| M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ✅ | 见 §2d |
 | M5 工作流 | v2 outbox/durable/审批/trigger | ⏳ 未开始 | — |
 | M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | ⏳ 未开始 | — |
 | M7 GA | 全绿 + KV-T GA + 签字 | ⛔ 未达标 | 见 §3 |
@@ -73,8 +73,8 @@ Rust 升级后漂到别的分片）。
 |:--|:--|:--|
 | M4-1 MoveToDlq/PollDlq | ✅ | `cargo test -p coord --test mq_v2_m4_dlq_admin_test`（`move_to_dlq_hides_the_message_from_poll_and_is_idempotent`、`move_to_dlq_rejects_an_unknown_offset_and_poll_dlq_paginates`）：复制 + tombstone、`Poll` 跳过、`PollDlq` 原 offset/reason/detail、重复调用 `already_moved`、DLQ 位点分页 |
 | M4-3 UpdateTopic/Describe/List | ✅ | 同一测试文件的 `describe_topic_reports_config_partitions_and_bounds`、`list_topics_paginates_and_filters_by_prefix`、`update_topic_merges_fields_and_enforces_the_epoch`；`coord-server/src/mq_v2/admin.rs` 的 2 个合并/校验单测。`UpdateTopic` 的 `0 = 保持当前值`（含 `max_bytes`，清空配额需删除重建）已在代码注释固定 |
-| M4-2 DeleteTopic/GetTopicDeletion | ⏳ | 后续 PR：`MqDropPartition` + `MqTopicOp::DeletionProgress` + `MqGroupOp::DropTopic` + reaper 回收 |
-| M4-4 能力/审计 | ⏳ | `Dlq` 能力开关与门禁用例已随 M4-1（`dlq_is_gated_by_the_dlq_capability`）；审计事件随 M4-2 的删除回收一起补 |
+| M4-2 DeleteTopic/GetTopicDeletion | ✅ | `cargo test -p coord --test mq_v2_m4_delete_test`（3 例：删除后立即 `TOPIC_NOT_FOUND`、reaper 回收 2 个分区 + 组位点清空 + `GetTopicDeletion` 转 Done、同名重建不复活、重复回收幂等、代际/未知 id 映射）；存储层 `storage::mq_log::tests::drop_partition_removes_records_dlq_and_idempotency_and_replays_idempotently`、`storage::mq_group::tests::drop_topic_removes_only_that_topics_offsets` |
+| M4-4 能力/审计 | ✅ | `coord-core/src/grpc_auth.rs::mq_v2_rpcs_are_mapped_with_the_same_capability_split_as_v1`（21 个 RPC 的能力映射）；`dlq_is_gated_by_the_dlq_capability`（未交付 `FAILED_PRECONDITION`）；`mq_v2_g0_test`（关闭/未交付/已交付三态 + reflection）。审计沿用全仓口径（拒绝路径带 RPC 方法与稳定码；成功路径的调用方身份传递是本仓 v2 backlog，`audit/mod.rs` 已文档化），MQ 不另建一套 |
 
 ## 3. 关闭 M7 的硬条件
 

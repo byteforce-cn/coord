@@ -65,8 +65,16 @@ pub struct MqTopicDeletion {
     pub delete_id: u64,
     pub deleted_at_ms: i64,
     pub state: MqTopicDeletionState,
-    /// 尚未确认回收的分区（M4-2 推进；M1-4 只负责置 Pending）。
+    /// 删除后的代际（旧代际之后一律 `TOPIC_NOT_FOUND`）。
+    pub deleted_epoch: u64,
+    /// 分区总数（回收进度分母）。
+    pub partitions_total: u32,
+    /// 尚未确认回收的分区（M4-2 逐个推进）。
     pub pending_partitions: Vec<u32>,
+    /// 删除时的 partition → 日志分片映射（topic 行已移除，回收仍需路由）。
+    pub shard_of_partition: Vec<u32>,
+    pub messages_removed: u64,
+    pub bytes_reclaimed: u64,
 }
 
 /// 整张 topic 表。
@@ -157,6 +165,13 @@ impl MqTopicTable {
         self.deletions
             .iter()
             .find(|deletion| deletion.topic_id == topic_id)
+    }
+
+    /// 按回收任务 id 查进度（`GetTopicDeletion`）。
+    pub fn deletion_by_id(&self, delete_id: u64) -> Option<&MqTopicDeletion> {
+        self.deletions
+            .iter()
+            .find(|deletion| deletion.delete_id == delete_id)
     }
 
     fn create(&mut self, op: &MqTopicCreate) -> MqTopicOutcome {
@@ -255,6 +270,44 @@ impl MqTopicTable {
         outcome
     }
 
+    fn deletion_progress(&mut self, op: &MqTopicDeletionProgress) -> MqTopicOutcome {
+        let Some(index) = self
+            .deletions
+            .iter()
+            .position(|deletion| deletion.delete_id == op.delete_id)
+        else {
+            return MqTopicOutcome::DeletionNotFound;
+        };
+        let deletion = &mut self.deletions[index];
+        if deletion.state == MqTopicDeletionState::Pending {
+            if let Some(position) = deletion
+                .pending_partitions
+                .iter()
+                .position(|partition| *partition == op.partition)
+            {
+                deletion.pending_partitions.remove(position);
+                deletion.messages_removed = deletion
+                    .messages_removed
+                    .saturating_add(op.messages_removed);
+                deletion.bytes_reclaimed =
+                    deletion.bytes_reclaimed.saturating_add(op.bytes_reclaimed);
+            }
+            if deletion.pending_partitions.is_empty() {
+                deletion.state = MqTopicDeletionState::Done;
+            }
+        }
+        MqTopicOutcome::DeletionProgressed {
+            delete_id: deletion.delete_id,
+            state: deletion.state,
+            partitions_reclaimed: deletion
+                .partitions_total
+                .saturating_sub(deletion.pending_partitions.len() as u32),
+            partitions_total: deletion.partitions_total,
+            messages_removed: deletion.messages_removed,
+            bytes_reclaimed: deletion.bytes_reclaimed,
+        }
+    }
+
     fn update(&mut self, op: &MqTopicUpdate) -> MqTopicOutcome {
         let Some(index) = self.topics.iter().position(|topic| topic.name == op.name) else {
             return MqTopicOutcome::NotFound;
@@ -281,6 +334,7 @@ impl MqTopicTable {
                 topic_id: deletion.topic_id,
                 delete_id: deletion.delete_id,
                 partitions: deletion.pending_partitions.len() as u32,
+                deleted_epoch: deletion.deleted_epoch,
                 replayed: true,
             };
         }
@@ -296,12 +350,18 @@ impl MqTopicTable {
             delete_id: op.delete_id,
             deleted_at_ms: op.now_ms,
             state: MqTopicDeletionState::Pending,
+            deleted_epoch: epoch,
+            partitions_total: topic.partitions,
             pending_partitions: (0..topic.partitions).collect(),
+            shard_of_partition: topic.shard_of_partition.clone(),
+            messages_removed: 0,
+            bytes_reclaimed: 0,
         };
         let outcome = MqTopicOutcome::Deleted {
             topic_id: topic.topic_id,
             delete_id: op.delete_id,
             partitions: topic.partitions,
+            deleted_epoch: epoch,
             replayed: false,
         };
         self.deletions.push(deletion);
@@ -355,6 +415,17 @@ pub enum MqTopicOp {
     Create(MqTopicCreate),
     Update(MqTopicUpdate),
     Delete(MqTopicDelete),
+    /// 末尾追加：回收器确认一个分区已物理回收。
+    DeletionProgress(MqTopicDeletionProgress),
+}
+
+/// 删除回收进度推进（每个分区一条；清空 pending 时 state 转 Done）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqTopicDeletionProgress {
+    pub delete_id: u64,
+    pub partition: u32,
+    pub messages_removed: u64,
+    pub bytes_reclaimed: u64,
 }
 
 /// 用户级结果（拒绝不失败 apply）。
@@ -382,8 +453,21 @@ pub enum MqTopicOutcome {
         topic_id: u64,
         delete_id: u64,
         partitions: u32,
+        /// 删除后的代际（`DeleteTopicResponse.deleted_topic_epoch`）。
+        deleted_epoch: u64,
         replayed: bool,
     },
+    /// 回收进度推进（`MqTopicOp::DeletionProgress` 的 apply 结果）。
+    DeletionProgressed {
+        delete_id: u64,
+        state: MqTopicDeletionState,
+        partitions_reclaimed: u32,
+        partitions_total: u32,
+        messages_removed: u64,
+        bytes_reclaimed: u64,
+    },
+    /// `delete_id` 不存在（已回收/从未存在）。
+    DeletionNotFound,
     /// 目标不存在（已删除也算；handler 映射 `TOPIC_NOT_FOUND`）。
     NotFound,
     EpochStale {
@@ -414,12 +498,14 @@ impl<B: StorageBackend> MvccStorage<B> {
                 MqTopicOp::Create(create) => table.create(create),
                 MqTopicOp::Update(update) => table.update(update),
                 MqTopicOp::Delete(delete) => table.delete(delete),
+                MqTopicOp::DeletionProgress(progress) => table.deletion_progress(progress),
             };
             if matches!(
                 outcome,
                 MqTopicOutcome::Created { .. }
                     | MqTopicOutcome::Updated { .. }
                     | MqTopicOutcome::Deleted { .. }
+                    | MqTopicOutcome::DeletionProgressed { .. }
             ) {
                 tx.insert(TABLE_KV, MQ_TOPIC_TABLE_KEY, &table.encode()?)?;
             }
@@ -591,11 +677,13 @@ mod tests {
                 topic_id,
                 delete_id,
                 partitions,
+                deleted_epoch,
                 replayed,
             } => {
                 assert_eq!(topic_id, first);
                 assert_eq!(delete_id, 7);
                 assert_eq!(partitions, 2);
+                assert_eq!(deleted_epoch, 2);
                 assert!(!replayed);
             }
             other => panic!("expected Deleted, got {other:?}"),

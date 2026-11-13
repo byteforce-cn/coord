@@ -173,9 +173,10 @@ mod tests {
         handle.abort();
     }
 
-    /// 门禁放行后落到 `UNIMPLEMENTED`：运维据此区分"配置没开"与"版本还没到"。
+    /// M0–M4 已把 21 个 RPC 全部接线：门禁放行后 handler 真的被执行（不再是
+    /// `UNIMPLEMENTED`）；未交付的能力仍然按 gate 拒绝。
     #[tokio::test]
-    async fn delivered_capability_passes_the_gate_and_hits_the_unwired_handler() {
+    async fn delivered_capability_reaches_the_wired_handler() {
         let (addr, handle) = start_server(
             MqV2State::new(true, MqV2RuntimeConfig::default())
                 .with_implemented([MqV2Capability::Topic]),
@@ -183,16 +184,21 @@ mod tests {
         .await;
         let mut mq = MqClient::connect(format!("http://{addr}")).await.unwrap();
 
-        // `CreateTopic`/`DescribeTopic`/`UpdateTopic` 自 M2/M4 起已接线；未接线的
-        // `DeleteTopic`（M4-2）用来证明"过门禁 → UNIMPLEMENTED"仍然成立。
+        // `CreateTopic` 已接线：没有 region 0 raft 装配 ⇒ FAILED_PRECONDITION
+        // （而不是"handler 未实现"）。
         let err = mq
-            .delete_topic(mq_v2::DeleteTopicRequest {
+            .create_topic(mq_v2::CreateTopicRequest {
                 topic: "orders".into(),
-                expected_topic_epoch: 0,
+                partitions: 1,
+                ..Default::default()
             })
             .await
-            .expect_err("handler is not wired before M4-2");
-        assert_eq!(err.code(), Code::Unimplemented, "{err:?}");
+            .expect_err("no raft assembly");
+        assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+        assert!(
+            !err.message().contains("not implemented"),
+            "a wired handler must not report UNIMPLEMENTED: {err:?}"
+        );
 
         // 未交付的能力仍然按配置/gate 拒绝。
         let err = mq
@@ -202,7 +208,7 @@ mod tests {
                 ..Default::default()
             })
             .await
-            .expect_err("Publish capability is not delivered in M0");
+            .expect_err("Publish capability is not delivered in this state");
         assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
         handle.abort();
     }
