@@ -1,11 +1,13 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-12（M0/M1 落地）
+> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M2 落地）
 >
-> **状态：M0、M1 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
+> **状态：M0、M1、M2 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
-> 耐久性）的存储层证据见 §1。周期 reaper 与指标接线随 M2-1（分片 Leader 循环）。
+> 耐久性）的存储层证据见 §1；M2-1–M2-5（写路径、offset/幂等、上限/原子性、
+> Rust 客户端 + Agent 代理、指标/基准）见 §1 与 §2b。保留回收的周期入口
+> （`mq_v2_reaper_pass`，仅分片 Leader 提案）随 M2-1 接线。
 > M7 GA 不早于 KV-T GA（`docs/adr/0015-kv-t.md` D8），该前置已于
 > 2026-11-11 签字。本文是 MQ v2 gate 状态的**单一事实源**；语义以
 > `docs/adr/0016-mq-v2.md` 为准，工作项与依赖以
@@ -19,7 +21,7 @@
 |:--|:--|:--|:--|
 | M0 契约冻结 | ADR/契约/配置/服务壳；默认拒绝 | ✅ | 见 §2 |
 | M1 日志/元数据/容量 | 分片/段日志/组状态机/topic 元数据/保留 | ✅ | M1-1–M1-6 存储层全部落地：`cargo test -p coord-server --lib storage::mq_log`（14 例：保留截止/配额释放/truncate 重放/重启/副本一致）、`storage::mq_group`（13 例：代际分配/整批 Ack/过期回收/重启/快照）、`storage::mq_topic`（5 例）、`carve_mq`、`cargo test -p coord --bins derive_`、`cargo test -p coord-server --lib test_apply_mq_group_commands`；`check-panics` 0。周期 reaper/指标接线随 M2-1 分片 Leader 循环；整节点备份演练属 M6-5 |
-| M2 Publish | 路由/批量/offset/幂等/配额 | ⏳ 未开始 | — |
+| M2 Publish | 路由/批量/offset/幂等/配额 | ✅ | 见 §2b |
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ⏳ 未开始 | — |
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ⏳ 未开始 | — |
 | M5 工作流 | v2 outbox/durable/审批/trigger | ⏳ 未开始 | — |
@@ -33,7 +35,21 @@
 | M0-1 ADR/设计/任务树 | ✅ | ADR-0016 accepted；设计文档 + 本文件入库；#178 评论链接 8 个 phase issue（#332–#339） |
 | M0-2 `coord.mq.v2` 契约冻结 | ✅ | 两侧 proto 副本 + build 接线；`check-wire-sync.sh` / `check-wire-descriptor.sh`（strict）/ `buf lint` / `check-error-code-contract.sh` / `check-sdk-sync.sh`（PROPOSED 豁免）绿；11 个码 Rust↔Java 逐字一致；19 个 RPC 能力映射进 `rpc_capability`（capability registry 门禁强制） |
 | M0-3 `[mq_v2]` 配置/启动校验 | ✅ | `cargo test -p coord config::tests::test_mq_v2`（5 例）；默认关闭；非法值点名 `mq_v2.*`；`enabled=true` 缺 `[kv_t]` 启动拒绝并点名两项 |
-| M0-4 服务壳/能力门禁 | ✅ | `cargo test -p coord --test mq_v2_g0_test`（4 例：关闭/未交付/已交付三态 + reflection 可见）；`coord_mq_v2_enabled` gauge；v1 数据面不受影响。**Agent `MqV2Proxy` 转发随 M2-4**（转发需要 Rust client；接线前 `services.mq=true` 在 v2 上仍启动期 fail-closed，避免暴露恒失败的服务） |
+| M0-4 服务壳/能力门禁 | ✅ | `cargo test -p coord --test mq_v2_g0_test`（4 例：关闭/未交付/已交付三态 + reflection 可见）；`coord_mq_v2_enabled` gauge；v1 数据面不受影响。Agent `MqV2Proxy` 已随 M2-4 接线（见 §2b） |
+
+### M2 分项（Publish 写路径）
+
+| 项 | 状态 | 证据 / 未达标原因 |
+|:--|:--|:--|
+| M2-1 Publish/PublishBatch + 路由/批量 | ✅ | `cargo test -p coord-server --lib mq_v2::publish`（8 例：topic/代际/分区校验、多 Raft 装配 fail-closed、FIFO/64 条上限、拒绝码、int64 溢出）；`cargo test -p coord --test mq_v2_m2_publish_test`（11 例含提交后可见、并发 offset=`0..64`、批深度 < 请求数、保留回收）；非 Leader → `NOT_LEADER` + `coord-leader-hint` 由 `mq_v2_m2_cluster_test` 钉住 |
+| M2-2 offset/顺序/幂等 | ✅ | 同一集成文件的 `publish_offsets_are_unique_and_monotonic_under_concurrency`、`duplicate_idempotency_key_returns_the_first_offset`、`publish_after_retention_truncation_reuses_the_idempotency_key`；apply 层（M1-2）的恢复/换届去重由 `cargo test -p coord-server --lib storage::mq_log` 覆盖 |
+| M2-3 上限/错误/原子性 | ✅ | `publish_batch_is_atomic_when_one_entry_is_oversized`、`publish_batch_over_the_quota_writes_nothing`、`publish_batch_rejects_empty_and_over_64_entries`、`topic_epoch_is_enforced_on_the_write_path`；错误码/trailer 只按码断言（`error_code_of`） |
+| M2-4 Agent 代理 + Rust 客户端 | ✅ | `cargo test -p coord-client --lib mq_v2`（5 例：hint 解析、分区缓存、批上限、配置往返）；`cargo test -p coord-agent --test agent_v2_mode_test`（`services.mq=true` + v2 ⇒ 代理注册、无后端时 `UNAVAILABLE`）；`cargo test -p coord --test mq_v2_m2_cluster_test -- --test-threads=1`（真实 3 节点：follower hint、客户端自动重路由、Agent 端到端发布） |
+| M2-5 指标/基准 | ✅ | 指标写入点：`coord_mq_v2_publish_{requests,entries,bytes,duplicates,latency_us,not_leader,rejected}`、`coord_mq_v2_append_{batches,requests}`、`coord_mq_v2_retention_{truncate,segments}`（`cargo test -p coord-server --lib metrics::tests::test_metrics_mq_v2`）；基准入口 `cargo test --release -p coord --test mq_v2_bench -- --ignored --nocapture --test-threads=1`（本机：顺序 445 ops/s、并发 2115 ops/s、平均批深度 5.86 req/entry；数字进 M6-3 报告） |
+
+周期保留回收（M1-5 的「周期」项）由 `mq_v2_reaper_pass` 接线：只在分片 Leader 上按
+topic 保留期提案 `MqTruncate`，无到期段不提案；关闭态零副作用
+（`cargo test -p coord-server --lib mq_v2::reaper`、`retention_reaper_reclaims_expired_segments_on_the_leader`）。
 
 ## 3. 关闭 M7 的硬条件
 

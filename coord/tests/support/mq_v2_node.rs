@@ -29,7 +29,7 @@ use coord_server::raft::type_config::{
 use coord_server::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode};
 use coord_server::server::CoordNode;
 use coord_server::storage::compaction::CompactionConfig;
-use coord_server::storage::mq_log::MqTruncate;
+use coord_server::storage::mq_log::{MqAppendBatch, MqAppendEntry, MqAppendRequest, MqTruncate};
 use coord_server::storage::mq_topic::{MqTopicMeta, MqTopicOp, MqTopicOutcome};
 use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
@@ -303,6 +303,58 @@ impl MqV2Node {
         }
     }
 
+    /// 用**指定的墙钟**向分区追加一批消息（测试用：让段年龄落在保留期之外）。
+    ///
+    /// 生产路径的 `now_ms` 由 handler 取当前时间；这里直接提案是为了让保留回收
+    /// 能在测试里被确定性触发（apply 只使用命令携带的时间）。
+    pub async fn append_at(
+        &self,
+        meta: &MqTopicMeta,
+        partition: u32,
+        now_ms: i64,
+        payloads: &[Vec<u8>],
+    ) -> u64 {
+        let shard_id = meta.shard_of_partition[partition as usize];
+        let runtime = self
+            .manager
+            .route_runtime(&mq_log_shard_prefix(shard_id))
+            .unwrap_or_else(|err| panic!("no runtime for shard {shard_id}: {err}"));
+        let response = runtime
+            .raft
+            .client_write(Command::MqAppendBatch(MqAppendBatch {
+                shard_id,
+                now_ms,
+                requests: vec![MqAppendRequest {
+                    topic_id: meta.topic_id,
+                    partition,
+                    max_message_bytes: meta.config.max_message_bytes,
+                    max_bytes: meta.config.max_bytes,
+                    segment_bytes: meta.config.segment_bytes,
+                    entries: payloads
+                        .iter()
+                        .map(|payload| MqAppendEntry {
+                            key: Vec::new(),
+                            payload: payload.clone(),
+                            idempotency_key: String::new(),
+                            headers: Default::default(),
+                            producer: "reaper-test".to_string(),
+                        })
+                        .collect(),
+                }],
+            }))
+            .await
+            .expect("propose append batch");
+        match response.response() {
+            RaftResponse::MqAppendBatch { response } => match &response.requests[0] {
+                coord_server::storage::mq_log::MqAppendOutcome::Applied(appended) => {
+                    appended.entries.len() as u64
+                }
+                other => panic!("append batch rejected: {other:?}"),
+            },
+            other => panic!("unexpected append response: {other:?}"),
+        }
+    }
+
     /// 分区的已 apply 边界（按分区所属分片的本地副本读）。
     pub fn bounds(
         &self,
@@ -320,22 +372,25 @@ impl MqV2Node {
             .expect("read partition bounds")
     }
 
+    /// 一个 `coord_mq_v2_*` 计数器的当前值（0 = 未出现）。
+    pub fn metric(&self, name: &str) -> u64 {
+        let metrics = self.node.metrics().expect("fixture injects metrics");
+        metrics
+            .render_prometheus_text()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(name)?
+                    .strip_prefix(' ')
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+            })
+            .unwrap_or(0)
+    }
+
     /// `(append_batches, append_requests)`：批量摊薄 fsync 的证据。
     pub fn append_stats(&self) -> (u64, u64) {
-        let metrics = self.node.metrics().expect("fixture injects metrics");
-        let text = metrics.render_prometheus_text();
-        let read = |name: &str| {
-            text.lines()
-                .find_map(|line| {
-                    line.strip_prefix(name)?
-                        .strip_prefix(' ')
-                        .and_then(|value| value.trim().parse::<u64>().ok())
-                })
-                .unwrap_or(0)
-        };
         (
-            read("coord_mq_v2_append_batches_total"),
-            read("coord_mq_v2_append_requests_total"),
+            self.metric("coord_mq_v2_append_batches_total"),
+            self.metric("coord_mq_v2_append_requests_total"),
         )
     }
 }

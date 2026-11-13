@@ -3513,6 +3513,35 @@ async fn run_server(
 
     let node = Arc::new(node);
 
+    // MQ v2 保留回收（M1-5 的段级 `MqTruncate` 的周期入口，仅在分片 Leader 上提案）：
+    // `[mq_v2].enabled=false` 时不启动任何任务（ADR-0001/ADR-0016 D11）。
+    if cfg.mq_v2.enabled {
+        let reaper = Arc::clone(&node);
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(coord_server::mq_v2::reaper::MQ_V2_REAPER_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let stats = reaper
+                            .mq_v2_reaper_pass(coord_server::mq_v2::now_ms())
+                            .await;
+                        if stats.truncate_proposals > 0 {
+                            tracing::info!(
+                                truncate_proposals = stats.truncate_proposals,
+                                dropped_segments = stats.dropped_segments,
+                                dropped_bytes = stats.dropped_bytes,
+                                "mq_v2 retention pass reclaimed segments"
+                            );
+                        }
+                    }
+                    _ = shutdown_signal() => break,
+                }
+            }
+        });
+    }
+
     // 启动 Lease 过期轮询后台任务（每 200ms 清理过期 Lease 绑定的 KV key；仅 leader 执行）
     node.start_lease_expiry_worker();
     // 启动 Lease failover reconciler（成为 leader 时从状态机重建）

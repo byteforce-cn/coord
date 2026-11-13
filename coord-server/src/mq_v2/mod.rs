@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub mod publish;
+pub mod reaper;
 mod services;
 pub mod topics;
 
@@ -25,7 +26,7 @@ use crate::server::CoordNode;
 use crate::storage::region_table::mq_log_shard_prefix;
 
 /// 提议方取一次墙钟写进命令（apply 不读时钟；ADR-0016 D10 的确定性要求）。
-pub(crate) fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
