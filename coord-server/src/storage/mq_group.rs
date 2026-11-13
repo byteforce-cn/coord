@@ -143,6 +143,15 @@ pub struct MqGroupReap {
     pub now_ms: i64,
 }
 
+/// 空组 + 位点过 TTL 的回收（Leader 周期提案；apply 只按命令携带的时间判断）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqGroupGc {
+    pub shard_id: u32,
+    pub now_ms: i64,
+    /// 位点 `updated_at_ms` 早于 `now_ms - offset_ttl_ms` 才算过期。
+    pub offset_ttl_ms: u64,
+}
+
 /// 批量提交位点（`Ack` = 一条）。契约要求整批校验、不部分提交。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MqGroupAck {
@@ -170,6 +179,8 @@ pub enum MqGroupOp {
     Leave(MqGroupLeave),
     Reap(MqGroupReap),
     Ack(MqGroupAck),
+    /// 末尾追加（postcard 兼容既有日志）：空组 + 过 TTL 位点的回收。
+    Gc(MqGroupGc),
 }
 
 impl MqGroupOp {
@@ -180,6 +191,7 @@ impl MqGroupOp {
             Self::Leave(op) => op.shard_id,
             Self::Reap(op) => op.shard_id,
             Self::Ack(op) => op.shard_id,
+            Self::Gc(op) => op.shard_id,
         }
     }
 }
@@ -228,6 +240,13 @@ pub struct MqGroupReaped {
     pub groups_changed: u32,
 }
 
+/// 组 TTL 回收的产出。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqGroupGcResult {
+    pub groups_removed: u32,
+    pub offsets_removed: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MqGroupAcked {
     pub results: Vec<MqGroupAckResult>,
@@ -271,6 +290,8 @@ pub enum MqGroupResult {
     Reaped(MqGroupReaped),
     Acked(MqGroupAcked),
     Rejected(MqGroupRejection),
+    /// 末尾追加：组 TTL 回收（与 `MqGroupOp::Gc` 对应）。
+    Gced(MqGroupGcResult),
 }
 
 /// 分片级 apply 水位 + 最近一次结果（同一 Raft 条目重复 apply 返回首次结果）。
@@ -431,7 +452,52 @@ fn apply_group_op(tx: &mut dyn WriteTx, op: &MqGroupOp) -> Result<MqGroupResult>
         MqGroupOp::Leave(leave) => apply_leave(tx, leave),
         MqGroupOp::Reap(reap) => apply_reap(tx, reap),
         MqGroupOp::Ack(ack) => apply_ack(tx, ack),
+        MqGroupOp::Gc(gc) => apply_gc(tx, gc),
     }
+}
+
+/// 回收空组：成员为空且位点全部过 TTL（没有位点 ⇒ 立即回收）。
+///
+/// 删组行与位点行在同一条 Raft 条目的 apply 事务里，重放幂等（第二次扫不到）。
+fn apply_gc(tx: &mut dyn WriteTx, op: &MqGroupGc) -> Result<MqGroupResult> {
+    let rows = tx.iter_prefix(TABLE_MQ_META, &[META_GROUP])?;
+    let mut summary = MqGroupGcResult::default();
+    let ttl_ms = i64::try_from(op.offset_ttl_ms).unwrap_or(i64::MAX);
+    let deadline = op.now_ms.saturating_sub(ttl_ms);
+    for (key, value) in rows {
+        let state = decode::<MqGroupState>(&value)?;
+        if !state.members.is_empty() {
+            continue;
+        }
+        let Some(name) = key
+            .strip_prefix(&[META_GROUP])
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            continue;
+        };
+        let offsets = tx.iter_prefix(TABLE_MQ_META, &offset_prefix(name))?;
+        let mut offset_rows = Vec::with_capacity(offsets.len());
+        let mut all_expired = true;
+        for (offset_key_bytes, offset_value) in offsets {
+            let offset = decode::<MqGroupOffset>(&offset_value)?;
+            if offset.updated_at_ms >= deadline {
+                all_expired = false;
+            }
+            offset_rows.push((offset_key_bytes, offset));
+        }
+        if !all_expired {
+            continue;
+        }
+        for (offset_key_bytes, _) in &offset_rows {
+            tx.remove(TABLE_MQ_META, offset_key_bytes)?;
+        }
+        tx.remove(TABLE_MQ_META, &key)?;
+        summary.groups_removed = summary.groups_removed.saturating_add(1);
+        summary.offsets_removed = summary
+            .offsets_removed
+            .saturating_add(u32::try_from(offset_rows.len()).unwrap_or(u32::MAX));
+    }
+    Ok(MqGroupResult::Gced(summary))
 }
 
 /// 校验并把订阅 canonical 化（按 topic 名排序）；非法输入 = 用户级拒绝。
@@ -1480,6 +1546,132 @@ mod tests {
         let state = storage.mq_group("billing").unwrap().unwrap();
         assert_eq!(state.members.len(), 1);
         assert_eq!(state.generation, 1);
+    }
+
+    #[test]
+    fn gc_removes_empty_groups_only_after_the_offset_ttl() {
+        let (_dir, storage) = setup();
+        // 组 A：join → ack → leave（空组，位点在 TTL 内 → 不回收）。
+        let member_a = joined(apply(
+            &storage,
+            MqGroupOp::Join(join("gc-a", "", vec![topic("t", 1, 1)], 30_000, 1_000)),
+            1,
+        ));
+        assert_eq!(
+            apply(
+                &storage,
+                MqGroupOp::Ack(MqGroupAck {
+                    shard_id: 0,
+                    group: "gc-a".to_string(),
+                    member_id: member_a.member_id.clone(),
+                    generation: member_a.generation,
+                    entries: vec![MqGroupAckEntry {
+                        topic_id: 1,
+                        partition: 0,
+                        offset: 4,
+                    }],
+                    now_ms: 2_000,
+                }),
+                2,
+            ),
+            MqGroupResult::Acked(MqGroupAcked {
+                results: vec![MqGroupAckResult {
+                    topic_id: 1,
+                    partition: 0,
+                    committed_offset: 5,
+                }],
+            })
+        );
+        let left = apply(
+            &storage,
+            MqGroupOp::Leave(MqGroupLeave {
+                shard_id: 0,
+                group: "gc-a".to_string(),
+                member_id: member_a.member_id.clone(),
+                generation: member_a.generation,
+                now_ms: 3_000,
+            }),
+            3,
+        );
+        assert!(matches!(left, MqGroupResult::Left(_)));
+
+        // 组 B：只有成员（无位点）——leave 后立即回收（无位点可等）。
+        let member_b = joined(apply(
+            &storage,
+            MqGroupOp::Join(join("gc-b", "", vec![topic("t", 1, 1)], 30_000, 1_000)),
+            4,
+        ));
+        assert!(matches!(
+            apply(
+                &storage,
+                MqGroupOp::Leave(MqGroupLeave {
+                    shard_id: 0,
+                    group: "gc-b".to_string(),
+                    member_id: member_b.member_id,
+                    generation: member_b.generation,
+                    now_ms: 3_000,
+                }),
+                5,
+            ),
+            MqGroupResult::Left(_)
+        ));
+
+        // TTL 内：空组的位点还在 → 不回收。
+        let kept = apply(
+            &storage,
+            MqGroupOp::Gc(MqGroupGc {
+                shard_id: 0,
+                now_ms: 10_000,
+                offset_ttl_ms: 60_000,
+            }),
+            6,
+        );
+        assert_eq!(
+            kept,
+            MqGroupResult::Gced(MqGroupGcResult {
+                groups_removed: 1,
+                offsets_removed: 0,
+            }),
+            "no offsets ⇒ collected immediately; fresh offsets are kept"
+        );
+        assert!(storage.mq_group("gc-a").unwrap().is_some());
+        assert_eq!(storage.mq_group_offsets("gc-a").unwrap().len(), 1);
+        assert!(storage.mq_group("gc-b").unwrap().is_none());
+
+        // TTL 外：空组与其位点一起回收。
+        let collected = apply(
+            &storage,
+            MqGroupOp::Gc(MqGroupGc {
+                shard_id: 0,
+                now_ms: 100_000,
+                offset_ttl_ms: 60_000,
+            }),
+            7,
+        );
+        assert_eq!(
+            collected,
+            MqGroupResult::Gced(MqGroupGcResult {
+                groups_removed: 1,
+                offsets_removed: 1,
+            })
+        );
+        assert!(storage.mq_group("gc-a").unwrap().is_none());
+        assert!(storage.mq_group_offsets("gc-a").unwrap().is_empty());
+
+        // 重放同一条命令：幂等（没有可回收的组）。
+        assert_eq!(
+            storage
+                .apply_mq_group_op(
+                    &MqGroupOp::Gc(MqGroupGc {
+                        shard_id: 0,
+                        now_ms: 100_000,
+                        offset_ttl_ms: 60_000,
+                    }),
+                    applied(7),
+                )
+                .unwrap(),
+            collected
+        );
     }
 
     #[test]

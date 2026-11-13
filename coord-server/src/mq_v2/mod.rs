@@ -13,6 +13,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+pub mod consume;
+pub mod groups;
 pub mod publish;
 pub mod reaper;
 mod services;

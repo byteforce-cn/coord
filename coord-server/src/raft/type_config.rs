@@ -859,6 +859,7 @@ fn mq_group_op_label(op: &crate::storage::mq_group::MqGroupOp) -> &'static str {
         MqGroupOp::Leave(_) => "leave",
         MqGroupOp::Reap(_) => "reap",
         MqGroupOp::Ack(_) => "ack",
+        MqGroupOp::Gc(_) => "gc",
     }
 }
 

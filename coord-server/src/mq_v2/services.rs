@@ -114,7 +114,7 @@ impl Mq for CoordNode {
         self.mq_v2().gate(MqV2Capability::Publish)?;
         let request = request.into_inner();
         let target =
-            self.mq_publish_target(&request.topic, request.partition, request.topic_epoch)?;
+            self.mq_partition_target(&request.topic, request.partition, request.topic_epoch)?;
         let appended = self
             .mq_append(
                 &target,
@@ -143,7 +143,7 @@ impl Mq for CoordNode {
         // 条数上限先于 topic 查找校验：超限/空批与 topic 是否存在无关。
         validate_batch_entries(request.entries.len())?;
         let target =
-            self.mq_publish_target(&request.topic, request.partition, request.topic_epoch)?;
+            self.mq_partition_target(&request.topic, request.partition, request.topic_epoch)?;
         let entries = request
             .entries
             .into_iter()
@@ -166,65 +166,89 @@ impl Mq for CoordNode {
 
     async fn poll(
         &self,
-        _request: Request<mq_v2::PollRequest>,
+        request: Request<mq_v2::PollRequest>,
     ) -> Result<Response<mq_v2::PollResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        // `Poll` 读已提交状态、不提案（长轮询的等待在 `mq_poll` 内）。
+        Ok(Response::new(self.mq_poll(request.into_inner()).await?))
     }
 
     async fn ack(
         &self,
-        _request: Request<mq_v2::AckRequest>,
+        request: Request<mq_v2::AckRequest>,
     ) -> Result<Response<mq_v2::AckResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        Ok(Response::new(self.mq_ack(request.into_inner()).await?))
     }
 
     async fn ack_batch(
         &self,
-        _request: Request<mq_v2::AckBatchRequest>,
+        request: Request<mq_v2::AckBatchRequest>,
     ) -> Result<Response<mq_v2::AckBatchResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        Ok(Response::new(
+            self.mq_ack_batch(request.into_inner()).await?,
+        ))
     }
 
     async fn join_group(
         &self,
-        _request: Request<mq_v2::JoinGroupRequest>,
+        request: Request<mq_v2::JoinGroupRequest>,
     ) -> Result<Response<mq_v2::JoinGroupResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        Ok(Response::new(
+            self.mq_join_group(request.into_inner()).await?,
+        ))
     }
 
     async fn heartbeat(
         &self,
-        _request: Request<mq_v2::HeartbeatRequest>,
+        request: Request<mq_v2::HeartbeatRequest>,
     ) -> Result<Response<mq_v2::HeartbeatResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        Ok(Response::new(
+            self.mq_heartbeat(request.into_inner()).await?,
+        ))
     }
 
     async fn leave_group(
         &self,
-        _request: Request<mq_v2::LeaveGroupRequest>,
+        request: Request<mq_v2::LeaveGroupRequest>,
     ) -> Result<Response<mq_v2::LeaveGroupResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        Ok(Response::new(
+            self.mq_leave_group(request.into_inner()).await?,
+        ))
     }
 
     async fn get_committed_offsets(
         &self,
-        _request: Request<mq_v2::GetCommittedOffsetsRequest>,
+        request: Request<mq_v2::GetCommittedOffsetsRequest>,
     ) -> Result<Response<mq_v2::GetCommittedOffsetsResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        Ok(Response::new(
+            self.mq_get_committed_offsets(request.into_inner()).await?,
+        ))
     }
 
     async fn describe_group(
         &self,
-        _request: Request<mq_v2::DescribeGroupRequest>,
+        request: Request<mq_v2::DescribeGroupRequest>,
     ) -> Result<Response<mq_v2::DescribeGroupResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        Ok(Response::new(
+            self.mq_describe_group(request.into_inner()).await?,
+        ))
     }
 
     async fn list_groups(
         &self,
-        _request: Request<mq_v2::ListGroupsRequest>,
+        request: Request<mq_v2::ListGroupsRequest>,
     ) -> Result<Response<mq_v2::ListGroupsResponse>, Status> {
-        gated!(self, MqV2Capability::Consume)
+        self.mq_v2().gate(MqV2Capability::Consume)?;
+        Ok(Response::new(
+            self.mq_list_groups(request.into_inner()).await?,
+        ))
     }
 
     type SubscribeStream = ReceiverStream<Result<mq_v2::Message, Status>>;
