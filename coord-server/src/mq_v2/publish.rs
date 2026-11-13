@@ -49,6 +49,9 @@ pub(crate) struct PendingAppend {
 pub(crate) struct ShardBatcher {
     queue: parking_lot::Mutex<Vec<PendingAppend>>,
     flush: tokio::sync::Mutex<()>,
+    /// 提交完成通知：长轮询（`Poll`）据此在本分片有新消息时立即醒来。
+    /// `notify_waiters` 不存 permit，消费端用兜底超时（见 `consume.rs`）避免丢唤醒。
+    appended: tokio::sync::Notify,
 }
 
 impl ShardBatcher {
@@ -70,6 +73,11 @@ impl ShardBatcher {
     /// 串行化同分片的 Raft 提案。
     pub(crate) async fn flush(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.flush.lock().await
+    }
+
+    /// 等待本分片的下一次提交（长轮询唤醒）。
+    pub(crate) async fn appended(&self) {
+        self.appended.notified().await;
     }
 }
 
@@ -100,7 +108,8 @@ impl PublishBatchers {
 }
 
 /// 一次 publish 的路由与上限（topic 配置已展开，apply 直接可用）。
-pub(crate) struct MqPublishTarget {
+pub(crate) struct MqPartitionTarget {
+    pub(crate) topic_name: String,
     pub(crate) topic_id: u64,
     pub(crate) partition: u32,
     pub(crate) shard_id: u32,
@@ -111,9 +120,10 @@ pub(crate) struct MqPublishTarget {
     pub(crate) segment_bytes: u64,
 }
 
-impl std::fmt::Debug for MqPublishTarget {
+impl std::fmt::Debug for MqPartitionTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MqPublishTarget")
+        f.debug_struct("MqPartitionTarget")
+            .field("topic_name", &self.topic_name)
             .field("topic_id", &self.topic_id)
             .field("partition", &self.partition)
             .field("shard_id", &self.shard_id)
@@ -129,12 +139,12 @@ impl CoordNode {
     /// 解析写目标：topic 存在 / 代际匹配 / 分区范围 / 分区所属分片的运行时。
     ///
     /// 只读 region 0 的 topic 表与 Region 路由表，不读分片状态、不提案。
-    pub(crate) fn mq_publish_target(
+    pub(crate) fn mq_partition_target(
         &self,
         topic: &str,
         partition: i32,
         topic_epoch: u64,
-    ) -> Result<MqPublishTarget, Status> {
+    ) -> Result<MqPartitionTarget, Status> {
         let table = self.mq_topic_table()?;
         let Some(meta) = table.topic(topic) else {
             return Err(attach(
@@ -175,7 +185,8 @@ impl CoordNode {
             })?;
         let runtime = self.mq_shard_runtime(shard_id)?;
         let region_id = runtime.region_id();
-        Ok(MqPublishTarget {
+        Ok(MqPartitionTarget {
+            topic_name: meta.name.clone(),
             topic_id: meta.topic_id,
             partition: partition_u32,
             shard_id,
@@ -193,7 +204,7 @@ impl CoordNode {
     /// 记录：请求数/条数/字节/幂等命中/延迟与拒绝码都在同一次调用内闭合。
     pub(crate) async fn mq_append(
         &self,
-        target: &MqPublishTarget,
+        target: &MqPartitionTarget,
         entries: Vec<MqAppendEntry>,
     ) -> Result<MqAppended, Status> {
         let started = std::time::Instant::now();
@@ -225,7 +236,7 @@ impl CoordNode {
 
     async fn mq_append_committed(
         &self,
-        target: &MqPublishTarget,
+        target: &MqPartitionTarget,
         entries: Vec<MqAppendEntry>,
     ) -> Result<MqAppended, Status> {
         self.mq_ensure_shard_leader(target).await?;
@@ -257,7 +268,10 @@ impl CoordNode {
     /// 非 Leader 快速失败（hint 指向该 Region 的当前 Leader）。
     ///
     /// 与真实提案之间的领导权变化由 `client_write` 的 `ForwardToLeader` 兜底。
-    async fn mq_ensure_shard_leader(&self, target: &MqPublishTarget) -> Result<(), Status> {
+    pub(crate) async fn mq_ensure_shard_leader(
+        &self,
+        target: &MqPartitionTarget,
+    ) -> Result<(), Status> {
         let leader = target.runtime.raft.current_leader().await;
         if leader == Some(self.node_id) {
             return Ok(());
@@ -272,7 +286,7 @@ impl CoordNode {
     }
 
     /// 取批 → 提案 → 回填结果，直到队列为空。
-    async fn mq_flush_shard(&self, batcher: &ShardBatcher, target: &MqPublishTarget) {
+    async fn mq_flush_shard(&self, batcher: &ShardBatcher, target: &MqPartitionTarget) {
         let _guard = batcher.flush().await;
         loop {
             let batch = batcher.take_batch();
@@ -314,6 +328,7 @@ impl CoordNode {
                 },
                 Err(status) => Err(status),
             };
+            let committed = outcomes.is_ok();
             match outcomes {
                 Ok(outcomes) => {
                     for (reply, outcome) in replies.into_iter().zip(outcomes) {
@@ -331,6 +346,10 @@ impl CoordNode {
                         let _ = reply.send(Err(status.clone()));
                     }
                 }
+            }
+            if committed {
+                // 唤醒本分片的长轮询（`notify_waiters` 不排队 permit，Poll 侧有兜底）。
+                batcher.appended.notify_waiters();
             }
         }
     }
@@ -456,7 +475,7 @@ mod tests {
     fn publish_target_rejects_unknown_topic() {
         let (_dir, node) = node();
         let status = node
-            .mq_publish_target("missing", 0, 0)
+            .mq_partition_target("missing", 0, 0)
             .expect_err("unknown topic must be rejected");
         assert_eq!(status.code(), Code::NotFound);
         assert_eq!(
@@ -477,7 +496,7 @@ mod tests {
             .expect("row")
             .clone();
         let status = node
-            .mq_publish_target("orders", 0, meta.epoch + 1)
+            .mq_partition_target("orders", 0, meta.epoch + 1)
             .expect_err("stale epoch must be rejected");
         assert_eq!(status.code(), Code::Aborted);
         assert_eq!(
@@ -493,7 +512,7 @@ mod tests {
         seed_topic(&node, "orders", 2);
         for partition in [-1, 2] {
             let status = node
-                .mq_publish_target("orders", partition, 0)
+                .mq_partition_target("orders", partition, 0)
                 .expect_err("partition must be rejected");
             assert_eq!(status.code(), Code::NotFound, "partition {partition}");
             assert_eq!(
@@ -509,7 +528,7 @@ mod tests {
         let (_dir, node) = node();
         seed_topic(&node, "orders", 2);
         let status = node
-            .mq_publish_target("orders", 0, 0)
+            .mq_partition_target("orders", 0, 0)
             .expect_err("missing region assembly must fail closed");
         assert_eq!(status.code(), Code::FailedPrecondition);
         assert_eq!(

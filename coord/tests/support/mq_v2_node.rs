@@ -29,11 +29,18 @@ use coord_server::raft::type_config::{
 use coord_server::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode};
 use coord_server::server::CoordNode;
 use coord_server::storage::compaction::CompactionConfig;
-use coord_server::storage::mq_log::{MqAppendBatch, MqAppendEntry, MqAppendRequest, MqTruncate};
+use coord_server::storage::mq_group::{
+    MqGroupJoin, MqGroupJoined, MqGroupOffset, MqGroupOp, MqGroupResult, MqGroupState, MqGroupTopic,
+};
+use coord_server::storage::mq_log::{
+    MqAppendBatch, MqAppendEntry, MqAppendRequest, MqMoveToDlq, MqTruncate,
+};
 use coord_server::storage::mq_topic::{MqTopicMeta, MqTopicOp, MqTopicOutcome};
 use coord_server::storage::mvcc::{MvccStorage, RevisionMode};
 use coord_server::storage::redb_backend::RedbBackend;
-use coord_server::storage::region_table::{carve_mq_regions, mq_log_shard_prefix, RegionTable};
+use coord_server::storage::region_table::{
+    carve_mq_regions, mq_group_shard_prefix, mq_log_shard_prefix, RegionTable,
+};
 use coord_server::storage::snapshot::SnapshotTracker;
 use tempfile::TempDir;
 use tonic::transport::{Channel, Server};
@@ -214,7 +221,11 @@ impl MqV2Node {
                     ..MqV2RuntimeConfig::default()
                 },
             )
-            .with_implemented([MqV2Capability::Topic, MqV2Capability::Publish]),
+            .with_implemented([
+                MqV2Capability::Topic,
+                MqV2Capability::Publish,
+                MqV2Capability::Consume,
+            ]),
         );
         let node = Arc::new(node);
 
@@ -353,6 +364,114 @@ impl MqV2Node {
             },
             other => panic!("unexpected append response: {other:?}"),
         }
+    }
+
+    /// 把一条消息移入 DLQ（测试用：制造 `Poll` 必须跳过的 tombstone）。
+    pub async fn move_to_dlq(
+        &self,
+        meta: &MqTopicMeta,
+        partition: u32,
+        offset: u64,
+    ) -> coord_server::storage::mq_log::MqMoveToDlqOutcome {
+        let shard_id = meta.shard_of_partition[partition as usize];
+        let runtime = self
+            .manager
+            .route_runtime(&mq_log_shard_prefix(shard_id))
+            .unwrap_or_else(|err| panic!("no runtime for shard {shard_id}: {err}"));
+        let response = runtime
+            .raft
+            .client_write(Command::MqMoveToDlq(MqMoveToDlq {
+                shard_id,
+                topic_id: meta.topic_id,
+                partition,
+                offset,
+                reason: "test".to_string(),
+                detail: String::new(),
+                now_ms: coord_server::mq_v2::now_ms(),
+            }))
+            .await
+            .expect("propose move to dlq");
+        match response.response() {
+            RaftResponse::MqMoveToDlq { outcome } => outcome.clone(),
+            other => panic!("unexpected move-to-dlq response: {other:?}"),
+        }
+    }
+
+    /// 提交一条组命令（测试用：绕过 M3-3 的 handler，直接驱动组状态机）。
+    pub async fn propose_group(&self, op: MqGroupOp) -> MqGroupResult {
+        let shard_id = op.shard_id();
+        let runtime = self
+            .manager
+            .route_runtime(&mq_group_shard_prefix(shard_id))
+            .unwrap_or_else(|err| panic!("no runtime for group shard {shard_id}: {err}"));
+        let response = runtime
+            .raft
+            .client_write(Command::MqGroup(op))
+            .await
+            .expect("propose group op");
+        match response.response() {
+            RaftResponse::MqGroup { result } => result.clone(),
+            other => panic!("unexpected group response: {other:?}"),
+        }
+    }
+
+    /// 直接在组 shard 上 Join（M3-2 的 Ack 测试先拿到有效代际/分配）。
+    pub async fn join_direct(
+        &self,
+        group: &str,
+        member_id: &str,
+        topic: &str,
+        partitions: u32,
+    ) -> MqGroupJoined {
+        let meta = self.topic_row(topic);
+        let shard_id = coord_server::mq_v2::groups::mq_group_shard(
+            group,
+            self.node.mq_v2().config().group_shards,
+        );
+        let result = self
+            .propose_group(MqGroupOp::Join(MqGroupJoin {
+                shard_id,
+                group: group.to_string(),
+                member_id: member_id.to_string(),
+                topics: vec![MqGroupTopic {
+                    topic: topic.to_string(),
+                    topic_id: meta.topic_id,
+                    partitions,
+                }],
+                session_timeout_ms: 30_000,
+                now_ms: coord_server::mq_v2::now_ms(),
+            }))
+            .await;
+        match result {
+            MqGroupResult::Joined(joined) => joined,
+            other => panic!("join rejected: {other:?}"),
+        }
+    }
+
+    fn group_runtime(&self, group: &str) -> Arc<coord_server::raft::RegionRuntime> {
+        let shard_id = coord_server::mq_v2::groups::mq_group_shard(
+            group,
+            self.node.mq_v2().config().group_shards,
+        );
+        self.manager
+            .route_runtime(&mq_group_shard_prefix(shard_id))
+            .unwrap_or_else(|err| panic!("no runtime for group shard {shard_id}: {err}"))
+    }
+
+    /// 组的权威状态（组 shard 本地副本）。
+    pub fn group_state(&self, group: &str) -> Option<MqGroupState> {
+        self.group_runtime(group)
+            .mvcc
+            .mq_group(group)
+            .expect("read group state")
+    }
+
+    /// 组的已提交位点（组 shard 本地副本）。
+    pub fn group_offsets(&self, group: &str) -> Vec<MqGroupOffset> {
+        self.group_runtime(group)
+            .mvcc
+            .mq_group_offsets(group)
+            .expect("read group offsets")
     }
 
     /// 分区的已 apply 边界（按分区所属分片的本地副本读）。

@@ -104,6 +104,30 @@ struct MetricsInner {
     pub mq_v2_retention_truncate_total: AtomicU64,
     /// 保留回收删除的段数
     pub mq_v2_retention_segments_total: AtomicU64,
+    /// `Poll` 请求数（含长轮询超时与越界拒绝）
+    pub mq_v2_poll_requests_total: AtomicU64,
+    /// `Poll` 返回的消息条数
+    pub mq_v2_poll_messages_total: AtomicU64,
+    /// `Poll` 返回的 key+payload 字节数
+    pub mq_v2_poll_bytes_total: AtomicU64,
+    /// 长轮询/立即返回时结果为空批的次数
+    pub mq_v2_poll_empty_total: AtomicU64,
+    /// `OFFSET_OUT_OF_RANGE` 拒绝次数（需要显式 reset policy）
+    pub mq_v2_poll_out_of_range_total: AtomicU64,
+    /// `Ack`/`AckBatch` 请求数
+    pub mq_v2_ack_requests_total: AtomicU64,
+    /// 已提交的位点条目数
+    pub mq_v2_ack_entries_total: AtomicU64,
+    /// 组命令拒绝次数（`NOT_GROUP_MEMBER`/`GROUP_EPOCH_STALE` 等）
+    pub mq_v2_ack_rejected_total: AtomicU64,
+    /// `JoinGroup` 次数
+    pub mq_v2_group_joins_total: AtomicU64,
+    /// `JoinGroup` 中推进代际（触发再平衡）的次数
+    pub mq_v2_group_rebalances_total: AtomicU64,
+    /// 会话过期被回收的成员数
+    pub mq_v2_group_expired_members_total: AtomicU64,
+    /// 组 TTL 回收删除的组数
+    pub mq_v2_group_gc_removed_total: AtomicU64,
     /// 客户端观测到的 leadership 丢失次数（旧批随后被丢弃）
     pub tso_leader_changes_total: AtomicU64,
     /// v2 KV 写被 `CommitRejected` 拒绝次数（D11.4；不静默写）
@@ -319,6 +343,18 @@ impl Default for MetricsInner {
             mq_v2_publish_rejected_total: AtomicU64::new(0),
             mq_v2_retention_truncate_total: AtomicU64::new(0),
             mq_v2_retention_segments_total: AtomicU64::new(0),
+            mq_v2_poll_requests_total: AtomicU64::new(0),
+            mq_v2_poll_messages_total: AtomicU64::new(0),
+            mq_v2_poll_bytes_total: AtomicU64::new(0),
+            mq_v2_poll_empty_total: AtomicU64::new(0),
+            mq_v2_poll_out_of_range_total: AtomicU64::new(0),
+            mq_v2_ack_requests_total: AtomicU64::new(0),
+            mq_v2_ack_entries_total: AtomicU64::new(0),
+            mq_v2_ack_rejected_total: AtomicU64::new(0),
+            mq_v2_group_joins_total: AtomicU64::new(0),
+            mq_v2_group_rebalances_total: AtomicU64::new(0),
+            mq_v2_group_expired_members_total: AtomicU64::new(0),
+            mq_v2_group_gc_removed_total: AtomicU64::new(0),
             tso_current: AtomicU64::new(0),
             tso_batch_remaining: AtomicU64::new(0),
             tso_refill_failures_total: AtomicU64::new(0),
@@ -768,6 +804,72 @@ impl Metrics {
             .fetch_add(segments, Ordering::Relaxed);
     }
 
+    /// 记录一次成功的 `Poll`（`empty` = 返回空批，含长轮询超时）。
+    pub fn record_mq_v2_poll(&self, messages: u64, bytes: u64, empty: bool) {
+        self.inner
+            .mq_v2_poll_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .mq_v2_poll_messages_total
+            .fetch_add(messages, Ordering::Relaxed);
+        self.inner
+            .mq_v2_poll_bytes_total
+            .fetch_add(bytes, Ordering::Relaxed);
+        if empty {
+            self.inner
+                .mq_v2_poll_empty_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 记录一次 `OFFSET_OUT_OF_RANGE` 拒绝。
+    pub fn record_mq_v2_poll_out_of_range(&self) {
+        self.inner
+            .mq_v2_poll_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .mq_v2_poll_out_of_range_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 记录一次 `Ack`/`AckBatch`（`entries` = 本次提交的位点条数）。
+    pub fn record_mq_v2_ack(&self, entries: u64, rejected: bool) {
+        self.inner
+            .mq_v2_ack_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+        if rejected {
+            self.inner
+                .mq_v2_ack_rejected_total
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.inner
+                .mq_v2_ack_entries_total
+                .fetch_add(entries, Ordering::Relaxed);
+        }
+    }
+
+    /// 记录一次 `JoinGroup`（`rebalanced` = 本次推进了代际）。
+    pub fn record_mq_v2_group_join(&self, rebalanced: bool) {
+        self.inner
+            .mq_v2_group_joins_total
+            .fetch_add(1, Ordering::Relaxed);
+        if rebalanced {
+            self.inner
+                .mq_v2_group_rebalances_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 记录一次组回收扫描（过期成员数与 TTL 删除的组数）。
+    pub fn record_mq_v2_group_reap(&self, expired_members: u64, groups_removed: u64) {
+        self.inner
+            .mq_v2_group_expired_members_total
+            .fetch_add(expired_members, Ordering::Relaxed);
+        self.inner
+            .mq_v2_group_gc_removed_total
+            .fetch_add(groups_removed, Ordering::Relaxed);
+    }
+
     /// 记录最近一次发放的 TSO（gauge）。
     pub fn set_tso_current(&self, ts: u64) {
         self.inner.tso_current.store(ts, Ordering::Relaxed);
@@ -1152,6 +1254,68 @@ impl Metrics {
                 "coord_mq_v2_retention_segments_total",
                 "MQ v2 segments reclaimed by retention",
                 inner.mq_v2_retention_segments_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_poll_requests_total",
+                "MQ v2 Poll RPCs",
+                inner.mq_v2_poll_requests_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_poll_messages_total",
+                "MQ v2 messages returned by Poll",
+                inner.mq_v2_poll_messages_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_poll_bytes_total",
+                "MQ v2 key+payload bytes returned by Poll",
+                inner.mq_v2_poll_bytes_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_poll_empty_total",
+                "MQ v2 Polls that returned an empty batch",
+                inner.mq_v2_poll_empty_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_poll_out_of_range_total",
+                "MQ v2 Polls rejected with OFFSET_OUT_OF_RANGE",
+                inner.mq_v2_poll_out_of_range_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_ack_requests_total",
+                "MQ v2 Ack/AckBatch RPCs",
+                inner.mq_v2_ack_requests_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_ack_entries_total",
+                "MQ v2 committed offset entries",
+                inner.mq_v2_ack_entries_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_ack_rejected_total",
+                "MQ v2 Ack/AckBatch rejections",
+                inner.mq_v2_ack_rejected_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_group_joins_total",
+                "MQ v2 JoinGroup calls",
+                inner.mq_v2_group_joins_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_group_rebalances_total",
+                "MQ v2 JoinGroup calls that advanced the generation",
+                inner.mq_v2_group_rebalances_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_group_expired_members_total",
+                "MQ v2 members expired by the session reaper",
+                inner
+                    .mq_v2_group_expired_members_total
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_group_gc_removed_total",
+                "MQ v2 groups removed by the offset TTL reaper",
+                inner.mq_v2_group_gc_removed_total.load(Ordering::Relaxed),
             ),
         ] {
             out.push_str(&format!("\n# HELP {name} {help}\n# TYPE {name} counter\n"));
