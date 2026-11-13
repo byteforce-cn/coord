@@ -258,11 +258,18 @@ auth:
 - **可用**：纯 KV 路径（`workflow = true`、`workflow_durable = false`）——真实 v2
   集群判据 `KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2`（inject → end
   在无 MQ 的 v2 集群上完成）。
-- **不可用（fail-closed）**：MQ v1 在 v2 集群冻结（`boundaries.md` B-KVT-6）；`data_plane =
-  "v2"` 时 `services.mq = true` 或 `services.workflow_durable = true` **启动期拒绝**，
-  不静默降级到非 durable/无投递面。判据：
-  `agent_workflow_durable_gate_test::test_v2_data_plane_rejects_mq`、
-  `test_v2_data_plane_rejects_workflow_durable`。
-- **审批面**：审批桥与聚合只在 durable 引擎装配时注入（见上一节）；v2 上 durable 被拒，
-  因此审批 RPC 保持非 durable 集群的 `FAILED_PRECONDITION` 口径，**不**承诺 v2 审批可用。
-- 能力矩阵见 ADR-0015 D13；MQ v2 属 G7（#178），KV-T GA 前不提供。
+- **可用（v2 durable）**：`data_plane = "v2"` + `services.mq = true` +
+  `services.workflow_durable = true` + Server 连接。outbox relay 与 `listen` 走
+  `coord.mq.v2`（事件 topic 幂等 `CreateTopic`，`idempotency_key = event_id`）；
+  状态与伴生事件仍在同一次 `coord.txn.v2` 提交里落库。判据：
+  `cargo test -p coord --test mq_v2_m5_durable_test -- --test-threads=1`
+  （同事务 `mod_revision`、kill -9 后不丢不重）。服务器 `[mq_v2].enabled = false`
+  时 Agent **启动失败**（不静默降级到无投递面）。
+- **不可用（fail-closed）**：MQ v1 在 v2 集群冻结（`boundaries.md` B-KVT-6）；
+  `services.workflow_durable = true` 缺 `services.mq` 或 Server 连接时启动期拒绝；
+  启动门禁判据：`agent_workflow_durable_gate_test::test_v2_durable_requires_services_mq`、
+  `test_v2_durable_requires_a_server_connection`。
+- **审批面**：审批桥与聚合只在 durable 引擎装配时注入（见上一节）；v2 durable 装配下
+  审批 RPC 可用（不再是 `FAILED_PRECONDITION`）。
+- 能力矩阵见 ADR-0015 D13；MQ v2 属 G7，`coord.mq.v2` 仍为 PROPOSED，GA 签字见
+  `docs/production/ops/mq-v2-gate.md`。

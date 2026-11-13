@@ -16,6 +16,7 @@ pub mod leader_election;
 pub mod lock;
 pub mod mq;
 pub mod mq_event_provider;
+pub mod mq_v2_delivery;
 pub mod opa;
 pub mod outbox_kv;
 pub mod outbox_relay;

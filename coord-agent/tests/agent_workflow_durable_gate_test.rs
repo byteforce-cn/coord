@@ -61,13 +61,35 @@ async fn test_durable_without_mq_is_fail_closed() {
     );
 }
 
-// `services.mq = true` 在 v2 上自 M2-4 起是「代理 coord.mq.v2」（ADR-0016 D11），
-// 不再于启动期拒绝；代理注册与转发由 `agent_v2_mode_test`
-// （`v2_agent_proxies_coord_mq_v2_when_services_mq_is_enabled`）覆盖。
+// `services.mq = true` 在 v2 上自 M2-4 起是「代理 coord.mq.v2」（ADR-0016 D11）；
+// durable 工作流的投递面在 v2 上走 `coord.mq.v2`（M5，ADR-0016 D12），不再要求 v1 MQ。
+// 两个前置仍在启动期检查：`services.mq` 与 Server 连接。
 
-/// v2 数据面：即使 mq=true，workflow_durable 也不能装配（MQ v1 不服务）。
+/// v2 数据面：durable 仍要求 `services.mq`（`coord.mq.v2` 代理开关）——缺即拒绝启动。
 #[tokio::test]
-async fn test_v2_data_plane_rejects_workflow_durable() {
+async fn test_v2_durable_requires_services_mq() {
+    let services = ServiceConfig {
+        workflow: true,
+        workflow_durable: true,
+        mq: false,
+        ..ServiceConfig::default()
+    };
+    let (mut config, _tmp) = durable_config(find_port(), "v2-no-mq", services);
+    config.data_plane = coord_agent::AgentDataPlane::V2;
+    let err = AgentServer::new(config)
+        .serve()
+        .await
+        .expect_err("v2 durable without services.mq must refuse startup");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("services.mq"),
+        "failure must name the mq prerequisite, got: {msg}"
+    );
+}
+
+/// v2 数据面：durable 仍要求 Server 连接（KV 持久化面）——缺即拒绝启动。
+#[tokio::test]
+async fn test_v2_durable_requires_a_server_connection() {
     let services = ServiceConfig {
         workflow: true,
         workflow_durable: true,
@@ -79,11 +101,11 @@ async fn test_v2_data_plane_rejects_workflow_durable() {
     let err = AgentServer::new(config)
         .serve()
         .await
-        .expect_err("v2 data plane must reject workflow_durable");
+        .expect_err("v2 durable without a server connection must refuse startup");
     let msg = err.to_string();
     assert!(
-        msg.contains("v2 data plane"),
-        "failure must name the v2 data-plane boundary, got: {msg}"
+        msg.contains("server connection"),
+        "failure must name the server prerequisite, got: {msg}"
     );
 }
 

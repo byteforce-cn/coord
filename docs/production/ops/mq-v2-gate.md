@@ -1,8 +1,9 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M4 落地）
+> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M4 落地，M5-1/M5-2 落地）
 >
-> **状态：M0、M1、M2、M3、M4 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
+> **状态：M0、M1、M2、M3、M4 完成（GO）；M5 进行中（M5-1/M5-2 ✅，M5-3/M5-4 ⏳）**。
+> M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
 > 耐久性）的存储层证据见 §1；M2-1–M2-5（写路径、offset/幂等、上限/原子性、
@@ -26,7 +27,7 @@
 | M2 Publish | 路由/批量/offset/幂等/配额 | ✅ | 见 §2b |
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ✅ | 见 §2c |
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ✅ | 见 §2d |
-| M5 工作流 | v2 outbox/durable/审批/trigger | ⏳ 未开始 | — |
+| M5 工作流 | v2 outbox/durable/审批/trigger | 🚧 M5-1/M5-2 ✅，M5-3/M5-4 ⏳ | 见 §2e |
 | M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | ⏳ 未开始 | — |
 | M7 GA | 全绿 + KV-T GA + 签字 | ⛔ 未达标 | 见 §3 |
 
@@ -75,6 +76,16 @@ Rust 升级后漂到别的分片）。
 | M4-3 UpdateTopic/Describe/List | ✅ | 同一测试文件的 `describe_topic_reports_config_partitions_and_bounds`、`list_topics_paginates_and_filters_by_prefix`、`update_topic_merges_fields_and_enforces_the_epoch`；`coord-server/src/mq_v2/admin.rs` 的 2 个合并/校验单测。`UpdateTopic` 的 `0 = 保持当前值`（含 `max_bytes`，清空配额需删除重建）已在代码注释固定 |
 | M4-2 DeleteTopic/GetTopicDeletion | ✅ | `cargo test -p coord --test mq_v2_m4_delete_test`（3 例：删除后立即 `TOPIC_NOT_FOUND`、reaper 回收 2 个分区 + 组位点清空 + `GetTopicDeletion` 转 Done、同名重建不复活、重复回收幂等、代际/未知 id 映射）；存储层 `storage::mq_log::tests::drop_partition_removes_records_dlq_and_idempotency_and_replays_idempotently`、`storage::mq_group::tests::drop_topic_removes_only_that_topics_offsets` |
 | M4-4 能力/审计 | ✅ | `coord-core/src/grpc_auth.rs::mq_v2_rpcs_are_mapped_with_the_same_capability_split_as_v1`（21 个 RPC 的能力映射）；`dlq_is_gated_by_the_dlq_capability`（未交付 `FAILED_PRECONDITION`）；`mq_v2_g0_test`（关闭/未交付/已交付三态 + reflection）。审计沿用全仓口径（拒绝路径带 RPC 方法与稳定码；成功路径的调用方身份传递是本仓 v2 backlog，`audit/mod.rs` 已文档化），MQ 不另建一套 |
+
+### M5 分项（v2 outbox、durable 与触发）
+
+| 项 | 状态 | 证据 / 未达标原因 |
+|:--|:--|:--|
+| M5-1 v2 outbox | ✅ | `cargo test -p coord --test mq_v2_m5_durable_test -- --test-threads=1`：`durable_state_and_outbox_commit_in_one_v2_transaction`（实例状态与伴生 outbox 记录 `mod_revision` 相等 = 同一次 `coord.txn.v2`）、`durable_workflow_survives_agent_kill_and_never_duplicates_events`（真实 Agent 进程：relay 经 `coord.mq.v2` 投递、`ce-id` 作幂等键重投 `deduplicated=true`、kill -9 重启后状态/事件仍各一份）；投递面单测 `cargo test -p coord-agent --lib services::mq_v2_delivery`（4 例）。`v2_compat::kv_range` 的 `SAFE_TS_LAG` 重试见 `read_path_retries_only_transient_safe_ts_errors` |
+| M5-2 durable 上 v2 | ✅ | 同一 e2e：`data_plane="v2"` + `workflow_durable=true` 的 Agent 启动成功（`Workflow outbox relay started`）、`ListPendingTasks` 可用（审批桥已注入）、重启后续跑；启动门禁 `cargo test -p coord-agent --test agent_workflow_durable_gate_test`（`test_v2_durable_requires_services_mq` / `test_v2_durable_requires_a_server_connection`）。纯 KV 路径不回归：`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
+| M5-3 Trigger 定义/分发器 | ⏳ 未开始 | `WorkflowDefinition` 无 `trigger`；`WorkflowStartRequest` 无幂等键；按 definition 的消费组分发器未实现 |
+| M5-4 全链路 e2e | ⏳ 未开始 | 依赖 M5-3；M5-1 的 publish→outbox→MQ v2 段已由上文覆盖 |
+| M5-5 文档/边界 | 🚧 部分 | B-KVT-6 与 workflow-semantics §8 已按 M5-1/M5-2 更新；consumer-contract 的 trigger 章节待 M5-3 |
 
 ## 3. 关闭 M7 的硬条件
 
