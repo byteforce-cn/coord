@@ -70,13 +70,50 @@ pub(crate) async fn kv_range(
         u64::try_from(revision)
             .map_err(|_| Error::InvalidArgument("revision must be >= 0".into()))?
     };
-    let (kvs, count, read_ts) = client
+    let (kvs, count, read_ts) = match client
         .kv_v2()
         .range(key, range_end, limit, read_ts, keys_only, count_only)
-        .await?;
+        .await
+    {
+        Ok(value) => value,
+        Err(err) if is_retryable_read_error(&err) => {
+            // `read_floor` 是 read-your-writes 下限；它刚越过某个节点的 `safe_ts`
+            // （fence 尚未 apply）时服务端返回 `SAFE_TS_LAG`。这是可重试的瞬态，
+            // 不能把一次读放大成 v1 形状调用方的致命 IO 错误。
+            let mut retry = RetryState::new(client.retry_config());
+            loop {
+                match retry.next_attempt() {
+                    Some(wait) => tokio::time::sleep(wait).await,
+                    None => return Err(err),
+                }
+                match client
+                    .kv_v2()
+                    .range(key, range_end, limit, read_ts, keys_only, count_only)
+                    .await
+                {
+                    Ok(value) => break value,
+                    Err(next) if is_retryable_read_error(&next) => continue,
+                    Err(next) => return Err(next),
+                }
+            }
+        }
+        Err(err) => return Err(err),
+    };
     let read_ts = i64::try_from(read_ts)
         .map_err(|_| Error::Internal("negative read_ts in response".into()))?;
     Ok((kvs, count, read_ts))
+}
+
+/// 读路径可重试的瞬态错误：safe_ts 追赶、连接级不可用、请求超时。
+fn is_retryable_read_error(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::V2 {
+            code: CoordErrorCode::SafeTsLag | CoordErrorCode::EpochStale,
+            ..
+        } | Error::ClusterUnavailable(_)
+            | Error::RequestTimeout
+    )
 }
 
 /// v1 形状的 `Delete`；返回 `(deleted, commit_ts)`。
@@ -634,6 +671,25 @@ fn v1_events(event: crate::watch_v2::WatchV2Event, prev_kv: bool) -> Vec<WatchEv
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_path_retries_only_transient_safe_ts_errors() {
+        assert!(is_retryable_read_error(&Error::V2 {
+            code: CoordErrorCode::SafeTsLag,
+            message: "safe_ts catching up".into(),
+        }));
+        assert!(is_retryable_read_error(&Error::ClusterUnavailable(
+            "no leader found".into()
+        )));
+        assert!(is_retryable_read_error(&Error::RequestTimeout));
+        assert!(!is_retryable_read_error(&Error::NotFound {
+            resource: "key",
+            key: "k".into(),
+        }));
+        assert!(!is_retryable_read_error(&Error::PermissionDenied(
+            "scope".into()
+        )));
+    }
 
     #[test]
     fn watch_range_maps_prefix_to_successor() {
