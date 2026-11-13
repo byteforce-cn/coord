@@ -240,9 +240,22 @@ impl MqV2Client {
         let mut retry = RetryState::new(self.client.retry_config());
         let mut hint_retries = 0u32;
         loop {
-            let endpoint = self
+            let endpoint = match self
                 .resolve_leader(&key, &request.topic, request.partition)
-                .await?;
+                .await
+            {
+                Ok(endpoint) => endpoint,
+                // 分片 Leader 尚未选出（选举窗口）：可重试，退避后重新发现。
+                // 未知 topic/分区是不可重试的业务结果。
+                Err(err @ Error::ClusterUnavailable(_)) => match retry.next_attempt() {
+                    Some(backoff) => {
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    None => return Err(err),
+                },
+                Err(err) => return Err(err),
+            };
             let channel = self.client.channel_for(&endpoint).await?;
             let mut stub = mq_v2::mq_client::MqClient::new(channel.clone());
             let result = stub
@@ -274,7 +287,12 @@ impl MqV2Client {
                     }
                     match classify_tonic(&status) {
                         RetryDecision::Abort => return Err(from_status_v2(status)),
-                        RetryDecision::RetryImmediately => continue,
+                        // 立即重试也**消耗**重试预算（否则 `UNAVAILABLE` 会无限自旋）；
+                        // 不睡是因为重定向后的目标已经变了。
+                        RetryDecision::RetryImmediately => match retry.next_attempt() {
+                            Some(_) => continue,
+                            None => return Err(from_status_v2(status)),
+                        },
                         RetryDecision::RetryAfter(wait) => match retry.next_attempt() {
                             Some(backoff) => {
                                 tokio::time::sleep(backoff.max(wait)).await;
