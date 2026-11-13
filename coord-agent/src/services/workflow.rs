@@ -2432,6 +2432,9 @@ pub mod phase4 {
         /// 等 MQ 就绪后在第一个产出/订阅之前建 topic。
         durable_mq: Option<Arc<crate::services::mq::MessageQueueService>>,
         durable_topic: String,
+        /// v2 集群的 outbox 投递面（`coord.mq.v2`）。与 `durable_mq` 互斥：
+        /// v1 用本地 MQ，v2 用服务端分区日志（ADR-0016 D11/D12）。
+        durable_v2_sink: Option<Arc<crate::services::mq_v2_delivery::MqV2OutboxSink>>,
         /// v2 审批桥（仅 durable 装配注入）。
         ///
         /// `None` ⇒ 审批命令 / 查询 fail-closed（`FailedPrecondition`），绝不退化为
@@ -2469,6 +2472,24 @@ pub mod phase4 {
         pub approval_roles: HashMap<String, Vec<String>>,
         /// 允许代终端用户操作 / 查询的服务主体白名单
         /// （`ServicesConfig::workflow_on_behalf_services`）。
+        pub on_behalf_services: Vec<String>,
+    }
+
+    /// v2 集群上的 durable 接线选项（ADR-0016 D12）。
+    ///
+    /// 与 [`DurableEngineOptions`] 的差别只在投递面：outbox relay 与 `listen` 走
+    /// `coord.mq.v2`（服务端分区日志），不再构造 Agent 本地 v1 MQ。
+    /// 只在 [`WorkflowEngineService::new_with_kv_store_durable_v2`] 使用。
+    pub struct DurableV2EngineOptions {
+        /// 事件 topic（`CreateTopic` 幂等引导；固定 1 分区）
+        pub topic: String,
+        /// 是否由 `start()` 拉起 relay
+        pub relay_enabled: bool,
+        /// relay 轮询间隔（毫秒）
+        pub relay_interval_ms: u64,
+        /// 审批节点 `roles` 的角色解析映射（角色名 → 审批人）
+        pub approval_roles: HashMap<String, Vec<String>>,
+        /// 允许代终端用户操作 / 查询的服务主体白名单
         pub on_behalf_services: Vec<String>,
     }
 
@@ -2614,13 +2635,97 @@ pub mod phase4 {
             opts: DurableEngineOptions,
         ) -> Self {
             use crate::services::mq_event_provider::{CursorStore, MqEventProvider};
-            use crate::services::outbox_kv::{KvCursorStore, KvOutboxStore};
+            use crate::services::outbox_kv::KvCursorStore;
             use crate::services::outbox_relay::MqOutboxSink;
+            use coord_core::workflow::durable::OutboxSink;
+
+            let sink: Arc<dyn OutboxSink> =
+                Arc::new(MqOutboxSink::new(Arc::clone(&opts.mq), opts.topic.clone()));
+            let cursors: Arc<dyn CursorStore> = Arc::new(KvCursorStore::new(Arc::clone(&inner)));
+            let event_provider: Arc<dyn EventProvider + Send + Sync> =
+                Arc::new(MqEventProvider::new_with_cursor_store(
+                    Arc::clone(&opts.mq),
+                    opts.topic.clone(),
+                    cursors,
+                ));
+
+            let mut svc = Self::assemble_durable(
+                inner,
+                dispatch,
+                sink,
+                event_provider,
+                opts.relay_enabled,
+                opts.relay_interval_ms,
+                opts.approval_roles,
+                opts.on_behalf_services,
+            );
+            // topic 创建推迟到 `start()`（届时 MQ 已就绪）；此处只留句柄。
+            svc.durable_mq = Some(opts.mq);
+            svc.durable_topic = opts.topic;
+            svc
+        }
+
+        /// v2 集群的 durable 引擎：outbox relay / listen 走 `coord.mq.v2`。
+        ///
+        /// 状态、outbox、定时器、租约、审批聚合仍经同一 `AgentInner`：`data_plane="v2"`
+        /// 时 `coord-client` 把 v1 形状的 KV/Txn 适配成 `coord.txn.v2`（单次 commit），
+        /// 因此「状态 + 伴生事件同事务」的语义不变。事件 topic 在 `start()` 里幂等
+        /// `CreateTopic`；MQ v2 未启用时启动失败（fail-closed，不静默不发事件）。
+        pub fn new_with_kv_store_durable_v2(
+            inner: Arc<AgentInner>,
+            dispatch: &WorkflowDispatchConfig,
+            opts: DurableV2EngineOptions,
+        ) -> Self {
+            use crate::services::mq_event_provider::CursorStore;
+            use crate::services::mq_v2_delivery::{MqV2EventProvider, MqV2OutboxSink};
+            use crate::services::outbox_kv::KvCursorStore;
+            use coord_core::workflow::durable::OutboxSink;
+
+            let sink_impl = Arc::new(MqV2OutboxSink::new(Arc::clone(&inner), opts.topic.clone()));
+            let sink: Arc<dyn OutboxSink> = sink_impl.clone();
+            let cursors: Arc<dyn CursorStore> = Arc::new(KvCursorStore::new(Arc::clone(&inner)));
+            let event_provider: Arc<dyn EventProvider + Send + Sync> =
+                Arc::new(MqV2EventProvider::new_with_cursor_store(
+                    Arc::clone(&inner),
+                    opts.topic.clone(),
+                    cursors,
+                ));
+
+            let mut svc = Self::assemble_durable(
+                inner,
+                dispatch,
+                sink,
+                event_provider,
+                opts.relay_enabled,
+                opts.relay_interval_ms,
+                opts.approval_roles,
+                opts.on_behalf_services,
+            );
+            svc.durable_v2_sink = Some(sink_impl);
+            svc
+        }
+
+        /// durable 引擎的共用装配：存储、outbox/定时器、租约、step token、审批桥、relay。
+        ///
+        /// v1 与 v2 只差 `sink`（本地 MQ vs `coord.mq.v2`）与 `provider`（listen 面）；
+        /// 其余对象都落在同一 `AgentInner` 上。
+        #[allow(clippy::too_many_arguments)]
+        fn assemble_durable(
+            inner: Arc<AgentInner>,
+            dispatch: &WorkflowDispatchConfig,
+            sink: Arc<dyn coord_core::workflow::durable::OutboxSink>,
+            event_provider: Arc<dyn EventProvider + Send + Sync>,
+            relay_enabled: bool,
+            relay_interval_ms: u64,
+            approval_roles: HashMap<String, Vec<String>>,
+            on_behalf_services: Vec<String>,
+        ) -> Self {
+            use crate::services::outbox_kv::KvOutboxStore;
             use crate::services::step_kv::KvStepStore;
             use crate::services::workflow_lease::KvInstanceLease;
             use coord_core::workflow::durable::{
-                AtomicOutboxCommit, DurableSupport, DurableTimerStore, OutboxRelay, OutboxSink,
-                OutboxStore, RelayPolicy, StepTokenStore,
+                AtomicOutboxCommit, DurableSupport, DurableTimerStore, OutboxRelay, OutboxStore,
+                RelayPolicy, StepTokenStore,
             };
             use coord_core::workflow::ports::InstanceLease;
 
@@ -2629,21 +2734,11 @@ pub mod phase4 {
                 Arc::clone(&kv_store) as Arc<dyn WorkflowStore + Send + Sync>;
 
             let durable_kv = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
-            let sink: Arc<dyn OutboxSink> =
-                Arc::new(MqOutboxSink::new(Arc::clone(&opts.mq), opts.topic.clone()));
             let relay = Arc::new(OutboxRelay::new(
                 Arc::clone(&durable_kv) as Arc<dyn OutboxStore>,
                 sink,
                 RelayPolicy::default(),
             ));
-
-            let cursors: Arc<dyn CursorStore> = Arc::new(KvCursorStore::new(Arc::clone(&inner)));
-            let event_provider: Arc<dyn EventProvider + Send + Sync> =
-                Arc::new(MqEventProvider::new_with_cursor_store(
-                    Arc::clone(&opts.mq),
-                    opts.topic.clone(),
-                    cursors,
-                ));
 
             // step token 存储：`call` 派发前的幂等键（去重外部副作用），与 outbox
             // 同在 `/_workflow/v3/` 键空间；注入后重试/恢复复用同一 token。
@@ -2671,9 +2766,7 @@ pub mod phase4 {
             let approval_bridge = Arc::new(ApprovalBridge::new(
                 approval_store,
                 Arc::new(SystemClock) as Arc<dyn Clock>,
-                Some(Arc::new(MapApproverResolver::new(
-                    opts.approval_roles.clone(),
-                ))),
+                Some(Arc::new(MapApproverResolver::new(approval_roles))),
             ));
 
             let mut svc = Self::assemble(
@@ -2685,14 +2778,11 @@ pub mod phase4 {
                 Some(support),
                 Some(Arc::clone(&durable_kv)),
                 Some(relay),
-                opts.relay_enabled,
-                opts.relay_interval_ms,
+                relay_enabled,
+                relay_interval_ms,
                 Some(approval_bridge),
             );
-            // topic 创建推迟到 `start()`（届时 MQ 已就绪）；此处只留句柄。
-            svc.durable_mq = Some(opts.mq);
-            svc.durable_topic = opts.topic;
-            svc.on_behalf_services = opts.on_behalf_services;
+            svc.on_behalf_services = on_behalf_services;
             svc
         }
 
@@ -2825,6 +2915,7 @@ pub mod phase4 {
                 relay_interval_ms,
                 durable_mq: None,
                 durable_topic: String::new(),
+                durable_v2_sink: None,
                 approval,
                 on_behalf_services: Vec::new(),
             }
@@ -2872,6 +2963,7 @@ pub mod phase4 {
                 relay_interval_ms: 1000,
                 durable_mq: None,
                 durable_topic: String::new(),
+                durable_v2_sink: None,
                 approval,
                 on_behalf_services: Vec::new(),
             }
@@ -3536,6 +3628,7 @@ pub mod phase4 {
                 relay_interval_ms: self.relay_interval_ms,
                 durable_mq: self.durable_mq.clone(),
                 durable_topic: self.durable_topic.clone(),
+                durable_v2_sink: self.durable_v2_sink.clone(),
                 approval: self.approval.clone(),
                 on_behalf_services: self.on_behalf_services.clone(),
             }
@@ -3569,6 +3662,15 @@ pub mod phase4 {
             // 的 30s 有界等待只是防该命名/排序变化的保险，不能替代它。
             if let Some(mq) = &self.durable_mq {
                 Self::ensure_durable_topic(mq, &self.durable_topic).await?;
+            }
+
+            // v2：事件 topic 由 `coord.mq.v2` 承载（服务端分区日志）。MQ v2 未启用/
+            // 不可达时启动失败，不静默进入「事件只落 outbox 不投递」的状态。
+            if let Some(sink) = &self.durable_v2_sink {
+                sink.wait_until_ready().await?;
+                tracing::info!(
+                    "Workflow durable event topic is ready on coord.mq.v2 (server-side log)"
+                );
             }
 
             // Spike 3：持久化恢复 —— 到期定时器先触发，再对账挂起实例（重订阅 listen、

@@ -1496,23 +1496,6 @@ impl AgentServer {
             }
         }
 
-        // v2 集群只服务 coord.*.v2：MQ v1 被策略冻结（ADR-0015 D13 / B-KVT-6），
-        // 依赖 MQ 投递面的 workflow_durable 必须在启动期拒绝——静默降级到
-        // 非 durable 路径会让「不丢/不重/一实例一驱动」的承诺失效而不报错。
-        // 纯 KV/审批路径的 workflow（durable=false）不受影响。
-        if self.config.data_plane == AgentDataPlane::V2 {
-            // `services.mq = true` 在 v2 上意味着「代理 coord.mq.v2」（ADR-0016 D11）：
-            // 允许启动，但**不装配** v1 本地 MQ（见下方 `mq_handle`）。durable 工作流
-            // 的投递面仍要求 v1 MQ（outbox relay / listen），M5 才切 v2；在那之前
-            // fail-closed，不静默降级到非 durable 引擎。
-            if self.config.services.workflow_durable {
-                return Err(
-                    "services.workflow_durable = true requires the MQ v2 durable engine on a                      v2 data plane, which is not available yet; disable workflow_durable"
-                        .into(),
-                );
-            }
-        }
-
         // durable 是 workflow 的持久化增强而非独立开关：workflow 未启用时该标记
         // 无装配目标，静默失效会掩盖配置错误（fail-closed）。
         if self.config.services.workflow_durable && !self.config.services.workflow {
@@ -1547,39 +1530,83 @@ impl AgentServer {
             // 前置缺失却照常启动，让承诺（不丢/不重/一实例一驱动）失效而不报错。
             let workflow_svc = if self.config.services.workflow_durable {
                 // 先查配置级前置（MQ 开关），再查连接级前置：两者都缺时优先报出配置
-                // 错误——它无需外部依赖即可修正。
-                let Some(mq) = mq_handle.as_ref() else {
-                    return Err(
-                        "services.workflow_durable = true requires services.mq = true \
-                         (outbox relay / listen delivery surface)"
-                            .into(),
-                    );
-                };
-                let Some(inner_ref) = inner.as_ref() else {
-                    return Err(
-                        "services.workflow_durable = true requires a server connection \
-                         (KV persistence backend); none is configured"
-                            .into(),
-                    );
-                };
-                Arc::new(
-                    crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store_durable(
-                        Arc::clone(inner_ref),
-                        &self.config.services.workflow_dispatch,
-                        crate::services::workflow::phase4::DurableEngineOptions {
-                            mq: Arc::clone(mq),
-                            topic: self.config.services.workflow_events_topic.clone(),
-                            relay_enabled: true,
-                            relay_interval_ms: 1000,
-                            approval_roles: self.config.services.workflow_approval_roles.clone(),
-                            on_behalf_services: self
-                                .config
-                                .services
-                                .workflow_on_behalf_services
-                                .clone(),
-                        },
-                    ),
-                )
+                // 错误——它无需外部依赖即可修正。v2 集群的投递面是 `coord.mq.v2`
+                // （ADR-0016 D11/D12），`services.mq = true` 只代表代理开关，不装配
+                // 本地 v1 MQ。
+                if self.config.data_plane == AgentDataPlane::V2 {
+                    if !self.config.services.mq {
+                        return Err(
+                            "services.workflow_durable = true on a v2 data plane requires \
+                             services.mq = true (coord.mq.v2 delivery surface)"
+                                .into(),
+                        );
+                    }
+                    let Some(inner_ref) = inner.as_ref() else {
+                        return Err(
+                            "services.workflow_durable = true requires a server connection \
+                             (KV persistence backend); none is configured"
+                                .into(),
+                        );
+                    };
+                    Arc::new(
+                        crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store_durable_v2(
+                            Arc::clone(inner_ref),
+                            &self.config.services.workflow_dispatch,
+                            crate::services::workflow::phase4::DurableV2EngineOptions {
+                                topic: self.config.services.workflow_events_topic.clone(),
+                                relay_enabled: true,
+                                relay_interval_ms: 1000,
+                                approval_roles: self
+                                    .config
+                                    .services
+                                    .workflow_approval_roles
+                                    .clone(),
+                                on_behalf_services: self
+                                    .config
+                                    .services
+                                    .workflow_on_behalf_services
+                                    .clone(),
+                            },
+                        ),
+                    )
+                } else {
+                    let Some(mq) = mq_handle.as_ref() else {
+                        return Err(
+                            "services.workflow_durable = true requires services.mq = true \
+                             (outbox relay / listen delivery surface)"
+                                .into(),
+                        );
+                    };
+                    let Some(inner_ref) = inner.as_ref() else {
+                        return Err(
+                            "services.workflow_durable = true requires a server connection \
+                             (KV persistence backend); none is configured"
+                                .into(),
+                        );
+                    };
+                    Arc::new(
+                        crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store_durable(
+                            Arc::clone(inner_ref),
+                            &self.config.services.workflow_dispatch,
+                            crate::services::workflow::phase4::DurableEngineOptions {
+                                mq: Arc::clone(mq),
+                                topic: self.config.services.workflow_events_topic.clone(),
+                                relay_enabled: true,
+                                relay_interval_ms: 1000,
+                                approval_roles: self
+                                    .config
+                                    .services
+                                    .workflow_approval_roles
+                                    .clone(),
+                                on_behalf_services: self
+                                    .config
+                                    .services
+                                    .workflow_on_behalf_services
+                                    .clone(),
+                            },
+                        ),
+                    )
+                }
             } else {
                 // 有 server 连接时走 KvWorkflowStore（raft 持久化），
                 // 启动时 init() 全量重建本地缓存 + watch 断连重连对账；
