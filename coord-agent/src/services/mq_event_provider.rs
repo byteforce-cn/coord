@@ -82,7 +82,7 @@ impl CursorStore for MemoryCursorStore {
 ///
 /// 用哈希而不是把过滤器原文拼进键：事件类型里可能含 `:`、`/` 等分隔字符，拼键会
 /// 产生歧义；哈希保证「同过滤器 ⇒ 同订阅、不同过滤器 ⇒ 不同订阅」。
-pub fn subscription_key(
+pub(crate) fn subscription_key(
     topic: &str,
     event_types: &[&str],
     source: Option<&str>,
@@ -105,6 +105,45 @@ pub fn subscription_key(
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{topic}:{hash:016x}")
+}
+
+/// 编码 CloudEvent 为 MQ 消息 payload（v1/v2 投递面共用同一形状）。
+pub(crate) fn encode_event(event_type: &str, source: Option<&str>, data: &Value) -> Vec<u8> {
+    let cloud_event = serde_json::json!({
+        "specversion": "1.0",
+        "type": event_type,
+        "source": source.unwrap_or("coord/workflow"),
+        "id": uuid_v4_like(),
+        "time": now_ms(),
+        "data": data,
+    });
+    serde_json::to_vec(&cloud_event).unwrap_or_default()
+}
+
+/// 从 MQ 消息解码 CloudEvent 字段。
+pub(crate) fn decode_event(
+    payload: &[u8],
+) -> Option<(String, Option<String>, Option<String>, Value)> {
+    let v: Value = serde_json::from_slice(payload).ok()?;
+    let event_type = v.get("type")?.as_str()?.to_string();
+    let source = v.get("source").and_then(|s| s.as_str()).map(String::from);
+    let subject = v.get("subject").and_then(|s| s.as_str()).map(String::from);
+    let data = v.get("data").cloned().unwrap_or(Value::Null);
+    Some((event_type, source, subject, data))
+}
+
+/// 事件过滤器匹配（空类型集合 = 任意类型；`source`/`subject` 的 `None` = 不约束）。
+pub(crate) fn event_matches(
+    event_types: &[&str],
+    source: Option<&str>,
+    subject: Option<&str>,
+    got: (&str, Option<&str>, Option<&str>),
+) -> bool {
+    let (event_type, got_source, got_subject) = got;
+    let type_match = event_types.is_empty() || event_types.contains(&event_type);
+    let source_match = source.map(|s| got_source == Some(s)).unwrap_or(true);
+    let subject_match = subject.map(|s| got_subject == Some(s)).unwrap_or(true);
+    type_match && source_match && subject_match
 }
 
 /// MQ 事件提供者
@@ -144,35 +183,12 @@ impl MqEventProvider {
         );
         provider
     }
-
-    /// 编码 CloudEvent 为 MQ 消息（headers 携带 event_type/source）
-    fn encode_event(event_type: &str, source: Option<&str>, data: &Value) -> Vec<u8> {
-        let cloud_event = serde_json::json!({
-            "specversion": "1.0",
-            "type": event_type,
-            "source": source.unwrap_or("coord/workflow"),
-            "id": uuid_v4_like(),
-            "time": now_ms(),
-            "data": data,
-        });
-        serde_json::to_vec(&cloud_event).unwrap_or_default()
-    }
-
-    /// 从 MQ 消息解码 CloudEvent 字段
-    fn decode_event(payload: &[u8]) -> Option<(String, Option<String>, Option<String>, Value)> {
-        let v: Value = serde_json::from_slice(payload).ok()?;
-        let event_type = v.get("type")?.as_str()?.to_string();
-        let source = v.get("source").and_then(|s| s.as_str()).map(String::from);
-        let subject = v.get("subject").and_then(|s| s.as_str()).map(String::from);
-        let data = v.get("data").cloned().unwrap_or(Value::Null);
-        Some((event_type, source, subject, data))
-    }
 }
 
 #[async_trait]
 impl EventProvider for MqEventProvider {
     async fn emit(&self, event_type: &str, source: Option<&str>, data: &Value) {
-        let payload = Self::encode_event(event_type, source, data);
+        let payload = encode_event(event_type, source, data);
         let mut headers = BTreeMap::new();
         headers.insert("ce-type".to_string(), event_type.to_string());
         headers.insert(
@@ -200,14 +216,13 @@ impl EventProvider for MqEventProvider {
                 if !records.is_empty() {
                     for rec in &records {
                         cursor = rec.offset + 1;
-                        if let Some((et, src, sub, _data)) = Self::decode_event(&rec.payload) {
-                            let type_match =
-                                event_types.is_empty() || event_types.contains(&et.as_str());
-                            let source_match =
-                                source.map(|s| src.as_deref() == Some(s)).unwrap_or(true);
-                            let subject_match =
-                                subject.map(|s| sub.as_deref() == Some(s)).unwrap_or(true);
-                            if type_match && source_match && subject_match {
+                        if let Some((et, src, sub, _data)) = decode_event(&rec.payload) {
+                            if event_matches(
+                                event_types,
+                                source,
+                                subject,
+                                (&et, src.as_deref(), sub.as_deref()),
+                            ) {
                                 // 命中即返回，**不**提交游标：位点由调用方在状态写成功后
                                 // 经 `ack_event` 提交（先提交会让崩溃窗口丢投递）。
                                 return Some(EventDelivery {
@@ -374,7 +389,7 @@ mod tests {
         }
 
         async fn emit(&self, event_type: &str) {
-            let payload = MqEventProvider::encode_event(event_type, Some("test"), &Value::Null);
+            let payload = encode_event(event_type, Some("test"), &Value::Null);
             let _ = self.mq.produce(&self.topic, self.partition, payload, None);
         }
 
@@ -388,8 +403,7 @@ mod tests {
                         let mut next = offset;
                         for rec in &records {
                             next = rec.offset + 1;
-                            if let Some((et, _, _, _)) = MqEventProvider::decode_event(&rec.payload)
-                            {
+                            if let Some((et, _, _, _)) = decode_event(&rec.payload) {
                                 if event_types.is_empty() || event_types.contains(&et.as_str()) {
                                     *self.next_offset.lock().unwrap_or_else(|e| e.into_inner()) =
                                         next;
