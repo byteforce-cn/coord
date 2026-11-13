@@ -31,6 +31,9 @@ pub const LEADER_HINT_METADATA_KEY: &str = "coord-leader-hint";
 /// 单次 `PublishBatch` 的条数上限（契约 1–64 条）。
 pub const MAX_BATCH_ENTRIES: usize = 64;
 
+/// 单次 `AckBatch` 的条数上限（契约 1–256 条）。
+pub const MAX_ACK_BATCH: usize = 256;
+
 /// `CreateTopic` 请求（0 值的展开口径由服务端决定，见 `mq_v2` proto 头注）。
 #[derive(Debug, Clone, Default)]
 pub struct MqCreateTopic {
@@ -122,6 +125,8 @@ pub struct MqV2Client {
     /// `(topic, partition) → 分片 Leader 地址`。分片 Leader 与 region 0 Leader 是
     /// 两套事实，不能复用 `Client` 的全局 leader 缓存。
     leaders: Arc<RwLock<HashMap<String, String>>>,
+    /// `group → group shard Leader 地址`（组操作按组名路由，与分区无关）。
+    group_leaders: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl MqV2Client {
@@ -129,6 +134,7 @@ impl MqV2Client {
         Self {
             client,
             leaders: Arc::new(RwLock::new(HashMap::new())),
+            group_leaders: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -236,74 +242,326 @@ impl MqV2Client {
                 })
                 .collect(),
         };
-        let key = partition_key(&request.topic, request.partition);
-        let mut retry = RetryState::new(self.client.retry_config());
-        let mut hint_retries = 0u32;
-        loop {
-            let endpoint = match self
-                .resolve_leader(&key, &request.topic, request.partition)
-                .await
-            {
-                Ok(endpoint) => endpoint,
-                // 分片 Leader 尚未选出（选举窗口）：可重试，退避后重新发现。
-                // 未知 topic/分区是不可重试的业务结果。
-                Err(err @ Error::ClusterUnavailable(_)) => match retry.next_attempt() {
-                    Some(backoff) => {
-                        tokio::time::sleep(backoff).await;
-                        continue;
-                    }
-                    None => return Err(err),
+        let response = self
+            .partition_call(
+                &request.topic,
+                request.partition,
+                payload,
+                |mut stub, payload| async move {
+                    stub.publish_batch(tonic::Request::new(payload))
+                        .await
+                        .map(|response| response.into_inner())
                 },
-                Err(err) => return Err(err),
-            };
-            let channel = self.client.channel_for(&endpoint).await?;
-            let mut stub = mq_v2::mq_client::MqClient::new(channel.clone());
-            let result = stub
-                .publish_batch(tonic::Request::new(payload.clone()))
-                .await;
-            self.client.return_channel(&endpoint, channel);
-            match result {
-                Ok(response) => {
-                    return response
-                        .into_inner()
-                        .results
-                        .into_iter()
-                        .map(publish_result_from_proto)
-                        .collect()
-                }
-                Err(status) => {
-                    // `NOT_LEADER` + hint：只更新**这个分区**的目标并立即重试。
-                    if let Some(hint) = leader_hint(&status) {
-                        self.remember_leader(&request.topic, request.partition, &hint);
-                        if hint_retries < MAX_HINT_RETRIES {
-                            hint_retries += 1;
-                            continue;
-                        }
-                    } else if error_code_of(&status).as_deref()
-                        == Some(CoordErrorCode::NotLeader.as_str())
-                    {
-                        // 没有可重定向目标（选举中）：丢掉缓存，退避后重新发现。
-                        self.leaders.write().remove(&key);
-                    }
-                    match classify_tonic(&status) {
-                        RetryDecision::Abort => return Err(from_status_v2(status)),
-                        // 立即重试也**消耗**重试预算（否则 `UNAVAILABLE` 会无限自旋）；
-                        // 不睡是因为重定向后的目标已经变了。
-                        RetryDecision::RetryImmediately => match retry.next_attempt() {
-                            Some(_) => continue,
-                            None => return Err(from_status_v2(status)),
-                        },
-                        RetryDecision::RetryAfter(wait) => match retry.next_attempt() {
-                            Some(backoff) => {
-                                tokio::time::sleep(backoff.max(wait)).await;
-                                continue;
-                            }
-                            None => return Err(from_status_v2(status)),
-                        },
-                    }
-                }
-            }
+            )
+            .await?;
+        response
+            .results
+            .into_iter()
+            .map(publish_result_from_proto)
+            .collect()
+    }
+
+    /// `Poll`：读已提交消息（`start_offset = None` ⇒ 从最早可用开始）。
+    pub async fn poll(&self, request: &MqPoll) -> Result<MqPollResult> {
+        let payload = mq_v2::PollRequest {
+            topic: request.topic.clone(),
+            partition: request.partition,
+            topic_epoch: request.topic_epoch,
+            start_offset: match request.start_offset {
+                Some(offset) => Some(crate::client::ts_to_i64("start_offset", offset)?),
+                None => None,
+            },
+            max_messages: request.max_messages,
+            max_bytes: request.max_bytes,
+            wait_ms: request.wait_ms,
+        };
+        let response = self
+            .partition_call(
+                &request.topic,
+                request.partition,
+                payload,
+                |mut stub, payload| async move {
+                    stub.poll(tonic::Request::new(payload))
+                        .await
+                        .map(|response| response.into_inner())
+                },
+            )
+            .await?;
+        let mut messages = Vec::with_capacity(response.messages.len());
+        for message in response.messages {
+            messages.push(MqMessage {
+                topic: message.topic,
+                partition: message.partition,
+                offset: offset_from_i64(message.offset)?,
+                timestamp_ms: message.timestamp_ms,
+                key: message.key,
+                payload: message.payload,
+                headers: message.headers.into_iter().collect(),
+                producer: message.producer,
+            });
         }
+        Ok(MqPollResult {
+            messages,
+            next_offset: offset_from_i64(response.next_offset)?,
+            earliest_offset: offset_from_i64(response.earliest_offset)?,
+            latest_offset: offset_from_i64(response.latest_offset)?,
+        })
+    }
+
+    /// `JoinGroup`：订阅的 topic 必须已存在；返回分配与已提交位点。
+    pub async fn join_group(&self, request: &MqJoinGroup) -> Result<MqJoined> {
+        let payload = mq_v2::JoinGroupRequest {
+            group: request.group.clone(),
+            member_id: request.member_id.clone(),
+            topics: request.topics.clone(),
+            session_timeout_ms: i32::try_from(request.session_timeout_ms).unwrap_or(i32::MAX),
+        };
+        let group = request.group.clone();
+        let response = self
+            .group_call(&group, payload, |mut stub, payload| async move {
+                stub.join_group(tonic::Request::new(payload))
+                    .await
+                    .map(|response| response.into_inner())
+            })
+            .await?;
+        let mut assignments = Vec::with_capacity(response.assignments.len());
+        for assignment in response.assignments {
+            assignments.push(MqAssignment {
+                topic: assignment.topic,
+                partition: assignment.partition,
+                committed_offset: offset_from_i64(assignment.committed_offset)?,
+            });
+        }
+        Ok(MqJoined {
+            member_id: response.member_id,
+            generation: response.generation,
+            assignments,
+            heartbeat_interval_ms: u32::try_from(response.heartbeat_interval_ms).unwrap_or(0),
+            session_timeout_ms: u32::try_from(response.session_timeout_ms).unwrap_or(0),
+        })
+    }
+
+    /// `Heartbeat`：续期；过期代际返回 `GROUP_EPOCH_STALE`（调用方重新 Join）。
+    pub async fn heartbeat(
+        &self,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<MqHeartbeat> {
+        let payload = mq_v2::HeartbeatRequest {
+            group: group.to_string(),
+            member_id: member_id.to_string(),
+            generation,
+        };
+        let response = self
+            .group_call(group, payload, |mut stub, payload| async move {
+                stub.heartbeat(tonic::Request::new(payload))
+                    .await
+                    .map(|response| response.into_inner())
+            })
+            .await?;
+        Ok(MqHeartbeat {
+            generation: response.generation,
+            rebalance_required: response.rebalance_required,
+        })
+    }
+
+    /// `LeaveGroup`：主动离组（重复调用幂等）。
+    pub async fn leave_group(&self, group: &str, member_id: &str, generation: u64) -> Result<()> {
+        let payload = mq_v2::LeaveGroupRequest {
+            group: group.to_string(),
+            member_id: member_id.to_string(),
+            generation,
+        };
+        let group_name = group.to_string();
+        self.group_call(&group_name, payload, |mut stub, payload| async move {
+            stub.leave_group(tonic::Request::new(payload))
+                .await
+                .map(|_| ())
+        })
+        .await
+    }
+
+    /// `Ack`：提交一个分区位点，返回推进后的 committed（下一条待消费）。
+    pub async fn ack(
+        &self,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+        ack: &MqAck,
+    ) -> Result<u64> {
+        let payload = mq_v2::AckRequest {
+            topic: ack.topic.clone(),
+            partition: ack.partition,
+            topic_epoch: ack.topic_epoch,
+            group: group.to_string(),
+            member_id: member_id.to_string(),
+            generation,
+            offset: crate::client::ts_to_i64("offset", ack.offset)?,
+        };
+        let response = self
+            .group_call(group, payload, |mut stub, payload| async move {
+                stub.ack(tonic::Request::new(payload))
+                    .await
+                    .map(|response| response.into_inner())
+            })
+            .await?;
+        offset_from_i64(response.committed_offset)
+    }
+
+    /// `AckBatch`：1–256 条、同一组；任一条未分配 ⇒ 整批不写。
+    pub async fn ack_batch(
+        &self,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+        acks: &[MqAck],
+    ) -> Result<Vec<MqAckResult>> {
+        if acks.is_empty() || acks.len() > MAX_ACK_BATCH {
+            return Err(Error::InvalidArgument(format!(
+                "AckBatch accepts 1..={MAX_ACK_BATCH} entries (got {})",
+                acks.len()
+            )));
+        }
+        let mut entries = Vec::with_capacity(acks.len());
+        for ack in acks {
+            entries.push(mq_v2::AckEntry {
+                topic: ack.topic.clone(),
+                partition: ack.partition,
+                topic_epoch: ack.topic_epoch,
+                offset: crate::client::ts_to_i64("offset", ack.offset)?,
+            });
+        }
+        let payload = mq_v2::AckBatchRequest {
+            group: group.to_string(),
+            member_id: member_id.to_string(),
+            generation,
+            acks: entries,
+        };
+        let response = self
+            .group_call(group, payload, |mut stub, payload| async move {
+                stub.ack_batch(tonic::Request::new(payload))
+                    .await
+                    .map(|response| response.into_inner())
+            })
+            .await?;
+        let mut results = Vec::with_capacity(response.results.len());
+        for result in response.results {
+            results.push(MqAckResult {
+                topic: result.topic,
+                partition: result.partition,
+                committed_offset: offset_from_i64(result.committed_offset)?,
+            });
+        }
+        Ok(results)
+    }
+
+    /// `GetCommittedOffsets`：`partitions` 为空 = 该组的全部已提交位点。
+    pub async fn get_committed_offsets(
+        &self,
+        group: &str,
+        partitions: &[(String, i32)],
+    ) -> Result<Vec<MqCommitted>> {
+        let payload = mq_v2::GetCommittedOffsetsRequest {
+            group: group.to_string(),
+            partitions: partitions
+                .iter()
+                .map(|(topic, partition)| mq_v2::TopicPartition {
+                    topic: topic.clone(),
+                    partition: *partition,
+                })
+                .collect(),
+        };
+        let response = self
+            .group_call(group, payload, |mut stub, payload| async move {
+                stub.get_committed_offsets(tonic::Request::new(payload))
+                    .await
+                    .map(|response| response.into_inner())
+            })
+            .await?;
+        let mut offsets = Vec::with_capacity(response.offsets.len());
+        for offset in response.offsets {
+            offsets.push(MqCommitted {
+                topic: offset.topic,
+                partition: offset.partition,
+                offset: offset_from_i64(offset.offset)?,
+                committed: offset.committed,
+            });
+        }
+        Ok(offsets)
+    }
+
+    /// `DescribeGroup`：成员/分配/lag（lag 读日志分片本地副本，可滞后）。
+    pub async fn describe_group(&self, group: &str) -> Result<MqGroupDescription> {
+        let payload = mq_v2::DescribeGroupRequest {
+            group: group.to_string(),
+        };
+        let response = self
+            .group_call(group, payload, |mut stub, payload| async move {
+                stub.describe_group(tonic::Request::new(payload))
+                    .await
+                    .map(|response| response.into_inner())
+            })
+            .await?;
+        let mut members = Vec::with_capacity(response.members.len());
+        for member in response.members {
+            let mut assignments = Vec::with_capacity(member.assignments.len());
+            for assignment in member.assignments {
+                assignments.push(MqAssignment {
+                    topic: assignment.topic,
+                    partition: assignment.partition,
+                    committed_offset: offset_from_i64(assignment.committed_offset)?,
+                });
+            }
+            members.push(MqGroupMemberInfo {
+                member_id: member.member_id,
+                topics: member.topics,
+                assignments,
+                last_heartbeat_ms: member.last_heartbeat_ms,
+            });
+        }
+        let mut partitions = Vec::with_capacity(response.partitions.len());
+        for lag in response.partitions {
+            partitions.push(MqPartitionLag {
+                topic: lag.topic,
+                partition: lag.partition,
+                committed_offset: offset_from_i64(lag.committed_offset)?,
+                next_offset: offset_from_i64(lag.next_offset)?,
+                lag: offset_from_i64(lag.lag)?,
+            });
+        }
+        Ok(MqGroupDescription {
+            group: response.group,
+            generation: response.generation,
+            state: MqGroupState::from_wire(response.state),
+            members,
+            partitions,
+        })
+    }
+
+    /// `ListGroups`：`prefix` 过滤、`page_token` 续页（空 = 没有下一页）。
+    pub async fn list_groups(
+        &self,
+        prefix: &str,
+        page_size: i32,
+        page_token: &str,
+    ) -> Result<(Vec<String>, String)> {
+        let payload = mq_v2::ListGroupsRequest {
+            prefix: prefix.to_string(),
+            page_size,
+            page_token: page_token.to_string(),
+        };
+        let response = self
+            .with_any_endpoint(move |mut stub| {
+                let payload = payload.clone();
+                async move {
+                    stub.list_groups(tonic::Request::new(payload))
+                        .await
+                        .map(|response| response.into_inner())
+                }
+            })
+            .await?;
+        Ok((response.groups, response.next_page_token))
     }
 
     fn remember_leader(&self, topic: &str, partition: i32, endpoint: &str) {
@@ -335,6 +593,144 @@ impl MqV2Client {
             )));
         }
         Ok(entry.leader_addr.clone())
+    }
+
+    /// 分片请求的通用重试循环（`PublishBatch`/`Poll`）：按分区缓存 Leader，
+    /// `NOT_LEADER` hint 只更新该分区，选举窗口与普通 `UNAVAILABLE` 都消耗同一份
+    /// 重试预算（有界）。
+    async fn partition_call<T, Req, F, Fut>(
+        &self,
+        topic: &str,
+        partition: i32,
+        request: Req,
+        attempt: F,
+    ) -> Result<T>
+    where
+        Req: Clone,
+        F: Fn(mq_v2::mq_client::MqClient<AuthedChannel>, Req) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let key = partition_key(topic, partition);
+        let mut retry = RetryState::new(self.client.retry_config());
+        let mut hint_retries = 0u32;
+        loop {
+            let endpoint = match self.resolve_leader(&key, topic, partition).await {
+                Ok(endpoint) => endpoint,
+                // 分片 Leader 尚未选出（选举窗口）：可重试；未知 topic/分区不可重试。
+                Err(err @ Error::ClusterUnavailable(_)) => match retry.next_attempt() {
+                    Some(backoff) => {
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    None => return Err(err),
+                },
+                Err(err) => return Err(err),
+            };
+            let channel = self.client.channel_for(&endpoint).await?;
+            let result = attempt(
+                mq_v2::mq_client::MqClient::new(channel.clone()),
+                request.clone(),
+            )
+            .await;
+            self.client.return_channel(&endpoint, channel);
+            match result {
+                Ok(value) => return Ok(value),
+                Err(status) => {
+                    if let Some(hint) = leader_hint(&status) {
+                        self.remember_leader(topic, partition, &hint);
+                        if hint_retries < MAX_HINT_RETRIES {
+                            hint_retries += 1;
+                            continue;
+                        }
+                    } else if error_code_of(&status).as_deref()
+                        == Some(CoordErrorCode::NotLeader.as_str())
+                    {
+                        self.leaders.write().remove(&key);
+                    }
+                    match classify_tonic(&status) {
+                        RetryDecision::Abort => return Err(from_status_v2(status)),
+                        RetryDecision::RetryImmediately => match retry.next_attempt() {
+                            Some(_) => continue,
+                            None => return Err(from_status_v2(status)),
+                        },
+                        RetryDecision::RetryAfter(wait) => match retry.next_attempt() {
+                            Some(backoff) => {
+                                tokio::time::sleep(backoff.max(wait)).await;
+                                continue;
+                            }
+                            None => return Err(from_status_v2(status)),
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    /// 组命令的通用重试循环：按组缓存 group shard Leader（首次从任意端点开始，
+    /// 由 `NOT_LEADER` hint 纠正）。
+    async fn group_call<T, Req, F, Fut>(&self, group: &str, request: Req, attempt: F) -> Result<T>
+    where
+        Req: Clone,
+        F: Fn(mq_v2::mq_client::MqClient<AuthedChannel>, Req) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let key = group_key(group);
+        let endpoints = self.client.endpoints();
+        if endpoints.is_empty() {
+            return Err(Error::ClusterUnavailable(
+                "no endpoints configured".to_string(),
+            ));
+        }
+        let mut retry = RetryState::new(self.client.retry_config());
+        let mut hint_retries = 0u32;
+        let mut fallback = 0usize;
+        loop {
+            let endpoint = match self.group_leaders.read().get(&key).cloned() {
+                Some(endpoint) => endpoint,
+                None => {
+                    let endpoint = endpoints[fallback % endpoints.len()].clone();
+                    fallback = fallback.wrapping_add(1);
+                    endpoint
+                }
+            };
+            let channel = self.client.channel_for(&endpoint).await?;
+            let result = attempt(
+                mq_v2::mq_client::MqClient::new(channel.clone()),
+                request.clone(),
+            )
+            .await;
+            self.client.return_channel(&endpoint, channel);
+            match result {
+                Ok(value) => return Ok(value),
+                Err(status) => {
+                    if let Some(hint) = leader_hint(&status) {
+                        self.group_leaders.write().insert(key.clone(), hint);
+                        if hint_retries < MAX_HINT_RETRIES {
+                            hint_retries += 1;
+                            continue;
+                        }
+                    } else if error_code_of(&status).as_deref()
+                        == Some(CoordErrorCode::NotLeader.as_str())
+                    {
+                        self.group_leaders.write().remove(&key);
+                    }
+                    match classify_tonic(&status) {
+                        RetryDecision::Abort => return Err(from_status_v2(status)),
+                        RetryDecision::RetryImmediately => match retry.next_attempt() {
+                            Some(_) => continue,
+                            None => return Err(from_status_v2(status)),
+                        },
+                        RetryDecision::RetryAfter(wait) => match retry.next_attempt() {
+                            Some(backoff) => {
+                                tokio::time::sleep(backoff.max(wait)).await;
+                                continue;
+                            }
+                            None => return Err(from_status_v2(status)),
+                        },
+                    }
+                }
+            }
+        }
     }
 
     /// 逐端点尝试一次（`GetTopicLeader` 这类任意节点可答的读面）。
@@ -374,6 +770,11 @@ fn partition_key(topic: &str, partition: i32) -> String {
     format!("{topic}\u{0}{partition}")
 }
 
+/// 组级 Leader 缓存键（与分区键分开：同一个 `group` 只有一份组 Leader）。
+fn group_key(group: &str) -> String {
+    format!("group\u{0}{group}")
+}
+
 /// 从 `NOT_LEADER` 的 trailer 取分片 Leader 地址。
 fn leader_hint(status: &tonic::Status) -> Option<String> {
     status
@@ -404,6 +805,11 @@ fn config_from_proto(config: mq_v2::TopicConfig) -> MqTopicConfig {
     }
 }
 
+fn offset_from_i64(offset: i64) -> Result<u64> {
+    u64::try_from(offset)
+        .map_err(|_| Error::Internal(format!("negative offset in response: {offset}")))
+}
+
 fn publish_result_from_proto(response: mq_v2::PublishResponse) -> Result<MqPublishResult> {
     Ok(MqPublishResult {
         offset: u64::try_from(response.offset).map_err(|_| {
@@ -412,6 +818,150 @@ fn publish_result_from_proto(response: mq_v2::PublishResponse) -> Result<MqPubli
         timestamp_ms: response.timestamp_ms,
         deduplicated: response.deduplicated,
     })
+}
+
+/// `Poll` 请求。
+#[derive(Debug, Clone, Default)]
+pub struct MqPoll {
+    pub topic: String,
+    pub partition: i32,
+    pub topic_epoch: u64,
+    /// `None` = 从当前最早可用开始（服务端不 clamp 显式越界值）。
+    pub start_offset: Option<u64>,
+    /// 0 = 服务端 `[mq_v2].poll_max_messages`。
+    pub max_messages: i32,
+    /// 0 = 服务端 `[mq_v2].poll_max_bytes`。
+    pub max_bytes: i32,
+    /// 0 = 立即返回；上限 `[mq_v2].long_poll_max_ms`。
+    pub wait_ms: i32,
+}
+
+/// 一条已提交消息（`Poll` 的返回项）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqMessage {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: u64,
+    pub timestamp_ms: i64,
+    pub key: Vec<u8>,
+    pub payload: Vec<u8>,
+    pub headers: BTreeMap<String, String>,
+    pub producer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqPollResult {
+    pub messages: Vec<MqMessage>,
+    /// 下次拉取建议的 offset（空批 = 请求起点）。
+    pub next_offset: u64,
+    pub earliest_offset: u64,
+    pub latest_offset: u64,
+}
+
+/// `JoinGroup` 请求。
+#[derive(Debug, Clone, Default)]
+pub struct MqJoinGroup {
+    pub group: String,
+    /// 空 = 新成员（由服务端分配 `member_id`）。
+    pub member_id: String,
+    pub topics: Vec<String>,
+    /// 0 = 服务端 `[mq_v2].group_session_timeout_ms`。
+    pub session_timeout_ms: u32,
+}
+
+/// 一个分区分配（含该分区的已提交位点，0 = 尚未提交）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqAssignment {
+    pub topic: String,
+    pub partition: i32,
+    pub committed_offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqJoined {
+    pub member_id: String,
+    pub generation: u64,
+    pub assignments: Vec<MqAssignment>,
+    pub heartbeat_interval_ms: u32,
+    pub session_timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MqHeartbeat {
+    pub generation: u64,
+    pub rebalance_required: bool,
+}
+
+/// 一条待提交位点（`Ack`/`AckBatch`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqAck {
+    pub topic: String,
+    pub partition: i32,
+    pub topic_epoch: u64,
+    /// 已处理完的最后一条 offset（含）；服务端把 committed 推进到 `offset + 1`。
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqAckResult {
+    pub topic: String,
+    pub partition: i32,
+    pub committed_offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqCommitted {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: u64,
+    pub committed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqGroupMemberInfo {
+    pub member_id: String,
+    pub topics: Vec<String>,
+    pub assignments: Vec<MqAssignment>,
+    pub last_heartbeat_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqPartitionLag {
+    pub topic: String,
+    pub partition: i32,
+    pub committed_offset: u64,
+    pub next_offset: u64,
+    pub lag: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MqGroupState {
+    Unspecified,
+    Empty,
+    Stable,
+    PreparingRebalance,
+    Dead,
+}
+
+impl MqGroupState {
+    fn from_wire(value: i32) -> Self {
+        match value {
+            1 => Self::Empty,
+            2 => Self::Stable,
+            3 => Self::PreparingRebalance,
+            4 => Self::Dead,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqGroupDescription {
+    pub group: String,
+    pub generation: u64,
+    pub state: MqGroupState,
+    pub members: Vec<MqGroupMemberInfo>,
+    pub partitions: Vec<MqPartitionLag>,
 }
 
 /// `PublishBatch` 的目标（同一次调用必须是同一 topic/partition）。

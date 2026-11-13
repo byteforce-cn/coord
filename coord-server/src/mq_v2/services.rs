@@ -255,9 +255,13 @@ impl Mq for CoordNode {
 
     async fn subscribe(
         &self,
-        _request: Request<mq_v2::SubscribeRequest>,
+        request: Request<mq_v2::SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        gated!(self, MqV2Capability::Subscribe)
+        self.mq_v2().gate(MqV2Capability::Subscribe)?;
+        // best-effort 推送：背压丢弃、不推进位点（至少一次路径是 Poll + Ack）。
+        Ok(Response::new(
+            self.mq_subscribe(request.into_inner()).await?,
+        ))
     }
 
     async fn move_to_dlq(

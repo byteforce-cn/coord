@@ -239,3 +239,116 @@ async fn poll_caps_messages_and_bytes_whole_message_at_a_time() {
     let response = poll(&mut client, Some(2), 10, 1, 0).await.expect("poll");
     assert_eq!(response.messages.len(), 1);
 }
+
+// ──── M3-5：Subscribe（best-effort 推送）────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscribe_pushes_new_messages_and_never_replays_history() {
+    let node = MqV2Node::boot(2, 1).await;
+    let mut client = node.client().await;
+    create_topic(&mut client, TOPIC, 1, None).await;
+    publish(&mut client, TOPIC, 0, b"old", "")
+        .await
+        .expect("publish old");
+
+    // start_offset = 0（未设置）⇒ 各分区最新：旧消息不推送。
+    let mut stream = client
+        .subscribe(mq_v2::SubscribeRequest {
+            topic: TOPIC.to_string(),
+            topic_epoch: 0,
+            group: String::new(),
+            partitions: Vec::new(),
+            start_offset: 0,
+        })
+        .await
+        .expect("subscribe")
+        .into_inner();
+
+    // 不读流，先灌 100 × 4 KiB：h2 流控窗口（~64 KiB）挡住接收端后，服务端队列
+    // （64）填满，其余必须丢弃而不是阻塞写路径。
+    let mut payload = vec![b'x'; 4096];
+    payload[..7].copy_from_slice(b"new-000");
+    for index in 0..100u32 {
+        payload[4..7].copy_from_slice(format!("{index:03}").as_bytes());
+        publish(&mut client, TOPIC, 0, &payload, "")
+            .await
+            .expect("publish new");
+    }
+    // 给推送任务时间把队列填满并丢弃其余：best-effort 的丢弃必须可观测。
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let mut received = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_millis(300), stream.message()).await {
+            Ok(Ok(Some(message))) => received.push(message),
+            _ => break,
+        }
+        if received.len() >= 64 {
+            break;
+        }
+    }
+    assert!(
+        !received.is_empty(),
+        "the subscription must push at least one message"
+    );
+    assert!(
+        received.iter().all(|message| message.payload.len() == 4096),
+        "start_offset = 0 means latest: no history"
+    );
+    assert_eq!(
+        received[0].offset, 1,
+        "offsets start after the skipped history"
+    );
+    // 背压丢弃的计数语义由 `consume::tests::subscribe_drops_when_the_queue_is_full...`
+    // 直接钉住（真实 h2 运输会把服务端队列抽干，端到端断言「一定丢弃」不可靠）。
+    assert!(
+        node.metric("coord_mq_v2_subscribe_messages_total") > 0,
+        "the subscription must publish its delivered-message counter"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscribe_rejects_an_explicit_offset_below_earliest() {
+    let node = MqV2Node::boot(2, 1).await;
+    let mut client = node.client().await;
+    node.propose_topic(MqTopicOp::Create(
+        coord_server::storage::mq_topic::MqTopicCreate {
+            name: TOPIC.to_string(),
+            partitions: 1,
+            config: MqTopicConfig {
+                retention_secs: 604_800,
+                max_bytes: 0,
+                max_message_bytes: 1024 * 1024,
+                segment_bytes: 1024,
+                dlq_retention_secs: 604_800,
+            },
+            request_id: String::new(),
+            now_ms: 1,
+            log_shards: 2,
+            max_partitions_per_shard: 1024,
+        },
+    ))
+    .await;
+    let meta = node.topic_row(TOPIC);
+    let payloads: Vec<Vec<u8>> = (0..40).map(|_| vec![b'p'; 100]).collect();
+    node.append_at(&meta, 0, coord_server::mq_v2::now_ms(), &payloads)
+        .await;
+    let truncated = node.truncate(&meta, 0, 32).await;
+    assert!(truncated.earliest_offset > 0);
+
+    let status = client
+        .subscribe(mq_v2::SubscribeRequest {
+            topic: TOPIC.to_string(),
+            topic_epoch: 0,
+            group: String::new(),
+            partitions: Vec::new(),
+            start_offset: 1,
+        })
+        .await
+        .expect_err("an explicit offset below earliest must be rejected");
+    assert_eq!(status.code(), Code::OutOfRange, "{status:?}");
+    assert_eq!(
+        coord_core::error_code::error_code_of(&status).as_deref(),
+        Some("OFFSET_OUT_OF_RANGE")
+    );
+}

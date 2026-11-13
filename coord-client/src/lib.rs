@@ -22,6 +22,7 @@ pub mod config;
 pub mod credential;
 pub mod leader;
 pub mod lease_v2;
+pub mod mq_consumer;
 pub mod mq_v2;
 pub mod pool;
 pub mod refresh;
@@ -47,8 +48,11 @@ pub use credential::{
 };
 pub use leader::LeaderDiscovery;
 pub use lease_v2::{LeaseV2Client, LeaseV2Grant, LeaseV2Keeper, LeaseV2State};
+pub use mq_consumer::{MqConsumer, MqConsumerOptions, ResetPolicy};
 pub use mq_v2::{
-    MqBatchEntry, MqCreateTopic, MqPartitionLeader, MqPublish, MqPublishBatch, MqPublishResult,
+    MqAck, MqAckResult, MqAssignment, MqBatchEntry, MqCommitted, MqCreateTopic, MqGroupDescription,
+    MqGroupMemberInfo, MqGroupState, MqHeartbeat, MqJoinGroup, MqJoined, MqMessage, MqPartitionLag,
+    MqPartitionLeader, MqPoll, MqPollResult, MqPublish, MqPublishBatch, MqPublishResult,
     MqTopicConfig, MqTopicCreated, MqTopicLeaders, MqV2Client,
 };
 pub use refresh::{spawn_session_refresher, SessionGateway, SessionTokens, REFRESH_LEAD_SECS};

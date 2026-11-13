@@ -224,6 +224,19 @@ impl CoordErrorCode {
                 | Self::EpochStale
                 | Self::HistoryUnavailable
                 | Self::SafeTsLag
+                // MQ v2：这些码决定客户端的下一步动作（重定向/重新 Join/reset 位点），
+                // 必须在客户端映射里保留，不能被压成 `INTERNAL`。
+                | Self::TopicNotFound
+                | Self::TopicExists
+                | Self::TopicEpochStale
+                | Self::PartitionNotFound
+                | Self::OffsetOutOfRange
+                | Self::GroupNotFound
+                | Self::NotGroupMember
+                | Self::GroupEpochStale
+                | Self::RebalanceInProgress
+                | Self::MessageTooLarge
+                | Self::QuotaExceeded
         )
     }
 
