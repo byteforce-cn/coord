@@ -197,6 +197,22 @@ pub struct MqTruncate {
     pub up_to_offset: u64,
 }
 
+/// `Command::MqDropPartition`：物理回收一个分区的全部数据（DeleteTopic 的回收路径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqDropPartition {
+    pub shard_id: u32,
+    pub topic_id: u64,
+    pub partition: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqDropPartitionResult {
+    pub records_removed: u64,
+    pub dlq_records_removed: u64,
+    pub idem_entries_removed: u64,
+    pub bytes_freed: u64,
+}
+
 /// `Command::MqMoveToDlq`：复制到 DLQ 并在主日志写 tombstone。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MqMoveToDlq {
@@ -465,6 +481,57 @@ impl<B: StorageBackend> MvccStorage<B> {
             result.next_offset = meta.next_offset;
             write_partition_meta(tx, op.topic_id, op.partition, &meta)?;
 
+            shard.applied_index = applied.index;
+            write_meta(tx, &shard_meta_key(op.shard_id), &shard)?;
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(result)
+        })
+    }
+
+    /// 物理回收一个分区（`Command::MqDropPartition`）：删除段记录、DLQ、幂等索引与
+    /// 分区元数据，并从本分片的 topic 记账里扣除。
+    ///
+    /// 重放幂等：行已删光时各项计数为 0，仍推进 apply 水位（不产生副作用）。
+    pub fn apply_mq_drop_partition(
+        &self,
+        op: &MqDropPartition,
+        applied: AppliedLogId,
+    ) -> Result<MqDropPartitionResult> {
+        self.backend().write(|tx| {
+            let mut result = MqDropPartitionResult::default();
+            let meta = read_partition_meta(tx, op.topic_id, op.partition)?;
+            let prefix = partition_prefix(op.topic_id, op.partition);
+            let end = partition_successor(op.topic_id, op.partition);
+
+            for (key, value) in tx.iter_range(TABLE_MQ_LOG, &prefix, &end)? {
+                result.bytes_freed = result.bytes_freed.saturating_add(value.len() as u64);
+                result.records_removed = result.records_removed.saturating_add(1);
+                tx.remove(TABLE_MQ_LOG, &key)?;
+            }
+            for (key, value) in tx.iter_prefix(TABLE_MQ_IDEM, &prefix)? {
+                result.bytes_freed = result.bytes_freed.saturating_add(value.len() as u64);
+                result.idem_entries_removed = result.idem_entries_removed.saturating_add(1);
+                tx.remove(TABLE_MQ_IDEM, &key)?;
+            }
+            for (key, value) in tx.iter_range(TABLE_MQ_DLQ, &prefix, &end)? {
+                result.bytes_freed = result.bytes_freed.saturating_add(value.len() as u64);
+                result.dlq_records_removed = result.dlq_records_removed.saturating_add(1);
+                tx.remove(TABLE_MQ_DLQ, &key)?;
+            }
+
+            let usage_key = topic_usage_key(op.topic_id);
+            let mut usage =
+                read_meta::<MqTopicUsage>(tx, TABLE_MQ_META, &usage_key)?.unwrap_or_default();
+            usage.log_bytes = usage.log_bytes.saturating_sub(meta.log_bytes);
+            usage.dlq_bytes = usage.dlq_bytes.saturating_sub(meta.dlq_bytes);
+            usage.idem_bytes = usage.idem_bytes.saturating_sub(meta.idem_bytes);
+            write_meta(tx, &usage_key, &usage)?;
+
+            tx.remove(
+                TABLE_MQ_META,
+                &partition_meta_key(op.topic_id, op.partition),
+            )?;
+            let mut shard = read_shard_meta(tx, op.shard_id)?;
             shard.applied_index = applied.index;
             write_meta(tx, &shard_meta_key(op.shard_id), &shard)?;
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
@@ -828,6 +895,9 @@ fn apply_append_request(
         tx.insert(TABLE_MQ_IDEM, key, &value)?;
     }
     meta.next_offset = next_offset;
+    // 分区级幂等索引字节必须与 topic 记账同步：`MqTruncate`/`MqDropPartition`
+    // 以 `meta.idem_bytes` 为扣减基数，漏记会让回收后仍占用配额。
+    meta.idem_bytes = meta.idem_bytes.saturating_add(added_idem_bytes);
 
     if added_log_bytes > 0 || added_idem_bytes > 0 {
         let mut updated = usage;
@@ -983,6 +1053,81 @@ mod tests {
             }
             other => panic!("expected applied, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn drop_partition_removes_records_dlq_and_idempotency_and_replays_idempotently() {
+        let (_dir, storage) = setup();
+        let keyed = |id: &str, payload: &str| MqAppendEntry {
+            key: Vec::new(),
+            payload: payload.as_bytes().to_vec(),
+            idempotency_key: id.to_string(),
+            headers: BTreeMap::new(),
+            producer: "test".to_string(),
+        };
+        append(
+            &storage,
+            1,
+            vec![keyed("a", "one"), keyed("b", "two"), keyed("c", "three")],
+        );
+        // 一条移入 DLQ（tombstone + DLQ 行）。
+        let moved = storage
+            .apply_mq_move_to_dlq(
+                &MqMoveToDlq {
+                    shard_id: 0,
+                    topic_id: 7,
+                    partition: 0,
+                    offset: 1,
+                    reason: "poison".to_string(),
+                    detail: String::new(),
+                    now_ms: 1_700_000_000_100,
+                },
+                applied(2),
+            )
+            .unwrap();
+        assert!(matches!(moved, MqMoveToDlqOutcome::Moved { .. }));
+        assert_eq!(
+            storage
+                .mq_partition_meta(7, 0)
+                .unwrap()
+                .unwrap()
+                .next_offset,
+            3
+        );
+
+        let dropped = storage
+            .apply_mq_drop_partition(
+                &MqDropPartition {
+                    shard_id: 0,
+                    topic_id: 7,
+                    partition: 0,
+                },
+                applied(3),
+            )
+            .unwrap();
+        assert_eq!(dropped.records_removed, 3);
+        assert_eq!(dropped.dlq_records_removed, 1);
+        assert_eq!(dropped.idem_entries_removed, 3);
+        assert!(dropped.bytes_freed > 0);
+        assert!(storage.mq_partition_meta(7, 0).unwrap().is_none());
+        assert!(storage.mq_records(7, 0, 0, 10).unwrap().is_empty());
+        assert!(storage.mq_dlq_records(7, 0, 0, 10).unwrap().is_empty());
+        let usage = storage.mq_topic_usage(7).unwrap();
+        assert_eq!(usage.total(), 0, "drop must release the topic accounting");
+
+        // 重放同一命令：不重复扣账（计数为 0）。
+        let replay = storage
+            .apply_mq_drop_partition(
+                &MqDropPartition {
+                    shard_id: 0,
+                    topic_id: 7,
+                    partition: 0,
+                },
+                applied(3),
+            )
+            .unwrap();
+        assert_eq!(replay, MqDropPartitionResult::default());
+        assert_eq!(storage.mq_topic_usage(7).unwrap().total(), 0);
     }
 
     #[test]

@@ -827,6 +827,12 @@ impl StateMachineStore {
                     .map_err(io_err)?;
                 Ok((Response::MqTopic { outcome }, None))
             }
+            Command::MqDropPartition(op) => {
+                // 物理回收：段/DLQ/幂等索引/分区元数据与 topic 记账在同一 apply 事务里
+                // 删除（重放幂等，见 `apply_mq_drop_partition`）。
+                let result = sm.apply_mq_drop_partition(op, applied).map_err(io_err)?;
+                Ok((Response::MqDropPartition { result }, None))
+            }
             Command::MqGroup(op) => {
                 // 组状态是消费组分片自己的状态域：不写 changelog、不上 KV
                 // Watch；成员/位点与 apply 水位同事务落盘。

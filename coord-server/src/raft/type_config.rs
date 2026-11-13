@@ -848,6 +848,8 @@ pub enum Command {
     /// **末尾追加**；`now_ms`/订阅的分区数随命令携带，新成员 id 由 apply 生成，
     /// 重放节点不读本地时钟/配置。组行与位点行落在 `mq_meta` 表（随快照携带）。
     MqGroup(crate::storage::mq_group::MqGroupOp),
+    /// 末尾追加：物理回收一个分区（DeleteTopic 的回收路径）。
+    MqDropPartition(crate::storage::mq_log::MqDropPartition),
 }
 
 /// 组命令的稳定短标签（raft 日志/诊断输出用；不参与语义）。
@@ -860,6 +862,7 @@ fn mq_group_op_label(op: &crate::storage::mq_group::MqGroupOp) -> &'static str {
         MqGroupOp::Reap(_) => "reap",
         MqGroupOp::Ack(_) => "ack",
         MqGroupOp::Gc(_) => "gc",
+        MqGroupOp::DropTopic(_) => "drop-topic",
     }
 }
 
@@ -1036,6 +1039,11 @@ impl std::fmt::Display for Command {
                 op.shard_id(),
                 mq_group_op_label(op)
             ),
+            Command::MqDropPartition(op) => write!(
+                f,
+                "MqDropPartition(shard={}, topic={}, partition={})",
+                op.shard_id, op.topic_id, op.partition
+            ),
         }
     }
 }
@@ -1192,6 +1200,9 @@ pub enum Response {
     MqGroup {
         result: crate::storage::mq_group::MqGroupResult,
     },
+    MqDropPartition {
+        result: crate::storage::mq_log::MqDropPartitionResult,
+    },
 }
 
 impl std::fmt::Display for Response {
@@ -1300,6 +1311,7 @@ impl std::fmt::Display for Response {
             Response::MqMoveToDlq { outcome } => write!(f, "MqMoveToDlq({outcome:?})"),
             Response::MqTopic { outcome } => write!(f, "MqTopic({outcome:?})"),
             Response::MqGroup { result } => write!(f, "MqGroup({result:?})"),
+            Response::MqDropPartition { result } => write!(f, "MqDropPartition({result:?})"),
         }
     }
 }

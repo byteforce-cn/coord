@@ -1,8 +1,8 @@
 //! `coord.mq.v2` 的 tonic 服务壳（ADR-0016 M0-4）。
 //!
 //! 每个 handler 先过 [`MqV2State::gate`]：关闭或能力未交付 → `FAILED_PRECONDITION`。
-//! 门禁通过但 handler 尚未实现 → `UNIMPLEMENTED`（实现进度问题，不是配置问题；
-//! 混成同一个码会让运维无法判断该改配置还是该升级版本）——与 KV-T v2 同一口径。
+//! M0–M4 已把 `coord.mq.v2` 的 21 个 RPC 全部接线，不存在「门禁通过但 handler 未
+//! 实现」的中间态（M0 的 `UNIMPLEMENTED` 探针因此改为断言 handler 已接线）。
 //!
 //! 服务**始终注册**：关闭时 reflection 仍然可见，客户端在连接阶段就能发现"这个
 //! 集群没有 MQ v2"，而不是拿到 `UNAVAILABLE` 后误判为网络故障。
@@ -20,26 +20,6 @@ use super::MqV2Capability;
 use crate::raft::type_config::Response as RaftResponse;
 use crate::server::CoordNode;
 use crate::storage::mq_log::MqAppendEntry;
-
-/// 门禁通过但 handler 尚未接线时的响应（M0 壳阶段不会到达：能力集合为空）。
-fn unimplemented(capability: MqV2Capability) -> Status {
-    attach(
-        Status::unimplemented(format!(
-            "coord.mq.v2 {} handler is not wired yet (gate pending; see \
-             docs/production/ops/mq-v2-gate.md)",
-            capability.label()
-        )),
-        CoordErrorCode::Internal,
-    )
-}
-
-/// 先过门禁，再按"未实现"返回（M0 的每个 handler 都是这两步）。
-macro_rules! gated {
-    ($self:ident, $cap:expr) => {{
-        $self.mq_v2().gate($cap)?;
-        Err(unimplemented($cap))
-    }};
-}
 
 #[tonic::async_trait]
 impl Mq for CoordNode {
@@ -107,16 +87,22 @@ impl Mq for CoordNode {
 
     async fn delete_topic(
         &self,
-        _request: Request<mq_v2::DeleteTopicRequest>,
+        request: Request<mq_v2::DeleteTopicRequest>,
     ) -> Result<Response<mq_v2::DeleteTopicResponse>, Status> {
-        gated!(self, MqV2Capability::Topic)
+        self.mq_v2().gate(MqV2Capability::Topic)?;
+        Ok(Response::new(
+            self.mq_delete_topic(request.into_inner()).await?,
+        ))
     }
 
     async fn get_topic_deletion(
         &self,
-        _request: Request<mq_v2::GetTopicDeletionRequest>,
+        request: Request<mq_v2::GetTopicDeletionRequest>,
     ) -> Result<Response<mq_v2::GetTopicDeletionResponse>, Status> {
-        gated!(self, MqV2Capability::Topic)
+        self.mq_v2().gate(MqV2Capability::Topic)?;
+        Ok(Response::new(
+            self.mq_get_topic_deletion(&request.into_inner().delete_id)?,
+        ))
     }
 
     async fn publish(

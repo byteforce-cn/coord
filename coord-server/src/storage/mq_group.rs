@@ -152,6 +152,13 @@ pub struct MqGroupGc {
     pub offset_ttl_ms: u64,
 }
 
+/// 删除 topic 在该分片内所有组里的位点（DeleteTopic 回收；位点已无意义）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqGroupDropTopic {
+    pub shard_id: u32,
+    pub topic_id: u64,
+}
+
 /// 批量提交位点（`Ack` = 一条）。契约要求整批校验、不部分提交。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MqGroupAck {
@@ -181,6 +188,8 @@ pub enum MqGroupOp {
     Ack(MqGroupAck),
     /// 末尾追加（postcard 兼容既有日志）：空组 + 过 TTL 位点的回收。
     Gc(MqGroupGc),
+    /// 末尾追加：删除 topic 后清理该分片内所有组的位点。
+    DropTopic(MqGroupDropTopic),
 }
 
 impl MqGroupOp {
@@ -192,6 +201,7 @@ impl MqGroupOp {
             Self::Reap(op) => op.shard_id,
             Self::Ack(op) => op.shard_id,
             Self::Gc(op) => op.shard_id,
+            Self::DropTopic(op) => op.shard_id,
         }
     }
 }
@@ -247,6 +257,13 @@ pub struct MqGroupGcResult {
     pub offsets_removed: u32,
 }
 
+/// topic 位点清理的产出。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqGroupDropped {
+    pub groups_changed: u32,
+    pub offsets_removed: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MqGroupAcked {
     pub results: Vec<MqGroupAckResult>,
@@ -292,6 +309,8 @@ pub enum MqGroupResult {
     Rejected(MqGroupRejection),
     /// 末尾追加：组 TTL 回收（与 `MqGroupOp::Gc` 对应）。
     Gced(MqGroupGcResult),
+    /// 末尾追加：删除 topic 的位点清理结果。
+    Dropped(MqGroupDropped),
 }
 
 /// 分片级 apply 水位 + 最近一次结果（同一 Raft 条目重复 apply 返回首次结果）。
@@ -453,7 +472,41 @@ fn apply_group_op(tx: &mut dyn WriteTx, op: &MqGroupOp) -> Result<MqGroupResult>
         MqGroupOp::Reap(reap) => apply_reap(tx, reap),
         MqGroupOp::Ack(ack) => apply_ack(tx, ack),
         MqGroupOp::Gc(gc) => apply_gc(tx, gc),
+        MqGroupOp::DropTopic(drop) => apply_drop_topic(tx, drop),
     }
+}
+
+/// 删除一个 topic 在本分片内所有组里的位点（DeleteTopic 的回收步骤）。
+///
+/// 组行保留（成员可能还在，只是订阅的 topic 被删）；重放幂等（第二次删不到）。
+fn apply_drop_topic(tx: &mut dyn WriteTx, op: &MqGroupDropTopic) -> Result<MqGroupResult> {
+    let rows = tx.iter_prefix(TABLE_MQ_META, &[META_GROUP_OFFSET])?;
+    let mut groups = std::collections::BTreeSet::new();
+    let mut offsets_removed = 0u32;
+    for (key, value) in rows {
+        let offset = decode::<MqGroupOffset>(&value)?;
+        if offset.topic_id != op.topic_id {
+            continue;
+        }
+        // key = 'O' + len(group) ++ group ++ topic_id ++ partition
+        if let Some(name) = key
+            .strip_prefix(&[META_GROUP_OFFSET])
+            .and_then(|rest| {
+                let len_bytes = rest.get(..4)?;
+                let len = u32::from_be_bytes(len_bytes.try_into().ok()?) as usize;
+                rest.get(4..4 + len)
+            })
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        {
+            groups.insert(name.to_string());
+        }
+        tx.remove(TABLE_MQ_META, &key)?;
+        offsets_removed = offsets_removed.saturating_add(1);
+    }
+    Ok(MqGroupResult::Dropped(MqGroupDropped {
+        groups_changed: u32::try_from(groups.len()).unwrap_or(u32::MAX),
+        offsets_removed,
+    }))
 }
 
 /// 回收空组：成员为空且位点全部过 TTL（没有位点 ⇒ 立即回收）。
@@ -1546,6 +1599,90 @@ mod tests {
         let state = storage.mq_group("billing").unwrap().unwrap();
         assert_eq!(state.members.len(), 1);
         assert_eq!(state.generation, 1);
+    }
+
+    #[test]
+    fn drop_topic_removes_only_that_topics_offsets() {
+        let (_dir, storage) = setup();
+        let joined = joined(apply(
+            &storage,
+            MqGroupOp::Join(join(
+                "drop-a",
+                "",
+                vec![topic("t1", 1, 2), topic("t2", 2, 1)],
+                30_000,
+                1_000,
+            )),
+            1,
+        ));
+        assert_eq!(joined.assignments.len(), 3);
+        assert!(matches!(
+            apply(
+                &storage,
+                MqGroupOp::Ack(MqGroupAck {
+                    shard_id: 0,
+                    group: "drop-a".to_string(),
+                    member_id: joined.member_id.clone(),
+                    generation: joined.generation,
+                    entries: vec![
+                        MqGroupAckEntry {
+                            topic_id: 1,
+                            partition: 0,
+                            offset: 0,
+                        },
+                        MqGroupAckEntry {
+                            topic_id: 1,
+                            partition: 1,
+                            offset: 0,
+                        },
+                        MqGroupAckEntry {
+                            topic_id: 2,
+                            partition: 0,
+                            offset: 0,
+                        },
+                    ],
+                    now_ms: 2_000,
+                }),
+                2,
+            ),
+            MqGroupResult::Acked(_)
+        ));
+        assert_eq!(storage.mq_group_offsets("drop-a").unwrap().len(), 3);
+
+        let dropped = apply(
+            &storage,
+            MqGroupOp::DropTopic(MqGroupDropTopic {
+                shard_id: 0,
+                topic_id: 1,
+            }),
+            3,
+        );
+        assert_eq!(
+            dropped,
+            MqGroupResult::Dropped(MqGroupDropped {
+                groups_changed: 1,
+                offsets_removed: 2,
+            })
+        );
+        let remaining = storage.mq_group_offsets("drop-a").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].topic_id, 2);
+        // 组行保留（成员可能还在，只是 topic 被删）。
+        assert!(storage.mq_group("drop-a").unwrap().is_some());
+
+        // 重放：没有可删的位点。
+        assert_eq!(
+            storage
+                .apply_mq_group_op(
+                    &MqGroupOp::DropTopic(MqGroupDropTopic {
+                        shard_id: 0,
+                        topic_id: 1,
+                    }),
+                    applied(4),
+                )
+                .unwrap(),
+            MqGroupResult::Dropped(MqGroupDropped::default())
+        );
     }
 
     #[test]

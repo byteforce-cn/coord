@@ -138,6 +138,12 @@ struct MetricsInner {
     pub mq_v2_dlq_moved_total: AtomicU64,
     /// `PollDlq` 返回的消息数
     pub mq_v2_poll_dlq_messages_total: AtomicU64,
+    /// 删除回收物理删除的分区数
+    pub mq_v2_deletion_partitions_total: AtomicU64,
+    /// 删除回收删除的消息数
+    pub mq_v2_deletion_messages_total: AtomicU64,
+    /// 删除回收释放的字节数
+    pub mq_v2_deletion_bytes_total: AtomicU64,
     /// 客户端观测到的 leadership 丢失次数（旧批随后被丢弃）
     pub tso_leader_changes_total: AtomicU64,
     /// v2 KV 写被 `CommitRejected` 拒绝次数（D11.4；不静默写）
@@ -370,6 +376,9 @@ impl Default for MetricsInner {
             mq_v2_subscribe_dropped_total: AtomicU64::new(0),
             mq_v2_dlq_moved_total: AtomicU64::new(0),
             mq_v2_poll_dlq_messages_total: AtomicU64::new(0),
+            mq_v2_deletion_partitions_total: AtomicU64::new(0),
+            mq_v2_deletion_messages_total: AtomicU64::new(0),
+            mq_v2_deletion_bytes_total: AtomicU64::new(0),
             tso_current: AtomicU64::new(0),
             tso_batch_remaining: AtomicU64::new(0),
             tso_refill_failures_total: AtomicU64::new(0),
@@ -923,6 +932,19 @@ impl Metrics {
             .fetch_add(messages, Ordering::Relaxed);
     }
 
+    /// 记录一轮删除回收的产出（分区数 / 消息数 / 字节数）。
+    pub fn record_mq_v2_deletion(&self, partitions: u64, messages: u64, bytes: u64) {
+        self.inner
+            .mq_v2_deletion_partitions_total
+            .fetch_add(partitions, Ordering::Relaxed);
+        self.inner
+            .mq_v2_deletion_messages_total
+            .fetch_add(messages, Ordering::Relaxed);
+        self.inner
+            .mq_v2_deletion_bytes_total
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
     /// 记录最近一次发放的 TSO（gauge）。
     pub fn set_tso_current(&self, ts: u64) {
         self.inner.tso_current.store(ts, Ordering::Relaxed);
@@ -1270,6 +1292,23 @@ impl Metrics {
         ));
 
         for (name, help, value) in [
+            (
+                "coord_mq_v2_deletion_partitions_total",
+                "MQ v2 partitions reclaimed by DeleteTopic",
+                inner
+                    .mq_v2_deletion_partitions_total
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_deletion_messages_total",
+                "MQ v2 messages reclaimed by DeleteTopic",
+                inner.mq_v2_deletion_messages_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_deletion_bytes_total",
+                "MQ v2 bytes reclaimed by DeleteTopic",
+                inner.mq_v2_deletion_bytes_total.load(Ordering::Relaxed),
+            ),
             (
                 "coord_mq_v2_dlq_moved_total",
                 "MQ v2 messages moved to the dead letter log",

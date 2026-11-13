@@ -12,8 +12,11 @@ use std::time::Duration;
 
 use crate::raft::type_config::{Command, Response as RaftResponse};
 use crate::server::CoordNode;
-use crate::storage::mq_group::{MqGroupGc, MqGroupOp, MqGroupReap, MqGroupResult};
-use crate::storage::mq_log::{mq_retention_cutoff, MqTruncate};
+use crate::storage::mq_group::{
+    MqGroupDropTopic, MqGroupGc, MqGroupOp, MqGroupReap, MqGroupResult,
+};
+use crate::storage::mq_log::{mq_retention_cutoff, MqDropPartition, MqTruncate};
+use crate::storage::mq_topic::{MqTopicDeletionProgress, MqTopicOp};
 
 /// 回收扫描周期。
 ///
@@ -37,6 +40,9 @@ pub struct MqReaperStats {
     pub group_members_expired: u32,
     pub groups_removed: u32,
     pub group_offsets_removed: u32,
+    pub partitions_dropped: u32,
+    pub deletion_messages_removed: u64,
+    pub deletion_bytes_reclaimed: u64,
 }
 
 impl CoordNode {
@@ -121,6 +127,14 @@ impl CoordNode {
             );
         }
         self.mq_v2_group_reap_pass(now_ms, &mut stats).await;
+        self.mq_v2_deletion_pass(&mut stats).await;
+        if let Some(metrics) = self.metrics() {
+            metrics.record_mq_v2_deletion(
+                u64::from(stats.partitions_dropped),
+                stats.deletion_messages_removed,
+                stats.deletion_bytes_reclaimed,
+            );
+        }
         if let Some(metrics) = self.metrics() {
             metrics.record_mq_v2_group_reap(
                 u64::from(stats.group_members_expired),
@@ -128,6 +142,126 @@ impl CoordNode {
             );
         }
         stats
+    }
+
+    /// 删除回收：对每个 Pending 的删除，清理组位点（各 group shard Leader）并逐个
+    /// 分区提案 `MqDropPartition`（日志分片 Leader），成功后推进
+    /// `MqTopicOp::DeletionProgress`（region 0）。
+    ///
+    /// 失败/非 Leader 的分区留在 `pending_partitions`，下一个周期重试；
+    /// `GetTopicDeletion` 因此不会提前报告 Done。计数是 best-effort：若 drop 成功而
+    /// 进度提案失败，下一轮的重放 drop 返回 0 计数（进度字段可能少算，不影响回收）。
+    async fn mq_v2_deletion_pass(&self, stats: &mut MqReaperStats) {
+        let Ok(table) = self.mq_topic_table() else {
+            return;
+        };
+        let deletions: Vec<crate::storage::mq_topic::MqTopicDeletion> = table
+            .deletions
+            .iter()
+            .filter(|deletion| {
+                deletion.state == crate::storage::mq_topic::MqTopicDeletionState::Pending
+            })
+            .cloned()
+            .collect();
+        let group_shards = self.mq_v2().config().group_shards;
+        for deletion in deletions {
+            // 组位点清理：每个 group shard 的 Leader 清自己的分片（幂等，逐轮重试）。
+            for shard_id in 0..group_shards {
+                let Ok(runtime) = self.mq_group_shard_runtime(shard_id) else {
+                    continue;
+                };
+                if runtime.raft.current_leader().await != Some(self.node_id) {
+                    continue;
+                }
+                if let Err(status) = self
+                    .mq_propose_group(MqGroupOp::DropTopic(MqGroupDropTopic {
+                        shard_id,
+                        topic_id: deletion.topic_id,
+                    }))
+                    .await
+                {
+                    tracing::warn!(
+                        shard_id,
+                        topic_id = deletion.topic_id,
+                        error = %status,
+                        "mq_v2 topic-offset cleanup failed; retrying next interval"
+                    );
+                }
+            }
+            for partition in deletion.pending_partitions.clone() {
+                let shard_id = deletion
+                    .shard_of_partition
+                    .get(partition as usize)
+                    .copied()
+                    .unwrap_or(0);
+                let Ok(runtime) = self.mq_shard_runtime(shard_id) else {
+                    continue;
+                };
+                if runtime.raft.current_leader().await != Some(self.node_id) {
+                    continue;
+                }
+                let region_id = runtime.region_id();
+                let command = Command::MqDropPartition(MqDropPartition {
+                    shard_id,
+                    topic_id: deletion.topic_id,
+                    partition,
+                });
+                let response = match self
+                    .client_write_with_timeout(&runtime.raft, command, region_id)
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(status) => {
+                        tracing::warn!(
+                            shard_id,
+                            topic_id = deletion.topic_id,
+                            partition,
+                            error = %status,
+                            "mq_v2 partition drop failed; retrying next interval"
+                        );
+                        continue;
+                    }
+                };
+                let result = match response.response() {
+                    RaftResponse::MqDropPartition { result } => *result,
+                    other => {
+                        tracing::warn!(
+                            shard_id,
+                            partition,
+                            ?other,
+                            "mq_v2 partition drop returned an unexpected response"
+                        );
+                        continue;
+                    }
+                };
+                stats.partitions_dropped = stats.partitions_dropped.saturating_add(1);
+                stats.deletion_messages_removed = stats
+                    .deletion_messages_removed
+                    .saturating_add(result.records_removed);
+                stats.deletion_bytes_reclaimed = stats
+                    .deletion_bytes_reclaimed
+                    .saturating_add(result.bytes_freed);
+
+                let Some(raft) = self.raft.as_ref() else {
+                    continue;
+                };
+                let progress =
+                    Command::MqTopic(MqTopicOp::DeletionProgress(MqTopicDeletionProgress {
+                        delete_id: deletion.delete_id,
+                        partition,
+                        messages_removed: result.records_removed,
+                        bytes_reclaimed: result.bytes_freed,
+                    }));
+                if let Err(status) = self.client_write_with_timeout(raft, progress, 0).await {
+                    tracing::warn!(
+                        delete_id = deletion.delete_id,
+                        partition,
+                        error = %status,
+                        "mq_v2 deletion progress write failed; retrying next interval"
+                    );
+                }
+            }
+        }
     }
 
     /// 组会话过期（`MqGroupOp::Reap`）+ 空组位点 TTL（`MqGroupOp::Gc`），逐 group
