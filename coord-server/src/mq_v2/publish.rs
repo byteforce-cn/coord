@@ -189,8 +189,41 @@ impl CoordNode {
 
     /// 把一条分区请求排进分片 batcher，等一次 Raft 提交 + apply 的结果。
     ///
-    /// 返回即已提交（`client_write` 在多数派提交并 apply 后才返回）。
+    /// 返回即已提交（`client_write` 在多数派提交并 apply 后才返回）。指标在这一层
+    /// 记录：请求数/条数/字节/幂等命中/延迟与拒绝码都在同一次调用内闭合。
     pub(crate) async fn mq_append(
+        &self,
+        target: &MqPublishTarget,
+        entries: Vec<MqAppendEntry>,
+    ) -> Result<MqAppended, Status> {
+        let started = std::time::Instant::now();
+        let entry_count = entries.len() as u64;
+        let bytes = entries
+            .iter()
+            .map(|entry| (entry.key.len() + entry.payload.len()) as u64)
+            .sum::<u64>();
+        let result = self.mq_append_committed(target, entries).await;
+        if let Some(metrics) = self.metrics() {
+            let latency_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            match &result {
+                Ok(appended) => {
+                    let deduplicated = appended
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.deduplicated)
+                        .count() as u64;
+                    metrics.record_mq_v2_publish(entry_count, bytes, deduplicated, latency_us);
+                }
+                Err(status) => metrics.record_mq_v2_publish_error(
+                    coord_core::error_code::error_code_of(status).as_deref(),
+                    latency_us,
+                ),
+            }
+        }
+        result
+    }
+
+    async fn mq_append_committed(
         &self,
         target: &MqPublishTarget,
         entries: Vec<MqAppendEntry>,

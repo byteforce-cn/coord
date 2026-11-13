@@ -86,6 +86,24 @@ struct MetricsInner {
     pub mq_v2_append_batches_total: AtomicU64,
     /// 已提交的 publish 请求数；与 `mq_v2_append_batches_total` 的比值 = 平均批深度
     pub mq_v2_append_requests_total: AtomicU64,
+    /// 收到的 publish 请求数（含失败；每次 handler 调用一次）
+    pub mq_v2_publish_requests_total: AtomicU64,
+    /// 已提交的消息条数
+    pub mq_v2_publish_entries_total: AtomicU64,
+    /// 已提交消息的 key + payload 字节数
+    pub mq_v2_publish_bytes_total: AtomicU64,
+    /// 幂等命中次数（返回首次 offset，未重复追加）
+    pub mq_v2_publish_duplicates_total: AtomicU64,
+    /// 写路径累计耗时（微秒；除以 requests 得平均延迟）
+    pub mq_v2_publish_latency_us_total: AtomicU64,
+    /// `NOT_LEADER` 拒绝次数（客户端应刷新 Leader 后重试）
+    pub mq_v2_publish_not_leader_total: AtomicU64,
+    /// `MESSAGE_TOO_LARGE` / `QUOTA_EXCEEDED` 拒绝次数（整批未追加）
+    pub mq_v2_publish_rejected_total: AtomicU64,
+    /// 保留回收提案数（`Command::MqTruncate`；0 = 没有到期段）
+    pub mq_v2_retention_truncate_total: AtomicU64,
+    /// 保留回收删除的段数
+    pub mq_v2_retention_segments_total: AtomicU64,
     /// 客户端观测到的 leadership 丢失次数（旧批随后被丢弃）
     pub tso_leader_changes_total: AtomicU64,
     /// v2 KV 写被 `CommitRejected` 拒绝次数（D11.4；不静默写）
@@ -292,6 +310,15 @@ impl Default for MetricsInner {
             mq_v2_enabled: AtomicI64::new(0),
             mq_v2_append_batches_total: AtomicU64::new(0),
             mq_v2_append_requests_total: AtomicU64::new(0),
+            mq_v2_publish_requests_total: AtomicU64::new(0),
+            mq_v2_publish_entries_total: AtomicU64::new(0),
+            mq_v2_publish_bytes_total: AtomicU64::new(0),
+            mq_v2_publish_duplicates_total: AtomicU64::new(0),
+            mq_v2_publish_latency_us_total: AtomicU64::new(0),
+            mq_v2_publish_not_leader_total: AtomicU64::new(0),
+            mq_v2_publish_rejected_total: AtomicU64::new(0),
+            mq_v2_retention_truncate_total: AtomicU64::new(0),
+            mq_v2_retention_segments_total: AtomicU64::new(0),
             tso_current: AtomicU64::new(0),
             tso_batch_remaining: AtomicU64::new(0),
             tso_refill_failures_total: AtomicU64::new(0),
@@ -682,6 +709,65 @@ impl Metrics {
             .fetch_add(requests, Ordering::Relaxed);
     }
 
+    /// 记录一次成功提交的 publish（`entries`/`bytes`/`deduplicated` 为本次批量的
+    /// 汇总；`latency_us` 含 Raft 提交与 apply）。
+    pub fn record_mq_v2_publish(
+        &self,
+        entries: u64,
+        bytes: u64,
+        deduplicated: u64,
+        latency_us: u64,
+    ) {
+        self.inner
+            .mq_v2_publish_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .mq_v2_publish_entries_total
+            .fetch_add(entries, Ordering::Relaxed);
+        self.inner
+            .mq_v2_publish_bytes_total
+            .fetch_add(bytes, Ordering::Relaxed);
+        self.inner
+            .mq_v2_publish_duplicates_total
+            .fetch_add(deduplicated, Ordering::Relaxed);
+        self.inner
+            .mq_v2_publish_latency_us_total
+            .fetch_add(latency_us, Ordering::Relaxed);
+    }
+
+    /// 记录一次失败的 publish；`code` 是 wire 码（`None` = 未分类的内部错误）。
+    pub fn record_mq_v2_publish_error(&self, code: Option<&str>, latency_us: u64) {
+        self.inner
+            .mq_v2_publish_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .mq_v2_publish_latency_us_total
+            .fetch_add(latency_us, Ordering::Relaxed);
+        match code {
+            Some("NOT_LEADER") => {
+                self.inner
+                    .mq_v2_publish_not_leader_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Some("MESSAGE_TOO_LARGE") | Some("QUOTA_EXCEEDED") => {
+                self.inner
+                    .mq_v2_publish_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    /// 记录一次保留回收扫描的产出（`proposals` = 提案数，`segments` = 删除段数）。
+    pub fn record_mq_v2_retention(&self, proposals: u64, segments: u64) {
+        self.inner
+            .mq_v2_retention_truncate_total
+            .fetch_add(proposals, Ordering::Relaxed);
+        self.inner
+            .mq_v2_retention_segments_total
+            .fetch_add(segments, Ordering::Relaxed);
+    }
+
     /// 记录最近一次发放的 TSO（gauge）。
     pub fn set_tso_current(&self, ts: u64) {
         self.inner.tso_current.store(ts, Ordering::Relaxed);
@@ -1020,6 +1106,57 @@ impl Metrics {
             "coord_mq_v2_append_requests_total {}\n",
             inner.mq_v2_append_requests_total.load(Ordering::Relaxed)
         ));
+
+        for (name, help, value) in [
+            (
+                "coord_mq_v2_publish_requests_total",
+                "MQ v2 publish RPCs received (success and failure)",
+                inner.mq_v2_publish_requests_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_publish_entries_total",
+                "MQ v2 messages committed",
+                inner.mq_v2_publish_entries_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_publish_bytes_total",
+                "MQ v2 committed key+payload bytes",
+                inner.mq_v2_publish_bytes_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_publish_duplicates_total",
+                "MQ v2 idempotency hits (no duplicate append)",
+                inner.mq_v2_publish_duplicates_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_publish_latency_us_total",
+                "MQ v2 publish latency, microseconds (divide by requests)",
+                inner.mq_v2_publish_latency_us_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_publish_not_leader_total",
+                "MQ v2 publishes rejected with NOT_LEADER",
+                inner.mq_v2_publish_not_leader_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_publish_rejected_total",
+                "MQ v2 publishes rejected by MESSAGE_TOO_LARGE / QUOTA_EXCEEDED",
+                inner.mq_v2_publish_rejected_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_retention_truncate_total",
+                "MQ v2 retention truncate proposals",
+                inner.mq_v2_retention_truncate_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_retention_segments_total",
+                "MQ v2 segments reclaimed by retention",
+                inner.mq_v2_retention_segments_total.load(Ordering::Relaxed),
+            ),
+        ] {
+            out.push_str(&format!("\n# HELP {name} {help}\n# TYPE {name} counter\n"));
+            out.push_str(&format!("{name} {value}\n"));
+        }
 
         out.push_str("\n# HELP coord_tso_current Last TSO issued by the local batch cache\n");
         out.push_str("# TYPE coord_tso_current gauge\n");
@@ -1775,6 +1912,23 @@ mod tests {
         assert!(output.contains("# TYPE coord_mq_v2_append_batches_total counter"));
         assert!(output.contains("coord_mq_v2_append_batches_total 2"));
         assert!(output.contains("coord_mq_v2_append_requests_total 64"));
+    }
+
+    #[test]
+    fn test_metrics_mq_v2_publish() {
+        let m = Metrics::new();
+        m.record_mq_v2_publish(64, 4096, 3, 1_500);
+        m.record_mq_v2_publish_error(Some("NOT_LEADER"), 250);
+        m.record_mq_v2_publish_error(Some("QUOTA_EXCEEDED"), 300);
+        m.record_mq_v2_publish_error(Some("TOPIC_NOT_FOUND"), 100);
+        let output = m.render_prometheus_text();
+        assert!(output.contains("coord_mq_v2_publish_requests_total 4"));
+        assert!(output.contains("coord_mq_v2_publish_entries_total 64"));
+        assert!(output.contains("coord_mq_v2_publish_bytes_total 4096"));
+        assert!(output.contains("coord_mq_v2_publish_duplicates_total 3"));
+        assert!(output.contains("coord_mq_v2_publish_latency_us_total 2150"));
+        assert!(output.contains("coord_mq_v2_publish_not_leader_total 1"));
+        assert!(output.contains("coord_mq_v2_publish_rejected_total 1"));
     }
 
     #[test]

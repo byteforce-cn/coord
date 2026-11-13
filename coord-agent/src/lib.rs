@@ -512,6 +512,8 @@ struct AgentGrpcSvcs {
     inner: Option<Arc<crate::proxy::AgentInner>>,
     /// 出站数据面；V2 时对外 v1 数据面代理返回冻结错误（内部客户端已切到 v2）。
     data_plane: AgentDataPlane,
+    /// `services.mq`：V2 上是「启用 coord.mq.v2 代理」（V1 上是本地 MQ 服务）。
+    mq: bool,
     /// 通用插件调用面（coord.plugin.Plugin；Invoke/List）
     ///
     /// 刻意**不**做成插件：它是插件引擎自身的管理面，做成插件会与
@@ -614,7 +616,14 @@ where
     .add_optional_service(
         svcs.plugin
             .map(coord_proto::plugin::plugin_server::PluginServer::from_arc),
-    );
+    )
+    // MQ v2 代理（M2-4）：只在 v2 数据面 + `services.mq = true` 时注册。v1 数据面的
+    // `services.mq` 是本地 MessageQueueService（插件面），两者不共存。
+    .add_optional_service((svcs.mq && svcs.data_plane == AgentDataPlane::V2).then(|| {
+        coord_proto::mq::v2::mq_server::MqServer::new(crate::proxy_v2::MqV2Proxy::new(
+            inner.clone(),
+        ))
+    }));
 
     // 原生服务 + 脚本插件：服务面由插件注册表动态给出（仅**已启动**的插件会被挂载，
     // 启动失败的插件不会暴露半死的 gRPC 接口）。
@@ -1492,15 +1501,13 @@ impl AgentServer {
         // 非 durable 路径会让「不丢/不重/一实例一驱动」的承诺失效而不报错。
         // 纯 KV/审批路径的 workflow（durable=false）不受影响。
         if self.config.data_plane == AgentDataPlane::V2 {
-            if self.config.services.mq {
-                return Err(
-                    "services.mq = true is not available on a v2 data plane: MQ v1 is                      frozen (ADR-0015 D13) and MQ v2 is not GA"
-                        .into(),
-                );
-            }
+            // `services.mq = true` 在 v2 上意味着「代理 coord.mq.v2」（ADR-0016 D11）：
+            // 允许启动，但**不装配** v1 本地 MQ（见下方 `mq_handle`）。durable 工作流
+            // 的投递面仍要求 v1 MQ（outbox relay / listen），M5 才切 v2；在那之前
+            // fail-closed，不静默降级到非 durable 引擎。
             if self.config.services.workflow_durable {
                 return Err(
-                    "services.workflow_durable = true requires MQ, which is not available                      on a v2 data plane; disable workflow_durable"
+                    "services.workflow_durable = true requires the MQ v2 durable engine on a                      v2 data plane, which is not available yet; disable workflow_durable"
                         .into(),
                 );
             }
@@ -1518,8 +1525,10 @@ impl AgentServer {
         // workflow 块之前把 MQ 句柄构造一次：构造本身无副作用（redb 在 start()
         // 才打开），注册与后台任务仍留在下方 `services.mq` 块——注册顺序不变，
         // 故 `workflow_durable` 关闭时装配路径逐字不变。
+        // v2 上 `services.mq` 只代表「代理 coord.mq.v2」：不得构造 v1 本地 MQ
+        // （ADR-0016 D11：Agent 在 v2 上不启本地 redb 消息队列）。
         let mq_handle: Option<Arc<crate::services::mq::MessageQueueService>> =
-            if self.config.services.mq {
+            if self.config.services.mq && self.config.data_plane == AgentDataPlane::V1 {
                 Some(Arc::new(crate::services::mq::MessageQueueService::new(
                     std::path::PathBuf::from(&self.config.data_dir),
                     // 容量上界（B-PL-4——已强制执行）：消息 + DLQ 与数据同事务记账，
@@ -2516,6 +2525,7 @@ impl AgentServer {
         let svcs = AgentGrpcSvcs {
             inner,
             data_plane: self.config.data_plane,
+            mq: self.config.services.mq,
             plugin: Some(Arc::new(crate::plugin::PluginService::new(Arc::clone(
                 &plugin_manager,
             )))),

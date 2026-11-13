@@ -182,6 +182,12 @@ async fn duplicate_idempotency_key_returns_the_first_offset() {
         u64::try_from(first.offset + 2).expect("non-negative offset"),
         "重复键不得重复追加"
     );
+    // 指标写入点：两次额外去重（重放一次 + 同批重复一次）必须被计入。
+    assert!(
+        node.metric("coord_mq_v2_publish_duplicates_total") >= 2,
+        "idempotency hits must be counted: {}",
+        node.metric("coord_mq_v2_publish_duplicates_total")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -321,6 +327,56 @@ async fn publish_after_retention_truncation_reuses_the_idempotency_key() {
         "窗口外（幂等索引已随段回收）同键必须重新分配 offset"
     );
     assert!(!reuse.deduplicated);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_reaper_reclaims_expired_segments_on_the_leader() {
+    let node = MqV2Node::boot(2, 1).await;
+    node.propose_topic(MqTopicOp::Create(
+        coord_server::storage::mq_topic::MqTopicCreate {
+            name: TOPIC.to_string(),
+            partitions: 1,
+            config: MqTopicConfig {
+                retention_secs: 3_600,
+                max_bytes: 0,
+                max_message_bytes: 1024 * 1024,
+                segment_bytes: 1024,
+                dlq_retention_secs: 3_600,
+            },
+            request_id: String::new(),
+            now_ms: 1,
+            log_shards: 2,
+            max_partitions_per_shard: 1024,
+        },
+    ))
+    .await;
+    let meta = node.topic_row(TOPIC);
+    // 两小时前写入 40 条 100B 消息（段大小 1 KiB ⇒ 多个已封口段）。
+    let old_ms = coord_server::mq_v2::now_ms() - 2 * 3_600 * 1_000;
+    let payloads: Vec<Vec<u8>> = (0..40).map(|_| vec![b'p'; 100]).collect();
+    assert_eq!(node.append_at(&meta, 0, old_ms, &payloads).await, 40);
+
+    let stats = node
+        .node
+        .mq_v2_reaper_pass(coord_server::mq_v2::now_ms())
+        .await;
+    assert!(
+        stats.truncate_proposals > 0 && stats.dropped_segments > 0,
+        "the retention pass must reclaim expired segments: {stats:?}"
+    );
+    let bounds = node.bounds(&meta, 0).expect("bounds");
+    assert!(
+        bounds.earliest_offset > 0,
+        "earliest_offset must advance after reclamation: {bounds:?}"
+    );
+    assert!(
+        bounds.next_offset >= 40,
+        "reclamation must never drop the newest segment: {bounds:?}"
+    );
+    assert!(
+        node.metric("coord_mq_v2_retention_segments_total") > 0,
+        "the reaper must publish its reclaim counter"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

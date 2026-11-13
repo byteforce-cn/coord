@@ -181,3 +181,48 @@ fn data_plane_config_defaults_to_v1_and_parses_v2() {
     let v2: AgentConfig = toml::from_str("data_plane = \"v2\"").unwrap();
     assert_eq!(v2.data_plane, AgentDataPlane::V2);
 }
+
+/// `services.mq = true` + `data_plane = "v2"` ⇒ Agent 注册 `coord.mq.v2` 代理
+/// （M2-4；ADR-0016 D11），不再是启动期拒绝，也不启 v1 本地 MQ。
+///
+/// 没有后端连接时转发必须落到 fail-closed 的 `UNAVAILABLE`（可重试）——比
+/// `UNIMPLEMENTED` 更准确：代理在，集群不在。真实集群转发由
+/// `coord/tests/mq_v2_m2_cluster_test.rs` 覆盖。
+#[tokio::test(flavor = "multi_thread")]
+async fn v2_agent_proxies_coord_mq_v2_when_services_mq_is_enabled() {
+    use coord_proto::mq::v2 as mq_v2;
+    use coord_proto::mq::v2::mq_client::MqClient;
+
+    let port = find_port();
+    let mut config = test_config(port);
+    config.services.mq = true;
+    let addr = config.agent_addr.clone();
+    let server = AgentServer::new(config);
+    let serving = tokio::spawn(async move {
+        let _ = server.serve().await;
+    });
+    let channel = connect_ready(&addr).await;
+
+    let mut mq = MqClient::new(channel);
+    let err = mq
+        .publish(mq_v2::PublishRequest {
+            topic: "orders".to_string(),
+            partition: 0,
+            payload: b"x".to_vec(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("no backend ⇒ the proxy must fail closed");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+    assert_eq!(
+        error_code_of(&err).as_deref(),
+        Some("UNAVAILABLE"),
+        "wire code must be preserved: {err:?}"
+    );
+    assert!(
+        err.message().contains("agent has no server connection"),
+        "failure must name the missing backend: {err:?}"
+    );
+
+    serving.abort();
+}

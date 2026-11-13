@@ -33,6 +33,7 @@ use coord_proto::kv::v2 as kv_v2;
 use coord_proto::kv::v2::kv_server::Kv as KvV2;
 use coord_proto::lease::v2 as lease_v2;
 use coord_proto::lease::v2::lease_server::Lease as LeaseV2;
+use coord_proto::mq::v2 as mq_v2;
 use coord_proto::storage::v2 as storage_v2;
 use coord_proto::storage::v2::storage_server::Storage as StorageV2;
 use coord_proto::tso::v2 as tso_v2;
@@ -1275,5 +1276,321 @@ mod tests {
         create.start_revision = -1;
         let err = watch_options_from_create(&create).expect_err("negative start must be rejected");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+}
+
+// ──── MQ v2 ────
+
+/// `coord.mq.v2.MQ` 代理（M2-4：写面）。
+///
+/// 只转发 M2 已交付的四个 RPC（`CreateTopic` / `GetTopicLeader` / `Publish` /
+/// `PublishBatch`）；其余方法返回 `UNIMPLEMENTED`（M3/M4 逐个接线，未接线的
+/// 方法宁可显式拒绝，也不做「假成功」）。分片 Leader 的重定向由
+/// `coord-client` 的 `MqV2Client` 按分区缓存处理，代理层不重排请求。
+#[derive(Debug, Clone)]
+pub struct MqV2Proxy {
+    inner: Option<Arc<AgentInner>>,
+}
+
+impl MqV2Proxy {
+    pub fn new(inner: Option<Arc<AgentInner>>) -> Self {
+        Self { inner }
+    }
+
+    fn unwired(method: &str) -> tonic::Status {
+        attach(
+            tonic::Status::unimplemented(format!(
+                "coord.mq.v2 {method} is not proxied yet (MQ v2 gate pending; see \
+                 docs/production/ops/mq-v2-gate.md)"
+            )),
+            CoordErrorCode::Internal,
+        )
+    }
+}
+
+fn mq_topic_config(
+    value: Option<mq_v2::TopicConfig>,
+) -> Result<Option<coord_client::MqTopicConfig>, tonic::Status> {
+    value
+        .map(|config| {
+            Ok(coord_client::MqTopicConfig {
+                retention_secs: ts_from_i64("retention_secs", config.retention_secs)?,
+                max_bytes: config.max_bytes,
+                max_message_bytes: config.max_message_bytes,
+                segment_bytes: config.segment_bytes,
+                dlq_retention_secs: ts_from_i64("dlq_retention_secs", config.dlq_retention_secs)?,
+            })
+        })
+        .transpose()
+}
+
+fn mq_topic_config_proto(
+    config: coord_client::MqTopicConfig,
+) -> Result<mq_v2::TopicConfig, tonic::Status> {
+    Ok(mq_v2::TopicConfig {
+        retention_secs: ts_to_i64("retention_secs", config.retention_secs)?,
+        max_bytes: config.max_bytes,
+        max_message_bytes: config.max_message_bytes,
+        segment_bytes: config.segment_bytes,
+        dlq_retention_secs: ts_to_i64("dlq_retention_secs", config.dlq_retention_secs)?,
+    })
+}
+
+fn mq_offset(offset: u64) -> Result<i64, tonic::Status> {
+    i64::try_from(offset).map_err(|_| {
+        attach(
+            tonic::Status::internal(format!("offset {offset} exceeds the int64 wire range")),
+            CoordErrorCode::Internal,
+        )
+    })
+}
+
+fn mq_publish_result(
+    result: coord_client::MqPublishResult,
+) -> Result<mq_v2::PublishResponse, tonic::Status> {
+    Ok(mq_v2::PublishResponse {
+        offset: mq_offset(result.offset)?,
+        timestamp_ms: result.timestamp_ms,
+        deduplicated: result.deduplicated,
+    })
+}
+
+fn mq_batch_entry(entry: mq_v2::BatchEntry) -> coord_client::MqBatchEntry {
+    coord_client::MqBatchEntry {
+        key: entry.key,
+        payload: entry.payload,
+        idempotency_key: entry.idempotency_key,
+        headers: entry.headers.into_iter().collect(),
+        producer: entry.producer,
+    }
+}
+
+#[tonic::async_trait]
+impl mq_v2::mq_server::Mq for MqV2Proxy {
+    async fn create_topic(
+        &self,
+        request: tonic::Request<mq_v2::CreateTopicRequest>,
+    ) -> Result<tonic::Response<mq_v2::CreateTopicResponse>, tonic::Status> {
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let created = inner
+            .client
+            .mq_v2()
+            .create_topic(&coord_client::MqCreateTopic {
+                topic: request.topic,
+                partitions: request.partitions,
+                request_id: request.request_id,
+                config: mq_topic_config(request.config)?,
+            })
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::CreateTopicResponse {
+            topic: created.topic,
+            topic_id: created.topic_id,
+            topic_epoch: created.topic_epoch,
+            partition_count: created.partition_count,
+            config: Some(mq_topic_config_proto(created.config)?),
+        }))
+    }
+
+    async fn get_topic_leader(
+        &self,
+        request: tonic::Request<mq_v2::GetTopicLeaderRequest>,
+    ) -> Result<tonic::Response<mq_v2::GetTopicLeaderResponse>, tonic::Status> {
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let leaders = inner
+            .client
+            .mq_v2()
+            .get_topic_leader(&request.topic)
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::GetTopicLeaderResponse {
+            topic: leaders.topic,
+            topic_id: leaders.topic_id,
+            topic_epoch: leaders.topic_epoch,
+            partitions: leaders
+                .partitions
+                .into_iter()
+                .map(|entry| mq_v2::PartitionLeader {
+                    partition: entry.partition,
+                    shard_id: entry.shard_id,
+                    leader_addr: entry.leader_addr,
+                    earliest_offset: mq_offset(entry.earliest_offset).unwrap_or(0),
+                    next_offset: mq_offset(entry.next_offset).unwrap_or(0),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn publish(
+        &self,
+        request: tonic::Request<mq_v2::PublishRequest>,
+    ) -> Result<tonic::Response<mq_v2::PublishResponse>, tonic::Status> {
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let result = inner
+            .client
+            .mq_v2()
+            .publish(&coord_client::MqPublish {
+                topic: request.topic,
+                partition: request.partition,
+                topic_epoch: request.topic_epoch,
+                key: request.key,
+                payload: request.payload,
+                idempotency_key: request.idempotency_key,
+                headers: request.headers.into_iter().collect(),
+                producer: request.producer,
+            })
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_publish_result(result)?))
+    }
+
+    async fn publish_batch(
+        &self,
+        request: tonic::Request<mq_v2::PublishBatchRequest>,
+    ) -> Result<tonic::Response<mq_v2::PublishBatchResponse>, tonic::Status> {
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let results = inner
+            .client
+            .mq_v2()
+            .publish_batch(&coord_client::MqPublishBatch {
+                topic: request.topic,
+                partition: request.partition,
+                topic_epoch: request.topic_epoch,
+                entries: request.entries.into_iter().map(mq_batch_entry).collect(),
+            })
+            .await
+            .map_err(map_v2_error)?;
+        let mut responses = Vec::with_capacity(results.len());
+        for result in results {
+            responses.push(mq_publish_result(result)?);
+        }
+        Ok(tonic::Response::new(mq_v2::PublishBatchResponse {
+            results: responses,
+        }))
+    }
+
+    async fn describe_topic(
+        &self,
+        _request: tonic::Request<mq_v2::DescribeTopicRequest>,
+    ) -> Result<tonic::Response<mq_v2::DescribeTopicResponse>, tonic::Status> {
+        Err(Self::unwired("DescribeTopic"))
+    }
+
+    async fn list_topics(
+        &self,
+        _request: tonic::Request<mq_v2::ListTopicsRequest>,
+    ) -> Result<tonic::Response<mq_v2::ListTopicsResponse>, tonic::Status> {
+        Err(Self::unwired("ListTopics"))
+    }
+
+    async fn update_topic(
+        &self,
+        _request: tonic::Request<mq_v2::UpdateTopicRequest>,
+    ) -> Result<tonic::Response<mq_v2::UpdateTopicResponse>, tonic::Status> {
+        Err(Self::unwired("UpdateTopic"))
+    }
+
+    async fn delete_topic(
+        &self,
+        _request: tonic::Request<mq_v2::DeleteTopicRequest>,
+    ) -> Result<tonic::Response<mq_v2::DeleteTopicResponse>, tonic::Status> {
+        Err(Self::unwired("DeleteTopic"))
+    }
+
+    async fn get_topic_deletion(
+        &self,
+        _request: tonic::Request<mq_v2::GetTopicDeletionRequest>,
+    ) -> Result<tonic::Response<mq_v2::GetTopicDeletionResponse>, tonic::Status> {
+        Err(Self::unwired("GetTopicDeletion"))
+    }
+
+    async fn poll(
+        &self,
+        _request: tonic::Request<mq_v2::PollRequest>,
+    ) -> Result<tonic::Response<mq_v2::PollResponse>, tonic::Status> {
+        Err(Self::unwired("Poll"))
+    }
+
+    async fn ack(
+        &self,
+        _request: tonic::Request<mq_v2::AckRequest>,
+    ) -> Result<tonic::Response<mq_v2::AckResponse>, tonic::Status> {
+        Err(Self::unwired("Ack"))
+    }
+
+    async fn ack_batch(
+        &self,
+        _request: tonic::Request<mq_v2::AckBatchRequest>,
+    ) -> Result<tonic::Response<mq_v2::AckBatchResponse>, tonic::Status> {
+        Err(Self::unwired("AckBatch"))
+    }
+
+    async fn join_group(
+        &self,
+        _request: tonic::Request<mq_v2::JoinGroupRequest>,
+    ) -> Result<tonic::Response<mq_v2::JoinGroupResponse>, tonic::Status> {
+        Err(Self::unwired("JoinGroup"))
+    }
+
+    async fn heartbeat(
+        &self,
+        _request: tonic::Request<mq_v2::HeartbeatRequest>,
+    ) -> Result<tonic::Response<mq_v2::HeartbeatResponse>, tonic::Status> {
+        Err(Self::unwired("Heartbeat"))
+    }
+
+    async fn leave_group(
+        &self,
+        _request: tonic::Request<mq_v2::LeaveGroupRequest>,
+    ) -> Result<tonic::Response<mq_v2::LeaveGroupResponse>, tonic::Status> {
+        Err(Self::unwired("LeaveGroup"))
+    }
+
+    async fn get_committed_offsets(
+        &self,
+        _request: tonic::Request<mq_v2::GetCommittedOffsetsRequest>,
+    ) -> Result<tonic::Response<mq_v2::GetCommittedOffsetsResponse>, tonic::Status> {
+        Err(Self::unwired("GetCommittedOffsets"))
+    }
+
+    async fn describe_group(
+        &self,
+        _request: tonic::Request<mq_v2::DescribeGroupRequest>,
+    ) -> Result<tonic::Response<mq_v2::DescribeGroupResponse>, tonic::Status> {
+        Err(Self::unwired("DescribeGroup"))
+    }
+
+    async fn list_groups(
+        &self,
+        _request: tonic::Request<mq_v2::ListGroupsRequest>,
+    ) -> Result<tonic::Response<mq_v2::ListGroupsResponse>, tonic::Status> {
+        Err(Self::unwired("ListGroups"))
+    }
+
+    type SubscribeStream = ReceiverStream<Result<mq_v2::Message, tonic::Status>>;
+
+    async fn subscribe(
+        &self,
+        _request: tonic::Request<mq_v2::SubscribeRequest>,
+    ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
+        Err(Self::unwired("Subscribe"))
+    }
+
+    async fn move_to_dlq(
+        &self,
+        _request: tonic::Request<mq_v2::MoveToDlqRequest>,
+    ) -> Result<tonic::Response<mq_v2::MoveToDlqResponse>, tonic::Status> {
+        Err(Self::unwired("MoveToDlq"))
+    }
+
+    async fn poll_dlq(
+        &self,
+        _request: tonic::Request<mq_v2::PollDlqRequest>,
+    ) -> Result<tonic::Response<mq_v2::PollDlqResponse>, tonic::Status> {
+        Err(Self::unwired("PollDlq"))
     }
 }

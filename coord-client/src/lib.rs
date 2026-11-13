@@ -22,6 +22,7 @@ pub mod config;
 pub mod credential;
 pub mod leader;
 pub mod lease_v2;
+pub mod mq_v2;
 pub mod pool;
 pub mod refresh;
 pub mod retry;
@@ -46,6 +47,10 @@ pub use credential::{
 };
 pub use leader::LeaderDiscovery;
 pub use lease_v2::{LeaseV2Client, LeaseV2Grant, LeaseV2Keeper, LeaseV2State};
+pub use mq_v2::{
+    MqBatchEntry, MqCreateTopic, MqPartitionLeader, MqPublish, MqPublishBatch, MqPublishResult,
+    MqTopicConfig, MqTopicCreated, MqTopicLeaders, MqV2Client,
+};
 pub use refresh::{spawn_session_refresher, SessionGateway, SessionTokens, REFRESH_LEAD_SECS};
 pub use retry::{classify_error, RetryDecision, RetryState};
 pub use storage_v2::{ObjectDataV2, ObjectV2Writer, PutObjectV2Result, StorageV2Client};
