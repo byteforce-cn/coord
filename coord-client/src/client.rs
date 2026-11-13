@@ -115,7 +115,7 @@ pub(crate) fn ts_to_i64(name: &str, ts: u64) -> Result<i64> {
 }
 
 /// R-SVC-08：按 gRPC 状态码分类错误，决定是否重试
-fn classify_tonic(status: &tonic::Status) -> RetryDecision {
+pub(crate) fn classify_tonic(status: &tonic::Status) -> RetryDecision {
     let msg = status.message().to_lowercase();
     if msg.contains("sealed") || msg.contains("unsealing") {
         return RetryDecision::Abort;
@@ -331,6 +331,24 @@ impl Client {
     /// 返回 KV v2 客户端（KV-T G1 最小面：显式 commit_ts / read_ts）。
     pub fn kv_v2(&self) -> KvV2Client {
         KvV2Client::new(self.clone())
+    }
+
+    /// 返回 MQ v2 客户端（M2 写面：CreateTopic/GetTopicLeader/Publish/PublishBatch）。
+    pub fn mq_v2(&self) -> crate::mq_v2::MqV2Client {
+        crate::mq_v2::MqV2Client::new(self.clone())
+    }
+
+    /// 已配置的集群端点。
+    ///
+    /// MQ v2 的分片 Leader 按分区不同（`coord-leader-hint`），客户端必须能按
+    /// hint 直连任意节点，不能只走单一 leader 缓存。
+    pub fn endpoints(&self) -> Vec<String> {
+        self.inner.config.endpoints.clone()
+    }
+
+    /// 按地址取一个已鉴权通道（连接池复用）。
+    pub(crate) async fn channel_for(&self, endpoint: &str) -> Result<AuthedChannel> {
+        self.inner.pool.get(endpoint).await
     }
 
     /// 返回 Lease 客户端（租约管理）
