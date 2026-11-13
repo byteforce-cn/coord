@@ -183,15 +183,15 @@ mod tests {
         .await;
         let mut mq = MqClient::connect(format!("http://{addr}")).await.unwrap();
 
-        // `CreateTopic` 自 M2 起已接线（缺 raft 装配 ⇒ FAILED_PRECONDITION）；
-        // 未接线的 manage RPC（Describe/Update/Delete/GetTopicDeletion，M4）用它
-        // 证明"过门禁 → UNIMPLEMENTED"仍然成立。
+        // `CreateTopic`/`DescribeTopic`/`UpdateTopic` 自 M2/M4 起已接线；未接线的
+        // `DeleteTopic`（M4-2）用来证明"过门禁 → UNIMPLEMENTED"仍然成立。
         let err = mq
-            .describe_topic(mq_v2::DescribeTopicRequest {
+            .delete_topic(mq_v2::DeleteTopicRequest {
                 topic: "orders".into(),
+                expected_topic_epoch: 0,
             })
             .await
-            .expect_err("handler is not wired before M4");
+            .expect_err("handler is not wired before M4-2");
         assert_eq!(err.code(), Code::Unimplemented, "{err:?}");
 
         // 未交付的能力仍然按配置/gate 拒绝。

@@ -1,6 +1,6 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M3 落地）
+> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M3 落地；M4 进行中）
 >
 > **状态：M0、M1、M2、M3 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
@@ -25,7 +25,7 @@
 | M1 日志/元数据/容量 | 分片/段日志/组状态机/topic 元数据/保留 | ✅ | M1-1–M1-6 存储层全部落地：`cargo test -p coord-server --lib storage::mq_log`（14 例：保留截止/配额释放/truncate 重放/重启/副本一致）、`storage::mq_group`（13 例：代际分配/整批 Ack/过期回收/重启/快照）、`storage::mq_topic`（5 例）、`carve_mq`、`cargo test -p coord --bins derive_`、`cargo test -p coord-server --lib test_apply_mq_group_commands`；`check-panics` 0。周期 reaper/指标接线随 M2-1 分片 Leader 循环；整节点备份演练属 M6-5 |
 | M2 Publish | 路由/批量/offset/幂等/配额 | ✅ | 见 §2b |
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ✅ | 见 §2c |
-| M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ⏳ 未开始 | — |
+| M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ⏳ 进行中（M4-1/M4-3 ✅） | 见 §2d |
 | M5 工作流 | v2 outbox/durable/审批/trigger | ⏳ 未开始 | — |
 | M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | ⏳ 未开始 | — |
 | M7 GA | 全绿 + KV-T GA + 签字 | ⛔ 未达标 | 见 §3 |
@@ -66,6 +66,15 @@ topic 保留期提案 `MqTruncate`，无到期段不提案；关闭态零副作�
 
 组 shard 哈希固定为 FNV-1a 64 取模（跨版本稳定；`DefaultHasher` 会让组的位点在
 Rust 升级后漂到别的分片）。
+
+### M4 分项（DLQ 与管理面）
+
+| 项 | 状态 | 证据 / 未达标原因 |
+|:--|:--|:--|
+| M4-1 MoveToDlq/PollDlq | ✅ | `cargo test -p coord --test mq_v2_m4_dlq_admin_test`（`move_to_dlq_hides_the_message_from_poll_and_is_idempotent`、`move_to_dlq_rejects_an_unknown_offset_and_poll_dlq_paginates`）：复制 + tombstone、`Poll` 跳过、`PollDlq` 原 offset/reason/detail、重复调用 `already_moved`、DLQ 位点分页 |
+| M4-3 UpdateTopic/Describe/List | ✅ | 同一测试文件的 `describe_topic_reports_config_partitions_and_bounds`、`list_topics_paginates_and_filters_by_prefix`、`update_topic_merges_fields_and_enforces_the_epoch`；`coord-server/src/mq_v2/admin.rs` 的 2 个合并/校验单测。`UpdateTopic` 的 `0 = 保持当前值`（含 `max_bytes`，清空配额需删除重建）已在代码注释固定 |
+| M4-2 DeleteTopic/GetTopicDeletion | ⏳ | 后续 PR：`MqDropPartition` + `MqTopicOp::DeletionProgress` + `MqGroupOp::DropTopic` + reaper 回收 |
+| M4-4 能力/审计 | ⏳ | `Dlq` 能力开关与门禁用例已随 M4-1（`dlq_is_gated_by_the_dlq_capability`）；审计事件随 M4-2 的删除回收一起补 |
 
 ## 3. 关闭 M7 的硬条件
 

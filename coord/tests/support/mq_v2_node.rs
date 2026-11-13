@@ -226,6 +226,7 @@ impl MqV2Node {
                 MqV2Capability::Publish,
                 MqV2Capability::Consume,
                 MqV2Capability::Subscribe,
+                MqV2Capability::Dlq,
             ]),
         );
         let node = Arc::new(node);
@@ -234,6 +235,9 @@ impl MqV2Node {
             .await
             .expect("bind grpc listener");
         let addr = listener.local_addr().expect("grpc addr");
+        // 单节点集群：把本节点的 gRPC 地址登记进 `grpc_addr_of`（Leader hint /
+        // Describe 的 leader_addr 依赖它；main.rs 从 `[cluster.initial_nodes]` 注入）。
+        node.register_grpc_addr(NODE_ID, &addr.to_string());
         let serving_node = Arc::clone(&node);
         let serving = tokio::spawn(async move {
             Server::builder()

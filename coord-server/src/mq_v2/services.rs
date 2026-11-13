@@ -74,23 +74,35 @@ impl Mq for CoordNode {
 
     async fn describe_topic(
         &self,
-        _request: Request<mq_v2::DescribeTopicRequest>,
+        request: Request<mq_v2::DescribeTopicRequest>,
     ) -> Result<Response<mq_v2::DescribeTopicResponse>, Status> {
-        gated!(self, MqV2Capability::Topic)
+        self.mq_v2().gate(MqV2Capability::Topic)?;
+        Ok(Response::new(
+            self.mq_describe_topic(&request.into_inner().topic).await?,
+        ))
     }
 
     async fn list_topics(
         &self,
-        _request: Request<mq_v2::ListTopicsRequest>,
+        request: Request<mq_v2::ListTopicsRequest>,
     ) -> Result<Response<mq_v2::ListTopicsResponse>, Status> {
-        gated!(self, MqV2Capability::Topic)
+        self.mq_v2().gate(MqV2Capability::Topic)?;
+        let request = request.into_inner();
+        Ok(Response::new(self.mq_list_topics(
+            &request.prefix,
+            request.page_size,
+            &request.page_token,
+        )?))
     }
 
     async fn update_topic(
         &self,
-        _request: Request<mq_v2::UpdateTopicRequest>,
+        request: Request<mq_v2::UpdateTopicRequest>,
     ) -> Result<Response<mq_v2::UpdateTopicResponse>, Status> {
-        gated!(self, MqV2Capability::Topic)
+        self.mq_v2().gate(MqV2Capability::Topic)?;
+        Ok(Response::new(
+            self.mq_update_topic(request.into_inner()).await?,
+        ))
     }
 
     async fn delete_topic(
@@ -266,16 +278,20 @@ impl Mq for CoordNode {
 
     async fn move_to_dlq(
         &self,
-        _request: Request<mq_v2::MoveToDlqRequest>,
+        request: Request<mq_v2::MoveToDlqRequest>,
     ) -> Result<Response<mq_v2::MoveToDlqResponse>, Status> {
-        gated!(self, MqV2Capability::Dlq)
+        self.mq_v2().gate(MqV2Capability::Dlq)?;
+        Ok(Response::new(
+            self.mq_move_to_dlq(request.into_inner()).await?,
+        ))
     }
 
     async fn poll_dlq(
         &self,
-        _request: Request<mq_v2::PollDlqRequest>,
+        request: Request<mq_v2::PollDlqRequest>,
     ) -> Result<Response<mq_v2::PollDlqResponse>, Status> {
-        gated!(self, MqV2Capability::Dlq)
+        self.mq_v2().gate(MqV2Capability::Dlq)?;
+        Ok(Response::new(self.mq_poll_dlq(request.into_inner()).await?))
     }
 
     async fn get_topic_leader(
@@ -292,7 +308,7 @@ impl Mq for CoordNode {
             topic: meta.name.clone(),
             topic_id: meta.topic_id,
             topic_epoch: meta.epoch,
-            partitions: self.mq_partition_leaders(meta),
+            partitions: self.mq_partition_leaders(meta).await,
         }))
     }
 }

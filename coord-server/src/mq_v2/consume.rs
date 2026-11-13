@@ -422,8 +422,8 @@ fn message_from_record(topic: &str, partition: u32, record: MqStoredRecord) -> m
     }
 }
 
-/// `OFFSET_OUT_OF_RANGE`：带 earliest/latest trailer，绝不 clamp。
-fn offset_out_of_range(earliest: u64, latest: u64) -> Status {
+/// `OFFSET_OUT_OF_RANGE`：带 earliest/latest trailer，绝不 clamp（DLQ/M4 复用）。
+pub(crate) fn offset_out_of_range(earliest: u64, latest: u64) -> Status {
     let mut status = attach(
         Status::out_of_range(format!(
             "start_offset is below the earliest available offset {earliest} \
