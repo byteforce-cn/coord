@@ -407,7 +407,7 @@ impl CoordNode {
     }
 
     /// 进程级指标（未注入时 v2 handler 不记自定义计数）。
-    pub(crate) fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
+    pub fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
         self.metrics.as_ref()
     }
 

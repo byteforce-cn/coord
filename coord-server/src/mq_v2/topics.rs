@@ -41,7 +41,7 @@ fn invalid(reason: impl Into<String>) -> Status {
     )
 }
 
-fn topic_not_found(name: &str) -> Status {
+pub(crate) fn topic_not_found(name: &str) -> Status {
     attach(
         Status::not_found(format!("topic not found: {name}")),
         CoordErrorCode::TopicNotFound,
@@ -146,7 +146,7 @@ impl CoordNode {
         &self,
         req: &mq_v2::CreateTopicRequest,
     ) -> Result<Command, Status> {
-        let config = self.mq_expand_topic_config(req.config.clone())?;
+        let config = self.mq_expand_topic_config(req.config)?;
         let partitions = u32::try_from(req.partitions)
             .map_err(|_| invalid("partitions must not be negative"))?;
         let cfg = self.mq_v2().config();

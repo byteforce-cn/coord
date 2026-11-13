@@ -15,7 +15,7 @@ use coord_proto::mq::v2 as mq_v2;
 use coord_proto::mq::v2::mq_server::Mq;
 
 use super::publish::{publish_response, validate_batch_entries};
-use super::topics::create_topic_response;
+use super::topics::{create_topic_response, topic_not_found};
 use super::MqV2Capability;
 use crate::raft::type_config::Response as RaftResponse;
 use crate::server::CoordNode;
@@ -258,10 +258,7 @@ impl Mq for CoordNode {
         let request = request.into_inner();
         let table = self.mq_topic_table()?;
         let Some(meta) = table.topic(&request.topic) else {
-            return Err(attach(
-                Status::not_found(format!("topic not found: {}", request.topic)),
-                CoordErrorCode::TopicNotFound,
-            ));
+            return Err(topic_not_found(&request.topic));
         };
         Ok(Response::new(mq_v2::GetTopicLeaderResponse {
             topic: meta.name.clone(),
