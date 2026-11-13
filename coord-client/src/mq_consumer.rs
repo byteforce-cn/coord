@@ -11,7 +11,8 @@
 //!    请求（契约要求 SDK 带，防删后重建时旧客户端写/读进新 topic）。
 //!
 //! 语义边界：`Poll` + `Ack` 是至少一次路径；重复投递是正常形态，调用方必须按
-//! `(topic, partition, offset)` 幂等。`Subscribe` 不在这里（best-effort，M3-5）。
+//! `(topic, partition, offset)` 幂等；**新分配**（该分区没有已提交位点）从当前最早可用
+//! offset 开始（保留期内的历史都可见）。`Subscribe` 不在这里（best-effort，M3-5）。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
