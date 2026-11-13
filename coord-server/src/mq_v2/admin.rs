@@ -207,9 +207,12 @@ impl CoordNode {
             )
         })?;
         let now = now_ms();
-        let delete_id = u64::try_from(now).map_err(|_| {
+        let now_u64 = u64::try_from(now).map_err(|_| {
             Status::internal("system clock is before the unix epoch; cannot build a delete id")
         })?;
+        // 回收任务 id 必须**按 topic 唯一**（`GetTopicDeletion` 只按它查）：
+        // 同毫秒删除不同 topic 时，纯时间戳会撞车；用 topic 名的 FNV-1a 异或时间。
+        let delete_id = (fnv1a64(request.topic.as_bytes()) ^ now_u64).max(1);
         let command = Command::MqTopic(MqTopicOp::Delete(MqTopicDelete {
             name: request.topic.clone(),
             delete_id,
@@ -281,6 +284,16 @@ impl CoordNode {
             bytes_reclaimed: deletion.bytes_reclaimed,
         })
     }
+}
+
+/// FNV-1a 64（回收任务 id 的 topic 标识；与组 shard 哈希同一实现口径）。
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// 合并 `TopicConfig`：非 0 字段覆盖当前值（契约：0/空 = 保持当前值）。
