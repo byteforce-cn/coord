@@ -11,11 +11,74 @@
 //! 区间、不起分片/后台任务、不改 v1 MQ 的 wire/磁盘/默认行为（ADR-0001）。
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+pub mod publish;
 mod services;
+pub mod topics;
 
 use coord_core::error_code::{attach, CoordErrorCode};
 use tonic::{Code, Status};
+
+use crate::raft::region_runtime::RegionRuntime;
+use crate::server::CoordNode;
+use crate::storage::region_table::mq_log_shard_prefix;
+
+/// 提议方取一次墙钟写进命令（apply 不读时钟；ADR-0016 D10 的确定性要求）。
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+impl CoordNode {
+    /// 日志分片 id → 分片 Region 运行时（`/_mq/log/<id>/` 经 Region 表路由）。
+    ///
+    /// 未装配 multi-raft（`region_manager = None`）⇒ `FAILED_PRECONDITION`：
+    /// MQ v2 跑在 v2 Region 上，缺装配是部署问题，不是网络故障。路由表已收敛但
+    /// 运行时未装配时 `route_runtime` 返回 `RouteNotReady`（可重试）。
+    pub(crate) fn mq_shard_runtime(&self, shard_id: u32) -> Result<Arc<RegionRuntime>, Status> {
+        let manager = self.region_manager.as_ref().ok_or_else(|| {
+            attach(
+                Status::failed_precondition(
+                    "mq_v2 requires multi-raft region assembly (region_manager missing); \
+                     enable [multi_raft] + [kv_t] on this cluster",
+                ),
+                CoordErrorCode::FailedPrecondition,
+            )
+        })?;
+        manager
+            .route_runtime(&mq_log_shard_prefix(shard_id))
+            .map_err(mq_status)
+    }
+}
+
+/// MQ v2 错误 → gRPC Status：先按结构化分类标注 wire 码，再交给 server 的通用
+/// 脱敏映射（细节只进服务端日志）。
+///
+/// - `RegionNotLeader`/`NotLeader`/`NotLeaderNoHint` → `NOT_LEADER`（hint 由
+///   `map_err` 写进 trailer）；
+/// - `RouteNotReady`/`ClusterUnavailable` → `UNAVAILABLE`（可重试）；
+/// - `RegionNotFound` → `NOT_FOUND`；
+/// - 其余保持在 `map_err` 里的原码。
+pub(crate) fn mq_status(err: coord_core::error::Error) -> Status {
+    use coord_core::error::Error;
+    let code = match &err {
+        Error::RegionNotLeader { .. } | Error::NotLeader { .. } | Error::NotLeaderNoHint => {
+            Some(CoordErrorCode::NotLeader)
+        }
+        Error::RouteNotReady | Error::ClusterUnavailable(_) => Some(CoordErrorCode::Unavailable),
+        Error::RegionNotFound { .. } => Some(CoordErrorCode::NotFound),
+        _ => None,
+    };
+    let status = crate::server::map_err(err);
+    match code {
+        Some(code) => attach(status, code),
+        None => status,
+    }
+}
 
 /// MQ v2 能力面（按契约的能力门禁分组，与 `coord:mq:*` 一一对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
