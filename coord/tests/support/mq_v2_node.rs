@@ -225,6 +225,7 @@ impl MqV2Node {
                 MqV2Capability::Topic,
                 MqV2Capability::Publish,
                 MqV2Capability::Consume,
+                MqV2Capability::Subscribe,
             ]),
         );
         let node = Arc::new(node);

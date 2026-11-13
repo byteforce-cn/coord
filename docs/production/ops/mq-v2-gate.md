@@ -1,13 +1,15 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M2 落地）
+> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M3 落地）
 >
-> **状态：M0、M1、M2 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
+> **状态：M0、M1、M2、M3 完成（GO）**。M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
 > 耐久性）的存储层证据见 §1；M2-1–M2-5（写路径、offset/幂等、上限/原子性、
-> Rust 客户端 + Agent 代理、指标/基准）见 §1 与 §2b。保留回收的周期入口
-> （`mq_v2_reaper_pass`，仅分片 Leader 提案）随 M2-1 接线。
+> Rust 客户端 + Agent 代理、指标/基准）见 §1 与 §2b；M3-1–M3-6（Poll/长轮询、
+> Ack/代际 fencing、组协调、Rust consumer helper、best-effort Subscribe、lag/组 TTL）
+> 见 §1 与 §2c。保留回收与组回收的周期入口（`mq_v2_reaper_pass`，仅分片 Leader
+> 提案）随 M2-1/M3-3 接线。
 > M7 GA 不早于 KV-T GA（`docs/adr/0015-kv-t.md` D8），该前置已于
 > 2026-11-11 签字。本文是 MQ v2 gate 状态的**单一事实源**；语义以
 > `docs/adr/0016-mq-v2.md` 为准，工作项与依赖以
@@ -22,7 +24,7 @@
 | M0 契约冻结 | ADR/契约/配置/服务壳；默认拒绝 | ✅ | 见 §2 |
 | M1 日志/元数据/容量 | 分片/段日志/组状态机/topic 元数据/保留 | ✅ | M1-1–M1-6 存储层全部落地：`cargo test -p coord-server --lib storage::mq_log`（14 例：保留截止/配额释放/truncate 重放/重启/副本一致）、`storage::mq_group`（13 例：代际分配/整批 Ack/过期回收/重启/快照）、`storage::mq_topic`（5 例）、`carve_mq`、`cargo test -p coord --bins derive_`、`cargo test -p coord-server --lib test_apply_mq_group_commands`；`check-panics` 0。周期 reaper/指标接线随 M2-1 分片 Leader 循环；整节点备份演练属 M6-5 |
 | M2 Publish | 路由/批量/offset/幂等/配额 | ✅ | 见 §2b |
-| M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ⏳ 未开始 | — |
+| M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ✅ | 见 §2c |
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ⏳ 未开始 | — |
 | M5 工作流 | v2 outbox/durable/审批/trigger | ⏳ 未开始 | — |
 | M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | ⏳ 未开始 | — |
@@ -50,6 +52,20 @@
 周期保留回收（M1-5 的「周期」项）由 `mq_v2_reaper_pass` 接线：只在分片 Leader 上按
 topic 保留期提案 `MqTruncate`，无到期段不提案；关闭态零副作用
 （`cargo test -p coord-server --lib mq_v2::reaper`、`retention_reaper_reclaims_expired_segments_on_the_leader`）。
+
+### M3 分项（读路径与消费组）
+
+| 项 | 状态 | 证据 / 未达标原因 |
+|:--|:--|:--|
+| M3-1 Poll/长轮询 | ✅ | `cargo test -p coord --test mq_v2_m3_consume_test`（8 例：已提交读、tombstone 跳过、`OFFSET_OUT_OF_RANGE` + earliest/latest trailer、未设置起点从最早开始、长轮询被 append 唤醒/超时空批、条数/字节整条截断、Subscribe）；`cargo test -p coord-server --lib mq_v2::consume`（3 例：上限截断、越界 trailer、背压丢弃） |
+| M3-2 Ack/AckBatch | ✅ | `cargo test -p coord --test mq_v2_m3_group_test`（11 例，含位点单调、过期代际、整批原子、topic/partition 错误码）；`cargo test -p coord-server --lib mq_v2::groups`（3 例：组 shard 哈希稳定、ack entry 映射、拒绝码） |
+| M3-3 组协调 | ✅ | `coord/tests/mq_v2_m3_group_test.rs`：Join 分配 + 已提交位点、同订阅重连不推进代际、未知 topic fail-closed、Heartbeat/Leave、会话过期回收并转移分区、DescribeGroup lag、ListGroups 跨分片分页；reaper 见 `mq_v2_reaper_pass` |
+| M3-4 Rust consumer helper | ✅ | `cargo test -p coord-client --lib mq_`（7 例）；`cargo test -p coord --test mq_v2_m3_cluster_test -- --test-threads=1`（真实 3 节点：两成员各占一个分区、成员变化自动重新 Join、离组后接管并从已提交位点续读，无重复投递已 Ack offset） |
+| M3-5 Subscribe（best-effort） | ✅ | `subscribe_pushes_new_messages_and_never_replays_history`、`subscribe_rejects_an_explicit_offset_below_earliest`、`consume::tests::subscribe_drops_when_the_queue_is_full_and_stops_when_closed`（满即丢弃、不推进位点、`start_offset=0` = 最新） |
+| M3-6 lag/组 TTL | ✅ | DescribeGroup 的 `GroupPartitionLag`（committed/next/lag）在 M3-3 用例中断言；空组 + 位点 TTL 回收：`storage::mq_group::tests::gc_removes_empty_groups_only_after_the_offset_ttl`、`group_ttl_reaper_removes_empty_groups_and_offsets`；指标 `coord_mq_v2_group_{joins,rebalances,expired_members,gc_removed}_total`、`coord_mq_v2_poll_*`、`coord_mq_v2_ack_*`、`coord_mq_v2_subscribe_*` |
+
+组 shard 哈希固定为 FNV-1a 64 取模（跨版本稳定；`DefaultHasher` 会让组的位点在
+Rust 升级后漂到别的分片）。
 
 ## 3. 关闭 M7 的硬条件
 

@@ -128,6 +128,12 @@ struct MetricsInner {
     pub mq_v2_group_expired_members_total: AtomicU64,
     /// 组 TTL 回收删除的组数
     pub mq_v2_group_gc_removed_total: AtomicU64,
+    /// 当前打开的 `Subscribe` 流数
+    pub mq_v2_subscribe_streams: AtomicI64,
+    /// `Subscribe` 已推送消息数
+    pub mq_v2_subscribe_messages_total: AtomicU64,
+    /// `Subscribe` 因背压丢弃的消息数
+    pub mq_v2_subscribe_dropped_total: AtomicU64,
     /// 客户端观测到的 leadership 丢失次数（旧批随后被丢弃）
     pub tso_leader_changes_total: AtomicU64,
     /// v2 KV 写被 `CommitRejected` 拒绝次数（D11.4；不静默写）
@@ -355,6 +361,9 @@ impl Default for MetricsInner {
             mq_v2_group_rebalances_total: AtomicU64::new(0),
             mq_v2_group_expired_members_total: AtomicU64::new(0),
             mq_v2_group_gc_removed_total: AtomicU64::new(0),
+            mq_v2_subscribe_streams: AtomicI64::new(0),
+            mq_v2_subscribe_messages_total: AtomicU64::new(0),
+            mq_v2_subscribe_dropped_total: AtomicU64::new(0),
             tso_current: AtomicU64::new(0),
             tso_batch_remaining: AtomicU64::new(0),
             tso_refill_failures_total: AtomicU64::new(0),
@@ -870,6 +879,30 @@ impl Metrics {
             .fetch_add(groups_removed, Ordering::Relaxed);
     }
 
+    /// 打开一个 `Subscribe` 流（gauge +1）。
+    pub fn inc_mq_v2_subscribe_stream(&self) {
+        self.inner
+            .mq_v2_subscribe_streams
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 关闭一个 `Subscribe` 流（gauge -1）。
+    pub fn dec_mq_v2_subscribe_stream(&self) {
+        self.inner
+            .mq_v2_subscribe_streams
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// 记录一个 `Subscribe` 流的推送结果（`dropped` = 背压丢弃，best-effort）。
+    pub fn record_mq_v2_subscribe(&self, messages: u64, dropped: u64) {
+        self.inner
+            .mq_v2_subscribe_messages_total
+            .fetch_add(messages, Ordering::Relaxed);
+        self.inner
+            .mq_v2_subscribe_dropped_total
+            .fetch_add(dropped, Ordering::Relaxed);
+    }
+
     /// 记录最近一次发放的 TSO（gauge）。
     pub fn set_tso_current(&self, ts: u64) {
         self.inner.tso_current.store(ts, Ordering::Relaxed);
@@ -1209,7 +1242,24 @@ impl Metrics {
             inner.mq_v2_append_requests_total.load(Ordering::Relaxed)
         ));
 
+        out.push_str("\n# HELP coord_mq_v2_subscribe_streams Open coord.mq.v2 Subscribe streams\n");
+        out.push_str("# TYPE coord_mq_v2_subscribe_streams gauge\n");
+        out.push_str(&format!(
+            "coord_mq_v2_subscribe_streams {}\n",
+            inner.mq_v2_subscribe_streams.load(Ordering::Relaxed)
+        ));
+
         for (name, help, value) in [
+            (
+                "coord_mq_v2_subscribe_messages_total",
+                "MQ v2 messages pushed by Subscribe",
+                inner.mq_v2_subscribe_messages_total.load(Ordering::Relaxed),
+            ),
+            (
+                "coord_mq_v2_subscribe_dropped_total",
+                "MQ v2 Subscribe messages dropped by backpressure",
+                inner.mq_v2_subscribe_dropped_total.load(Ordering::Relaxed),
+            ),
             (
                 "coord_mq_v2_publish_requests_total",
                 "MQ v2 publish RPCs received (success and failure)",
