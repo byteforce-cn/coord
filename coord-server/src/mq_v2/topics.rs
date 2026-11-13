@@ -16,7 +16,6 @@ use coord_proto::mq::v2 as mq_v2;
 use tonic::Status;
 
 use crate::raft::type_config::Command;
-use crate::raft::WatchReceiver;
 use crate::server::{map_err, CoordNode};
 use crate::storage::mq_topic::{
     MqTopicConfig, MqTopicCreate, MqTopicMeta, MqTopicOp, MqTopicTable,
@@ -33,6 +32,40 @@ const MESSAGE_MAX_BYTES: u32 = 8 * 1024 * 1024;
 /// 段封口大小的边界（与 `[mq_v2].segment_bytes` 的配置校验逐字一致）。
 const SEGMENT_MIN_BYTES: u64 = 1024 * 1024;
 const SEGMENT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// 展开后（或 Update 合并后）的配置边界校验。
+///
+/// 单一归属：契约 `TopicConfig`（retention 1h–30d、单条 ≤ 8MiB、段 1MiB–1GiB）。
+/// `[mq_v2]` 的配置校验用同一组边界，避免「配置能写、topic 建不出来」的双口径。
+pub(crate) fn validate_topic_config(config: &MqTopicConfig) -> Result<(), Status> {
+    if !(RETENTION_MIN_SECS..=RETENTION_MAX_SECS).contains(&config.retention_secs) {
+        return Err(invalid(format!(
+            "retention_secs must be in {RETENTION_MIN_SECS}..={RETENTION_MAX_SECS} \
+             seconds (1h–30d, got {})",
+            config.retention_secs
+        )));
+    }
+    if config.dlq_retention_secs == 0 || config.dlq_retention_secs > RETENTION_MAX_SECS {
+        return Err(invalid(format!(
+            "dlq_retention_secs must be in 1..={RETENTION_MAX_SECS} seconds (got {})",
+            config.dlq_retention_secs
+        )));
+    }
+    if !(1..=MESSAGE_MAX_BYTES).contains(&config.max_message_bytes) {
+        return Err(invalid(format!(
+            "max_message_bytes must be in 1..={MESSAGE_MAX_BYTES} (1B–8MiB, got {})",
+            config.max_message_bytes
+        )));
+    }
+    if !(SEGMENT_MIN_BYTES..=SEGMENT_MAX_BYTES).contains(&config.segment_bytes) {
+        return Err(invalid(format!(
+            "segment_bytes must be in {SEGMENT_MIN_BYTES}..={SEGMENT_MAX_BYTES} \
+             (1MiB–1GiB, got {})",
+            config.segment_bytes
+        )));
+    }
+    Ok(())
+}
 
 fn invalid(reason: impl Into<String>) -> Status {
     attach(
@@ -71,71 +104,42 @@ impl CoordNode {
         let defaults = self.mq_v2().config();
         let config_supplied = requested.is_some();
         let requested = requested.unwrap_or_default();
-
         let retention_secs = if requested.retention_secs == 0 {
             defaults.default_retention_secs
         } else {
             u64::try_from(requested.retention_secs)
                 .map_err(|_| invalid("retention_secs must not be negative"))?
         };
-        if !(RETENTION_MIN_SECS..=RETENTION_MAX_SECS).contains(&retention_secs) {
-            return Err(invalid(format!(
-                "retention_secs must be in {RETENTION_MIN_SECS}..={RETENTION_MAX_SECS} \
-                 seconds (1h–30d, got {retention_secs})"
-            )));
-        }
-
         let dlq_retention_secs = if requested.dlq_retention_secs == 0 {
             retention_secs
         } else {
-            let value = u64::try_from(requested.dlq_retention_secs)
-                .map_err(|_| invalid("dlq_retention_secs must not be negative"))?;
-            if value > RETENTION_MAX_SECS {
-                return Err(invalid(format!(
-                    "dlq_retention_secs must be <= {RETENTION_MAX_SECS} seconds (30d, \
-                     got {value})"
-                )));
-            }
-            value
+            u64::try_from(requested.dlq_retention_secs)
+                .map_err(|_| invalid("dlq_retention_secs must not be negative"))?
         };
-
         let max_message_bytes = if requested.max_message_bytes == 0 {
             defaults.max_message_bytes
         } else {
             requested.max_message_bytes
         };
-        if !(1..=MESSAGE_MAX_BYTES).contains(&max_message_bytes) {
-            return Err(invalid(format!(
-                "max_message_bytes must be in 1..={MESSAGE_MAX_BYTES} (1B–8MiB, got \
-                 {max_message_bytes})"
-            )));
-        }
-
         let segment_bytes = if requested.segment_bytes == 0 {
             defaults.segment_bytes
         } else {
             requested.segment_bytes
         };
-        if !(SEGMENT_MIN_BYTES..=SEGMENT_MAX_BYTES).contains(&segment_bytes) {
-            return Err(invalid(format!(
-                "segment_bytes must be in {SEGMENT_MIN_BYTES}..={SEGMENT_MAX_BYTES} \
-                 (1MiB–1GiB, got {segment_bytes})"
-            )));
-        }
-
         let max_bytes = if config_supplied {
             requested.max_bytes
         } else {
             defaults.max_topic_bytes
         };
-
-        Ok(MqTopicConfig {
+        let config = MqTopicConfig {
             retention_secs,
             max_bytes,
             max_message_bytes,
             segment_bytes,
             dlq_retention_secs,
-        })
+        };
+        validate_topic_config(&config)?;
+        Ok(config)
     }
 
     /// 构造 `Command::MqTopic(MqTopicOp::Create)`。
@@ -166,7 +170,10 @@ impl CoordNode {
     /// `earliest_offset`/`next_offset` 读的是**本节点**分片副本的已 apply 状态：
     /// 该 RPC 是路由发现用途，不是一致性读（契约只承诺给客户端一个可刷新的
     /// Leader/分片视图）。
-    pub(crate) fn mq_partition_leaders(&self, meta: &MqTopicMeta) -> Vec<mq_v2::PartitionLeader> {
+    pub(crate) async fn mq_partition_leaders(
+        &self,
+        meta: &MqTopicMeta,
+    ) -> Vec<mq_v2::PartitionLeader> {
         let mut leaders = Vec::with_capacity(meta.partitions as usize);
         for partition in 0..meta.partitions {
             let shard_id = meta
@@ -178,7 +185,7 @@ impl CoordNode {
             let mut earliest_offset = 0i64;
             let mut next_offset = 0i64;
             if let Ok(runtime) = self.mq_shard_runtime(shard_id) {
-                let leader = runtime.raft.metrics().borrow_watched().current_leader;
+                let leader = runtime.raft.current_leader().await;
                 leader_addr = leader
                     .and_then(|id| self.grpc_addr_of(id))
                     .unwrap_or_default();
@@ -439,8 +446,8 @@ mod tests {
         assert_eq!(error_code_of(&invalid).as_deref(), Some("INVALID_ARGUMENT"));
     }
 
-    #[test]
-    fn partition_leaders_report_the_shard_of_each_partition() {
+    #[tokio::test]
+    async fn partition_leaders_report_the_shard_of_each_partition() {
         let (_dir, mut node) = node();
         apply(&MqTopicOp::Create(topic_create("orders", 4)), &node.storage);
 
@@ -491,7 +498,7 @@ mod tests {
 
         let table = node.mq_topic_table().expect("topic table");
         let meta = table.topic("orders").expect("topic row");
-        let leaders = node.mq_partition_leaders(meta);
+        let leaders = node.mq_partition_leaders(meta).await;
         assert_eq!(leaders.len(), 4);
         for (partition, leader) in leaders.iter().enumerate() {
             assert_eq!(leader.partition, partition as i32);

@@ -3258,15 +3258,15 @@ async fn run_server(
                 group_session_timeout_ms: cfg.mq_v2.group_session_timeout_ms,
             },
         )
-        // M0-4 交付服务壳与门禁；M2 交付写路径（Topic 的 Create/GetTopicLeader +
-        // Publish/PublishBatch）；M3 交付读路径/消费组（Poll/Ack/组协调）与
-        // best-effort Subscribe。Topic 其余 manage RPC 过门禁后落 UNIMPLEMENTED
-        // （M4-2/M4-3 接线），Dlq 仍为 FAILED_PRECONDITION。
+        // M0-4 交付服务壳与门禁；M2 写路径；M3 读路径/消费组/Subscribe；M4 交付
+        // DLQ 与 topic 管理面（Describe/List/Update + Delete 回收）。`DeleteTopic`/
+        // `GetTopicDeletion` 的接线在同一里程碑的后续 PR。
         .with_implemented([
             coord_server::mq_v2::MqV2Capability::Topic,
             coord_server::mq_v2::MqV2Capability::Publish,
             coord_server::mq_v2::MqV2Capability::Consume,
             coord_server::mq_v2::MqV2Capability::Subscribe,
+            coord_server::mq_v2::MqV2Capability::Dlq,
         ]),
     );
     if cfg.mq_v2.enabled {
