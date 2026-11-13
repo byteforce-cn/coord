@@ -3241,22 +3241,31 @@ async fn run_server(
     // 不启后台任务；服务壳仍注册、每个 RPC 返回 FAILED_PRECONDITION（reflection
     // 可见，客户端能把"没开"与"网络故障"区分开）。能力集合在 M0 为空——后续 gate
     // 在自己的 issue 里把能力加入 implemented 并实现 handler。
-    node.set_mq_v2_state(coord_server::mq_v2::MqV2State::new(
-        cfg.mq_v2.enabled,
-        coord_server::mq_v2::MqV2RuntimeConfig {
-            log_shards: cfg.mq_v2.log_shards,
-            group_shards: cfg.mq_v2.group_shards,
-            max_partitions_per_shard: cfg.mq_v2.max_partitions_per_shard,
-            default_retention_secs: cfg.mq_v2.default_retention_secs,
-            max_topic_bytes: cfg.mq_v2.max_topic_bytes,
-            max_message_bytes: cfg.mq_v2.max_message_bytes,
-            segment_bytes: cfg.mq_v2.segment_bytes,
-            poll_max_bytes: cfg.mq_v2.poll_max_bytes,
-            poll_max_messages: cfg.mq_v2.poll_max_messages,
-            long_poll_max_ms: cfg.mq_v2.long_poll_max_ms,
-            group_session_timeout_ms: cfg.mq_v2.group_session_timeout_ms,
-        },
-    ));
+    node.set_mq_v2_state(
+        coord_server::mq_v2::MqV2State::new(
+            cfg.mq_v2.enabled,
+            coord_server::mq_v2::MqV2RuntimeConfig {
+                log_shards: cfg.mq_v2.log_shards,
+                group_shards: cfg.mq_v2.group_shards,
+                max_partitions_per_shard: cfg.mq_v2.max_partitions_per_shard,
+                default_retention_secs: cfg.mq_v2.default_retention_secs,
+                max_topic_bytes: cfg.mq_v2.max_topic_bytes,
+                max_message_bytes: cfg.mq_v2.max_message_bytes,
+                segment_bytes: cfg.mq_v2.segment_bytes,
+                poll_max_bytes: cfg.mq_v2.poll_max_bytes,
+                poll_max_messages: cfg.mq_v2.poll_max_messages,
+                long_poll_max_ms: cfg.mq_v2.long_poll_max_ms,
+                group_session_timeout_ms: cfg.mq_v2.group_session_timeout_ms,
+            },
+        )
+        // M0-4 交付服务壳与门禁；M2 交付写路径（Topic 的 Create/GetTopicLeader +
+        // Publish/PublishBatch）。Topic 其余 manage RPC 过门禁后落 UNIMPLEMENTED
+        // （M4-2/M4-3 接线），Consume/Subscribe/Dlq 仍为 FAILED_PRECONDITION。
+        .with_implemented([
+            coord_server::mq_v2::MqV2Capability::Topic,
+            coord_server::mq_v2::MqV2Capability::Publish,
+        ]),
+    );
     if cfg.mq_v2.enabled {
         tracing::info!(
             log_shards = cfg.mq_v2.log_shards,
