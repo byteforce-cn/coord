@@ -82,6 +82,10 @@ struct MetricsInner {
     /// MQ v2 开关：0 = `[mq_v2].enabled=false`（服务壳注册但全部拒绝），
     /// 1 = 已开启（能力仍可能按 gate 未交付）。区分"没开"与"开了但 gate 拒绝"。
     pub mq_v2_enabled: AtomicI64,
+    /// 已提交的 `Command::MqAppendBatch` 条目数（M2-1：批量摊薄 fsync 的证据）
+    pub mq_v2_append_batches_total: AtomicU64,
+    /// 已提交的 publish 请求数；与 `mq_v2_append_batches_total` 的比值 = 平均批深度
+    pub mq_v2_append_requests_total: AtomicU64,
     /// 客户端观测到的 leadership 丢失次数（旧批随后被丢弃）
     pub tso_leader_changes_total: AtomicU64,
     /// v2 KV 写被 `CommitRejected` 拒绝次数（D11.4；不静默写）
@@ -286,6 +290,8 @@ impl Default for MetricsInner {
             seal_status: AtomicI64::new(0),
             kv_t_enabled: AtomicI64::new(0),
             mq_v2_enabled: AtomicI64::new(0),
+            mq_v2_append_batches_total: AtomicU64::new(0),
+            mq_v2_append_requests_total: AtomicU64::new(0),
             tso_current: AtomicU64::new(0),
             tso_batch_remaining: AtomicU64::new(0),
             tso_refill_failures_total: AtomicU64::new(0),
@@ -666,6 +672,16 @@ impl Metrics {
             .store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
     }
 
+    /// 记录一次 `Command::MqAppendBatch` 提交（`requests` = 该条目承载的请求数）。
+    pub fn record_mq_v2_append_batch(&self, requests: u64) {
+        self.inner
+            .mq_v2_append_batches_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .mq_v2_append_requests_total
+            .fetch_add(requests, Ordering::Relaxed);
+    }
+
     /// 记录最近一次发放的 TSO（gauge）。
     pub fn set_tso_current(&self, ts: u64) {
         self.inner.tso_current.store(ts, Ordering::Relaxed);
@@ -985,6 +1001,24 @@ impl Metrics {
         out.push_str(&format!(
             "coord_mq_v2_enabled {}\n",
             inner.mq_v2_enabled.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_mq_v2_append_batches_total MQ v2 MqAppendBatch raft entries committed\n",
+        );
+        out.push_str("# TYPE coord_mq_v2_append_batches_total counter\n");
+        out.push_str(&format!(
+            "coord_mq_v2_append_batches_total {}\n",
+            inner.mq_v2_append_batches_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_mq_v2_append_requests_total MQ v2 publish requests committed\n",
+        );
+        out.push_str("# TYPE coord_mq_v2_append_requests_total counter\n");
+        out.push_str(&format!(
+            "coord_mq_v2_append_requests_total {}\n",
+            inner.mq_v2_append_requests_total.load(Ordering::Relaxed)
         ));
 
         out.push_str("\n# HELP coord_tso_current Last TSO issued by the local batch cache\n");
@@ -1730,6 +1764,17 @@ mod tests {
         assert!(output.contains("grpc_requests_total{method=\"put\"} 2"));
         assert!(output.contains("lease_active_total 1"));
         assert!(output.contains("lease_expired_total 1"));
+    }
+
+    #[test]
+    fn test_metrics_mq_v2_append_batches() {
+        let m = Metrics::new();
+        m.record_mq_v2_append_batch(1);
+        m.record_mq_v2_append_batch(63);
+        let output = m.render_prometheus_text();
+        assert!(output.contains("# TYPE coord_mq_v2_append_batches_total counter"));
+        assert!(output.contains("coord_mq_v2_append_batches_total 2"));
+        assert!(output.contains("coord_mq_v2_append_requests_total 64"));
     }
 
     #[test]

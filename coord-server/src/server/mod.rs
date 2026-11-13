@@ -289,6 +289,8 @@ pub struct CoordNode {
     /// 关闭态不切保留区间、不起分片/后台任务；服务壳仍注册，全部 RPC
     /// `FAILED_PRECONDITION`（ADR-0016 D11）。
     mq_v2: crate::mq_v2::MqV2State,
+    /// MQ v2 写路径的每分片批处理器（懒创建；`[mq_v2].enabled=false` 时永远是空表）。
+    mq_v2_batchers: Arc<crate::mq_v2::publish::PublishBatchers>,
     /// KV-T 本地 TSO 批次缓存（仅 enabled 且 region 0 raft 已装配时注入）。
     ///
     /// 保持 `Option` 而非延迟构造：关闭时不得有任何 v2 装配痕迹（ADR-0001）。
@@ -390,6 +392,7 @@ impl CoordNode {
             chunk_store: None,
             kvt: crate::kvt::KvTState::disabled(),
             mq_v2: crate::mq_v2::MqV2State::disabled(),
+            mq_v2_batchers: Arc::new(crate::mq_v2::publish::PublishBatchers::new()),
             tso_client: None,
             commit_sequencer: None,
             metrics: None,
@@ -630,6 +633,11 @@ impl CoordNode {
     /// 当前 MQ v2 门禁状态（`coord.mq.v2` 服务壳使用）。
     pub fn mq_v2(&self) -> &crate::mq_v2::MqV2State {
         &self.mq_v2
+    }
+
+    /// MQ v2 每分片批处理器（写路径内部状态；关闭态不会被写入）。
+    pub(crate) fn mq_v2_batchers(&self) -> &Arc<crate::mq_v2::publish::PublishBatchers> {
+        &self.mq_v2_batchers
     }
 
     /// 把本节点 region 0 已 apply 的权威 Region 表收敛到路由表（#159）。

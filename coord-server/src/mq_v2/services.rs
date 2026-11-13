@@ -14,10 +14,12 @@ use coord_core::error_code::{attach, CoordErrorCode};
 use coord_proto::mq::v2 as mq_v2;
 use coord_proto::mq::v2::mq_server::Mq;
 
+use super::publish::{publish_response, validate_batch_entries};
 use super::topics::create_topic_response;
 use super::MqV2Capability;
 use crate::raft::type_config::Response as RaftResponse;
 use crate::server::CoordNode;
+use crate::storage::mq_log::MqAppendEntry;
 
 /// 门禁通过但 handler 尚未接线时的响应（M0 壳阶段不会到达：能力集合为空）。
 fn unimplemented(capability: MqV2Capability) -> Status {
@@ -107,16 +109,59 @@ impl Mq for CoordNode {
 
     async fn publish(
         &self,
-        _request: Request<mq_v2::PublishRequest>,
+        request: Request<mq_v2::PublishRequest>,
     ) -> Result<Response<mq_v2::PublishResponse>, Status> {
-        gated!(self, MqV2Capability::Publish)
+        self.mq_v2().gate(MqV2Capability::Publish)?;
+        let request = request.into_inner();
+        let target =
+            self.mq_publish_target(&request.topic, request.partition, request.topic_epoch)?;
+        let appended = self
+            .mq_append(
+                &target,
+                vec![MqAppendEntry {
+                    key: request.key,
+                    payload: request.payload,
+                    idempotency_key: request.idempotency_key,
+                    headers: request.headers.into_iter().collect(),
+                    producer: request.producer,
+                }],
+            )
+            .await?;
+        let entry = appended
+            .entries
+            .first()
+            .ok_or_else(|| Status::internal("mq append applied no entry for a single publish"))?;
+        Ok(Response::new(publish_response(entry)?))
     }
 
     async fn publish_batch(
         &self,
-        _request: Request<mq_v2::PublishBatchRequest>,
+        request: Request<mq_v2::PublishBatchRequest>,
     ) -> Result<Response<mq_v2::PublishBatchResponse>, Status> {
-        gated!(self, MqV2Capability::Publish)
+        self.mq_v2().gate(MqV2Capability::Publish)?;
+        let request = request.into_inner();
+        // 条数上限先于 topic 查找校验：超限/空批与 topic 是否存在无关。
+        validate_batch_entries(request.entries.len())?;
+        let target =
+            self.mq_publish_target(&request.topic, request.partition, request.topic_epoch)?;
+        let entries = request
+            .entries
+            .into_iter()
+            .map(|entry| MqAppendEntry {
+                key: entry.key,
+                payload: entry.payload,
+                idempotency_key: entry.idempotency_key,
+                headers: entry.headers.into_iter().collect(),
+                producer: entry.producer,
+            })
+            .collect();
+        // 整批是**一个**分区请求：apply 内任一条超限/超配额 ⇒ 一条都不追加。
+        let appended = self.mq_append(&target, entries).await?;
+        let mut results = Vec::with_capacity(appended.entries.len());
+        for entry in &appended.entries {
+            results.push(publish_response(entry)?);
+        }
+        Ok(Response::new(mq_v2::PublishBatchResponse { results }))
     }
 
     async fn poll(
