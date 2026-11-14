@@ -204,8 +204,8 @@ Raft 集群仍是 v1；显式 `false` 时 v2 服务注册（reflection 可见）
   `total_size`（不符不发上游），`read_ts`/`commit_ts` 原样透传。未迁移的 Agent
   内部数据面调用在 v2 集群上按 v1 冻结口径 fail-closed，不静默降级。
 - **不承诺**：v1 数据迁移 / v1 facade；MQ v1 在 v2 集群不可用；MQ v2 为
-  **PROPOSED**（契约 `coord.mq.v2` 已在 M0 冻结，实现按 M0–M7 推进，GA 前不构成
-  承诺面，见 `ops/mq-v2-gate.md`）；严格外部实时序（`boundaries.md` B-KVT-1..8）。
+  **COMMITTED**（2026-11-14 GA；只服务 v2 集群、无 v1→v2 迁移，gate 证据与
+  post-GA backlog 见 `ops/mq-v2-gate.md`）；严格外部实时序（`boundaries.md` B-KVT-1..8）。
 
 ## 2. Registry / Config（场景 ①）
 
@@ -328,12 +328,12 @@ Raft 集群仍是 v1；显式 `false` 时 v2 服务注册（reflection 可见）
   `coord_agent_mq_next_offset`；告警 `CoordMqConsumerLag`（处置见 runbook §6）。
 - 滞后持续增长 = 生产快于消费（扩消费者）；停滞且 > 0 = 消费者停摆。
 
-### 5.6 MQ v2（`coord.mq.v2`，PROPOSED）
+### 5.6 MQ v2（`coord.mq.v2`，COMMITTED，GA 2026-11-14）
 
 MQ v2 是 G7 的 greenfield 面（ADR-0016）：服务端分区日志 + 服务端消费组，
 **只服务 v2 集群**；v1 MQ 在 v2 集群仍 fail-closed，也没有 v1→v2 迁移。
-契约在 M0 冻结，当前状态 **PROPOSED**（`STATUS.md`）；实现完成并签字前不要当
-稳定面消费（gate 证据见 `ops/mq-v2-gate.md`）。
+契约在 M0 冻结 wire，2026-11-14 签字 GA（`STATUS.md`）；gate 证据、未关闭项与
+post-GA backlog 见 `ops/mq-v2-gate.md`。
 
 - **服务面**：`[mq_v2].enabled=false`（默认）时服务注册但每个 RPC 返回
   `FAILED_PRECONDITION`；`enabled=true` 要求 `[kv_t].enabled=true`，否则启动失败

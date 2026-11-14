@@ -81,6 +81,7 @@ GA_IMPLS=(
   "cn/byteforce/coord/sdk/internal/rpc/TransitClientImpl.java|contracts.transit.v1"
   "cn/byteforce/coord/sdk/internal/rpc/CacheClientImpl.java|contracts.cache.v1"
   "cn/byteforce/coord/sdk/internal/rpc/MqClientImpl.java|contracts.mq.v1"
+  "cn/byteforce/coord/sdk/internal/rpc/MqV2ClientImpl.java|contracts.mq.v2"
   "cn/byteforce/coord/sdk/internal/rpc/WorkflowClientImpl.java|contracts.workflow.v1"
   "cn/byteforce/coord/sdk/internal/rpc/ObjectStoreClientImpl.java|contracts.storage"
   "cn/byteforce/coord/sdk/internal/rpc/LeaderElectionClientImpl.java|contracts.election.v1"

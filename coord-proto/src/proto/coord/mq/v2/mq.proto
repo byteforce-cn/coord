@@ -3,7 +3,7 @@ syntax = "proto3";
 // ============================================================
 // coord.mq.v2 —— MQ v2：服务端分区日志、消费组与工作流触发
 //
-// 状态：PROPOSED（M0 冻结；M7 GA 前不构成承诺面）
+// 状态：COMMITTED（M0 冻结 wire；M7 GA 2026-11-14，GA 未改 wire）
 // 语义单一归属：docs/adr/0016-mq-v2.md（ADR-0016）；
 // 工作项与验收：docs/superpowers/specs/2026-10-29-mq-v2-design.md。
 //

@@ -278,5 +278,5 @@ auth:
   `consumer-contract.md` §5.7。判据：
   `cargo test -p coord --test mq_v2_m5_trigger_test -- --test-threads=1`
   （含全链路 publish → trigger → workflow → outbox → 下一 trigger）。
-- 能力矩阵见 ADR-0015 D13；MQ v2 属 G7，`coord.mq.v2` 仍为 PROPOSED，GA 签字见
-  `docs/production/ops/mq-v2-gate.md`。
+- 能力矩阵见 ADR-0015 D13；MQ v2 属 G7，`coord.mq.v2` 为 COMMITTED（GA
+  2026-11-14），签字与 post-GA backlog 见 `docs/production/ops/mq-v2-gate.md`。
