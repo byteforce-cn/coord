@@ -1,7 +1,7 @@
 # java-example
 
 Java 应用接入 Coord 的示例模块（KV / Lease / Watch / Txn / Registry 的 v1 面，
-以及 KV-T v2 数据面）。**刻意不依赖 `coord-java-sdk`**：示例只用 Maven 生成的
+KV-T v2 数据面，以及 MQ v2 分区日志/消费组）。**刻意不依赖 `coord-java-sdk`**：示例只用 Maven 生成的
 gRPC + proto stub（契约包 `cn.byteforce.coord.contracts.*`），用来证明"普通
 gRPC 客户端可以直连 coord-agent"，而不是证明"SDK 自己能用"。
 
@@ -20,6 +20,7 @@ gRPC 客户端可以直连 coord-agent"，而不是证明"SDK 自己能用"。
 |:--|:--|
 | `src/main/java/cn/byteforce/coord/example/CoordClient.java` | v1 面的客户端封装（KV/Lease/Watch/Txn/Maintenance） |
 | `src/main/java/cn/byteforce/coord/example/KvTV2Example.java` | **v2 数据面示例**：`coord.tso.v2` / `coord.kv.v2` / `coord.txn.v2` / `coord.watch.v2` |
+| `src/main/java/cn/byteforce/coord/example/MqV2Example.java` | **MQ v2 示例**：`coord.mq.v2` 建 topic / 幂等发布 / 组消费 Ack / DLQ / 删除回收 |
 | `src/test/java/com/byteforce/coord/example/*IntegrationTest.java` | 连真实 v1 集群（`scripts/ci-java-it-cluster.sh start v1`）的集成套件 |
 | `scripts/verify-build.sh` | proto 生成 + 编译 + 单测的本地校验 |
 
@@ -59,6 +60,26 @@ bash scripts/ci-java-it-cluster.sh stop v2
 退出码：`0` 通过；`1` 断言/RPC 失败；**`2` 目标集群不是 v2**（`FAILED_PRECONDITION`
 = `[kv_t]` 未开启、或 `UNIMPLEMENTED` = agent 不转发 v2 服务）。没有"降级到 v1 API"
 的分支：v2 没验过就是失败。
+
+## MQ v2 示例（`MqV2Example`）
+
+同一套真实 v2 集群，服务端需 `[mq_v2].enabled = true`（`ci-java-it-cluster.sh`
+的 v2 配置已带上）：
+
+```bash
+bash scripts/ci-java-it-cluster.sh start v2
+bash java-example/scripts/run-v2-example.sh mq      # 退出码 0 = 通过
+```
+
+示例依次验证：`CreateTopic`（`request_id` 重放同一身份）→ `Publish`（同
+`idempotency_key` 重放返回首次 offset 且 `deduplicated=true`）→ `JoinGroup` /
+`Poll` / `Ack`（committed 推进）→ `MoveToDlq` + `PollDlq`（原 offset 与
+`reason`）→ `UpdateTopic`（epoch CAS）→ `DeleteTopic` +
+`GetTopicDeletion` 收敛到 `DONE`。退出码口径与 KV-T v2 示例一致：**2** =
+`[mq_v2]` 未启用或 agent 不代理 `coord.mq.v2`。
+
+SDK 侧同一链路由 `coord-java-sdk` 的 `MqV2ClusterIntegrationTest` 覆盖（见
+`coord-java-sdk/README.md`）。
 
 ## 跨语言互操作（Rust `coord-client` ↔ Java SDK）
 

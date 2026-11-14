@@ -149,6 +149,7 @@ is terminal.
 | Event | `client.events()` | live by default; pass a persisted `seq` cursor to replay within the retention window |
 | Cache | `client.cache()` | capacity is per-agent, converged periodically; `setIfAbsent` (SETNX), `keys`, `clear` |
 | MQ | `client.mq()` | `poll+ack` reliability path; leader routing via `getTopicLeader` |
+| MQ v2 | `client.mqV2()` | `coord.mq.v2` (18/19 RPCs — no `Subscribe`); at-least-once `poll`+`ack`; `MqV2Consumer` handles rejoin, topic epoch and offset reset; DLQ + topic lifecycle included |
 | Scheduler / Workflow | `client.scheduler()`, `client.workflow()` | claim-based jobs; completion results persist (first result wins) and read back via `getJob`; workflow retention via `deleteInstance` / `deleteDefinition` |
 | Policy | `client.policy()` | `checkPermission` is agent-local RBAC; production path is OPA bundle + `evaluate` |
 | PKI | `client.pki()` | `getCertByCN` returns the **private key** — treat "read" as private-key read |
@@ -157,6 +158,50 @@ is terminal.
 | ObjectStore | `client.objectStore()` | see `docs/production/volume-object-storage.md` |
 | KV-T v2 | `client.tsoV2()`, `client.kvV2()`, `client.leaseV2()`, `client.txnV2()`, `client.watchV2()`, `client.storageV2()` | `[kv_t]` enabled (default on multi-Region clusters, ADR-0017); writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; txn conflicts are results (replay with a new `startTs`); watch is at-least-once with cursor resume; storage buffers up to 256 MiB |
 | Health | `client.healthCheck()` | agent health check |
+
+## MQ v2 (`client.mqV2()`)
+
+`coord.mq.v2` is the server-side partitioned log (ADR-0016): 19 RPCs, 18 of
+which are on this SDK. `Subscribe` is deliberately absent — the contract
+declares it best-effort (drops under backpressure, does not replay, does not
+commit), so the at-least-once path is `poll` + `ack`.
+
+```java
+var mq = client.mqV2();
+var created = mq.createTopic("orders", 4, "req-1", MqV2TopicConfig.defaults());
+long epoch = created.topicEpoch();                       // required on the write path
+
+mq.publish(new MqV2Publish("orders", 0, epoch,
+        null, "payload".getBytes(), "idem-1", java.util.Map.of(), "svc"));
+
+var options = MqV2ConsumerOptions.builder("orders-svc", java.util.List.of("orders"))
+        .waitMs(500)                                      // long-poll bound
+        .build();
+try (var consumer = MqV2Consumer.join(mq, options)) {
+    for (var message : consumer.poll()) {
+        // idempotent by (topic, partition, offset): duplicates are normal
+        consumer.ack(message);
+    }
+}
+```
+
+Boundaries the SDK enforces instead of hiding:
+
+- **`topicEpoch`**: pass the epoch from `createTopic`/`describeTopic` on
+  publish/poll/ack/move-to-DLQ. `0` means "do not check" and is for read paths
+  only; after a delete + recreate, a stale epoch fails with
+  `TOPIC_EPOCH_STALE` instead of touching the new topic.
+- **Offset reset**: `OFFSET_OUT_OF_RANGE` is surfaced, not clamped. The
+  `MqV2Consumer` helper applies `EARLIEST` / `LATEST` / `FAIL` (default:
+  `FAIL`) — choosing a policy is the caller's call.
+- **Rebalance**: generation fencing is mandatory; the helper rejoins on
+  `GROUP_EPOCH_STALE` / `REBALANCE_IN_PROGRESS` / `NOT_GROUP_MEMBER` /
+  `GROUP_NOT_FOUND` (an old-generation `Ack` is never swallowed).
+- **Bytes**: `key`/`payload` are `byte[]`; no UTF-8 assumption. `toString()`
+  never prints payloads.
+- **Cluster shape**: requires a v2 cluster with `[mq_v2].enabled=true`
+  (server) and an agent with `services.mq=true`; otherwise every RPC fails
+  with `FAILED_PRECONDITION`.
 
 ## Errors
 
@@ -194,8 +239,10 @@ consumer-facing view per service. A missing capability fails with
 - Unit tests: `mvn test`.
 - Integration suites (real server + agent): `mvn -Pit` — see
   `.github/workflows/ci.yml` for the authoritative invocation.
-- KV-T v2 real-cluster e2e (`KvTV2ClusterIntegrationTest`) needs the v2
-  dev cluster (multi-raft + PD + object storage + `[kv_t]`):
+- KV-T v2 real-cluster e2e (`KvTV2ClusterIntegrationTest`) and MQ v2 e2e
+  (`MqV2ClusterIntegrationTest`) need the v2 dev cluster (multi-raft + PD +
+  object storage + `[kv_t]`; the script also sets `[mq_v2].enabled=true` and
+  `services.mq=true` for the agent):
 
   ```bash
   cargo build --workspace --bins

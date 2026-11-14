@@ -69,7 +69,7 @@ ADR-0016 D1）。契约在 M0 冻结（wire 不再变），实现按
 
 | 能力 | 契约包 | 状态 | 期限 | 实现落点/边界说明 |
 |:---|:---|:---:|:---|:---|
-| 消息队列 v2（服务端分区日志/消费组） | coord.mq.v2 | PROPOSED | - | 契约包：`proto/coord/mq/v2/`；M0 冻结（19 个 RPC + 11 个结构化错误码）；`[mq_v2].enabled=false` 时服务注册但一律 `FAILED_PRECONDITION`；分区内有序 + 至少一次（`Poll`+`Ack`），`Subscribe` 仅 best-effort；无 exactly-once / Kafka 兼容 / 自动分区再平衡 |
+| 消息队列 v2（服务端分区日志/消费组） | coord.mq.v2 | PROPOSED | - | 契约包：`proto/coord/mq/v2/`；M0 冻结（19 个 RPC + 11 个结构化错误码）；`[mq_v2].enabled=false` 时服务注册但一律 `FAILED_PRECONDITION`；分区内有序 + 至少一次（`Poll`+`Ack`），`Subscribe` 仅 best-effort；无 exactly-once / Kafka 兼容 / 自动分区再平衡。Java SDK 可用（M6-1：`client.mqV2()` 18/19 RPC + `MqV2Consumer`；状态仍 PROPOSED） |
 
 ## 实验承诺区（EXPERIMENTAL）
 

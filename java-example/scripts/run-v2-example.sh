@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 运行 java-example 的 KV-T v2 示例（`KvTV2Example`）——需要一套**真实 v2 集群**。
+# 运行 java-example 的 v2 示例（默认 `KvTV2Example`；`mq` 选 `MqV2Example`）
+# ——需要一套**真实 v2 集群**。
 #
 # 为什么要有这个包装脚本：示例只用 proto stub（不引 SDK），因此必须先编译
 # `java-example` 模块（含 protoc 生成契约 stub）再拼 classpath；把「编译 + 生成
 # stub + 运行」写在一处，文档里的命令才不会和 pom 漂移。
 #
 # 用法:
-#   bash java-example/scripts/run-v2-example.sh
+#   bash java-example/scripts/run-v2-example.sh          # KV-T v2
+#   bash java-example/scripts/run-v2-example.sh mq       # MQ v2
 #   COORD_V2_AGENT_HOST=127.0.0.1 COORD_V2_AGENT_PORT=19637 \
 #     bash java-example/scripts/run-v2-example.sh
 #
@@ -43,9 +45,15 @@ trap 'rm -f "$CP_FILE"' EXIT
 "$MAVEN" -q -B -f "$PROJECT_DIR/pom.xml" dependency:build-classpath \
   -DincludeScope=runtime -Dmdep.outputFile="$CP_FILE"
 
+MAIN="cn.byteforce.coord.example.KvTV2Example"
+if [[ "${1:-}" == "mq" ]]; then
+  MAIN="cn.byteforce.coord.example.MqV2Example"
+  shift
+fi
+
 CP="$PROJECT_DIR/target/classes:$(cat "$CP_FILE")"
 set +e
-"$JAVA_BIN" -cp "$CP" cn.byteforce.coord.example.KvTV2Example "$@"
+"$JAVA_BIN" -cp "$CP" "$MAIN" "$@"
 RC=$?
 set -e
 printf '[v2-example] exit code: %s\n' "$RC"
