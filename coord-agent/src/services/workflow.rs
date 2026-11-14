@@ -3007,6 +3007,13 @@ pub mod phase4 {
             let value: serde_json::Value = serde_yaml::from_str(dsl)
                 .map_err(|e| DeployError::Validation(format!("parse error: {e}")))?;
 
+            // MQ 触发器声明（ADR-0016 D12）：从顶层 value 取，两条 DSL 解析路径共用。
+            // 形状不对/取值越界 = 部署期拒绝（不落库），不静默忽略。`value` 随后会被
+            // CNCF 解析器消费，故先取出。
+            let trigger = coord_core::workflow::trigger::TriggerConfig::from_top_level(&value)
+                .map_err(DeployError::Validation)?;
+            trigger.validate().map_err(DeployError::Validation)?;
+
             let mut def = if sw::looks_like_cncf_sw(&value) {
                 // CNCF SW 权威格式：start + states[] 原生解析
                 sw::parse_cncf_sw_value(value).map_err(DeployError::Validation)?
@@ -3027,6 +3034,7 @@ pub mod phase4 {
 
             // 用调用者指定的 namespace 覆盖 YAML 中的 namespace
             def.document.namespace = namespace.to_string();
+            def.trigger = trigger;
             // 保存原始 DSL 以便 get_definition 返回
             def.raw_yaml = Some(dsl.to_string());
 
@@ -3092,6 +3100,9 @@ pub mod phase4 {
             // 2. 重新解析 + 校验（恢复内容必须可部署）
             let value: serde_json::Value = serde_yaml::from_str(&raw)
                 .map_err(|e| DeployError::Validation(format!("parse error: {e}")))?;
+            let trigger = coord_core::workflow::trigger::TriggerConfig::from_top_level(&value)
+                .map_err(DeployError::Validation)?;
+            trigger.validate().map_err(DeployError::Validation)?;
             let mut def = if sw::looks_like_cncf_sw(&value) {
                 sw::parse_cncf_sw_value(value).map_err(DeployError::Validation)?
             } else {
@@ -3111,6 +3122,8 @@ pub mod phase4 {
             // 3. 覆盖 namespace + 语义版本 bump（回滚 = 新版本落地）
             def.document.namespace = namespace.to_string();
             def.document.version = bump_version(version);
+            // 回滚同样重新校验 trigger：恢复的内容必须可部署（与 Deploy 同一判据）。
+            def.trigger = trigger;
             def.raw_yaml = Some(raw);
             let id = format!(
                 "{}-{:x}",
@@ -4450,6 +4463,56 @@ events:
             .any(|t| matches!(t.task, Task::Call(_))));
         assert!(loaded.do_tasks.iter().any(|t| t.name == "check"));
         assert!(loaded.do_tasks.iter().any(|t| t.name == "__end"));
+    }
+
+    #[tokio::test]
+    async fn test_deploy_persists_a_declared_mq_trigger() {
+        // 遗留 DSL 与 CNCF SW 两条解析路径都必须取到顶层 `trigger`（M5-3）。
+        let svc = WorkflowEngineService::new_for_test();
+        let legacy = format!(
+            "{}trigger:\n  topic: orders\n  filter:\n    event_type: order.created\n  max_attempts: 4\n",
+            sample_linear_yaml()
+        );
+        let def_id = svc.deploy_definition("test", &legacy).await.unwrap();
+        let loaded = svc.get_definition(&def_id).await.unwrap().unwrap();
+        let trigger = &loaded.trigger;
+        assert_eq!(trigger.topic.as_deref(), Some("orders"));
+        assert_eq!(trigger.effective_max_attempts(), 4);
+        assert_eq!(trigger.group_name(&def_id), format!("wf-trigger:{def_id}"));
+
+        // CNCF 文档是 JSON 流式根节点，追加块式 `trigger:` 不再是同一文档 ⇒ 在流式
+        // 映射里插入同名键（顶层取值的判据相同）。
+        let cncf =
+            sample_cncf_sw().replacen('{', "{\n  \"trigger\": { \"topic\": \"orders\" },", 1);
+        let def_id = svc.deploy_definition("test", &cncf).await.unwrap();
+        let loaded = svc.get_definition(&def_id).await.unwrap().unwrap();
+        assert_eq!(loaded.trigger.topic.as_deref(), Some("orders"));
+    }
+
+    #[tokio::test]
+    async fn test_deploy_rejects_a_malformed_trigger_without_storing_it() {
+        let svc = WorkflowEngineService::new_for_test();
+        let bad = format!(
+            "{}trigger:\n  topic: orders\n  max_attempts: 0\n",
+            sample_linear_yaml()
+        );
+        match svc.deploy_definition("test", &bad).await.unwrap_err() {
+            DeployError::Validation(msg) => {
+                assert!(msg.contains("trigger.max_attempts"), "msg: {msg}")
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+        let no_topic = format!("{}trigger:\n  max_attempts: 2\n", sample_linear_yaml());
+        match svc.deploy_definition("test", &no_topic).await.unwrap_err() {
+            DeployError::Validation(msg) => assert!(msg.contains("trigger.topic"), "msg: {msg}"),
+            other => panic!("expected validation error, got {other:?}"),
+        }
+        // 拒绝不落库：同名定义仍未部署可读。
+        assert!(svc
+            .list_definition_versions("test", "linear-wf")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

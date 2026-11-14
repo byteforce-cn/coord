@@ -628,6 +628,7 @@ mod tests {
             timeout: None,
             use_components: None,
             schedule: Default::default(),
+            trigger: Default::default(),
             auth: Default::default(),
             secrets: Default::default(),
             constants: Default::default(),

@@ -26,4 +26,5 @@ pub mod retry;
 pub mod runtime;
 pub mod sw;
 pub mod tasks;
+pub mod trigger;
 pub mod validate;
