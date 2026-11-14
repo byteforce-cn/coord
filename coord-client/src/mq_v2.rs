@@ -956,7 +956,21 @@ impl MqV2Client {
                 },
                 Err(err) => return Err(err),
             };
-            let channel = self.client.channel_for(&endpoint).await?;
+            let channel = match self.client.channel_for(&endpoint).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    // 缓存里的 Leader 连不上（进程 kill -9 / 端口变化）：先驱逐再
+                    // 重新发现。否则一次 leader 故障会把这个分区永久钉在死地址上。
+                    self.leaders.write().remove(&key);
+                    match retry.next_attempt() {
+                        Some(backoff) => {
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        }
+                        None => return Err(err),
+                    }
+                }
+            };
             let result = attempt(
                 mq_v2::mq_client::MqClient::new(channel.clone()),
                 request.clone(),
@@ -974,7 +988,10 @@ impl MqV2Client {
                         }
                     } else if error_code_of(&status).as_deref()
                         == Some(CoordErrorCode::NotLeader.as_str())
+                        || status.code() == tonic::Code::Unavailable
                     {
+                        // 连接级 UNAVAILABLE（leader 进程被杀、端口失效）没有 hint 可
+                        // 跟随；缓存必须驱逐，否则这个分区会一直钉在死地址上。
                         self.leaders.write().remove(&key);
                     }
                     match classify_tonic(&status) {
@@ -1023,7 +1040,20 @@ impl MqV2Client {
                     endpoint
                 }
             };
-            let channel = self.client.channel_for(&endpoint).await?;
+            let channel = match self.client.channel_for(&endpoint).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    // 组 shard Leader 换了地址：驱逐缓存，下一轮从任意端点重新探测。
+                    self.group_leaders.write().remove(&key);
+                    match retry.next_attempt() {
+                        Some(backoff) => {
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        }
+                        None => return Err(err),
+                    }
+                }
+            };
             let result = attempt(
                 mq_v2::mq_client::MqClient::new(channel.clone()),
                 request.clone(),
@@ -1041,6 +1071,7 @@ impl MqV2Client {
                         }
                     } else if error_code_of(&status).as_deref()
                         == Some(CoordErrorCode::NotLeader.as_str())
+                        || status.code() == tonic::Code::Unavailable
                     {
                         self.group_leaders.write().remove(&key);
                     }
