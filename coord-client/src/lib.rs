@@ -50,10 +50,13 @@ pub use leader::LeaderDiscovery;
 pub use lease_v2::{LeaseV2Client, LeaseV2Grant, LeaseV2Keeper, LeaseV2State};
 pub use mq_consumer::{MqConsumer, MqConsumerOptions, ResetPolicy};
 pub use mq_v2::{
-    MqAck, MqAckResult, MqAssignment, MqBatchEntry, MqCommitted, MqCreateTopic, MqGroupDescription,
-    MqGroupMemberInfo, MqGroupState, MqHeartbeat, MqJoinGroup, MqJoined, MqMessage, MqMoveToDlq,
-    MqMoveToDlqResult, MqPartitionLag, MqPartitionLeader, MqPoll, MqPollResult, MqPublish,
-    MqPublishBatch, MqPublishResult, MqTopicConfig, MqTopicCreated, MqTopicLeaders, MqV2Client,
+    MqAck, MqAckResult, MqAssignment, MqBatchEntry, MqCommitted, MqCreateTopic, MqDeleteTopic,
+    MqDlqMessage, MqGroupDescription, MqGroupMemberInfo, MqGroupState, MqHeartbeat, MqJoinGroup,
+    MqJoined, MqMessage, MqMoveToDlq, MqMoveToDlqResult, MqPartitionInfo, MqPartitionLag,
+    MqPartitionLeader, MqPoll, MqPollDlq, MqPollDlqResult, MqPollResult, MqPublish, MqPublishBatch,
+    MqPublishResult, MqTopicConfig, MqTopicCreated, MqTopicDeleted, MqTopicDeletion,
+    MqTopicDeletionState, MqTopicDescription, MqTopicLeaders, MqTopicSummary, MqTopicUpdated,
+    MqUpdateTopic, MqV2Client,
 };
 pub use refresh::{spawn_session_refresher, SessionGateway, SessionTokens, REFRESH_LEAD_SECS};
 pub use retry::{classify_error, RetryDecision, RetryState};

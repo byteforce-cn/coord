@@ -86,6 +86,109 @@ pub struct MqTopicLeaders {
     pub partitions: Vec<MqPartitionLeader>,
 }
 
+/// 一个分区的描述（`DescribeTopic` 的 `partitions[]`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqPartitionInfo {
+    pub partition: i32,
+    pub shard_id: u32,
+    pub leader_addr: String,
+    pub earliest_offset: u64,
+    pub next_offset: u64,
+    pub log_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqTopicDescription {
+    pub topic: String,
+    pub topic_id: u64,
+    pub topic_epoch: u64,
+    pub partition_count: i32,
+    pub config: MqTopicConfig,
+    pub created_at_ms: i64,
+    pub partitions: Vec<MqPartitionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqTopicSummary {
+    pub topic: String,
+    pub topic_id: u64,
+    pub topic_epoch: u64,
+    pub partition_count: i32,
+    pub config: MqTopicConfig,
+}
+
+/// `UpdateTopic`：`config` 里的 0/空字段 = 保持当前值。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MqUpdateTopic {
+    pub topic: String,
+    /// 非 0 时做 CAS：不一致 ⇒ `TOPIC_EPOCH_STALE`。
+    pub expected_topic_epoch: u64,
+    pub config: Option<MqTopicConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqTopicUpdated {
+    pub topic: String,
+    pub topic_epoch: u64,
+    pub config: MqTopicConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MqDeleteTopic {
+    pub topic: String,
+    pub expected_topic_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqTopicDeleted {
+    pub delete_id: String,
+    pub deleted_topic_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MqTopicDeletionState {
+    Unspecified,
+    Pending,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqTopicDeletion {
+    pub delete_id: String,
+    pub topic: String,
+    pub topic_id: u64,
+    pub state: MqTopicDeletionState,
+    pub partitions_total: u32,
+    pub partitions_reclaimed: u32,
+    pub messages_removed: u64,
+    pub bytes_reclaimed: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MqPollDlq {
+    pub topic: String,
+    pub partition: i32,
+    pub topic_epoch: u64,
+    /// `None` = 从 DLQ 起点开始。
+    pub start_offset: Option<u64>,
+    pub max_messages: i32,
+}
+
+/// 一条死信消息：原消息 + 移入原因/细节（`PollDlq` 独有）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqDlqMessage {
+    pub message: MqMessage,
+    pub reason: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqPollDlqResult {
+    pub messages: Vec<MqDlqMessage>,
+    pub next_dlq_offset: u64,
+}
+
 /// 一条待发布消息。
 #[derive(Debug, Clone, Default)]
 pub struct MqPublish {
@@ -198,6 +301,162 @@ impl MqV2Client {
         Ok(response)
     }
 
+    /// `DescribeTopic`：分区/配置/边界（任意节点可答）。
+    pub async fn describe_topic(&self, topic: &str) -> Result<MqTopicDescription> {
+        let payload = mq_v2::DescribeTopicRequest {
+            topic: topic.to_string(),
+        };
+        let response = self
+            .with_any_endpoint(move |mut stub| {
+                let payload = payload.clone();
+                async move {
+                    stub.describe_topic(tonic::Request::new(payload))
+                        .await
+                        .map(|response| response.into_inner())
+                }
+            })
+            .await?;
+        let mut partitions = Vec::with_capacity(response.partitions.len());
+        for partition in response.partitions {
+            partitions.push(MqPartitionInfo {
+                partition: partition.partition,
+                shard_id: partition.shard_id,
+                leader_addr: partition.leader_addr,
+                earliest_offset: offset_from_i64(partition.earliest_offset)?,
+                next_offset: offset_from_i64(partition.next_offset)?,
+                log_bytes: partition.log_bytes,
+            });
+        }
+        Ok(MqTopicDescription {
+            topic: response.topic,
+            topic_id: response.topic_id,
+            topic_epoch: response.topic_epoch,
+            partition_count: response.partition_count,
+            config: response.config.map(config_from_proto).unwrap_or_default(),
+            created_at_ms: response.created_at_ms,
+            partitions,
+        })
+    }
+
+    /// `ListTopics`：按前缀分页（任意节点可答）。
+    pub async fn list_topics(
+        &self,
+        prefix: &str,
+        page_size: i32,
+        page_token: &str,
+    ) -> Result<(Vec<MqTopicSummary>, String)> {
+        let payload = mq_v2::ListTopicsRequest {
+            prefix: prefix.to_string(),
+            page_size,
+            page_token: page_token.to_string(),
+        };
+        let response = self
+            .with_any_endpoint(move |mut stub| {
+                let payload = payload.clone();
+                async move {
+                    stub.list_topics(tonic::Request::new(payload))
+                        .await
+                        .map(|response| response.into_inner())
+                }
+            })
+            .await?;
+        let topics = response
+            .topics
+            .into_iter()
+            .map(|topic| MqTopicSummary {
+                topic: topic.topic,
+                topic_id: topic.topic_id,
+                topic_epoch: topic.topic_epoch,
+                partition_count: topic.partition_count,
+                config: topic.config.map(config_from_proto).unwrap_or_default(),
+            })
+            .collect();
+        Ok((topics, response.next_page_token))
+    }
+
+    /// `UpdateTopic`：只改设置了的字段（0/空 = 保持当前值）。
+    pub async fn update_topic(&self, request: &MqUpdateTopic) -> Result<MqTopicUpdated> {
+        let payload = mq_v2::UpdateTopicRequest {
+            topic: request.topic.clone(),
+            expected_topic_epoch: request.expected_topic_epoch,
+            config: request.config.map(config_to_proto),
+        };
+        let response = self
+            .client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = mq_v2::mq_client::MqClient::new(channel);
+                let request = tonic::Request::new(payload.clone());
+                async move {
+                    stub.update_topic(request)
+                        .await
+                        .map(|response| response.into_inner())
+                }
+            })
+            .await?;
+        Ok(MqTopicUpdated {
+            topic: response.topic,
+            topic_epoch: response.topic_epoch,
+            config: response.config.map(config_from_proto).unwrap_or_default(),
+        })
+    }
+
+    /// `DeleteTopic`：标记删除并返回回收任务 id（回收异步）。
+    pub async fn delete_topic(&self, request: &MqDeleteTopic) -> Result<MqTopicDeleted> {
+        let payload = mq_v2::DeleteTopicRequest {
+            topic: request.topic.clone(),
+            expected_topic_epoch: request.expected_topic_epoch,
+        };
+        let response = self
+            .client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = mq_v2::mq_client::MqClient::new(channel);
+                let request = tonic::Request::new(payload.clone());
+                async move {
+                    stub.delete_topic(request)
+                        .await
+                        .map(|response| response.into_inner())
+                }
+            })
+            .await?;
+        Ok(MqTopicDeleted {
+            delete_id: response.delete_id,
+            deleted_topic_epoch: response.deleted_topic_epoch,
+        })
+    }
+
+    /// `GetTopicDeletion`：查回收进度（任意节点可答）。
+    pub async fn get_topic_deletion(&self, delete_id: &str) -> Result<MqTopicDeletion> {
+        let payload = mq_v2::GetTopicDeletionRequest {
+            delete_id: delete_id.to_string(),
+        };
+        let response = self
+            .with_any_endpoint(move |mut stub| {
+                let payload = payload.clone();
+                async move {
+                    stub.get_topic_deletion(tonic::Request::new(payload))
+                        .await
+                        .map(|response| response.into_inner())
+                }
+            })
+            .await?;
+        let state = match response.state {
+            1 => MqTopicDeletionState::Pending,
+            2 => MqTopicDeletionState::Done,
+            3 => MqTopicDeletionState::Failed,
+            _ => MqTopicDeletionState::Unspecified,
+        };
+        Ok(MqTopicDeletion {
+            delete_id: response.delete_id,
+            topic: response.topic,
+            topic_id: response.topic_id,
+            state,
+            partitions_total: response.partitions_total,
+            partitions_reclaimed: response.partitions_reclaimed,
+            messages_removed: response.messages_removed,
+            bytes_reclaimed: response.bytes_reclaimed,
+        })
+    }
+
     /// 发布一条消息；返回即已提交。
     pub async fn publish(&self, request: &MqPublish) -> Result<MqPublishResult> {
         let batch = MqPublishBatch {
@@ -305,6 +564,53 @@ impl MqV2Client {
             next_offset: offset_from_i64(response.next_offset)?,
             earliest_offset: offset_from_i64(response.earliest_offset)?,
             latest_offset: offset_from_i64(response.latest_offset)?,
+        })
+    }
+
+    /// `PollDlq`：读死信队列（独立 offset 与保留期；`start_offset = None` = 起点）。
+    pub async fn poll_dlq(&self, request: &MqPollDlq) -> Result<MqPollDlqResult> {
+        let payload = mq_v2::PollDlqRequest {
+            topic: request.topic.clone(),
+            partition: request.partition,
+            topic_epoch: request.topic_epoch,
+            start_offset: match request.start_offset {
+                Some(offset) => Some(crate::client::ts_to_i64("start_offset", offset)?),
+                None => None,
+            },
+            max_messages: request.max_messages,
+        };
+        let response = self
+            .partition_call(
+                &request.topic,
+                request.partition,
+                payload,
+                |mut stub, payload| async move {
+                    stub.poll_dlq(tonic::Request::new(payload))
+                        .await
+                        .map(|response| response.into_inner())
+                },
+            )
+            .await?;
+        let mut messages = Vec::with_capacity(response.messages.len());
+        for message in response.messages {
+            messages.push(MqDlqMessage {
+                message: MqMessage {
+                    topic: message.topic,
+                    partition: message.partition,
+                    offset: offset_from_i64(message.offset)?,
+                    timestamp_ms: message.timestamp_ms,
+                    key: message.key,
+                    payload: message.payload,
+                    headers: message.headers.into_iter().collect(),
+                    producer: message.producer,
+                },
+                reason: message.dlq_reason,
+                detail: message.dlq_detail,
+            });
+        }
+        Ok(MqPollDlqResult {
+            messages,
+            next_dlq_offset: offset_from_i64(response.next_dlq_offset)?,
         })
     }
 

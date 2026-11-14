@@ -1281,12 +1281,13 @@ mod tests {
 
 // ──── MQ v2 ────
 
-/// `coord.mq.v2.MQ` 代理（M2-4：写面）。
+/// `coord.mq.v2.MQ` 代理。
 ///
-/// 只转发 M2 已交付的四个 RPC（`CreateTopic` / `GetTopicLeader` / `Publish` /
-/// `PublishBatch`）；其余方法返回 `UNIMPLEMENTED`（M3/M4 逐个接线，未接线的
-/// 方法宁可显式拒绝，也不做「假成功」）。分片 Leader 的重定向由
-/// `coord-client` 的 `MqV2Client` 按分区缓存处理，代理层不重排请求。
+/// 19 个 RPC 中 18 个转发到 `coord-client::MqV2Client`（topic 生命周期、写面、
+/// 读面、组协调、DLQ、路由）；只有 `Subscribe` 仍返回 `UNIMPLEMENTED` —— Rust
+/// 客户端没有 `Subscribe` 实现（best-effort 推送面，契约见 ADR-0016；MQ v2 的
+/// at-least-once 路径是 `Poll`+`Ack`）。未接线的能力宁可显式拒绝，也不做「假成功」。
+/// 分片/组 Leader 的重定向由 `MqV2Client` 的缓存与重试承担，代理层不重排请求。
 #[derive(Debug, Clone)]
 pub struct MqV2Proxy {
     inner: Option<Arc<AgentInner>>,
@@ -1353,6 +1354,72 @@ fn mq_publish_result(
         timestamp_ms: result.timestamp_ms,
         deduplicated: result.deduplicated,
     })
+}
+
+fn mq_message(message: coord_client::MqMessage) -> Result<mq_v2::Message, tonic::Status> {
+    Ok(mq_v2::Message {
+        topic: message.topic,
+        partition: message.partition,
+        offset: mq_offset(message.offset)?,
+        timestamp_ms: message.timestamp_ms,
+        key: message.key,
+        payload: message.payload,
+        headers: message.headers.into_iter().collect(),
+        producer: message.producer,
+        dlq_reason: String::new(),
+        dlq_detail: String::new(),
+    })
+}
+
+fn mq_dlq_message(message: coord_client::MqDlqMessage) -> Result<mq_v2::Message, tonic::Status> {
+    let mut mapped = mq_message(message.message)?;
+    mapped.dlq_reason = message.reason;
+    mapped.dlq_detail = message.detail;
+    Ok(mapped)
+}
+
+fn mq_topic_description(
+    described: coord_client::MqTopicDescription,
+) -> Result<mq_v2::DescribeTopicResponse, tonic::Status> {
+    let mut partitions = Vec::with_capacity(described.partitions.len());
+    for partition in described.partitions {
+        partitions.push(mq_v2::PartitionInfo {
+            partition: partition.partition,
+            shard_id: partition.shard_id,
+            leader_addr: partition.leader_addr,
+            earliest_offset: mq_offset(partition.earliest_offset)?,
+            next_offset: mq_offset(partition.next_offset)?,
+            log_bytes: partition.log_bytes,
+        });
+    }
+    Ok(mq_v2::DescribeTopicResponse {
+        topic: described.topic,
+        topic_id: described.topic_id,
+        topic_epoch: described.topic_epoch,
+        partition_count: described.partition_count,
+        config: Some(mq_topic_config_proto(described.config)?),
+        created_at_ms: described.created_at_ms,
+        partitions,
+    })
+}
+
+fn mq_topic_deletion_state(state: coord_client::MqTopicDeletionState) -> i32 {
+    match state {
+        coord_client::MqTopicDeletionState::Unspecified => 0,
+        coord_client::MqTopicDeletionState::Pending => 1,
+        coord_client::MqTopicDeletionState::Done => 2,
+        coord_client::MqTopicDeletionState::Failed => 3,
+    }
+}
+
+fn mq_group_state(state: coord_client::MqGroupState) -> i32 {
+    match state {
+        coord_client::MqGroupState::Unspecified => 0,
+        coord_client::MqGroupState::Empty => 1,
+        coord_client::MqGroupState::Stable => 2,
+        coord_client::MqGroupState::PreparingRebalance => 3,
+        coord_client::MqGroupState::Dead => 4,
+    }
 }
 
 fn mq_batch_entry(entry: mq_v2::BatchEntry) -> coord_client::MqBatchEntry {
@@ -1475,100 +1542,386 @@ impl mq_v2::mq_server::Mq for MqV2Proxy {
 
     async fn describe_topic(
         &self,
-        _request: tonic::Request<mq_v2::DescribeTopicRequest>,
+        request: tonic::Request<mq_v2::DescribeTopicRequest>,
     ) -> Result<tonic::Response<mq_v2::DescribeTopicResponse>, tonic::Status> {
-        Err(Self::unwired("DescribeTopic"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let described = inner
+            .client
+            .mq_v2()
+            .describe_topic(&request.topic)
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_topic_description(described)?))
     }
 
     async fn list_topics(
         &self,
-        _request: tonic::Request<mq_v2::ListTopicsRequest>,
+        request: tonic::Request<mq_v2::ListTopicsRequest>,
     ) -> Result<tonic::Response<mq_v2::ListTopicsResponse>, tonic::Status> {
-        Err(Self::unwired("ListTopics"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let (topics, next_page_token) = inner
+            .client
+            .mq_v2()
+            .list_topics(&request.prefix, request.page_size, &request.page_token)
+            .await
+            .map_err(map_v2_error)?;
+        let mut summaries = Vec::with_capacity(topics.len());
+        for topic in topics {
+            summaries.push(mq_v2::TopicSummary {
+                topic: topic.topic,
+                topic_id: topic.topic_id,
+                topic_epoch: topic.topic_epoch,
+                partition_count: topic.partition_count,
+                config: Some(mq_topic_config_proto(topic.config)?),
+            });
+        }
+        Ok(tonic::Response::new(mq_v2::ListTopicsResponse {
+            topics: summaries,
+            next_page_token,
+        }))
     }
 
     async fn update_topic(
         &self,
-        _request: tonic::Request<mq_v2::UpdateTopicRequest>,
+        request: tonic::Request<mq_v2::UpdateTopicRequest>,
     ) -> Result<tonic::Response<mq_v2::UpdateTopicResponse>, tonic::Status> {
-        Err(Self::unwired("UpdateTopic"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let updated = inner
+            .client
+            .mq_v2()
+            .update_topic(&coord_client::MqUpdateTopic {
+                topic: request.topic,
+                expected_topic_epoch: request.expected_topic_epoch,
+                config: mq_topic_config(request.config)?,
+            })
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::UpdateTopicResponse {
+            topic: updated.topic,
+            topic_epoch: updated.topic_epoch,
+            config: Some(mq_topic_config_proto(updated.config)?),
+        }))
     }
 
     async fn delete_topic(
         &self,
-        _request: tonic::Request<mq_v2::DeleteTopicRequest>,
+        request: tonic::Request<mq_v2::DeleteTopicRequest>,
     ) -> Result<tonic::Response<mq_v2::DeleteTopicResponse>, tonic::Status> {
-        Err(Self::unwired("DeleteTopic"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let deleted = inner
+            .client
+            .mq_v2()
+            .delete_topic(&coord_client::MqDeleteTopic {
+                topic: request.topic,
+                expected_topic_epoch: request.expected_topic_epoch,
+            })
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::DeleteTopicResponse {
+            delete_id: deleted.delete_id,
+            deleted_topic_epoch: deleted.deleted_topic_epoch,
+        }))
     }
 
     async fn get_topic_deletion(
         &self,
-        _request: tonic::Request<mq_v2::GetTopicDeletionRequest>,
+        request: tonic::Request<mq_v2::GetTopicDeletionRequest>,
     ) -> Result<tonic::Response<mq_v2::GetTopicDeletionResponse>, tonic::Status> {
-        Err(Self::unwired("GetTopicDeletion"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let deletion = inner
+            .client
+            .mq_v2()
+            .get_topic_deletion(&request.delete_id)
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::GetTopicDeletionResponse {
+            delete_id: deletion.delete_id,
+            topic: deletion.topic,
+            topic_id: deletion.topic_id,
+            state: mq_topic_deletion_state(deletion.state),
+            partitions_total: deletion.partitions_total,
+            partitions_reclaimed: deletion.partitions_reclaimed,
+            messages_removed: deletion.messages_removed,
+            bytes_reclaimed: deletion.bytes_reclaimed,
+        }))
     }
 
     async fn poll(
         &self,
-        _request: tonic::Request<mq_v2::PollRequest>,
+        request: tonic::Request<mq_v2::PollRequest>,
     ) -> Result<tonic::Response<mq_v2::PollResponse>, tonic::Status> {
-        Err(Self::unwired("Poll"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let result = inner
+            .client
+            .mq_v2()
+            .poll(&coord_client::MqPoll {
+                topic: request.topic,
+                partition: request.partition,
+                topic_epoch: request.topic_epoch,
+                start_offset: match request.start_offset {
+                    Some(offset) => Some(ts_from_i64("start_offset", offset)?),
+                    None => None,
+                },
+                max_messages: request.max_messages,
+                max_bytes: request.max_bytes,
+                wait_ms: request.wait_ms,
+            })
+            .await
+            .map_err(map_v2_error)?;
+        let mut messages = Vec::with_capacity(result.messages.len());
+        for message in result.messages {
+            messages.push(mq_message(message)?);
+        }
+        Ok(tonic::Response::new(mq_v2::PollResponse {
+            messages,
+            next_offset: mq_offset(result.next_offset)?,
+            earliest_offset: mq_offset(result.earliest_offset)?,
+            latest_offset: mq_offset(result.latest_offset)?,
+        }))
     }
 
     async fn ack(
         &self,
-        _request: tonic::Request<mq_v2::AckRequest>,
+        request: tonic::Request<mq_v2::AckRequest>,
     ) -> Result<tonic::Response<mq_v2::AckResponse>, tonic::Status> {
-        Err(Self::unwired("Ack"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let committed = inner
+            .client
+            .mq_v2()
+            .ack(
+                &request.group,
+                &request.member_id,
+                request.generation,
+                &coord_client::MqAck {
+                    topic: request.topic,
+                    partition: request.partition,
+                    topic_epoch: request.topic_epoch,
+                    offset: ts_from_i64("offset", request.offset)?,
+                },
+            )
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::AckResponse {
+            committed_offset: mq_offset(committed)?,
+        }))
     }
 
     async fn ack_batch(
         &self,
-        _request: tonic::Request<mq_v2::AckBatchRequest>,
+        request: tonic::Request<mq_v2::AckBatchRequest>,
     ) -> Result<tonic::Response<mq_v2::AckBatchResponse>, tonic::Status> {
-        Err(Self::unwired("AckBatch"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let mut acks = Vec::with_capacity(request.acks.len());
+        for ack in request.acks {
+            acks.push(coord_client::MqAck {
+                topic: ack.topic,
+                partition: ack.partition,
+                topic_epoch: ack.topic_epoch,
+                offset: ts_from_i64("offset", ack.offset)?,
+            });
+        }
+        let results = inner
+            .client
+            .mq_v2()
+            .ack_batch(
+                &request.group,
+                &request.member_id,
+                request.generation,
+                &acks,
+            )
+            .await
+            .map_err(map_v2_error)?;
+        let mut responses = Vec::with_capacity(results.len());
+        for result in results {
+            responses.push(mq_v2::AckResult {
+                topic: result.topic,
+                partition: result.partition,
+                committed_offset: mq_offset(result.committed_offset)?,
+            });
+        }
+        Ok(tonic::Response::new(mq_v2::AckBatchResponse {
+            results: responses,
+        }))
     }
 
     async fn join_group(
         &self,
-        _request: tonic::Request<mq_v2::JoinGroupRequest>,
+        request: tonic::Request<mq_v2::JoinGroupRequest>,
     ) -> Result<tonic::Response<mq_v2::JoinGroupResponse>, tonic::Status> {
-        Err(Self::unwired("JoinGroup"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let joined = inner
+            .client
+            .mq_v2()
+            .join_group(&coord_client::MqJoinGroup {
+                group: request.group,
+                member_id: request.member_id,
+                topics: request.topics,
+                session_timeout_ms: u32::try_from(request.session_timeout_ms).map_err(|_| {
+                    attach(
+                        tonic::Status::invalid_argument(format!(
+                            "session_timeout_ms must not be negative: {}",
+                            request.session_timeout_ms
+                        )),
+                        CoordErrorCode::InvalidArgument,
+                    )
+                })?,
+            })
+            .await
+            .map_err(map_v2_error)?;
+        let mut assignments = Vec::with_capacity(joined.assignments.len());
+        for assignment in joined.assignments {
+            assignments.push(mq_v2::GroupAssignment {
+                topic: assignment.topic,
+                partition: assignment.partition,
+                committed_offset: mq_offset(assignment.committed_offset)?,
+            });
+        }
+        Ok(tonic::Response::new(mq_v2::JoinGroupResponse {
+            member_id: joined.member_id,
+            generation: joined.generation,
+            assignments,
+            heartbeat_interval_ms: i32::try_from(joined.heartbeat_interval_ms).unwrap_or(i32::MAX),
+            session_timeout_ms: i32::try_from(joined.session_timeout_ms).unwrap_or(i32::MAX),
+        }))
     }
 
     async fn heartbeat(
         &self,
-        _request: tonic::Request<mq_v2::HeartbeatRequest>,
+        request: tonic::Request<mq_v2::HeartbeatRequest>,
     ) -> Result<tonic::Response<mq_v2::HeartbeatResponse>, tonic::Status> {
-        Err(Self::unwired("Heartbeat"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let heartbeat = inner
+            .client
+            .mq_v2()
+            .heartbeat(&request.group, &request.member_id, request.generation)
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::HeartbeatResponse {
+            generation: heartbeat.generation,
+            rebalance_required: heartbeat.rebalance_required,
+        }))
     }
 
     async fn leave_group(
         &self,
-        _request: tonic::Request<mq_v2::LeaveGroupRequest>,
+        request: tonic::Request<mq_v2::LeaveGroupRequest>,
     ) -> Result<tonic::Response<mq_v2::LeaveGroupResponse>, tonic::Status> {
-        Err(Self::unwired("LeaveGroup"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        inner
+            .client
+            .mq_v2()
+            .leave_group(&request.group, &request.member_id, request.generation)
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::LeaveGroupResponse {}))
     }
 
     async fn get_committed_offsets(
         &self,
-        _request: tonic::Request<mq_v2::GetCommittedOffsetsRequest>,
+        request: tonic::Request<mq_v2::GetCommittedOffsetsRequest>,
     ) -> Result<tonic::Response<mq_v2::GetCommittedOffsetsResponse>, tonic::Status> {
-        Err(Self::unwired("GetCommittedOffsets"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let partitions: Vec<(String, i32)> = request
+            .partitions
+            .into_iter()
+            .map(|partition| (partition.topic, partition.partition))
+            .collect();
+        let offsets = inner
+            .client
+            .mq_v2()
+            .get_committed_offsets(&request.group, &partitions)
+            .await
+            .map_err(map_v2_error)?;
+        let mut committed = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            committed.push(mq_v2::CommittedOffset {
+                topic: offset.topic,
+                partition: offset.partition,
+                offset: mq_offset(offset.offset)?,
+                committed: offset.committed,
+            });
+        }
+        Ok(tonic::Response::new(mq_v2::GetCommittedOffsetsResponse {
+            offsets: committed,
+        }))
     }
 
     async fn describe_group(
         &self,
-        _request: tonic::Request<mq_v2::DescribeGroupRequest>,
+        request: tonic::Request<mq_v2::DescribeGroupRequest>,
     ) -> Result<tonic::Response<mq_v2::DescribeGroupResponse>, tonic::Status> {
-        Err(Self::unwired("DescribeGroup"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let described = inner
+            .client
+            .mq_v2()
+            .describe_group(&request.group)
+            .await
+            .map_err(map_v2_error)?;
+        let mut members = Vec::with_capacity(described.members.len());
+        for member in described.members {
+            let mut assignments = Vec::with_capacity(member.assignments.len());
+            for assignment in member.assignments {
+                assignments.push(mq_v2::GroupAssignment {
+                    topic: assignment.topic,
+                    partition: assignment.partition,
+                    committed_offset: mq_offset(assignment.committed_offset)?,
+                });
+            }
+            members.push(mq_v2::GroupMember {
+                member_id: member.member_id,
+                topics: member.topics,
+                assignments,
+                last_heartbeat_ms: member.last_heartbeat_ms,
+            });
+        }
+        let mut partitions = Vec::with_capacity(described.partitions.len());
+        for partition in described.partitions {
+            partitions.push(mq_v2::GroupPartitionLag {
+                topic: partition.topic,
+                partition: partition.partition,
+                committed_offset: mq_offset(partition.committed_offset)?,
+                next_offset: mq_offset(partition.next_offset)?,
+                lag: i64::try_from(partition.lag).unwrap_or(i64::MAX),
+            });
+        }
+        Ok(tonic::Response::new(mq_v2::DescribeGroupResponse {
+            group: described.group,
+            generation: described.generation,
+            state: mq_group_state(described.state),
+            members,
+            partitions,
+        }))
     }
 
     async fn list_groups(
         &self,
-        _request: tonic::Request<mq_v2::ListGroupsRequest>,
+        request: tonic::Request<mq_v2::ListGroupsRequest>,
     ) -> Result<tonic::Response<mq_v2::ListGroupsResponse>, tonic::Status> {
-        Err(Self::unwired("ListGroups"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let (groups, next_page_token) = inner
+            .client
+            .mq_v2()
+            .list_groups(&request.prefix, request.page_size, &request.page_token)
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::ListGroupsResponse {
+            groups,
+            next_page_token,
+        }))
     }
 
     type SubscribeStream = ReceiverStream<Result<mq_v2::Message, tonic::Status>>;
@@ -1582,15 +1935,57 @@ impl mq_v2::mq_server::Mq for MqV2Proxy {
 
     async fn move_to_dlq(
         &self,
-        _request: tonic::Request<mq_v2::MoveToDlqRequest>,
+        request: tonic::Request<mq_v2::MoveToDlqRequest>,
     ) -> Result<tonic::Response<mq_v2::MoveToDlqResponse>, tonic::Status> {
-        Err(Self::unwired("MoveToDlq"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let moved = inner
+            .client
+            .mq_v2()
+            .move_to_dlq(&coord_client::MqMoveToDlq {
+                topic: request.topic,
+                partition: request.partition,
+                topic_epoch: request.topic_epoch,
+                offset: ts_from_i64("offset", request.offset)?,
+                reason: request.reason,
+                detail: request.detail,
+            })
+            .await
+            .map_err(map_v2_error)?;
+        Ok(tonic::Response::new(mq_v2::MoveToDlqResponse {
+            dlq_offset: mq_offset(moved.dlq_offset)?,
+            already_moved: moved.already_moved,
+        }))
     }
 
     async fn poll_dlq(
         &self,
-        _request: tonic::Request<mq_v2::PollDlqRequest>,
+        request: tonic::Request<mq_v2::PollDlqRequest>,
     ) -> Result<tonic::Response<mq_v2::PollDlqResponse>, tonic::Status> {
-        Err(Self::unwired("PollDlq"))
+        let inner = self.inner.as_ref().ok_or_else(no_backend)?;
+        let request = request.into_inner();
+        let polled = inner
+            .client
+            .mq_v2()
+            .poll_dlq(&coord_client::MqPollDlq {
+                topic: request.topic,
+                partition: request.partition,
+                topic_epoch: request.topic_epoch,
+                start_offset: match request.start_offset {
+                    Some(offset) => Some(ts_from_i64("start_offset", offset)?),
+                    None => None,
+                },
+                max_messages: request.max_messages,
+            })
+            .await
+            .map_err(map_v2_error)?;
+        let mut messages = Vec::with_capacity(polled.messages.len());
+        for message in polled.messages {
+            messages.push(mq_dlq_message(message)?);
+        }
+        Ok(tonic::Response::new(mq_v2::PollDlqResponse {
+            messages,
+            next_dlq_offset: mq_offset(polled.next_dlq_offset)?,
+        }))
     }
 }
