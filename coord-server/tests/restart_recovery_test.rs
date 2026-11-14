@@ -207,12 +207,15 @@ async fn test_applied_persisted_across_restart() {
             }
         }
     };
-    assert_eq!(
-        revision_after_restart,
-        last_rev + 1,
-        "revision must continue from applied+1"
+    // revision ≡ 日志 index，而 openraft 0.10 的 leader 就职必写一条空白条目：
+    // 重启后要重新竞选（新 term），那条空白条目占掉一个 index，因此重启后的首写
+    // 落在 `last_rev + 2`，不是 `last_rev + 1`。只要求水位前进，不要求无跳号。
+    assert!(
+        revision_after_restart > last_rev,
+        "revision must advance from the persisted applied watermark: \
+         {revision_after_restart} <= {last_rev}"
     );
-    assert_eq!(mvcc2.current_revision(), last_rev + 1);
+    assert_eq!(mvcc2.current_revision(), revision_after_restart);
 }
 
 /// apply 幂等守卫 —— 同 revision 重复 apply 无副作用

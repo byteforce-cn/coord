@@ -93,6 +93,26 @@ bincode 退场 P3 要求删除该依赖，因此这些载荷必须切换编码�
 - **同一版本同时读双写新**：违反"先读后写"，在混布集群产生静默窗口；本仓无
   生产部署也保留该纪律，为首个真实部署固化语义。
 
+### D7 0.10 稳定线：AppendEntries 回复仍传 `AppendEntriesResponse`
+
+openraft 0.10 把 `RaftNetworkV2::append_entries` 的返回值换成 `AppendResult<C>`
+（`Ok(确认到的 log_id)` / `Err(AppendError)`），且 `AppendError` 上游**不实现
+serde**，明确要求传输层自定线格式并做双向转换。两种可选形态：
+
+- **A（选定）**：线上继续传 `AppendEntriesResponse`（四变体；0.10 未改其 serde
+  线结构，与升级前逐字节相同）。follower 侧用上游 `AppendEntriesResponse::from()`
+  收窄，leader 侧用 `into_append_result(prev_log_id, last_log_id)` 还原；
+  follower 只接受前缀时必须回 `PartialSuccess(ack)`，否则 leader 会把确认位置
+  反推成请求的 `last_log_id`（超前确认）。
+- **B（不选）**：自定义带 conflict hint 的线格式。回退探测快，但老节点无法解码
+  新字节（`AppendError` 的 hint 没有向下兼容的降级形态），等价于放弃混布窗口，
+  且需要第二套冻结向量。
+
+故选 A：与既有字节一致、不需要新格式；代价是 0.10 新增的 conflict hint 不随线
+传输，冲突回退仍按 `Conflict`＋`prev_log_id` 逐次探测（只影响回退轮次，不影响
+正确性）。要拿回 hint 的路径是新增一种标记值（D1 已为此留了扩展位），在全部
+接收方就绪后再切写侧。
+
 ## 后果
 
 - coord-proto 以字段新增方式兼容演进，contract 检查可覆盖；

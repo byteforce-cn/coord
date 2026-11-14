@@ -3854,18 +3854,13 @@ impl Maintenance for CoordNode {
             tonic::Status::unavailable("another membership change is in progress")
         })?;
 
-        // remove 目标是 leader。
-        // 设计决策：openraft 0.10 支持 leader
-        // 自移除 —— change_membership(RemoveVoters) 经 joint→uniform 配置提交，
-        // 新配置提交后旧 leader 自动退位、剩余 quorum 继续服务。若先显式
-        // transfer_leader，本节点即成为 follower，反而无法再提交该变更
-        // （openraft 拒绝非 leader 的 change_membership），而内部 gRPC 转发会
-        // 破坏鉴权 fail-closed 模型。显式移交执行器（transfer_leadership）
-        // 供维护/优雅停机路径使用。
+        // remove 目标是 leader 时走「自移除」：先由 leader 自己提交成员变更，
+        // 再显式交棒。不能先 transfer_leader 再变更——本节点成为 follower 后
+        // 就无法提交该变更（openraft 拒绝非 leader 的 change_membership），
+        // 而内部 gRPC 转发会破坏鉴权 fail-closed 模型。
         if raft.current_leader().await == Some(req.node_id) {
             tracing::info!(
-                "Removing leader node {} via openraft self-removal \
-                 (auto step-down after config commit)",
+                "Removing leader node {} via self-removal then leadership hand-off",
                 req.node_id
             );
         }
@@ -3878,9 +3873,28 @@ impl Maintenance for CoordNode {
                 tonic::Status::failed_precondition(format!("change_membership failed: {e}"))
             })?;
 
+        // 自移除提交后本节点被降为 learner；openraft 0.10 不会因此自动退位，
+        // 必须显式交棒，否则待下线节点会一直当 leader（见 `hand_off_if_demoted`）。
+        let handed_off = match crate::raft::hand_off_if_demoted(raft.as_ref()).await {
+            Ok(to) => to,
+            Err(e) => {
+                tracing::warn!(
+                    "node {} removed but leadership hand-off failed: {e}",
+                    req.node_id
+                );
+                None
+            }
+        };
+
         Ok(tonic::Response::new(MemberRemoveResponse {
             success: true,
-            message: format!("node {} removed from cluster", req.node_id),
+            message: match handed_off {
+                Some(to) => format!(
+                    "node {} removed from cluster; leadership handed off to {to}",
+                    req.node_id
+                ),
+                None => format!("node {} removed from cluster", req.node_id),
+            },
         }))
     }
 

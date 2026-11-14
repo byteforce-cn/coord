@@ -1,3 +1,20 @@
+## [contracts/v1.13.1] — 2026-11-15（Patch：已知限制的事实性更正，wire 无改动）
+
+**发布口径**：**Patch**（无字段/RPC/枚举/错误码变更：`buf breaking` 基线不变，
+`check-wire-sync.sh` / `check-wire-descriptor.sh` 逐包签名不变）。
+
+- `WHITEPAPER.md` §12 第 3 条的「共识依赖 `openraft 0.10.0-alpha.25`（alpha 版本；
+  上游无稳定版）」经代码实测**已过期**：openraft 已发 0.10.0 稳定版，本仓同步切到
+  该稳定线（声明见根 `Cargo.toml`）。只改这一句的事实描述，
+  §12 其余风险条目（未经独立第三方审计、Jepsen/浸泡/kind 未全部完成）**不变**。
+- 不承诺滚动升级的口径**不变**，并补充了直接证据：0.10 把节点间 `VoteRequest` 的
+  `leadership_transfer: bool` 换成 `leadership_transfer_from: Option<Vote>`，混合版本
+  集群的投票编解码不互通（`docs/production/ops/upgrade.md` §3.5）。
+
+**影响范围**：无消费方动作（wire 与语义承诺均未变）。
+
+**回滚预案**：回滚本分支即回到旧表述；无 wire / 落盘迁移。
+
 ## [contracts/v1.13.0] — 2026-11-14（状态变更：MQ v2 GA，PROPOSED → COMMITTED）
 
 **发布口径**：**状态变更**（wire 无改动：19 个 RPC / 字段编号 / 11 个结构化错误码与

@@ -260,7 +260,7 @@ Coord 处于 pre-1.0，并明确列出**不承诺**的事项；完整清单（�
 
 ## 状态
 
-版本 `0.4.1`（pre-1.0）。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**。一致性核心由仓库内 Jepsen 工程与 CI 持续检验；引入前请阅读「测试与验证」与「限制与非目标」。
+版本 `0.4.1`（pre-1.0）。Raft 引擎（`openraft`）已切到 0.10 稳定线，但 Coord **暂不建议用于生产**。一致性核心由仓库内 Jepsen 工程与 CI 持续检验；引入前请阅读「测试与验证」与「限制与非目标」。
 
 KV-T v2 数据面（ADR-0015）已于 2026-11-11 通过 GA gate：72h Jepsen run、逐 gate 证据与
 签字记录见 [`docs/production/ops/kv-t-ga-gate.md`](docs/production/ops/kv-t-ga-gate.md)。

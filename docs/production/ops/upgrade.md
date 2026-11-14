@@ -114,6 +114,21 @@ agent 把请求代理给 server，两侧**都没有**协议版本常量，也没
 
 ⇒ **结论**：**必须整集群 + 全部 agent 同版本**。这写进第 4 节的"不支持"清单。
 
+### 3.5 server↔server（raft RPC 与 raft 落盘）—— ⚠️ 落盘兼容，wire 不兼容
+
+openraft 从 alpha.34 升到 0.10.0 时做过逐字段对照与 postcard 字节比对
+（两个探针 crate 分别锁两个版本，序列化同一组值后比字节）：
+
+| 对象 | 结果 | 依据 |
+|:--|:--|:--|
+| raft 落盘（`Entry` / `Vote` / `LogId` / `Membership` / `SnapshotMeta`） | ✅ 字节一致 | `coord-server/src/raft/log_store.rs`（信封 V2 + postcard）；`SnapshotMeta` 的 serde 线结构（`SnapshotMetaWire`）未变 |
+| `AppendEntriesRequest` / `AppendEntriesResponse`（四变体）/ `VoteResponse` / `TransferLeaderRequest` | ✅ 字节一致 | 上游 `src/raft/message/*.rs` 字段未变；本仓线上格式固定为 `AppendEntriesResponse`（`coord-server/src/raft/network.rs`） |
+| `VoteRequest` | ⚠️ **普通选举兼容，领导权转移不兼容** | 上游 0.10 把 `leadership_transfer: bool` 改成 `leadership_transfer_from: Option<Vote>`（`src/raft/message/vote.rs`）：普通选举办议尾字节两者都是 `0x00`，带 transfer 时旧串是 `0x01`、新串是 `0x01 || vote`，互相解不开（本仓 postcard 解码要求精确消费） |
+
+⇒ **结论**：换二进制后单节点**可以读回自己的旧 raft 日志**（停机升级不丢数据），
+但**混合版本集群的投票/领导权转移 RPC 编解码不互通** —— 与 §1 的"不玩滚动升级"
+口径一致；升级必须在同一停机窗口内一次换完整个集群。
+
 ---
 
 ## 4. 「不支持」清单（升级相关）

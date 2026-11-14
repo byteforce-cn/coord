@@ -7,8 +7,8 @@
 // - network:         RaftNetworkFactory + RaftNetwork 实现（Tonic gRPC）
 // - region:          Multi-Raft Region 管理器（RegionHandle + RegionManager）
 //
-// openraft 类型隔离边界：openraft 仍为 alpha（0.10.0-alpha.34，版本
-// 精确锁定见根 Cargo.toml 依赖）。`openraft::` 与
+// openraft 类型隔离边界：openraft 走 0.10 稳定线（版本声明见根 Cargo.toml）。
+// `openraft::` 与
 // `openraft_multi::` 路径只允许出现在本 crate 的 `raft/` 模块内部；其余模块与
 // `coord` CLI、测试一律经本文件提供的别名与构造函数使用。升级 openraft 版本时，
 // 编译缺口应只出现在本目录。
@@ -43,7 +43,7 @@ pub type RaftConfig = openraft::Config;
 
 /// R-RFT-19：Raft 运行时调优参数（来自 `[raft]` 配置段）。
 ///
-/// 全部字段为 `Option`：`None` = 保持 openraft 默认值（0.10.0-alpha.34：
+/// 全部字段为 `Option`：`None` = 保持 openraft 默认值（0.10.0：
 /// 心跳 50ms、选举 150–300ms、安装快照 200ms、快照策略 since_last:5000、
 /// 快照保留窗口 1000；回收语义见 ADR-0004）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -99,7 +99,7 @@ pub type ChangeMembers = openraft::ChangeMembers<u64, RaftNode>;
 
 /// 快照数据（字节缓冲，Cursor 可读可写）。
 ///
-/// 0.10.0-alpha.34 起 `RaftStateMachine::SnapshotData` 与 `RaftNetworkV2::SnapshotData`
+/// 0.10.0 起 `RaftStateMachine::SnapshotData` 与 `RaftNetworkV2::SnapshotData`
 /// 必须为同一类型（`Raft::new` 要求 `NetSnapshot::SnapshotData ==
 /// RaftStateMachine::SnapshotData`），此处统一收敛。
 pub type RaftSnapshotData = std::io::Cursor<Vec<u8>>;
@@ -140,13 +140,52 @@ where
     N: openraft::RaftNetworkFactory<type_config::TypeConfig> + 'static,
     LS: openraft::storage::RaftLogStorage<type_config::TypeConfig> + 'static,
     SM: openraft::storage::RaftStateMachine<type_config::TypeConfig> + 'static,
-    // alpha.34：`Raft::new` 要求网络与状态机的 SnapshotData 为同一类型
+    // `Raft::new` 要求网络与状态机的 SnapshotData 为同一类型
     N::Network:
         openraft::network::NetSnapshot<type_config::TypeConfig, SnapshotData = SM::SnapshotData>,
 {
     openraft::Raft::new(node_id, config, network, log_store, state_machine)
         .await
         .map_err(|e| format!("create raft instance: {e}").into())
+}
+
+/// 成员变更提交后，若本节点被降级为 learner 却仍是 leader，把领导权交给剩余 voter。
+///
+/// openraft 0.10 的自动退位只覆盖「leader 完全不在成员配置里」（`RemoveNodes`）。
+/// `RemoveVoters`（retain=true）把本节点降为 learner，而 learner leader 仍会发心跳：
+/// 其余 voter 永不超时，也就永远不会竞选出来，集群会长期停在一个待下线节点当
+/// leader。变更刚提交时本节点仍是 leader，直接 `transfer_leader` 即可交棒；
+/// 反过来「先交棒再变更」不可行（非 leader 无法提交成员变更）。
+///
+/// 返回 `Ok(None)` 表示无需交棒，`Ok(Some(新 leader 候选))` 表示已发起交棒。
+pub async fn hand_off_if_demoted(raft: &CoordRaft) -> Result<Option<u64>, String> {
+    // metrics 的 `borrow_watched()` 是不可跨 await 持有的锁 guard：先快照成纯值。
+    let metrics = raft.metrics();
+    let snapshot = metrics.borrow_watched().clone();
+    drop(metrics);
+
+    let self_id = snapshot.id;
+    if snapshot.current_leader != Some(self_id)
+        || snapshot
+            .membership_config
+            .voter_ids()
+            .any(|id| id == self_id)
+    {
+        return Ok(None);
+    }
+
+    // 单节点集群自我移除：已无 voter 可交棒（集群本身不再有服务能力）。
+    // 剩余 voter 里选第一个：matching 日志谁最靠前由接收端复核，
+    // 这里只决定「往哪发 TransferLeader」。
+    let Some(target) = snapshot.membership_config.voter_ids().next() else {
+        return Ok(None);
+    };
+
+    raft.trigger()
+        .transfer_leader(target)
+        .await
+        .map_err(|e| format!("transfer leadership to {target} after removal: {e}"))?;
+    Ok(Some(target))
 }
 
 #[cfg(test)]

@@ -17,8 +17,8 @@ use std::time::Duration;
 use openraft::error::{RPCError, ReplicationClosed, StreamingError};
 use openraft::network::RPCOption;
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
-    TransferLeaderResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, AppendResult, SnapshotResponse,
+    TransferLeaderRequest, TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use openraft::OptionalSend;
@@ -794,10 +794,24 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
-    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+    ) -> Result<AppendResult<TypeConfig>, RPCError<TypeConfig>> {
         self.ensure_not_blocked()?;
         match self {
             RaftNetwork::Real { inner, .. } => inner.append_entries(rpc, option).await,
+            RaftNetwork::Blocked { .. } => Err(self.blocked_rpc_error()),
+        }
+    }
+
+    /// PreVote：线上协议不携带该 RPC（`enable_pre_vote` 默认关闭），内层走 core 的
+    /// 默认实现；分区模拟仍需阻断，不得伪造授予。
+    async fn pre_vote(
+        &mut self,
+        rpc: VoteRequest<TypeConfig>,
+        option: RPCOption,
+    ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
+        self.ensure_not_blocked()?;
+        match self {
+            RaftNetwork::Real { inner, .. } => inner.pre_vote(rpc, option).await,
             RaftNetwork::Blocked { .. } => Err(self.blocked_rpc_error()),
         }
     }
@@ -1056,11 +1070,16 @@ const MAX_REMOTE_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
     type SnapshotData = super::RaftSnapshotData;
 
+    /// AppendEntries：线上格式固定为 `AppendEntriesResponse`（四个变体；0.10 未改其 serde
+    /// 线结构），不随线传输 0.10 的 conflict hint；两端各自用上游的 `From` / `into_append_result`
+    /// 转换（见本文件 `raft_rpc_server` 的对应转换）。
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+    ) -> Result<AppendResult<TypeConfig>, RPCError<TypeConfig>> {
+        let prev_log_id = rpc.prev_log_id;
+        let last_log_id = rpc.last_log_id();
         let payload = serialize_payload(&rpc)
             .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?;
         let req = tonic::Request::new(
@@ -1069,8 +1088,9 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
         );
         let mut client = self.get_client().await.map_err(to_rpc_error)?;
         let resp = client.append_entries(req).await.map_err(to_rpc_error)?;
-        decode_message_payload(&resp.into_inner())
-            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))
+        let resp: AppendEntriesResponse<TypeConfig> = decode_message_payload(&resp.into_inner())
+            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?;
+        Ok(resp.into_append_result(prev_log_id, last_log_id))
     }
 
     async fn vote(
@@ -1173,7 +1193,7 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
 
 // ──── Multi-Raft 网络共享层────
 //
-// 依赖 openraft-multi 0.10.0-alpha.34（workspace 锁定，仅本 raft/ 模块内使用，
+// 依赖 openraft-multi 0.10（与 openraft 同一稳定线，仅本 raft/ 模块内使用，
 // 隔离边界）。官方用法见 databendlabs/openraft examples/multi-raft-kv：
 // 共享 Router 实现 GroupRouter → per-region factory 包 GroupNetworkFactory →
 // new_client 返回 GroupNetworkAdapter。Coord 侧把既有 RaftNetworkFactoryImpl 连接池
@@ -1214,7 +1234,7 @@ impl openraft_multi::GroupRouter<TypeConfig, u64> for RaftNetworkFactoryImpl {
         group_id: u64,
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
-    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+    ) -> Result<AppendResult<TypeConfig>, RPCError<TypeConfig>> {
         // GroupRouter 无 node 参数，按 target 从静态地址表解析
         let node = openraft::impls::BasicNode::new(
             self.node_addrs
@@ -1243,6 +1263,29 @@ impl openraft_multi::GroupRouter<TypeConfig, u64> for RaftNetworkFactoryImpl {
         );
         let mut net = self.build_group_network(target, group_id, &node).await?;
         net.vote(rpc, option).await
+    }
+
+    /// Multi-Raft PreVote：`GroupRouter` 无默认实现，必须显式提供。
+    ///
+    /// 线上协议尚未携带 PreVote（core 的默认实现无条件授予，等于 no-op），因此这里
+    /// 只保证「不可达必须报错」——分区目标经 `build_group_network` 直接返回
+    /// `Unreachable`，不会被当成一张授予票。
+    async fn pre_vote(
+        &self,
+        target: u64,
+        group_id: u64,
+        rpc: VoteRequest<TypeConfig>,
+        option: RPCOption,
+    ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
+        let node = openraft::impls::BasicNode::new(
+            self.node_addrs
+                .read()
+                .get(&target)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let mut net = self.build_group_network(target, group_id, &node).await?;
+        net.pre_vote(rpc, option).await
     }
 
     /// Multi-Raft 领导权转移 RPC（openraft-multi `GroupRouter` 覆盖；
@@ -1465,10 +1508,21 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         let msg = request.into_inner();
         let (raft, region_id, rpc) =
             dispatch_raft_rpc!(self, msg, AppendEntriesRequest<TypeConfig>);
-        let resp = raft
+        // 0.10 把回复替换为 `AppendResult`（带 conflict hint，且不实现 serde）。
+        // 本仓线上格式保持 `AppendEntriesResponse`：普通接受/冲突/更高 vote 与之
+        // 一一对应，仅当 follower 只接受前缀时需显式回 `PartialSuccess`，否则
+        // leader 按 `last_log_id` 反推的确认位置会超前。
+        let last_log_id = rpc.last_log_id();
+        let result = raft
             .append_entries(rpc)
             .await
             .map_err(|e| tonic::Status::internal(format!("append_entries failed: {e}")))?;
+        let resp = match result {
+            Ok(Some(ack)) if Some(ack) != last_log_id => {
+                AppendEntriesResponse::PartialSuccess(Some(ack))
+            }
+            other => AppendEntriesResponse::from(other),
+        };
         let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message_for_region(
             payload, region_id,

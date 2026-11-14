@@ -106,11 +106,20 @@ async fn m0_kill9_restart_revision_stable() {
                 .unwrap();
             if round == 0 && i == 0 {
                 expected_rev = rev;
+            } else if i == 0 {
+                // 每轮首写都在一次 kill -9 重启之后：revision ≡ 日志 index，而 leader
+                // 就职必写一条空白条目（重启后重新竞选出新 term 也要一条），故只要求
+                // 严格前进，不要求恰好 +1。
+                assert!(
+                    rev > expected_rev,
+                    "post-restart revision must advance (round {round}): rev={rev} expected_rev={expected_rev}"
+                );
+                expected_rev = rev;
             } else {
                 assert_eq!(
                     rev,
                     expected_rev + 1,
-                    "revision must be monotonic +1 (round {round}, key {i})"
+                    "revision must be monotonic +1 within a run (round {round}, key {i})"
                 );
                 expected_rev = rev;
             }
@@ -136,16 +145,17 @@ async fn m0_kill9_restart_revision_stable() {
             .await
             .expect("range");
         assert_eq!(kvs.len(), 1);
-        // 新写入从 expected_rev+1 续
+        // 新写入必须从持久化的水位继续（不得退回内存计数器）：revision ≡ 日志
+        // index，而 openraft 0.10 的 leader 就职会写一条空白条目（重启后重新竞选
+        // 出新 term 也要一条），故这里只要求严格前进，不要求恰好 +1。
         let rev = client2
             .kv()
             .put(b"/m0/kill9/after-restart", format!("r{round}").as_bytes())
             .await
             .unwrap();
-        assert_eq!(
-            rev,
-            expected_rev + 1,
-            "post-restart write must continue from applied+1"
+        assert!(
+            rev > expected_rev,
+            "post-restart write must continue past the applied watermark (round {round})"
         );
         expected_rev = rev;
 
