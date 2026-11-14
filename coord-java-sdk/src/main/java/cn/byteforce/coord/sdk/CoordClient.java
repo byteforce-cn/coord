@@ -23,6 +23,7 @@ import cn.byteforce.coord.sdk.internal.thread.ThreadPoolManager;
 import cn.byteforce.coord.sdk.internal.watch.WatchManager;
 import cn.byteforce.coord.sdk.lock.LockClient;
 import cn.byteforce.coord.sdk.mq.MqClient;
+import cn.byteforce.coord.sdk.mq.v2.MqV2Client;
 import cn.byteforce.coord.sdk.objectstore.ObjectStoreClient;
 import cn.byteforce.coord.sdk.pki.PkiClient;
 import cn.byteforce.coord.sdk.policy.PolicyClient;
@@ -50,6 +51,8 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@link #idgen()} — Distributed unique ID generation</li>
  *   <li>{@link #cache()} — Distributed cache (String/Hash/List/Set)</li>
  *   <li>{@link #mq()} — Message queue (topic/publish/poll/ack)</li>
+ *   <li>{@link #mqV2()} — MQ v2 (partitioned log, consumer groups, DLQ;
+ *       requires a v2 cluster and an agent that forwards {@code coord.mq.v2})</li>
  *   <li>{@link #transit()} — Envelope encryption/decryption</li>
  *   <li>{@link #workflow()} — Workflow definition and instance management</li>
  *   <li>{@link #policy()} — RBAC/ABAC policy evaluation</li>
@@ -95,6 +98,7 @@ public final class CoordClient implements Closeable {
     private final IdGenClientImpl idgenClient;
     private final CacheClientImpl cacheClient;
     private final MqClientImpl mqClient;
+    private final MqV2ClientImpl mqV2Client;
     private final TransitClientImpl transitClient;
     private final WorkflowClientImpl workflowClient;
     private final PolicyClientImpl policyClient;
@@ -143,6 +147,8 @@ public final class CoordClient implements Closeable {
         this.cacheClient = new CacheClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
         this.mqClient = new MqClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.mqV2Client = new MqV2ClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
         this.transitClient = new TransitClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
@@ -303,6 +309,18 @@ public final class CoordClient implements Closeable {
      */
     public KvClient kvV2() {
         return kvV2Client;
+    }
+
+    /**
+     * Returns the MQ v2 client ({@code coord.mq.v2}).
+     * <p>
+     * Data-plane calls go through the agent's {@code MqV2Proxy}, which owns
+     * shard-leader routing; the SDK never caches a server address. The surface
+     * is blocked behind {@code [mq_v2].enabled=true} on a v2 cluster — a v1
+     * cluster rejects these RPCs with {@code FAILED_PRECONDITION}.
+     */
+    public MqV2Client mqV2() {
+        return mqV2Client;
     }
 
     /**
