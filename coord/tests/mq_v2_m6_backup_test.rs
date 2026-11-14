@@ -259,6 +259,11 @@ fn backup_restore_and_toggle_preserve_mq_v2_state() {
     let addrs = cluster.addrs();
 
     runtime().block_on(async {
+        // 恢复后 shard raft（承载 group 位点的 region）选举比 region 0 慢：
+        // 元数据读（describe/poll）能先成功，但 `get_committed_offsets` 需要
+        // 分片 leader，过早调用会得到 `not leader for region N`。先等它可见。
+        wait_topic_leader(&addrs, TOPIC, 0).await;
+
         let client = Client::new(ClientConfig::new(addrs.clone()))
             .await
             .expect("coord client");
@@ -288,10 +293,24 @@ fn backup_restore_and_toggle_preserve_mq_v2_state() {
             "all messages must survive restore"
         );
 
-        let committed = mq
-            .get_committed_offsets(GROUP, &[(TOPIC.to_string(), 0)])
-            .await
-            .expect("committed after restore");
+        // 即便 leader 已可见，首个 RPC 仍可能撞上客户端路由缓存刷新（与 publish 同口径
+        // 重试，截止到 FAILOVER）。
+        let deadline = std::time::Instant::now() + FAILOVER;
+        let committed = loop {
+            match mq
+                .get_committed_offsets(GROUP, &[(TOPIC.to_string(), 0)])
+                .await
+            {
+                Ok(committed) => break committed,
+                Err(e) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "committed offsets kept failing after restore: {e}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        };
         assert_eq!(
             committed[0].offset, 3,
             "committed offsets must survive restore"
