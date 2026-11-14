@@ -139,7 +139,7 @@ impl TestNode {
 
 /// 轮询等待集群选出 leader，返回 leader 节点下标。
 ///
-/// openraft 0.10.0-alpha.34 起 leader 需先获得 quorum 确认（leader lease）才能
+/// openraft 0.10.0 起 leader 需先获得 quorum 确认（leader lease）才能
 /// 接受写入；`current_leader` 就绪不代表 lease 已建立，因此同时要求
 /// `last_quorum_acked` 为 Some，避免选举后立即 client_write 收到
 /// `ForwardToLeader(leader_id: None)`。
@@ -158,16 +158,33 @@ async fn wait_for_leader(nodes: &[TestNode], timeout: Duration) -> Option<usize>
     None
 }
 
+/// 提案一条 Put，返回 revision。
+///
+/// openraft 0.10 要求 leader 在 `election_timeout_max` 内确认过 quorum 才接受写入；
+/// 本机并行跑多个 in-process 集群时调度会拖长心跳周期，`client_write` 会收到
+/// `ForwardToLeader{reason: LeaseExpired}`（上游约定的处理方式就是**在同一节点重试**）。
 async fn propose_put(leader: &TestNode, key: &[u8], value: &[u8]) -> u64 {
-    let resp = leader
-        .raft
-        .client_write(Command::Put {
-            key: key.to_vec(),
-            value: value.to_vec(),
-            lease_id: None,
-        })
-        .await
-        .expect("client_write put");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let resp = loop {
+        match leader
+            .raft
+            .client_write(Command::Put {
+                key: key.to_vec(),
+                value: value.to_vec(),
+                lease_id: None,
+            })
+            .await
+        {
+            Ok(resp) => break resp,
+            Err(e) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "client_write put kept failing: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
     match resp.response() {
         Response::Put { revision } => *revision,
         other => panic!("unexpected response: {other:?}"),

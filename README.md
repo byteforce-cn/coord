@@ -275,7 +275,7 @@ current status and the work required to close each item — is
 
 ## Status
 
-Version `0.4.1` (pre-1.0). The Raft engine (`openraft`) is an alpha dependency and Coord is **not yet recommended for production**. The consistency core is continuously exercised by the in-repo Jepsen project and CI; see [Testing & verification](#testing--verification) and [Limitations / non-goals](#limitations--non-goals) before adopting.
+Version `0.4.1` (pre-1.0). The Raft engine (`openraft`) is on its 0.10 stable line, but Coord is **not yet recommended for production**. The consistency core is continuously exercised by the in-repo Jepsen project and CI; see [Testing & verification](#testing--verification) and [Limitations / non-goals](#limitations--non-goals) before adopting.
 
 The KV-T v2 data plane (ADR-0015) passed its GA gate on 2026-11-11: the 72h Jepsen
 run, per-gate evidence and the sign-off record are in

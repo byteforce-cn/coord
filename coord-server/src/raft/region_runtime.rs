@@ -384,11 +384,20 @@ impl RegionRaftHandle for CoordRegionRaftHandle {
             .change_membership(crate::raft::remove_voter_ids(ids), true)
             .await
             .map_err(|e| Error::Internal(format!("region raft remove voter {node_id}: {e}")))?;
+        // 被移除的 voter 若正是本节点的 region leader，openraft 0.10 会把它降为
+        // learner 但仍保留 leadership；显式交棒后剩余 voter 才能选出新 leader。
+        crate::raft::hand_off_if_demoted(&self.raft)
+            .await
+            .map_err(|e| {
+                Error::Internal(format!(
+                    "region raft hand off after removing {node_id}: {e}"
+                ))
+            })?;
         Ok(())
     }
 
     async fn transfer_leader(&self, to: NodeID) -> Result<()> {
-        // alpha.34：transfer_leader 在 Trigger 上（Raft::trigger() 门面）
+        // transfer_leader 在 Trigger 上（Raft::trigger() 门面）
         self.raft
             .trigger()
             .transfer_leader(to)

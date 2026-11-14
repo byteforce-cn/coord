@@ -148,7 +148,7 @@ impl TestNode {
 
 /// 轮询等待集群选出 leader，返回 leader 节点下标。
 ///
-/// openraft 0.10.0-alpha.34 起 leader 需先获得 quorum 确认（leader lease）才能
+/// openraft 0.10.0 起 leader 需先获得 quorum 确认（leader lease）才能
 /// 接受写入；`current_leader` 就绪不代表 lease 已建立，因此同时要求
 /// `last_quorum_acked` 为 Some，避免选举后立即 client_write 收到
 /// `ForwardToLeader(leader_id: None)`。
@@ -359,7 +359,7 @@ async fn test_lease_failover_rebuild_and_expired_cleanup() {
 
     // 新 leader 选出（在存活节点中轮询；旧节点 raft 已关停，不再自认 leader，
     // 且其 current_leader 状态可能残留旧值，故不作为判定依据）。
-    // 同时要求 `last_quorum_acked`（alpha.34 leader lease 已建立），否则新 leader
+    // 同时要求 `last_quorum_acked`（leader lease 已建立），否则新 leader
     // 选举后立即 propose 会收到 `ForwardToLeader(leader_id: None)`。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut new_leader_idx = None;

@@ -8,7 +8,7 @@
 
 需要为 raft 日志钉住三个问题：**何时回收、回收到哪里、崩溃恢复与落后 follower 追赶靠什么保证**。当前实现没有把这些语义写进单一决策，文档与实现之间也存在失真，因此先以本 ADR 固化语义，再落实现（B-ST-1 / B-ST-2）。
 
-### 上游契约（openraft =0.10.0-alpha.34，registry 源码实读）
+### 上游契约（openraft =0.10.0，registry 源码实读）
 
 - 不变量 `purged ≤ snapshot ≤ applied ≤ committed`：**已回收的日志必然被快照覆盖**（`src/docs/data/log_pointers.md`）。
 - 自动回收只发生在新快照构建成功之后；回收点 = `snapshot_last_log_id.next_index() − max_in_snapshot_log_to_keep`（`src/engine/handler/log_handler/mod.rs`，`calc_purge_upto`）。
@@ -48,7 +48,7 @@
 
 ## 参考
 
-- 上游（openraft =0.10.0-alpha.34）：`src/docs/data/log_pointers.md`（不变量）；`src/engine/engine_impl.rs::trigger_purge_log`；`src/engine/handler/log_handler/mod.rs::calc_purge_upto`；`src/raft/trigger.rs::purge_log`；`src/config/config.rs`（`SnapshotPolicy` / `max_in_snapshot_log_to_keep` 字段文档）；`src/errors/fatal.rs`（`StorageError` → `Fatal`）。
+- 上游（openraft =0.10.0）：`src/docs/data/log_pointers.md`（不变量）；`src/engine/engine_impl.rs::trigger_purge_log`；`src/engine/handler/log_handler/mod.rs::calc_purge_upto`；`src/raft/trigger.rs::purge_log`；`src/config/config.rs`（`SnapshotPolicy` / `max_in_snapshot_log_to_keep` 字段文档）；`src/errors/fatal.rs`（`StorageError` → `Fatal`）。
 - coord 代码：`coord-server/src/raft/mod.rs`（`apply_tuning`）；`coord-server/src/raft/log_store.rs`（`purge` 守卫）；`coord-server/src/storage/snapshot.rs`（`SnapshotTracker`）；`coord-server/src/storage/compaction.rs`（`CompactionConfig`）；`coord/src/main.rs`（启动 WARN 与恢复检查）。
 - 测试锚点：`coord-server/tests/snapshot_visibility_test.rs`（快照构建可见性）；实现 PR 增补有界性受控实验与负控制测试。
 - 边界：`docs/production/ops/boundaries.md`（B-ST-1；B-ST-2 的处置见「决定」）。

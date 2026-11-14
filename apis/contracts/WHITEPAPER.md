@@ -579,8 +579,11 @@ D4），复用既有码而非新增。
    （契约消费预览不受限）。
 2. **生产就绪验证仍在进行中**：独立 Jepsen、72h 浸泡、kind 部署验证尚未全部完成；
    本仓库**未经独立第三方安全审计**，任何声明不得暗示已审计。
-3. 共识依赖 `openraft 0.10.0-alpha.25`（alpha 版本；上游无稳定版，
-   按风险接受处理）。
+3. 共识依赖 `openraft 0.10.0`（上游稳定线；同一线内的 `openraft-rt` / `openraft-macros`
+   / `openraft-multi` 与主 crate 同步，声明见根 `Cargo.toml`）。alpha 依赖已退场，
+   滚动升级仍不承诺：0.10 把节点间 `VoteRequest` 的 `leadership_transfer: bool`
+   换成 `leadership_transfer_from: Option<Vote>`，见
+   `docs/production/ops/upgrade.md` §3.5。
 4. 部分内部错误串直出客户端——§6.3 的"只依赖 Status Code"纪律必须执行。
 5. 监控/部署物/runbook 存在缺口。
 6. gRPC reflection 由 `security.reflection_enabled` 控制（`main.rs:2549`），
