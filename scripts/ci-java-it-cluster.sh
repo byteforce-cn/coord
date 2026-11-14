@@ -137,6 +137,10 @@ enabled = true
 
 [kv_t]
 enabled = true
+
+# MQ v2（Java SDK 的 MqV2ClusterIntegrationTest）：服务端分区日志 + 消费组。
+[mq_v2]
+enabled = true
 EOF
   fi
 
@@ -162,8 +166,9 @@ idgen = true
 leader_election = true
 EOF
   if [[ "$MODE" == "v2" ]]; then
-    # 纯 KV/审批路径的 workflow 在 v2 上可用；durable 依赖 MQ v1，启动期拒绝。
-    printf 'workflow = true\n' >>"$RUN_DIR/agent.toml"
+    # 纯 KV/审批路径的 workflow 在 v2 上可用；`mq = true` 在 v2 数据面上只注册
+    # `coord.mq.v2` 代理（Java SDK 的 MQ v2 IT 走这条通道）。
+    printf 'workflow = true\nmq = true\n' >>"$RUN_DIR/agent.toml"
   fi
 }
 
