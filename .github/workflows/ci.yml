@@ -796,7 +796,7 @@ jobs:
       # 的 ~100 个集成测试二进制全部链接一遍（每个都链 tonic/openraft），
       # 是 build 时间的主成本。库/二进制依赖仍会完整构建。
       - name: Build tests
-        run: cargo build -p coord --test chaos_real --test kv_t_g6_chaos_v2_test
+        run: cargo build -p coord --test chaos_real --test kv_t_g6_chaos_v2_test --test mq_v2_m6_chaos_test
       # 失败必须**自描述**：间歇红曾因日志不可得而无法判定「真缺陷 vs 假红」。
       # 失败测试名/panic 以注解带出（见 scripts/ci-annotate-test-failures.sh）。
       - name: Run real-process chaos suites
@@ -817,6 +817,14 @@ jobs:
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-kv-t-v2.log cargo test -p coord --test kv_t_g6_chaos_v2_test -- --ignored --nocapture --test-threads=1
+
+      # MQ v2 故障矩阵（3 进程）：分片/组 shard Leader kill -9、follower 对称分区、
+      # 配额打满；不变量是 offset 唯一/连续、committed 单调、整批原子拒绝。
+      - name: Run v2 MQ chaos (shard/group leader, partition, quota)
+        if: always()
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-mq-v2.log cargo test -p coord --test mq_v2_m6_chaos_test -- --ignored --nocapture --test-threads=1
 
       - name: Run distributed soak (smoke, 120s)
         if: always()
