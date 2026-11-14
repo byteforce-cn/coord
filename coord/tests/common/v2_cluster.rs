@@ -54,7 +54,8 @@ pub struct V2Node {
     scheduler_paused: bool,
     kvt_extra: String,
     pd_extra: String,
-    toml_extra: String,
+    /// 追加到配置末尾的段（测试可在重启前改写，用于启用/关闭 `[mq_v2]`）。
+    pub toml_extra: String,
     explicit_kv_t_enabled: bool,
 }
 
@@ -682,6 +683,7 @@ pub async fn direct_put(addrs: &[String], key: &[u8], value: &[u8]) -> i64 {
 /// 「读不到」有两种完全不同的原因，混在一起会把 apply 落后误判成数据丢失：
 /// - `Rejected`：副本还没 apply 到 `read_ts`（`SAFE_TS_LAG`）或传输失败，可重试；
 /// - `Empty`：副本已 apply 到 `read_ts` 却没有这一行 —— 违反「已提交即可见」。
+#[derive(Debug)]
 pub enum ReadAttempt {
     Found(Vec<u8>, i64),
     Empty(String),

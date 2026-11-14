@@ -1,8 +1,8 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M5 落地，M6-1/M6-2/M6-3/M6-4 落地）
+> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M5 落地，M6-1–M6-5 全部落地）
 >
-> **状态：M0–M5 完成（GO）；M6 进行中（M6-1/M6-2/M6-3/M6-4 ✅；M6-5 未开始）**。
+> **状态：M0–M5 完成（GO）；M6 完成（M6-1–M6-5 ✅）**。
 > M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
@@ -28,7 +28,7 @@
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ✅ | 见 §2c |
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ✅ | 见 §2d |
 | M5 工作流 | v2 outbox/durable/审批/trigger | ✅ | 见 §2e |
-| M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | 🚧 M6-1/M6-2/M6-3/M6-4 ✅；M6-5 未开始 | 见 §2f |
+| M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | ✅ | 见 §2f |
 | M7 GA | 全绿 + KV-T GA + 签字 | ⛔ 未达标 | 见 §3 |
 
 ## 2. M0 分项（启动 gate）
@@ -85,7 +85,7 @@ Rust 升级后漂到别的分片）。
 | M6-2 Ops | ✅ | 告警：`monitoring/prometheus-rules.yml` 的新 group `coord-mq-v2`（9 条：发布非 Leader/拒绝/延迟、Poll 越界、Ack 拒绝、组再平衡/成员过期、DLQ、Subscribe 丢弃）；runbook：`docs/production/ops/runbook.md` §6 的 9 个同名处置小节；dashboard：`monitoring/grafana-dashboard.json` 的 `MQ v2: Publish / Poll` 与 `MQ v2: Groups / DLQ / Retention`；对照表：`docs/production/ops/observability.md` 第 12–14 行。判据：`bash scripts/check-gate-drills.sh`（33 条告警、锚点可达、无孤儿小节；改名注入负控制变红）、`bash scripts/check-doc-refs.sh`、`python3 -c 'import json;json.load(open("monitoring/grafana-dashboard.json"))'`。边界：lag/配额/保留无连续 gauge，按需 `DescribeGroup`/`DescribeTopic`/`GetTopicDeletion`（observability §2.3） |
 | M6-3 性能/容量/浸泡 | ✅ | 基准入口 `PERF_GATE=1 cargo test --release -p coord --test mq_v2_bench -- --ignored --nocapture --test-threads=1`（本机 8 vCPU：顺序 283 ops/s / 并发 2133 ops/s / 批深度 5.90；poll 4783 msgs/s / ack 5563 acks/s；4 成员再平衡 0.14s；阈值 = 基线×0.6，`PERF_GATE` fail-closed）。浸泡 `PERF_GATE=1 MQ_V2_SOAK_SECS=600 cargo test --release -p coord --test mq_v2_soak -- --ignored --nocapture --test-threads=1`：261206 条 publish→poll→ack，每分区 offset 无洞/无重复、committed==published、lag 0。报告 `docs/production/ops/mq-v2-performance.md`（环境/命令/阈值/容量；未跑边界：跨机、多组 shard 聚合、72h、容量打满、快照安装） |
 | M6-4 混沌/Jepsen | ✅ | 真实 3 进程故障矩阵 `cargo test -p coord --test mq_v2_m6_chaos_test -- --ignored --nocapture --test-threads=1`（CI chaos job 构建并执行）：① 分片 Leader `kill -9`（故障窗口 ≥100 次发布）后 offset 唯一/连续/不复用、重启后可读回；② 组 shard Leader `kill -9` 后 Ack 重试且 committed 单调、重启后保留；③ 配额打满整批原子拒绝、offset 无空洞、已提交可读；④ follower 对称网络分区下多数派可写、heal 后 offset 连续。**发现并修复**：`coord-client` 的分片/组 Leader 缓存原先只跟随 `NOT_LEADER` hint，进程级 kill 后无 hint 的 `UNAVAILABLE` 会把分区永久钉在死地址；`partition_call`/`group_call` 现在驱逐缓存后重新发现（`cargo test -p coord-client --lib` 72 例回归）。边界：快照安装中断由 KV-T chaos 覆盖（MQ 段随 Region 快照恢复），本套件不重复注入；Jepsen 是确定性故障矩阵 + ≥100 样本，不是随机生成器 |
-| M6-5 备份/恢复/升级/回退 | ⏳ 未开始 | 整节点备份含 MQ 的演练未做 |
+| M6-5 备份/恢复/升级/回退 | ✅ | 真实 3 进程整节点离线备份/恢复演练 `cargo test -p coord --test mq_v2_m6_backup_test -- --ignored --nocapture --test-threads=1`：建 topic/发布 5 条/组 Ack 3 + v2 KV 写入 → 全集群 kill -9 → 逐节点 `coord backup save/restore` → 同 node_id 重启 → topic_epoch 不变、5 条可按 offset 读回、committed=3、续写 offset=5；关闭 `[mq_v2]` 重启后 MQ RPC `FAILED_PRECONDITION` 且 v2 KV 按备份前 `commit_ts` 可读；重新开启后 6 条可读、续写 offset=6。边界：二进制升级/回退（旧版本→新版本）未演练（本仓无旧版本二进制）；回退口径以 §5（关闭服务、不迁移 v1）为准。" |
 
 ### M5 分项（v2 outbox、durable 与触发）
 
