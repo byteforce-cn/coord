@@ -362,3 +362,135 @@ groups:
           description: |
             这是客户端游标过旧，不是服务端丢事件：让客户端用 Range 重建快照后
             从新 revision 订阅；不要用调大 watch_retention 掩盖。
+
+  - name: coord-mq-v2
+    rules:
+      # 发布打到非 Leader 分片：客户端/Agent 会按 coord-leader-hint 重路由。
+      # 持续出现 = leader 抖动或路由缓存陈旧，不是写入失败。
+      - alert: CoordMqV2PublishNotLeader
+        expr: |
+          increase(coord_mq_v2_publish_not_leader_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 发布持续命中非 Leader（10m 内 {{ $value }} 次）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2publishnotleader--mq-v2-发布持续非-leader"
+          description: |
+            数据面写必须发到分片 Leader；非 Leader 返回 NOT_LEADER +
+            coord-leader-hint。持续重定向说明 shard leader 在切换或客户端路由
+            缓存过期——先看 Region/PD leader，不要手工固定到某个节点。
+
+      # 发布被服务端拒绝：配额、单条上限、分批上限或参数错误。
+      - alert: CoordMqV2PublishRejected
+        expr: |
+          increase(coord_mq_v2_publish_rejected_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 发布被拒绝（10m 内 {{ $value }} 次）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2publishrejected--mq-v2-发布被拒绝配额超大参数"
+          description: |
+            QUOTA_EXCEEDED / MESSAGE_TOO_LARGE / INVALID_ARGUMENT 是整批原子
+            拒绝（不产生部分提交）。按返回的稳定错误码分支，不要重试到成功。
+
+      # 平均发布延迟 > 200ms（含 Raft 提交与 apply）。
+      - alert: CoordMqV2PublishLatencyHigh
+        expr: |
+          rate(coord_mq_v2_publish_latency_us_total[5m])
+            / clamp_min(rate(coord_mq_v2_publish_requests_total[5m]), 0.001) > 200000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 平均发布延迟 {{ $value | humanize }}us"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2publishlatencyhigh--mq-v2-发布平均延迟--200ms"
+          description: |
+            发布延迟包含 Raft 多数派提交与 apply。先看磁盘 fdatasync、Raft
+            append 队列与同分片的分区数；不要把它当成客户端超时重试问题。
+
+      # 消费位点早于保留窗口（OFFSET_OUT_OF_RANGE）：保留已删掉未读消息。
+      - alert: CoordMqV2PollOutOfRange
+        expr: |
+          increase(coord_mq_v2_poll_out_of_range_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 消费位点早于保留窗口（10m 内 {{ $value }} 次）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2polloutofrange--mq-v2-消费位点早于保留窗口"
+          description: |
+            这是消费停滞导致保留窗口越过位点，不是服务端丢事件。处置是消费端的
+            reset 策略（earliest/latest/fail）；不要用调大保留期掩盖。
+
+      # Ack 被拒绝：代际过期、成员不存在或分区未分配给该成员。
+      - alert: CoordMqV2AckRejected
+        expr: |
+          increase(coord_mq_v2_ack_rejected_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 Ack 被拒绝（10m 内 {{ $value }} 次）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2ackrejected--mq-v2-ack-被拒绝代际分配"
+          description: |
+            GROUP_EPOCH_STALE / NOT_GROUP_MEMBER 要求重新 Join 后按新分配重试；
+            committed 单调不回退。拒绝必须暴露给调用方，不能被吞。
+
+      # 组再平衡占 Join 的比例 > 50%：成员抖动/心跳过期/消费者频繁重启。
+      - alert: CoordMqV2GroupRebalanceStorm
+        expr: |
+          rate(coord_mq_v2_group_rebalances_total[10m])
+            / clamp_min(rate(coord_mq_v2_group_joins_total[10m]), 0.001) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 组再平衡比例 {{ $value | humanizePercentage }}"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2grouprebalancestorm--mq-v2-消费组再平衡风暴"
+          description: |
+            再平衡期间同一分区会短暂无人消费，且旧代际 Ack 会被拒绝。查成员
+            进程重启、session_timeout 与心跳间隔，不要靠调大超时掩盖。
+
+      # 成员会话过期：消费者没在 session_timeout 内续期。
+      - alert: CoordMqV2GroupMembersExpired
+        expr: |
+          increase(coord_mq_v2_group_expired_members_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 消费组成员会话过期（10m 内 {{ $value }} 个）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2groupmembersexpired--mq-v2-消费组成员会话过期"
+          description: |
+            过期会推进 generation 并触发再平衡。先看消费者是否还活着/网络是否
+            可达，再看心跳间隔是否接近 session_timeout。
+
+      # 死信入队：消息被显式 MoveToDlq（含工作流触发器的 max_attempts）。
+      - alert: CoordMqV2DlqMoved
+        expr: |
+          increase(coord_mq_v2_dlq_moved_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 死信入队（10m 内 {{ $value }} 条）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2dlqmoved--mq-v2-死信入队"
+          description: |
+            DLQ 是"消费方处理不了"的审计出口。用 PollDlq 读 reason/detail，
+            修好消费者后再决定是否重放；不要自动重放。
+
+      # Subscribe 是 best-effort：背压时丢弃（不推进已提交位点）。
+      - alert: CoordMqV2SubscribeDrops
+        expr: |
+          increase(coord_mq_v2_subscribe_dropped_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} MQ v2 Subscribe 背压丢弃（10m 内 {{ $value }} 条）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqv2subscribedrops--mq-v2-subscribe-背压丢消息"
+          description: |
+            Subscribe 契约明确：队列打满即丢弃、不重投、不推进位点。需要至少
+            一次必须改用 Poll + Ack；不要调大 buffer 当作可靠性承诺。

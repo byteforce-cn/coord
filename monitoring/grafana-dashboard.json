@@ -269,6 +269,101 @@
         }
       ]
     }
+    ,
+    {
+      "type": "timeseries",
+      "title": "MQ v2: Publish / Poll",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(coord_mq_v2_publish_requests_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "publish req/s {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(coord_mq_v2_publish_entries_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "publish entries/s {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(coord_mq_v2_publish_bytes_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "publish bytes/s {{instance}}"
+        },
+        {
+          "refId": "D",
+          "expr": "rate(coord_mq_v2_publish_latency_us_total{instance=~\"$instance\"}[1m]) / clamp_min(rate(coord_mq_v2_publish_requests_total{instance=~\"$instance\"}[1m]), 0.001) / 1000",
+          "legendFormat": "publish avg ms {{instance}}"
+        },
+        {
+          "refId": "E",
+          "expr": "rate(coord_mq_v2_poll_requests_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "poll req/s {{instance}}"
+        },
+        {
+          "refId": "F",
+          "expr": "rate(coord_mq_v2_poll_messages_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "poll messages/s {{instance}}"
+        },
+        {
+          "refId": "G",
+          "expr": "rate(coord_mq_v2_poll_empty_total{instance=~\"$instance\"}[1m]) / clamp_min(rate(coord_mq_v2_poll_requests_total{instance=~\"$instance\"}[1m]), 0.001)",
+          "legendFormat": "poll empty ratio {{instance}}"
+        },
+        {
+          "refId": "H",
+          "expr": "rate(coord_mq_v2_poll_out_of_range_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "poll out-of-range/s {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "MQ v2: Groups / DLQ / Retention",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(coord_mq_v2_group_joins_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "group joins/s {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(coord_mq_v2_group_rebalances_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "group rebalances/s {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(coord_mq_v2_group_expired_members_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "expired members/s {{instance}}"
+        },
+        {
+          "refId": "D",
+          "expr": "rate(coord_mq_v2_group_gc_removed_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "groups gc-removed/s {{instance}}"
+        },
+        {
+          "refId": "E",
+          "expr": "rate(coord_mq_v2_dlq_moved_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "dlq moved/s {{instance}}"
+        },
+        {
+          "refId": "F",
+          "expr": "rate(coord_mq_v2_poll_dlq_messages_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "dlq polled/s {{instance}}"
+        },
+        {
+          "refId": "G",
+          "expr": "rate(coord_mq_v2_retention_truncate_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "retention truncates/s {{instance}}"
+        },
+        {
+          "refId": "H",
+          "expr": "rate(coord_mq_v2_retention_segments_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "retention segments/s {{instance}}"
+        }
+      ]
+    }
   ],
   "refresh": "30s",
   "schemaVersion": 39,

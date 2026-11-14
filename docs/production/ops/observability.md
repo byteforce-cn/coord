@@ -23,6 +23,9 @@
 | 9 | `coord_kv_t_commit_watermark` / `_in_flight` / `_stalls_total` / `_seal_lag_seconds` / `coord_kv_t_commit_log_shards{,_sealed}` / `coord_kv_t_commit_log_outbox_rows_trimmed_total` | `metrics.rs` 的 `set_kv_t_commit_*`（`kvt/commit_log_shards.rs`、`kvt/commit_watermark.rs`） | 告警 `CoordKvTWatermarkStall` / `CoordKvTShardSealLag` / `CoordKvTCommitLogShardsHigh` + runbook 同名小节 + Grafana `KV-T: Commit Log / Watch` | `check-gate-drills.sh`；commit log/seal 测试 | ✅ 闭环 |
 | 10 | `coord_kv_t_watch_streams` / `_batches_total` / `_events_total` / `_lag_commit_ts` / `_history_unavailable_total` / `_backpressure_total` | `metrics.rs` 的 `set_kv_t_watch_*`（`kvt/watch_rpc.rs`） | 告警 `CoordKvTWatchHistoryUnavailable` + runbook §6/§7 + Grafana 面板 | `check-gate-drills.sh`；`kv_t_g4_watch_rpc_test` | ✅ 闭环 |
 | 11 | `coord_pd_queue_pending` / `_running` / `_terminal` / `coord_pd_operator_requeued_total` | `metrics.rs` 的 `set_pd_queue_depth` / `inc_pd_operator_requeued`（`pd/executor.rs`） | 告警 `CoordKvTSplitMergeStuck`（仅 v2 节点）+ runbook 同名小节 | `check-gate-drills.sh`；split/merge executor 测试 | ✅ 闭环 |
+| 12 | `coord_mq_v2_publish_{requests,entries,bytes,duplicates,latency_us,not_leader,rejected}_total` / `coord_mq_v2_append_{batches,requests}_total` | `coord-server/src/metrics.rs::record_mq_v2_publish*` / `record_mq_v2_append_batch`（`mq_v2/services.rs` 写路径） | 告警 `CoordMqV2PublishNotLeader` / `CoordMqV2PublishRejected` / `CoordMqV2PublishLatencyHigh` + runbook 同名小节 + Grafana `MQ v2: Publish / Poll` | `bash scripts/check-gate-drills.sh`；`cargo test -p coord-server --lib metrics::tests::test_metrics_mq_v2` | ✅ 闭环 |
+| 13 | `coord_mq_v2_poll_{requests,messages,bytes,empty,out_of_range}_total` / `coord_mq_v2_ack_{requests,entries,rejected}_total` / `coord_mq_v2_subscribe_{streams,messages,dropped}` | `metrics.rs::record_mq_v2_poll*` / `record_mq_v2_ack` / `record_mq_v2_subscribe`（`mq_v2/consume.rs`、`mq_v2/groups.rs`） | 告警 `CoordMqV2PollOutOfRange` / `CoordMqV2AckRejected` / `CoordMqV2SubscribeDrops` + runbook 同名小节 + Grafana `MQ v2: Publish / Poll` | `check-gate-drills.sh`；`mq_v2_m3_consume_test` / `mq_v2_m3_group_test` | ✅ 闭环 |
+| 14 | `coord_mq_v2_group_{joins,rebalances,expired_members,gc_removed}_total` / `coord_mq_v2_dlq_moved_total` / `coord_mq_v2_poll_dlq_messages_total` / `coord_mq_v2_retention_{truncate,segments}_total` / `coord_mq_v2_deletion_{partitions,messages,bytes}_total` | `metrics.rs::record_mq_v2_group_*` / `record_mq_v2_dlq_move` / `record_mq_v2_retention` / `record_mq_v2_deletion`（reaper、组状态机、删除回收） | 告警 `CoordMqV2GroupRebalanceStorm` / `CoordMqV2GroupMembersExpired` / `CoordMqV2DlqMoved` + runbook 同名小节 + Grafana `MQ v2: Groups / DLQ / Retention` | `check-gate-drills.sh`；`mq_v2_reaper` / 组回收单测 | ✅ 闭环（lag/配额/保留无连续 gauge，见 §2.4） |
 
 ---
 
@@ -51,7 +54,19 @@ agent 侧那个 15s 采样任务是**只读**的 `tokio::spawn`，不在任何 s
 这在 Prometheus 侧可以通过 `coord_agent_workflow_workers_live` 长期不变来间接发现，
 但**不是**一条显式告警。列入下节待办，不掩盖。
 
-### 2.3 仍未验证：SLO 阈值与真实数据的对照
+### 2.3 MQ v2 的 lag/配额/保留只有按需查询
+
+v2 的指标面是**计数器**：没有每分区 lag、每 topic 计费字节或保留水位的连续
+gauge。原因不是遗漏接线，而是这些量由状态机按需计算（`DescribeGroup` 的
+`GroupPartitionLag`、`DescribeTopic` 的 `log_bytes`/`earliest_offset`，
+`GetTopicDeletion` 的回收进度），周期采样会给每个 topic/分区新增一条时间序列
+（默认上限 1 GiB × 1024 分区/分片，基数不可控）。
+
+因此告警覆盖的是**症状**（越界、拒绝、再平衡、死信、丢弃），lag/配额/保留的
+诊断走 runbook 的按需查询路径；不写"已闭环实时 lag 指标"这类不成立的结论。
+若后续需要连续 lag，先给指标定基数上限（per group 而非 per partition）再接线。
+
+### 2.4 仍未验证：SLO 阈值与真实数据的对照
 
 `docs/production/ops/slo.md` 给了三项 SLO 与错误预算，但**没有** 7×24 的真实曲线
 支撑（需要 14 天连续运行）。因此本文件的结论只到"指标面可用、有消费者"，

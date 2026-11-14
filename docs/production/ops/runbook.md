@@ -591,6 +591,115 @@ auto-resolve 语义，处置是人工的。
   增长时，查 `trim commit log outbox failed` 日志与数据 Region 的 leader；裁剪
   是尽力而为的容量优化，不影响 Watch 可读窗口。
 
+### `CoordMqV2PublishNotLeader` — MQ v2 发布持续非 Leader
+
+- 指标：`coord_mq_v2_publish_not_leader_total`（与 `_publish_requests_total` 对比）。
+- 语义：分区数据面必须发到日志分片 Leader；非 Leader 返回 `NOT_LEADER` +
+  `coord-leader-hint`，客户端/Agent 据此重路由。持续重定向 = leader 切换或
+  路由缓存陈旧，**不是**写入失败。
+- 处置：看 `GetTopicLeaders` 的 `leader_addr` 与 Region/PD leader 是否稳定；
+  确认 Agent 版本包含 `MqV2Proxy` 的 hint 缓存。**不要**把客户端固定到某个
+  server 地址或绕过 Agent。
+- 升级：leader 持续抖动按 `CoordLeaderChurn` 处理。
+
+### `CoordMqV2PublishRejected` — MQ v2 发布被拒绝（配额/超大/参数）
+
+- 指标：`coord_mq_v2_publish_rejected_total`；稳定错误码
+  `QUOTA_EXCEEDED` / `MESSAGE_TOO_LARGE` / `RESOURCE_EXHAUSTED` /
+  `INVALID_ARGUMENT`。
+- 语义：`PublishBatch` 以单分区请求为原子单位，任一条失败整批不追加——不会
+  有部分提交，也不会静默丢历史。
+- 处置：按错误码定位：配额 → 看 `DescribeTopic` 的 `log_bytes` 与
+  `TopicConfig.max_bytes`（或临时加大/清理）；超大 → 对照
+  `[mq_v2].max_message_bytes` / topic 的 `max_message_bytes`；参数 → 修调用方
+  （分区越界、条数 > 64、负 offset）。
+- **不要**把拒绝当瞬时错误重试到成功（配额不会自愈）；不要手工删段。
+- 升级：需要调保留/配额时走 `UpdateTopic`（`expected_topic_epoch` CAS）。
+
+### `CoordMqV2PublishLatencyHigh` — MQ v2 发布平均延迟 > 200ms
+
+- 指标：`coord_mq_v2_publish_latency_us_total` /
+  `coord_mq_v2_publish_requests_total`（窗口内比值 = 平均延迟）。
+- 语义：发布响应在 Raft 多数派提交并 apply 之后才返回；延迟包含
+  append/fdatasync 与 apply。批深度（`append_requests_total` /
+  `append_batches_total`）下降会放大每次提交成本。
+- 处置：查节点磁盘 fdatasync 延迟、Raft append 队列、同分片分区数
+  （`[mq_v2].log_shards` 是否偏小）与 CPU。**不要**靠调大客户端超时掩盖
+  提交变慢。
+- 升级：持续 > 1s 按 Region 提交路径故障处理（对齐 `CoordFollowerApplyLag`）。
+
+### `CoordMqV2PollOutOfRange` — MQ v2 消费位点早于保留窗口
+
+- 指标：`coord_mq_v2_poll_out_of_range_total`；trailer 带 earliest/latest。
+- 语义：消费者起点低于 `earliest_offset`：保留期已回收未读消息。这是消费
+  停滞的症状，**不是**服务端丢事件；服务端不 clamp 显式 offset。
+- 处置：确认消费者活着、`DescribeGroup` 的 lag 与 committed 是否停滞；让
+  消费端按 `MqV2ResetPolicy`（`EARLIEST`/`LATEST`/默认 `FAIL`）显式选择重置，
+  并记录丢掉的区间。
+- **不要**调大 `retention_secs` 掩盖消费停滞（数据仍在增长，问题会复发）；
+  不要手工改组位点。
+- 升级：若是 workflow trigger / durable outbox 的消费者，先修 Agent 侧
+  投递循环再重置。
+
+### `CoordMqV2AckRejected` — MQ v2 Ack 被拒绝（代际/分配）
+
+- 指标：`coord_mq_v2_ack_rejected_total`；稳定错误码
+  `GROUP_EPOCH_STALE` / `NOT_GROUP_MEMBER` / `GROUP_NOT_FOUND`。
+- 语义：代际 fencing 在 apply 内执行；成员变化/会话过期会推进 generation，
+  旧代际的 Ack 必须失败（不得被吞）。committed 单调不回退，重复/更旧的
+  Ack 是幂等成功——被拒绝说明**代际或分配**已变。
+- 处置：让消费者重新 `JoinGroup` 后按新分配重试；确认请求里的
+  `member_id`/`generation` 与最近一次 Join 一致。
+- **不要**手工推进位点、不要跳过 generation 校验、不要把拒绝降级成告警日志
+  后继续消费。
+- 升级：配合 `CoordMqV2GroupRebalanceStorm` 查成员抖动。
+
+### `CoordMqV2GroupRebalanceStorm` — MQ v2 消费组再平衡风暴
+
+- 指标：`coord_mq_v2_group_rebalances_total` /
+  `coord_mq_v2_group_joins_total`（10m 比值）。
+- 语义：成员变化或会话过期推进 generation；再平衡期间分区短暂无人消费，
+  旧代际 Ack 被拒绝。高比值说明消费者在反复进出组。
+- 处置：查消费者进程重启/OOM、网络抖动、`session_timeout_ms` 与心跳间隔的
+  比例（心跳应显著小于超时）。
+- **不要**通过调大 `session_timeout` 掩盖崩溃重启；不要让同一个 group 混用
+  不同订阅集合（会不停触发重新分配）。
+- 升级：需要稳定分配时按消费契约的组名/订阅约定排查。
+
+### `CoordMqV2GroupMembersExpired` — MQ v2 消费组成员会话过期
+
+- 指标：`coord_mq_v2_group_expired_members_total`、
+  `coord_mq_v2_group_gc_removed_total`。
+- 语义：成员没有在 `session_timeout` 内续期，服务端回收其分配并推进
+  代际；位点保留到组 TTL。
+- 处置：确认消费者进程存活、`Heartbeat` 是否持续成功（Agent 到组 shard
+  Leader 的连接）；检查 Agent 日志里的 `coord.mq.v2 Heartbeat` 错误。
+- **不要**把心跳间隔调到接近超时；不要用"少开消费者"规避。
+- 升级：大面积过期时先看组 shard 的 leader 可用性。
+
+### `CoordMqV2DlqMoved` — MQ v2 死信入队
+
+- 指标：`coord_mq_v2_dlq_moved_total`、`coord_mq_v2_poll_dlq_messages_total`。
+- 语义：消息被显式 `MoveToDlq`（消费方判定毒消息，或 workflow trigger 达到
+  `max_attempts`）。DLQ 保留独立 offset 与保留期，主日志写 tombstone（`Poll`
+  跳过）。
+- 处置：`PollDlq` 读 `reason`/`detail` 与原始 offset；`workflow_trigger_max_attempts`
+  先看对应实例的失败原因；修好消费者/定义后再决定是否重放（重放需显式
+  `Publish`，DX 没有自动重放）。
+- **不要**把 DLQ 当丢弃桶；不要在原因未修前批量重放。
+- 升级：毒消息持续增长时按触发器的 `max_attempts` 与过滤器排查。
+
+### `CoordMqV2SubscribeDrops` — MQ v2 Subscribe 背压丢消息
+
+- 指标：`coord_mq_v2_subscribe_streams`、`_subscribe_messages_total`、
+  `_subscribe_dropped_total`。
+- 语义：`Subscribe` 是契约明确的 best-effort 通道：订阅者队列打满即丢弃，
+  不报错、不重投、**不推进已提交位点**。丢弃是契约内行为，不是服务端故障。
+- 处置：需要至少一次的消费者改用 `Poll` + `Ack`（消费契约 §5.6）；确认
+  该订阅的用途确实允许丢消息（观测/提示类）。
+- **不要**把 Subscribe 当可靠性通道，也不要用调大 buffer 冒充承诺。
+- 升级：若业务要求不丢，迁移到 Poll+Ack 并设 `resetPolicy=FAIL`。
+
 ## 7. KV-T v2 Watch 订阅排障
 
 ### 订阅无事件 / 背压 / 历史不足
