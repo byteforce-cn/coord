@@ -1,8 +1,8 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M5 落地，M6-1/M6-2 落地）
+> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M5 落地，M6-1/M6-2/M6-3 落地）
 >
-> **状态：M0–M5 完成（GO）；M6 进行中（M6-1/M6-2 ✅；M6-3–M6-5 未开始）**。
+> **状态：M0–M5 完成（GO）；M6 进行中（M6-1/M6-2/M6-3 ✅；M6-4–M6-5 未开始）**。
 > M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
@@ -28,7 +28,7 @@
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ✅ | 见 §2c |
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ✅ | 见 §2d |
 | M5 工作流 | v2 outbox/durable/审批/trigger | ✅ | 见 §2e |
-| M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | 🚧 M6-1/M6-2 ✅；M6-3–M6-5 未开始 | 见 §2f |
+| M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | 🚧 M6-1/M6-2/M6-3 ✅；M6-4–M6-5 未开始 | 见 §2f |
 | M7 GA | 全绿 + KV-T GA + 签字 | ⛔ 未达标 | 见 §3 |
 
 ## 2. M0 分项（启动 gate）
@@ -48,7 +48,7 @@
 | M2-2 offset/顺序/幂等 | ✅ | 同一集成文件的 `publish_offsets_are_unique_and_monotonic_under_concurrency`、`duplicate_idempotency_key_returns_the_first_offset`、`publish_after_retention_truncation_reuses_the_idempotency_key`；apply 层（M1-2）的恢复/换届去重由 `cargo test -p coord-server --lib storage::mq_log` 覆盖 |
 | M2-3 上限/错误/原子性 | ✅ | `publish_batch_is_atomic_when_one_entry_is_oversized`、`publish_batch_over_the_quota_writes_nothing`、`publish_batch_rejects_empty_and_over_64_entries`、`topic_epoch_is_enforced_on_the_write_path`；错误码/trailer 只按码断言（`error_code_of`） |
 | M2-4 Agent 代理 + Rust 客户端 | ✅ | `cargo test -p coord-client --lib mq_v2`（5 例：hint 解析、分区缓存、批上限、配置往返）；`cargo test -p coord-agent --test agent_v2_mode_test`（`services.mq=true` + v2 ⇒ 代理注册、无后端时 `UNAVAILABLE`）；`cargo test -p coord --test mq_v2_m2_cluster_test -- --test-threads=1`（真实 3 节点：follower hint、客户端自动重路由、Agent 端到端发布） |
-| M2-5 指标/基准 | ✅ | 指标写入点：`coord_mq_v2_publish_{requests,entries,bytes,duplicates,latency_us,not_leader,rejected}`、`coord_mq_v2_append_{batches,requests}`、`coord_mq_v2_retention_{truncate,segments}`（`cargo test -p coord-server --lib metrics::tests::test_metrics_mq_v2`）；基准入口 `cargo test --release -p coord --test mq_v2_bench -- --ignored --nocapture --test-threads=1`（本机：顺序 445 ops/s、并发 2115 ops/s、平均批深度 5.86 req/entry；数字进 M6-3 报告） |
+| M2-5 指标/基准 | ✅ | 指标写入点：`coord_mq_v2_publish_{requests,entries,bytes,duplicates,latency_us,not_leader,rejected}`、`coord_mq_v2_append_{batches,requests}`、`coord_mq_v2_retention_{truncate,segments}`（`cargo test -p coord-server --lib metrics::tests::test_metrics_mq_v2`）；基准入口 `PERF_GATE=1 cargo test --release -p coord --test mq_v2_bench -- --ignored --nocapture --test-threads=1`（M6-3 报告：`docs/production/ops/mq-v2-performance.md`） |
 
 周期保留回收（M1-5 的「周期」项）由 `mq_v2_reaper_pass` 接线：只在分片 Leader 上按
 topic 保留期提案 `MqTruncate`，无到期段不提案；关闭态零副作用
@@ -83,7 +83,7 @@ Rust 升级后漂到别的分片）。
 |:--|:--|:--|
 | M6-1 Java SDK/示例 | ✅ | **Rust 半边**：`coord-client` 补齐 topic 管理面（`describe_topic`/`list_topics`/`update_topic`/`delete_topic`/`get_topic_deletion`）与 `poll_dlq`（`MqDlqMessage` 带 `reason`/`detail`）；Agent `MqV2Proxy` 从 4 个 RPC 扩到 **18/19**（仅 best-effort `Subscribe` 保留 `UNIMPLEMENTED`，Rust 客户端无 Subscribe）。判据：`cargo test -p coord --test mq_v2_m2_cluster_test -- --test-threads=1`（第 6 段经 Agent 跑通 Describe/List/Join/Poll/Ack/Committed/DescribeGroup/ListGroups/Heartbeat/MoveToDlq/PollDlq/Update/Delete/GetTopicDeletion/Leave）。**Java 半边**：`cn.byteforce.coord.sdk.mq.v2` 的 31 个 record/enum、`client.mqV2()`（18/19 RPC，`Subscribe` 按 best-effort 不实现）与 `MqV2Consumer`（Join/Poll/Ack/Heartbeat + rejoin、topic epoch、offset reset 策略）。判据：`cd coord-java-sdk && mvn -B verify`（`MqV2ModelTest`/`MqV2ClientTest`/`MqV2ConsumerTest`，28 例）；`bash scripts/ci-java-it-cluster.sh start v2` 后 `mvn -B verify -Pit -Dtest=MqV2ClusterIntegrationTest`（3 例：建 topic/幂等重放/双成员消费与 committed·lag/DLQ/update/delete 回收；CI job `java example integration (real server + agent)`）；示例 `bash java-example/scripts/run-v2-example.sh mq` 退出码 0。`check-sdk-sync` 在 PROPOSED 下豁免，翻 COMMITTED 前必须补 |
 | M6-2 Ops | ✅ | 告警：`monitoring/prometheus-rules.yml` 的新 group `coord-mq-v2`（9 条：发布非 Leader/拒绝/延迟、Poll 越界、Ack 拒绝、组再平衡/成员过期、DLQ、Subscribe 丢弃）；runbook：`docs/production/ops/runbook.md` §6 的 9 个同名处置小节；dashboard：`monitoring/grafana-dashboard.json` 的 `MQ v2: Publish / Poll` 与 `MQ v2: Groups / DLQ / Retention`；对照表：`docs/production/ops/observability.md` 第 12–14 行。判据：`bash scripts/check-gate-drills.sh`（33 条告警、锚点可达、无孤儿小节；改名注入负控制变红）、`bash scripts/check-doc-refs.sh`、`python3 -c 'import json;json.load(open("monitoring/grafana-dashboard.json"))'`。边界：lag/配额/保留无连续 gauge，按需 `DescribeGroup`/`DescribeTopic`/`GetTopicDeletion`（observability §2.3） |
-| M6-3 性能/容量/浸泡 | ⏳ 未开始 | 基准入口已存在（`mq_v2_bench`，M2-5 首轮数字）；正式报告与 soak 未跑 |
+| M6-3 性能/容量/浸泡 | ✅ | 基准入口 `PERF_GATE=1 cargo test --release -p coord --test mq_v2_bench -- --ignored --nocapture --test-threads=1`（本机 8 vCPU：顺序 283 ops/s / 并发 2133 ops/s / 批深度 5.90；poll 4783 msgs/s / ack 5563 acks/s；4 成员再平衡 0.14s；阈值 = 基线×0.6，`PERF_GATE` fail-closed）。浸泡 `PERF_GATE=1 MQ_V2_SOAK_SECS=600 cargo test --release -p coord --test mq_v2_soak -- --ignored --nocapture --test-threads=1`：261206 条 publish→poll→ack，每分区 offset 无洞/无重复、committed==published、lag 0。报告 `docs/production/ops/mq-v2-performance.md`（环境/命令/阈值/容量；未跑边界：跨机、多组 shard 聚合、72h、容量打满、快照安装） |
 | M6-4 混沌/Jepsen | ⏳ 未开始 | v2 MQ checker / 故障矩阵未接 |
 | M6-5 备份/恢复/升级/回退 | ⏳ 未开始 | 整节点备份含 MQ 的演练未做 |
 
