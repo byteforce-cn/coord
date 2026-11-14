@@ -302,6 +302,226 @@ fn mq_v2_publish_on_a_three_node_cluster() {
             .into_inner();
         assert_eq!(published.offset, 0, "new topic ⇒ first offset");
         assert_agent_alive(&mut agent);
+
+        // 6. 读面/组协调/DLQ/管理面同样经 Agent 代理（M3/M4 的 RPC 不再 `UNIMPLEMENTED`）：
+        //    Java SDK 走 Agent 通道，所以这条路径就是它的 wire 判据。
+        let described = via_agent
+            .describe_topic(mq_v2::DescribeTopicRequest {
+                topic: "agent-orders".to_string(),
+            })
+            .await
+            .expect("DescribeTopic through the agent")
+            .into_inner();
+        assert_eq!(described.partition_count, 1);
+        assert_eq!(described.topic_epoch, agent_topic.topic_epoch);
+        assert_eq!(described.partitions.len(), 1);
+        assert_eq!(described.partitions[0].next_offset, 1);
+
+        let listed = via_agent
+            .list_topics(mq_v2::ListTopicsRequest {
+                prefix: "agent-".to_string(),
+                page_size: 10,
+                page_token: String::new(),
+            })
+            .await
+            .expect("ListTopics through the agent")
+            .into_inner();
+        assert_eq!(listed.topics.len(), 1);
+        assert_eq!(listed.topics[0].topic, "agent-orders");
+
+        let joined = via_agent
+            .join_group(mq_v2::JoinGroupRequest {
+                group: "agent-g".to_string(),
+                member_id: String::new(),
+                topics: vec!["agent-orders".to_string()],
+                session_timeout_ms: 0,
+            })
+            .await
+            .expect("JoinGroup through the agent")
+            .into_inner();
+        assert!(!joined.member_id.is_empty());
+        assert_eq!(joined.assignments.len(), 1);
+        assert_eq!(joined.assignments[0].committed_offset, 0);
+
+        let polled = via_agent
+            .poll(mq_v2::PollRequest {
+                topic: "agent-orders".to_string(),
+                partition: 0,
+                topic_epoch: agent_topic.topic_epoch,
+                start_offset: Some(0),
+                max_messages: 10,
+                max_bytes: 0,
+                wait_ms: 0,
+            })
+            .await
+            .expect("Poll through the agent")
+            .into_inner();
+        assert_eq!(polled.messages.len(), 1);
+        assert_eq!(polled.messages[0].payload, b"via-agent");
+        assert_eq!(polled.messages[0].key, b"agent-key");
+
+        let acked = via_agent
+            .ack(mq_v2::AckRequest {
+                topic: "agent-orders".to_string(),
+                partition: 0,
+                topic_epoch: agent_topic.topic_epoch,
+                group: "agent-g".to_string(),
+                member_id: joined.member_id.clone(),
+                generation: joined.generation,
+                offset: 0,
+            })
+            .await
+            .expect("Ack through the agent")
+            .into_inner();
+        assert_eq!(acked.committed_offset, 1);
+
+        let committed = via_agent
+            .get_committed_offsets(mq_v2::GetCommittedOffsetsRequest {
+                group: "agent-g".to_string(),
+                partitions: Vec::new(),
+            })
+            .await
+            .expect("GetCommittedOffsets through the agent")
+            .into_inner();
+        assert_eq!(committed.offsets.len(), 1);
+        assert!(committed.offsets[0].committed);
+        assert_eq!(committed.offsets[0].offset, 1);
+
+        let group = via_agent
+            .describe_group(mq_v2::DescribeGroupRequest {
+                group: "agent-g".to_string(),
+            })
+            .await
+            .expect("DescribeGroup through the agent")
+            .into_inner();
+        assert_eq!(group.group, "agent-g");
+        assert_eq!(group.members.len(), 1);
+        assert_eq!(group.partitions.len(), 1);
+        assert_eq!(group.partitions[0].committed_offset, 1);
+        assert_eq!(group.partitions[0].lag, 0);
+
+        let groups = via_agent
+            .list_groups(mq_v2::ListGroupsRequest {
+                prefix: "agent-".to_string(),
+                page_size: 10,
+                page_token: String::new(),
+            })
+            .await
+            .expect("ListGroups through the agent")
+            .into_inner();
+        assert_eq!(groups.groups, vec!["agent-g".to_string()]);
+
+        let heartbeat = via_agent
+            .heartbeat(mq_v2::HeartbeatRequest {
+                group: "agent-g".to_string(),
+                member_id: joined.member_id.clone(),
+                generation: joined.generation,
+            })
+            .await
+            .expect("Heartbeat through the agent")
+            .into_inner();
+        assert_eq!(heartbeat.generation, joined.generation);
+        assert!(!heartbeat.rebalance_required);
+
+        let empty_dlq = via_agent
+            .poll_dlq(mq_v2::PollDlqRequest {
+                topic: "agent-orders".to_string(),
+                partition: 0,
+                topic_epoch: agent_topic.topic_epoch,
+                start_offset: None,
+                max_messages: 10,
+            })
+            .await
+            .expect("PollDlq through the agent")
+            .into_inner();
+        assert!(empty_dlq.messages.is_empty());
+
+        let moved = via_agent
+            .move_to_dlq(mq_v2::MoveToDlqRequest {
+                topic: "agent-orders".to_string(),
+                partition: 0,
+                topic_epoch: agent_topic.topic_epoch,
+                offset: 0,
+                reason: "poison".to_string(),
+                detail: "proxied move".to_string(),
+            })
+            .await
+            .expect("MoveToDlq through the agent")
+            .into_inner();
+        assert_eq!(moved.dlq_offset, 0);
+        assert!(!moved.already_moved);
+
+        let dlq = via_agent
+            .poll_dlq(mq_v2::PollDlqRequest {
+                topic: "agent-orders".to_string(),
+                partition: 0,
+                topic_epoch: agent_topic.topic_epoch,
+                start_offset: None,
+                max_messages: 10,
+            })
+            .await
+            .expect("PollDlq after move")
+            .into_inner();
+        assert_eq!(dlq.messages.len(), 1);
+        assert_eq!(dlq.messages[0].offset, 0, "DLQ keeps the original offset");
+        assert_eq!(dlq.messages[0].dlq_reason, "poison");
+        assert_eq!(dlq.messages[0].dlq_detail, "proxied move");
+
+        let updated = via_agent
+            .update_topic(mq_v2::UpdateTopicRequest {
+                topic: "agent-orders".to_string(),
+                expected_topic_epoch: agent_topic.topic_epoch,
+                config: Some(mq_v2::TopicConfig {
+                    retention_secs: 7200,
+                    ..Default::default()
+                }),
+            })
+            .await
+            .expect("UpdateTopic through the agent")
+            .into_inner();
+        assert_eq!(
+            updated.config.as_ref().map(|config| config.retention_secs),
+            Some(7200)
+        );
+
+        let doomed = via_agent
+            .create_topic(mq_v2::CreateTopicRequest {
+                topic: "agent-doomed".to_string(),
+                partitions: 1,
+                request_id: String::new(),
+                config: None,
+            })
+            .await
+            .expect("create doomed topic")
+            .into_inner();
+        let deleted = via_agent
+            .delete_topic(mq_v2::DeleteTopicRequest {
+                topic: "agent-doomed".to_string(),
+                expected_topic_epoch: doomed.topic_epoch,
+            })
+            .await
+            .expect("DeleteTopic through the agent")
+            .into_inner();
+        assert!(!deleted.delete_id.is_empty());
+        let deletion = via_agent
+            .get_topic_deletion(mq_v2::GetTopicDeletionRequest {
+                delete_id: deleted.delete_id.clone(),
+            })
+            .await
+            .expect("GetTopicDeletion through the agent")
+            .into_inner();
+        assert_eq!(deletion.delete_id, deleted.delete_id);
+        assert_eq!(deletion.topic, "agent-doomed");
+
+        via_agent
+            .leave_group(mq_v2::LeaveGroupRequest {
+                group: "agent-g".to_string(),
+                member_id: joined.member_id,
+                generation: joined.generation,
+            })
+            .await
+            .expect("LeaveGroup through the agent");
+        assert_agent_alive(&mut agent);
     });
 
     cluster.assert_all_alive();
