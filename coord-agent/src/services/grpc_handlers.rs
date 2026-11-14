@@ -2149,8 +2149,10 @@ impl Workflow for WorkflowEngineService {
 
         // 发起人取自 CCT（空主体 ⇒ None），注入实例供审批自审判定。
         let initiator = non_empty(&identity.subject);
+        // 幂等键（可选）：同键重放返回首个 workflow_id（ADR-0016 D12 的 Start 幂等）。
+        let idempotency_key = non_empty(req.idempotency_key.trim());
         let inst = self
-            .start_instance_as(&def_id, input, initiator)
+            .start_instance_as_with_key(&def_id, input, initiator, idempotency_key)
             .await
             .map_err(map_engine_error)?;
 

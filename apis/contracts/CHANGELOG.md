@@ -1,3 +1,14 @@
+## [contracts/v1.12.0] — 2026-11-14（Minor：Workflow Start 幂等键）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 的 `WorkflowStartRequest` 追加可选字段
+`idempotency_key = 4`；未改动任何既有字段编号/枚举/错误码；`buf breaking` 基线不变）。
+
+- **语义**：同键重放返回**首次**创建的 `workflow_id`，且不重置既有实例状态
+  （已 `COMPLETED` 的实例不会被重新驱动）；作用域是 definition。
+- **用途**：MQ 触发器以 `mq:<topic_id>:<partition>:<offset>` 作 Start 幂等键 ——
+  崩溃重投由 Start 幂等吸收（ADR-0016 D12）。
+- **兼容性**：缺省空串 = 旧行为（每次 Start 新实例）。Java SDK 暴露面随 M6-1。
+
 ## [contracts/v1.11.0] — 2026-11-12（Minor：MQ v2 契约冻结为 PROPOSED）
 
 **发布口径**：**Minor**（新增 1 个 `coord.mq.v2` 包 + 追加 11 个结构化错误码；

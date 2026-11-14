@@ -1286,14 +1286,32 @@ where
         input: Value,
         initiator: Option<&str>,
     ) -> Result<WorkflowInstance, RuntimeError> {
+        self.start_as_with_id(definition, input, initiator, None)
+            .await
+    }
+
+    /// 同 [`EngineRuntime::start_as`]，但可指定实例 id（Start 幂等键的确定性 id）。
+    ///
+    /// `None` = 随机 UUID（旧行为逐字不变）；`Some(id)` = 调用方派生，重放命中同一实例。
+    pub async fn start_as_with_id(
+        &self,
+        definition: &WorkflowDefinition,
+        input: Value,
+        initiator: Option<&str>,
+        instance_id: Option<&str>,
+    ) -> Result<WorkflowInstance, RuntimeError> {
         let now_ms = self.clock.now_ms();
 
         // 工作流级输入变换/校验
         let input_val = match self.apply_workflow_input(definition, input) {
             Ok(v) => v,
             Err(fault) => {
-                // 输入校验失败 → faulted 实例（RFC 7807 validation 错误）
-                let mut inst = WorkflowInstance::new(definition, Value::Null, now_ms);
+                // 输入校验失败 → faulted 实例（RFC 7807 validation 错误）。
+                // 幂等 Start 下同样用确定性 id 落库：重放命中同一个 faulted 实例。
+                let mut inst = match instance_id {
+                    Some(id) => WorkflowInstance::new_with_id(id, definition, Value::Null, now_ms),
+                    None => WorkflowInstance::new(definition, Value::Null, now_ms),
+                };
                 inst.status = InstanceStatus::Failed;
                 inst.fault = Some(fault);
                 inst.initiator = initiator.map(str::to_string);
@@ -1306,7 +1324,10 @@ where
             }
         };
 
-        let mut inst = WorkflowInstance::new(definition, input_val, now_ms);
+        let mut inst = match instance_id {
+            Some(id) => WorkflowInstance::new_with_id(id, definition, input_val, now_ms),
+            None => WorkflowInstance::new(definition, input_val, now_ms),
+        };
         inst.initiator = initiator.map(str::to_string);
 
         self.store

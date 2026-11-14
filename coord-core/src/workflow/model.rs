@@ -356,6 +356,27 @@ pub fn definition_hash(def: &WorkflowDefinition) -> String {
         .collect()
 }
 
+/// Start 幂等键 → 确定性实例 id。
+///
+/// `sha256(definition_id NUL key)` 取前 32 个 hex 字符并加 `wf-` 前缀：跨进程/跨重启
+/// 稳定（重启后同键仍命中同一实例），且不同定义/不同键的碰撞概率可忽略。用 NUL 分隔
+/// 两个输入，避免 `("ab","c")` 与 `("a","bc")` 拼成同一个串。
+pub fn idempotent_instance_id(definition_id: &str, key: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(definition_id.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(key.as_bytes());
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let short: String = hex.chars().take(32).collect();
+    format!("wf-{short}")
+}
+
 /// 递归按键排序构造可达的 `Value` 副本（数组元素顺序保留）。
 fn canonical_json(value: Value) -> Value {
     match value {
@@ -1109,8 +1130,21 @@ impl std::fmt::Display for ValidationError {
 impl WorkflowInstance {
     /// 创建新的工作流实例（标准相位：创建即 `Pending`，start 驱动后进入 `Running`）
     pub fn new(definition: &WorkflowDefinition, input: Value, now_ms: i64) -> Self {
+        Self::new_with_id(&uuid::Uuid::new_v4().to_string(), definition, input, now_ms)
+    }
+
+    /// 同 [`WorkflowInstance::new`]，但用调用方给定的实例 id（Start 幂等键派生）。
+    ///
+    /// 幂等 Start 用确定性 id 表达「同键 = 同一实例」：重放直接命中已存在的实例，
+    /// 既不需要额外的幂等记录，也不会把已完成实例重置回 `Pending`。
+    pub fn new_with_id(
+        id: &str,
+        definition: &WorkflowDefinition,
+        input: Value,
+        now_ms: i64,
+    ) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
             definition_ns: definition.document.namespace.clone(),
             definition_name: definition.document.name.clone(),
             definition_version: definition.document.version.clone(),
