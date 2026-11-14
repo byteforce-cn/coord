@@ -1,8 +1,8 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M5 落地）
+> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M5 落地，M6-1 Rust 半边落地）
 >
-> **状态：M0、M1、M2、M3、M4、M5 完成（GO）；M6 未开始**。
+> **状态：M0–M5 完成（GO）；M6 进行中（M6-1 🚧：Rust 客户端/Agent 代理已通，Java SDK 待落地）**。
 > M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
@@ -28,7 +28,7 @@
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ✅ | 见 §2c |
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ✅ | 见 §2d |
 | M5 工作流 | v2 outbox/durable/审批/trigger | ✅ | 见 §2e |
-| M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | ⏳ 未开始 | — |
+| M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | 🚧 M6-1 进行中 | 见 §2f |
 | M7 GA | 全绿 + KV-T GA + 签字 | ⛔ 未达标 | 见 §3 |
 
 ## 2. M0 分项（启动 gate）
@@ -76,6 +76,16 @@ Rust 升级后漂到别的分片）。
 | M4-3 UpdateTopic/Describe/List | ✅ | 同一测试文件的 `describe_topic_reports_config_partitions_and_bounds`、`list_topics_paginates_and_filters_by_prefix`、`update_topic_merges_fields_and_enforces_the_epoch`；`coord-server/src/mq_v2/admin.rs` 的 2 个合并/校验单测。`UpdateTopic` 的 `0 = 保持当前值`（含 `max_bytes`，清空配额需删除重建）已在代码注释固定 |
 | M4-2 DeleteTopic/GetTopicDeletion | ✅ | `cargo test -p coord --test mq_v2_m4_delete_test`（3 例：删除后立即 `TOPIC_NOT_FOUND`、reaper 回收 2 个分区 + 组位点清空 + `GetTopicDeletion` 转 Done、同名重建不复活、重复回收幂等、代际/未知 id 映射）；存储层 `storage::mq_log::tests::drop_partition_removes_records_dlq_and_idempotency_and_replays_idempotently`、`storage::mq_group::tests::drop_topic_removes_only_that_topics_offsets` |
 | M4-4 能力/审计 | ✅ | `coord-core/src/grpc_auth.rs::mq_v2_rpcs_are_mapped_with_the_same_capability_split_as_v1`（21 个 RPC 的能力映射）；`dlq_is_gated_by_the_dlq_capability`（未交付 `FAILED_PRECONDITION`）；`mq_v2_g0_test`（关闭/未交付/已交付三态 + reflection）。审计沿用全仓口径（拒绝路径带 RPC 方法与稳定码；成功路径的调用方身份传递是本仓 v2 backlog，`audit/mod.rs` 已文档化），MQ 不另建一套 |
+
+### M6 分项（SDK、Ops、性能、混沌与 Jepsen）
+
+| 项 | 状态 | 证据 / 未达标原因 |
+|:--|:--|:--|
+| M6-1 Java SDK/示例 | 🚧 Rust 半边 ✅，Java 未开始 | **Rust 半边**：`coord-client` 补齐 topic 管理面（`describe_topic`/`list_topics`/`update_topic`/`delete_topic`/`get_topic_deletion`）与 `poll_dlq`（`MqDlqMessage` 带 `reason`/`detail`）；Agent `MqV2Proxy` 从 4 个 RPC 扩到 **18/19**（仅 best-effort `Subscribe` 保留 `UNIMPLEMENTED`，Rust 客户端无 Subscribe）。判据：`cargo test -p coord --test mq_v2_m2_cluster_test -- --test-threads=1`（第 6 段经 Agent 跑通 Describe/List/Join/Poll/Ack/Committed/DescribeGroup/ListGroups/Heartbeat/MoveToDlq/PollDlq/Update/Delete/GetTopicDeletion/Leave）。**Java 半边**未开始：接口/consumer helper/示例/真实集群 IT 的实现计划见 `docs/superpowers/plans/2026-11-14-mq-v2-m6-1-java-sdk.md`（`check-sdk-sync` 在 PROPOSED 下豁免，翻 COMMITTED 前必须补） |
+| M6-2 Ops | ⏳ 未开始 | 指标已有（M2-5/M3-6）；dashboard/告警/runbook 与 `check-gate-drills.sh` 未接 |
+| M6-3 性能/容量/浸泡 | ⏳ 未开始 | 基准入口已存在（`mq_v2_bench`，M2-5 首轮数字）；正式报告与 soak 未跑 |
+| M6-4 混沌/Jepsen | ⏳ 未开始 | v2 MQ checker / 故障矩阵未接 |
+| M6-5 备份/恢复/升级/回退 | ⏳ 未开始 | 整节点备份含 MQ 的演练未做 |
 
 ### M5 分项（v2 outbox、durable 与触发）
 
