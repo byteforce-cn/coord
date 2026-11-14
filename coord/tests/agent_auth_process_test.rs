@@ -483,9 +483,13 @@ cache = true
                 break;
             }
             Err(status) => {
+                // `Cancelled`（连接被关闭）= Agent 还在起/刚换端口：与 Unavailable 同类，
+                // 是冷启动窗口的传输层瞬时错误，不是权限结论（判据在下面的 assert）。
                 let retriable = matches!(
                     status.code(),
-                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                    tonic::Code::Unavailable
+                        | tonic::Code::DeadlineExceeded
+                        | tonic::Code::Cancelled
                 ) || status.message().contains("unknown RPC method");
                 last_err = Some(status);
                 assert!(

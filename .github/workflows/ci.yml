@@ -757,6 +757,12 @@ jobs:
       - name: Install protoc (coord-proto build dependency)
         run: bash scripts/ci-install-protoc.sh
       - name: cargo audit (RustSec)
+        # 该 action 只做**上报**（本身 `ignoreReturnCode: true`），真正的阻断闸是
+        # 下面的 cargo deny。它的 `checks.update` 在重跑/同 SHA 场景会间歇返回
+        # 404（`Not Found - rest/checks/runs#update-a-check-run`），把干净的依赖树
+        # 变红；`continue-on-error` 只吸收这条上报失败，不让安全检查因"报不上去"而
+        # 阻断。漏洞仍由 cargo deny 的 advisories 策略拦截（未豁免即 exit≠0）。
+        continue-on-error: true
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

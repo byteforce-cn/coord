@@ -132,6 +132,44 @@ async fn list_topics_any(addrs: &[String]) -> Result<usize, tonic::Status> {
     Err(last.unwrap_or_else(|| tonic::Status::unavailable("no endpoint answered")))
 }
 
+/// 等分片 Leader 可见：恢复/重启后 shard raft 的选举比 region 0 慢。
+async fn wait_topic_leader(addrs: &[String], topic: &str, partition: i32) {
+    let deadline = std::time::Instant::now() + FAILOVER;
+    loop {
+        for addr in addrs {
+            let Ok(channel) = Channel::from_shared(format!("http://{addr}"))
+                .expect("endpoint")
+                .connect_timeout(Duration::from_secs(2))
+                .connect()
+                .await
+            else {
+                continue;
+            };
+            let mut client = MqClient::new(channel);
+            if let Ok(response) = client
+                .get_topic_leader(mq_v2::GetTopicLeaderRequest {
+                    topic: topic.to_string(),
+                })
+                .await
+            {
+                if response
+                    .into_inner()
+                    .partitions
+                    .iter()
+                    .any(|entry| entry.partition == partition && !entry.leader_addr.is_empty())
+                {
+                    return;
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shard leader for {topic}/{partition} never became visible after restore"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[test]
 #[ignore = "real-process backup/restore drill; run explicitly"]
 fn backup_restore_and_toggle_preserve_mq_v2_state() {
@@ -259,17 +297,27 @@ fn backup_restore_and_toggle_preserve_mq_v2_state() {
             "committed offsets must survive restore"
         );
 
-        let next = mq
-            .publish(&MqPublish {
-                topic: TOPIC.to_string(),
-                partition: 0,
-                topic_epoch,
-                payload: b"after-restore".to_vec(),
-                idempotency_key: "after-restore".to_string(),
-                ..Default::default()
-            })
-            .await
-            .expect("publish after restore");
+        let deadline = std::time::Instant::now() + FAILOVER;
+        let next = loop {
+            match mq
+                .publish(&MqPublish {
+                    topic: TOPIC.to_string(),
+                    partition: 0,
+                    topic_epoch,
+                    payload: b"after-restore".to_vec(),
+                    idempotency_key: "after-restore".to_string(),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(result) => break result,
+                Err(error) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "publish after restore never succeeded: {error}"
+                ),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
         assert_eq!(next.offset, 5, "offsets must continue after restore");
     });
 
@@ -311,6 +359,7 @@ fn backup_restore_and_toggle_preserve_mq_v2_state() {
     let addrs = cluster.addrs();
 
     runtime().block_on(async {
+        wait_topic_leader(&addrs, TOPIC, 0).await;
         let client = Client::new(ClientConfig::new(addrs.clone()))
             .await
             .expect("coord client");
