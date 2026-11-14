@@ -264,7 +264,8 @@ MAJOR：破坏性变更（非必要不使用；须提前 ≥ 3 个月发布废�
 - **PROPOSED 状态（绿场新包）**：wire 已冻结但实现/GA 未到，登记在 `STATUS.md`
   的 PROPOSED 段——不是承诺面，不参与目标日期/SDK impl 强制；翻成 COMMITTED 时
   补期限并恢复双向强制。PROPOSED 与 EXPERIMENTAL 的区别：前者形状已定、后者
-  形状未定。当前只有 `coord.mq.v2`（ADR-0016）。
+  形状未定。曾以此状态冻结的 `coord.mq.v2`（ADR-0016）已于 2026-11-14 转
+  COMMITTED。
 
 - 每次 MINOR 及以上发版，proto 产物推送至企业 Artifact 仓库，并更新《协议变更公示板》。
 - 客户端依赖规则：锁定到 MINOR（如 `contracts/v1.x`），自动吸收 PATCH。
@@ -321,9 +322,9 @@ v1 的「Txn 条件不满足 = 非错误」**不适用于 v2 OCC**：v2 没有 `
 
 ### 6.1.2 MQ v2（ADR-0016）新增结构化码
 
-`coord.mq.v2` 在 M0 冻结、当前状态为 **PROPOSED**（见 STATUS.md；GA 前不构成
-承诺面）。码值仍按跨语言逐字一致维护（Rust `CoordErrorCode` ↔ Java `ErrorCode`），
-因为一旦 M7 翻转 COMMITTED，码表就是承诺；提前落地避免那时再改 wire。
+`coord.mq.v2` 在 M0 冻结 wire、2026-11-14 GA 后状态为 **COMMITTED**（见 STATUS.md）。
+码值按跨语言逐字一致维护（Rust `CoordErrorCode` ↔ Java `ErrorCode`）——GA 后码表
+就是承诺，任何改动都得走 `buf breaking` 与跨语言门禁。
 
 | 码 | gRPC Status | 语义 | 客户端动作 |
 |:---|:---|:---|:---|

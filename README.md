@@ -68,7 +68,7 @@ Server ports `50051` / `50052` are reachable only by agents — the Server is ne
 
 - **Discovery & config:** `Registry` · `ConfigCenter` · `Event`
 - **Coordination:** `Lock` · `IdGen` · `LeaderElection`
-- **Data & messaging:** `Cache` · `Mq` · `Replica` (ISR replication for Cache/MQ)
+- **Data & messaging:** `Cache` · `Mq` (v1; v2 clusters use `coord.mq.v2`) · `Replica` (ISR replication for Cache/MQ)
 - **Automation:** `Workflow` · `Scheduler` · `Policy` · `FeatureFlags`
 - **Resilience & security:** `CircuitBreaker` · `RateLimiter` · `Transit` · `Pki`
 - **Extensibility:** every service above is hosted as a **builtin plugin** by the plugin manager — one registry owns each service's lifecycle, gRPC surface and health. `Plugin` (`coord.plugin.Plugin`) exposes that unified service/plugin inventory (with per-service health), and loads external wasm/JS plugins when `[plugins]` is enabled (off by default)

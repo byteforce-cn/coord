@@ -210,7 +210,8 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.mq.v1.MQ/MoveToDlq" => Some("coord:mq:dlq"),
         "/coord.mq.v1.MQ/DeleteTopic" => Some("coord:mq:manage"),
 
-        // MQ v2（ADR-0016；PROPOSED）——能力名与 v1 同义复用（同一份消息权限）。
+        // MQ v2（ADR-0016；COMMITTED，状态见 apis/contracts/STATUS.md）——能力名与 v1
+        // 同义复用（同一份消息权限）。
         // 能力门禁在服务壳之前判定：先 PERMISSION_DENIED（无能力）再
         // FAILED_PRECONDITION（有能力但未启用），不泄露内部开关状态。
         "/coord.mq.v2.MQ/CreateTopic" => Some("coord:mq:manage"),

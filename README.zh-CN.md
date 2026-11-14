@@ -68,7 +68,7 @@ Server 的 `50051` / `50052` 端口仅对 Agent 可达，**对业务应用永不
 
 - **发现与配置**：`Registry` · `ConfigCenter` · `Event`
 - **协调原语**：`Lock` · `IdGen` · `LeaderElection`
-- **数据与消息**：`Cache` · `Mq` · `Replica`（Cache/MQ 的 ISR 复制）
+- **数据与消息**：`Cache` · `Mq`（v1；v2 集群用 `coord.mq.v2`） · `Replica`（Cache/MQ 的 ISR 复制）
 - **流程自动化**：`Workflow` · `Scheduler` · `Policy` · `FeatureFlags`
 - **韧性与安全**：`CircuitBreaker` · `RateLimiter` · `Transit` · `Pki`
 - **可扩展**：上述服务全部由插件管理器作为**内建插件**承载 —— 一份注册表统一拥有各服务的生命周期、gRPC 面与健康；`Plugin`（`coord.plugin.Plugin`）暴露统一的服务/插件清单（含逐项健康），并在 `[plugins]` 开启时加载外部 wasm/JS 插件（默认关闭）

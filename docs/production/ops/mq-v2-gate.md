@@ -1,8 +1,8 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M5 落地，M6-1–M6-5 全部落地）
+> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M7 完成，GA 已签）
 >
-> **状态：M0–M5 完成（GO）；M6 完成（M6-1–M6-5 ✅）**。
+> **状态：M0–M6 完成（GO）；M7 GA 已于 2026-11-14 签字（`coord.mq.v2` 转 COMMITTED，§4）**。
 > M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
@@ -12,7 +12,8 @@
 > 见 §1 与 §2c。保留回收与组回收的周期入口（`mq_v2_reaper_pass`，仅分片 Leader
 > 提案）随 M2-1/M3-3 接线。
 > M7 GA 不早于 KV-T GA（`docs/adr/0015-kv-t.md` D8），该前置已于
-> 2026-11-11 签字。本文是 MQ v2 gate 状态的**单一事实源**；语义以
+> 2026-11-11 签字；M7-1/M7-2/M7-3 于 2026-11-14 完成（§4）。本文是 MQ v2 gate
+> 状态的**单一事实源**；语义以
 > `docs/adr/0016-mq-v2.md` 为准，工作项与依赖以
 > `docs/superpowers/specs/2026-10-29-mq-v2-design.md` 为准。
 >
@@ -29,14 +30,14 @@
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ✅ | 见 §2d |
 | M5 工作流 | v2 outbox/durable/审批/trigger | ✅ | 见 §2e |
 | M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | ✅ | 见 §2f |
-| M7 GA | 全绿 + KV-T GA + 签字 | ⛔ 未达标 | 见 §3 |
+| M7 GA | 全绿 + KV-T GA + 签字 | ✅ | §3 全部满足；签字记录见 §4，post-GA backlog 见 §6 |
 
 ## 2. M0 分项（启动 gate）
 
 | 项 | 状态 | 证据 / 未达标原因 |
 |:--|:--|:--|
 | M0-1 ADR/设计/任务树 | ✅ | ADR-0016 accepted；设计文档 + 本文件入库；#178 评论链接 8 个 phase issue（#332–#339） |
-| M0-2 `coord.mq.v2` 契约冻结 | ✅ | 两侧 proto 副本 + build 接线；`check-wire-sync.sh` / `check-wire-descriptor.sh`（strict）/ `buf lint` / `check-error-code-contract.sh` / `check-sdk-sync.sh`（PROPOSED 豁免）绿；11 个码 Rust↔Java 逐字一致；19 个 RPC 能力映射进 `rpc_capability`（capability registry 门禁强制） |
+| M0-2 `coord.mq.v2` 契约冻结 | ✅ | 两侧 proto 副本 + build 接线；`check-wire-sync.sh` / `check-wire-descriptor.sh`（strict）/ `buf lint` / `check-error-code-contract.sh` / `check-sdk-sync.sh` 绿（M0 时 PROPOSED 豁免；M7-2 已补 `GA_IMPLS` 转强制）；11 个码 Rust↔Java 逐字一致；19 个 RPC 能力映射进 `rpc_capability`（capability registry 门禁强制） |
 | M0-3 `[mq_v2]` 配置/启动校验 | ✅ | `cargo test -p coord config::tests::test_mq_v2`（5 例）；默认关闭；非法值点名 `mq_v2.*`；`enabled=true` 缺 `[kv_t]` 启动拒绝并点名两项 |
 | M0-4 服务壳/能力门禁 | ✅ | `cargo test -p coord --test mq_v2_g0_test`（4 例：关闭/未交付/已交付三态 + reflection 可见）；`coord_mq_v2_enabled` gauge；v1 数据面不受影响。Agent `MqV2Proxy` 已随 M2-4 接线（见 §2b） |
 
@@ -81,7 +82,7 @@ Rust 升级后漂到别的分片）。
 
 | 项 | 状态 | 证据 / 未达标原因 |
 |:--|:--|:--|
-| M6-1 Java SDK/示例 | ✅ | **Rust 半边**：`coord-client` 补齐 topic 管理面（`describe_topic`/`list_topics`/`update_topic`/`delete_topic`/`get_topic_deletion`）与 `poll_dlq`（`MqDlqMessage` 带 `reason`/`detail`）；Agent `MqV2Proxy` 从 4 个 RPC 扩到 **18/19**（仅 best-effort `Subscribe` 保留 `UNIMPLEMENTED`，Rust 客户端无 Subscribe）。判据：`cargo test -p coord --test mq_v2_m2_cluster_test -- --test-threads=1`（第 6 段经 Agent 跑通 Describe/List/Join/Poll/Ack/Committed/DescribeGroup/ListGroups/Heartbeat/MoveToDlq/PollDlq/Update/Delete/GetTopicDeletion/Leave）。**Java 半边**：`cn.byteforce.coord.sdk.mq.v2` 的 31 个 record/enum、`client.mqV2()`（18/19 RPC，`Subscribe` 按 best-effort 不实现）与 `MqV2Consumer`（Join/Poll/Ack/Heartbeat + rejoin、topic epoch、offset reset 策略）。判据：`cd coord-java-sdk && mvn -B verify`（`MqV2ModelTest`/`MqV2ClientTest`/`MqV2ConsumerTest`，28 例）；`bash scripts/ci-java-it-cluster.sh start v2` 后 `mvn -B verify -Pit -Dtest=MqV2ClusterIntegrationTest`（3 例：建 topic/幂等重放/双成员消费与 committed·lag/DLQ/update/delete 回收；CI job `java example integration (real server + agent)`）；示例 `bash java-example/scripts/run-v2-example.sh mq` 退出码 0。`check-sdk-sync` 在 PROPOSED 下豁免，翻 COMMITTED 前必须补 |
+| M6-1 Java SDK/示例 | ✅ | **Rust 半边**：`coord-client` 补齐 topic 管理面（`describe_topic`/`list_topics`/`update_topic`/`delete_topic`/`get_topic_deletion`）与 `poll_dlq`（`MqDlqMessage` 带 `reason`/`detail`）；Agent `MqV2Proxy` 从 4 个 RPC 扩到 **18/19**（仅 best-effort `Subscribe` 保留 `UNIMPLEMENTED`，Rust 客户端无 Subscribe）。判据：`cargo test -p coord --test mq_v2_m2_cluster_test -- --test-threads=1`（第 6 段经 Agent 跑通 Describe/List/Join/Poll/Ack/Committed/DescribeGroup/ListGroups/Heartbeat/MoveToDlq/PollDlq/Update/Delete/GetTopicDeletion/Leave）。**Java 半边**：`cn.byteforce.coord.sdk.mq.v2` 的 31 个 record/enum、`client.mqV2()`（18/19 RPC，`Subscribe` 按 best-effort 不实现）与 `MqV2Consumer`（Join/Poll/Ack/Heartbeat + rejoin、topic epoch、offset reset 策略）。判据：`cd coord-java-sdk && mvn -B verify`（`MqV2ModelTest`/`MqV2ClientTest`/`MqV2ConsumerTest`，28 例）；`bash scripts/ci-java-it-cluster.sh start v2` 后 `mvn -B verify -Pit -Dtest=MqV2ClusterIntegrationTest`（3 例：建 topic/幂等重放/双成员消费与 committed·lag/DLQ/update/delete 回收；CI job `java example integration (real server + agent)`）；示例 `bash java-example/scripts/run-v2-example.sh mq` 退出码 0。`check-sdk-sync` 的 PROPOSED 豁免已随 M7-2 消失（`MqV2ClientImpl` 进入 `GA_IMPLS`），反向覆盖回到强制 |
 | M6-2 Ops | ✅ | 告警：`monitoring/prometheus-rules.yml` 的新 group `coord-mq-v2`（9 条：发布非 Leader/拒绝/延迟、Poll 越界、Ack 拒绝、组再平衡/成员过期、DLQ、Subscribe 丢弃）；runbook：`docs/production/ops/runbook.md` §6 的 9 个同名处置小节；dashboard：`monitoring/grafana-dashboard.json` 的 `MQ v2: Publish / Poll` 与 `MQ v2: Groups / DLQ / Retention`；对照表：`docs/production/ops/observability.md` 第 12–14 行。判据：`bash scripts/check-gate-drills.sh`（33 条告警、锚点可达、无孤儿小节；改名注入负控制变红）、`bash scripts/check-doc-refs.sh`、`python3 -c 'import json;json.load(open("monitoring/grafana-dashboard.json"))'`。边界：lag/配额/保留无连续 gauge，按需 `DescribeGroup`/`DescribeTopic`/`GetTopicDeletion`（observability §2.3） |
 | M6-3 性能/容量/浸泡 | ✅ | 基准入口 `PERF_GATE=1 cargo test --release -p coord --test mq_v2_bench -- --ignored --nocapture --test-threads=1`（本机 8 vCPU：顺序 283 ops/s / 并发 2133 ops/s / 批深度 5.90；poll 4783 msgs/s / ack 5563 acks/s；4 成员再平衡 0.14s；阈值 = 基线×0.6，`PERF_GATE` fail-closed）。浸泡 `PERF_GATE=1 MQ_V2_SOAK_SECS=600 cargo test --release -p coord --test mq_v2_soak -- --ignored --nocapture --test-threads=1`：261206 条 publish→poll→ack，每分区 offset 无洞/无重复、committed==published、lag 0。报告 `docs/production/ops/mq-v2-performance.md`（环境/命令/阈值/容量；未跑边界：跨机、多组 shard 聚合、72h、容量打满、快照安装） |
 | M6-4 混沌/Jepsen | ✅ | 真实 3 进程故障矩阵 `cargo test -p coord --test mq_v2_m6_chaos_test -- --ignored --nocapture --test-threads=1`（CI chaos job 构建并执行）：① 分片 Leader `kill -9`（故障窗口 ≥100 次发布）后 offset 唯一/连续/不复用、重启后可读回；② 组 shard Leader `kill -9` 后 Ack 重试且 committed 单调、重启后保留；③ 配额打满整批原子拒绝、offset 无空洞、已提交可读；④ follower 对称网络分区下多数派可写、heal 后 offset 连续。**发现并修复**：`coord-client` 的分片/组 Leader 缓存原先只跟随 `NOT_LEADER` hint，进程级 kill 后无 hint 的 `UNAVAILABLE` 会把分区永久钉在死地址；`partition_call`/`group_call` 现在驱逐缓存后重新发现（`cargo test -p coord-client --lib` 72 例回归）。边界：快照安装中断由 KV-T chaos 覆盖（MQ 段随 Region 快照恢复），本套件不重复注入；Jepsen 是确定性故障矩阵 + ≥100 样本，不是随机生成器 |
@@ -110,9 +111,16 @@ Rust 升级后漂到别的分片）。
 
 ## 4. 签字记录
 
+> 2026-11-14：M0–M6 的可复跑判据在 `be9c8fa` 的 PR CI run 全绿（含 MQ chaos 与
+> 整节点备份/恢复、Java SDK/示例、fmt+clippy、cargo audit+deny）；本机另复跑了
+> MQ 的 server-lib 71 例、集成 43 例、真实 3 节点 7 例与 Java SDK `mvn verify` 263 例。
+> M6-3 的 ignored 基准 / 600s soak 未在 GA commit 重跑（实现代码自 M6-3 落地后
+> 未变，证据见 §2f），列在 §6 而非本次通过项。本行回填于 `be9c8fa` 之后的仅文档
+> 提交（同一 PR），不改任何判据。
+
 | 日期 | 结论 | 依据 commit / CI run | 未关闭项 | 签字人 |
 |:--|:--|:--|:--|:--|
-| — | **未签** | — | §3 全部 | — |
+| 2026-11-14 | **GO（已签）** | commit `be9c8fa` / CI run [43589056087](https://github.com/byteforce-cn/coord/actions/runs/43589056087)（19 项全绿：test shards 1–3、workspace tests、chaos kill9+soak、chaos multi-raft、java sdk/example、fmt+clippy、cargo audit+deny、proto contract）；本机 Rust MQ 判据 121 例（server-lib 71 + 集成 43 + 真实 3 节点 7）、Java SDK 263 例 | §6 post-GA backlog（不阻塞 GA） | maintainers |
 
 ## 5. 回退/降级口径
 
@@ -121,3 +129,21 @@ Rust 升级后漂到别的分片）。
 - **不能**回退到 MQ v1：v2 集群不服务 v1 MQ，也没有 v1→v2 数据迁移（ADR-0016 D1）。
 - 任一 gate 未达标 ⇒ 停在 gate，不静默降级语义；需要降级时新增 ADR 并记录风险。
 - MQ v2 与 KV-T 的 gate 相互独立：KV-T 已 GA 后，MQ v2 出问题不回退 KV-T 语义。
+
+## 6. Post-GA backlog（不阻塞本次签字）
+
+以下是签字时已明确登记的 GA 之后事项；它们不属于 GA 口径，不得反向读成
+“已交付”：
+
+| 项 | 现状/边界 | 归属 |
+|:--|:--|:--|
+| 自动分区再平衡 / `MovePartition` | 不做；改分区数需删除重建。手工迁移与自动再平衡要新 ADR | ADR-0016 D9/D13 |
+| 压缩（compression） | wire 无压缩字段；引入需 wire 版本化与客户端协商 | ADR-0016 |
+| exactly-once | 不承诺；`Poll`+`Ack` 是至少一次，重复投递是正常形状 | ADR-0016 D1 |
+| 二进制升级/回退演练 | M6-5 未演练（本仓无旧版本二进制）；升级口径仍为停机升级 | `ops/upgrade.md` |
+| 跨机基准 / 多组 shard 聚合 / 72h soak / 容量打满 / 快照安装中断 | M6-3/M6-4 报告已列的未跑边界；不作为 GA 通过项 | `ops/mq-v2-performance.md` |
+| 成功路径的调用方身份审计 | 全仓 v2 backlog（`audit/mod.rs` 已文档化）；拒绝路径已带 RPC 方法与稳定码 | M4-4 |
+| Java `Subscribe` 客户端 | best-effort 面保持 18/19 RPC；需要时按契约新增客户端方法 | M6-1 |
+| lag / 配额 / 保留的连续 gauge | 目前按需 `DescribeGroup`/`DescribeTopic`/`GetTopicDeletion` | M6-2 |
+| 真实毒消息端到端 | M5-3 由分发器单测钉住调用/reason/Ack；未构造端到端毒消息 | M5-3 |
+| 触发器 e2e 冷启动窗口 | 本机一次 `Workflow.Deploy` 的 30s 重试窗口耗尽（`a_killed_agent_redelivers_without_duplicate_instances`），随后单跑与整套 3/3 复跑均绿，PR CI 也绿；观察是否需要区分冷启动错误与放宽窗口 | M5-3 |

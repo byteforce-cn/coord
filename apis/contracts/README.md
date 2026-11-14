@@ -32,6 +32,7 @@ KV/Txn/Lease/Watch 是平台实现底座，保留稳定承诺供 SDK 与数据�
 | PKI 证书签发 | `coord.pki.v1` | 2026-12-31 |
 | 缓存 | `coord.cache.v1` | 2026-12-31 |
 | 消息队列 | `coord.mq.v1` | 2026-12-31 |
+| 消息队列 v2 | `coord.mq.v2` | 2027-12-31 |
 | 特性开关 | `coord.featureflags.v1` | 2026-12-31 |
 | 对象存储（Server） | `coord.storage` | 2026-12-31 |
 | 工作流（Saga） | `coord.workflow.v1` | 2027-03-31 |

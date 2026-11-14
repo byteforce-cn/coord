@@ -159,7 +159,7 @@ is terminal.
 | KV-T v2 | `client.tsoV2()`, `client.kvV2()`, `client.leaseV2()`, `client.txnV2()`, `client.watchV2()`, `client.storageV2()` | `[kv_t]` enabled (default on multi-Region clusters, ADR-0017); writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; txn conflicts are results (replay with a new `startTs`); watch is at-least-once with cursor resume; storage buffers up to 256 MiB |
 | Health | `client.healthCheck()` | agent health check |
 
-## MQ v2 (`client.mqV2()`)
+## MQ v2 (`client.mqV2()`) — COMMITTED (GA 2026-11-14)
 
 `coord.mq.v2` is the server-side partitioned log (ADR-0016): 19 RPCs, 18 of
 which are on this SDK. `Subscribe` is deliberately absent — the contract

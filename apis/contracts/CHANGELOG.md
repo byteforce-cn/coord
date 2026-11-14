@@ -1,3 +1,16 @@
+## [contracts/v1.13.0] — 2026-11-14（状态变更：MQ v2 GA，PROPOSED → COMMITTED）
+
+**发布口径**：**状态变更**（wire 无改动：19 个 RPC / 字段编号 / 11 个结构化错误码与
+`contracts/v1.11.0` 逐字相同；`buf breaking` 基线不变）。
+
+- `coord.mq.v2` 由 PROPOSED 翻 COMMITTED（期限 2027-12-31）：GA gate 证据、未关闭项
+  与 post-GA backlog 见 `docs/production/ops/mq-v2-gate.md`；`STATUS.md` / WHITEPAPER /
+  consumer-contract / boundaries 同步。
+- SDK 双向强制回归：`check-sdk-sync.sh` 的 PROPOSED 豁免消失，Java impl
+  `MqV2ClientImpl` 登记进 `GA_IMPLS`（18/19 RPC；`Subscribe` 按 best-effort 无客户端）。
+- 无迁移说明：v2 集群不服务 MQ v1，也没有 v1→v2 数据迁移（ADR-0016 D1）；GA 不改变
+  升级路径（`docs/production/ops/upgrade.md`）。
+
 ## [contracts/v1.12.0] — 2026-11-14（Minor：Workflow Start 幂等键）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 的 `WorkflowStartRequest` 追加可选字段
