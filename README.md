@@ -172,8 +172,8 @@ try (CoordClient client = CoordClient.create(config)) {
 ```
 
 > The snippet above is the **real** SDK (`coord-java-sdk`, Maven group `cn.byteforce`,
-> artifact `coord-java-sdk`, current source version `0.4.1`) — connect via `CoordClient.create(CoordConfig)`.
-> It is published on **Maven Central** (`cn.byteforce:coord-java-sdk`; latest published release is `0.3.5`); alternatively
+> artifact `coord-java-sdk`, current source version `0.4.2`) — connect via `CoordClient.create(CoordConfig)`.
+> It is published on **Maven Central** (`cn.byteforce:coord-java-sdk`; latest published release is `0.4.1`); alternatively
 > run `mvn -pl coord-java-sdk install` in this repo to build the current version from source. The `java-example/` module is a
 > **separate, self-contained** gRPC demo; its
 > `cn.byteforce.coord.example.CoordClient` convenience wrapper is example-local
@@ -275,7 +275,7 @@ current status and the work required to close each item — is
 
 ## Status
 
-Version `0.4.1` (pre-1.0). The Raft engine (`openraft`) is on its 0.10 stable line, but Coord is **not yet recommended for production**. The consistency core is continuously exercised by the in-repo Jepsen project and CI; see [Testing & verification](#testing--verification) and [Limitations / non-goals](#limitations--non-goals) before adopting.
+Version `0.4.2` (pre-1.0). The Raft engine (`openraft`) is on its 0.10 stable line, but Coord is **not yet recommended for production**. The consistency core is continuously exercised by the in-repo Jepsen project and CI; see [Testing & verification](#testing--verification) and [Limitations / non-goals](#limitations--non-goals) before adopting.
 
 The KV-T v2 data plane (ADR-0015) passed its GA gate on 2026-11-11: the 72h Jepsen
 run, per-gate evidence and the sign-off record are in
