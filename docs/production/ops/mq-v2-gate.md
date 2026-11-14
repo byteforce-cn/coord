@@ -1,8 +1,8 @@
 # MQ v2 GA Gate（M0–M7 证据与签字）
 
-> Owner: maintainers ｜ Last verified: 2026-11-13（M0–M4 落地，M5-1/M5-2 落地）
+> Owner: maintainers ｜ Last verified: 2026-11-14（M0–M4 落地，M5-1/M5-2/M5-3 落地）
 >
-> **状态：M0、M1、M2、M3、M4 完成（GO）；M5 进行中（M5-1/M5-2 ✅，M5-3/M5-4 ⏳）**。
+> **状态：M0、M1、M2、M3、M4 完成（GO）；M5 进行中（M5-1/M5-2/M5-3 ✅，M5-4 ⏳，M5-5 🚧）**。
 > M0-1（#178 链接 #332–#339）、M0-2（`coord.mq.v2`
 > 冻结为 PROPOSED）、M0-3（`[mq_v2]` 配置/启动校验）、M0-4（服务壳/能力门禁）
 > 均已合入；M1-1–M1-6（分片区间、段日志、组状态机、topic 元数据、保留/配额、
@@ -27,7 +27,7 @@
 | M2 Publish | 路由/批量/offset/幂等/配额 | ✅ | 见 §2b |
 | M3 Poll/Ack/组 | 至少一次/长轮询/代际 fencing/再平衡 | ✅ | 见 §2c |
 | M4 DLQ/管理面 | 死信/删除回收/更新/能力 | ✅ | 见 §2d |
-| M5 工作流 | v2 outbox/durable/审批/trigger | 🚧 M5-1/M5-2 ✅，M5-3/M5-4 ⏳ | 见 §2e |
+| M5 工作流 | v2 outbox/durable/审批/trigger | 🚧 M5-1/M5-2/M5-3 ✅，M5-4 ⏳ | 见 §2e |
 | M6 SDK/Ops/证据 | Rust/Java/Ops/性能/混沌/Jepsen | ⏳ 未开始 | — |
 | M7 GA | 全绿 + KV-T GA + 签字 | ⛔ 未达标 | 见 §3 |
 
@@ -83,9 +83,9 @@ Rust 升级后漂到别的分片）。
 |:--|:--|:--|
 | M5-1 v2 outbox | ✅ | `cargo test -p coord --test mq_v2_m5_durable_test -- --test-threads=1`：`durable_state_and_outbox_commit_in_one_v2_transaction`（实例状态与伴生 outbox 记录 `mod_revision` 相等 = 同一次 `coord.txn.v2`）、`durable_workflow_survives_agent_kill_and_never_duplicates_events`（真实 Agent 进程：relay 经 `coord.mq.v2` 投递、`ce-id` 作幂等键重投 `deduplicated=true`、kill -9 重启后状态/事件仍各一份）；投递面单测 `cargo test -p coord-agent --lib services::mq_v2_delivery`（4 例）。`v2_compat::kv_range` 的 `SAFE_TS_LAG` 重试见 `read_path_retries_only_transient_safe_ts_errors` |
 | M5-2 durable 上 v2 | ✅ | 同一 e2e：`data_plane="v2"` + `workflow_durable=true` 的 Agent 启动成功（`Workflow outbox relay started`）、`ListPendingTasks` 可用（审批桥已注入）、重启后续跑；启动门禁 `cargo test -p coord-agent --test agent_workflow_durable_gate_test`（`test_v2_durable_requires_services_mq` / `test_v2_durable_requires_a_server_connection`）。纯 KV 路径不回归：`KvTV2ClusterIntegrationTest#workflowPureKvPathCompletesOnV2` |
-| M5-3 Trigger 定义/分发器 | ⏳ 未开始 | `WorkflowDefinition` 无 `trigger`；`WorkflowStartRequest` 无幂等键；按 definition 的消费组分发器未实现 |
+| M5-3 Trigger 定义/分发器 | ✅ | 定义声明：顶层 `trigger:{topic,filter,max_attempts}`（ADR-0016 D12），CNCF SW 与遗留 DSL 两条解析路径共用顶层取值；Deploy/Rollback 校验（topic 1..=255 字节、`max_attempts` 1..=32 缺省 3），失败不落库 → `cargo test -p coord-core --lib workflow::trigger`（7 例）、`cargo test -p coord-agent --lib test_deploy_`（含 `test_deploy_rejects_a_malformed_trigger_without_storing_it`）。Start 幂等：`WorkflowStartRequest.idempotency_key=4`（`contracts/v1.12.0`）+ 确定性实例 id（`wf-sha256(definition_id,key)`）⇒ 同键返同一实例、不重置状态 → `start_with_the_same_idempotency_key_returns_the_same_instance`、`a_completed_instance_is_not_reset_by_a_replayed_start`。分发器：对账 5s、组名 `wf-trigger:<definition_id>`、`mq:<topic_id>:<partition>:<offset>` 作键、Start 持久化后 Ack、`max_attempts` 到限 `MoveToDlq`（reason=`workflow_trigger_max_attempts`）+ Ack、不自动建 topic、位点越界按 earliest 重置 → `cargo test -p coord-agent --lib services::workflow_trigger`（7 例，含毒消息/Ack 纪律）。端到端（真实 3 节点 v2 + 真实 Agent 进程）→ `cargo test -p coord --test mq_v2_m5_trigger_test -- --test-threads=1`（2 例：过滤命中/不命中与组位点=3；`kill -9` 重启后实例数不增、位点不倒退）。**边界**：e2e 未构造真实毒消息（毒消息的调用/reason/Ack 由分发器单测钉住，服务端 MoveToDlq/PollDlq wire 由 M4 用例钉住） |
 | M5-4 全链路 e2e | ⏳ 未开始 | 依赖 M5-3；M5-1 的 publish→outbox→MQ v2 段已由上文覆盖 |
-| M5-5 文档/边界 | 🚧 部分 | B-KVT-6 与 workflow-semantics §8 已按 M5-1/M5-2 更新；consumer-contract 的 trigger 章节待 M5-3 |
+| M5-5 文档/边界 | 🚧 部分 | B-KVT-6 与 workflow-semantics §8 已按 M5-1/M5-2 更新；consumer-contract 的 trigger 章节随 M5-4 收尾 |
 
 ## 3. 关闭 M7 的硬条件
 
