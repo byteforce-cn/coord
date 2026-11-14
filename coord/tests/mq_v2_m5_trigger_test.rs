@@ -29,6 +29,8 @@ use coord_proto::workflow::v1::{
 use tonic::transport::Channel;
 
 const TOPIC: &str = "orders";
+const EVENTS_TOPIC: &str = "com.china-workflow.events";
+const PROCESSED: &str = "order.processed";
 const TRIGGER_STARTED: &str = "Workflow MQ triggers started";
 const TRIGGER_JOINED: &str = "workflow trigger joined group";
 const CREATED: &str = "order.created";
@@ -497,5 +499,109 @@ fn a_killed_agent_redelivers_without_duplicate_instances() {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    });
+}
+
+/// 链路 A：收到订单消息 → 发出 `order.processed` 事件（经 durable outbox 投递）。
+fn emit_definition(name: &str, trigger: &str) -> String {
+    format!(
+        r#"document:
+  dsl: "1.0.3"
+  namespace: default
+  name: {name}
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            type: {PROCESSED}
+            source: {name}
+            data:
+              ok: true
+trigger:
+  topic: {trigger}
+"#
+    )
+}
+
+#[test]
+fn the_chain_publish_trigger_workflow_outbox_next_trigger_completes() {
+    let _ = runtime();
+    let cluster = mq_cluster();
+    let addrs = cluster.addrs();
+    let mut agent = AgentFixture::start(&addrs[0]);
+
+    runtime().block_on(async {
+        wait_tcp_ready(&agent.addr, Duration::from_secs(30)).await;
+        let client = v2_client(addrs.clone()).await;
+        let mq = client.mq_v2();
+        mq.create_topic(&coord_client::MqCreateTopic {
+            topic: TOPIC.to_string(),
+            partitions: 1,
+            request_id: "m5-chain".to_string(),
+            config: None,
+        })
+        .await
+        .expect("create orders topic");
+
+        let mut workflow = WorkflowClient::new(connect(&agent.addr).await);
+        // A：业务消息触发；完成时由 outbox 发 `order.processed`。
+        let a_id = deploy(&mut workflow, &emit_definition("chain-a", TOPIC)).await;
+        // B：消费 `order.processed`（事件 topic 上的其他事件被过滤掉，含 B 自己的
+        // `workflow.completed.v1` —— 否则会自激）。
+        let b_id = deploy(
+            &mut workflow,
+            &triggered_definition(
+                "chain-b",
+                &format!(
+                    "{{\"topic\":\"{EVENTS_TOPIC}\",\"filter\":{{\"event_type\":\"{PROCESSED}\"}}}}"
+                ),
+            ),
+        )
+        .await;
+
+        publish(&mq, 0, CREATED, r#"{"orderId":"chain-1"}"#).await;
+
+        // 第一跳：publish → trigger → A 完成。
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let a_instances = list_instances(&mut workflow, &a_id).await.instances;
+            if a_instances
+                .iter()
+                .any(|instance| instance.state.eq_ignore_ascii_case("COMPLETED"))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "chain-a never completed; agent logs:\n{}",
+                tail(&agent.logs(), 60)
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // 第二跳：A 的 `order.processed`（outbox → coord.mq.v2）→ B 完成。
+        let b_ids = wait_instances(&mut workflow, &b_id, 1, Duration::from_secs(120)).await;
+        wait_all_completed(&mut workflow, &b_id, 1).await;
+        assert_eq!(
+            b_ids.len(),
+            1,
+            "the processed event must start exactly one B instance"
+        );
+
+        // 断链点重启：kill -9 后 A/B 各自仍只有一个实例（不重复触发）。
+        agent.kill9();
+        agent.restart();
+        wait_tcp_ready(&agent.addr, Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let mut workflow = WorkflowClient::new(connect(&agent.addr).await);
+        let a_after = list_instances(&mut workflow, &a_id).await.instances;
+        let b_after = list_instances(&mut workflow, &b_id).await.instances;
+        assert_eq!(a_after.len(), 1, "restart must not re-trigger chain-a");
+        assert_eq!(b_after.len(), 1, "restart must not re-trigger chain-b");
+        wait_all_completed(&mut workflow, &a_id, 1).await;
+        wait_all_completed(&mut workflow, &b_id, 1).await;
     });
 }

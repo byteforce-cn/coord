@@ -348,6 +348,42 @@ MQ v2 是 G7 的 greenfield 面（ADR-0016）：服务端分区日志 + 服务�
   重建得到新 `topic_id`，旧代际读写一律 `TOPIC_NOT_FOUND`。
 - **错误码**：11 个 MQ v2 码见 WHITEPAPER §6.1.2；按码分支，禁止解析文案。
 
+### 5.7 工作流 MQ 触发器（M5-3/M5-4，ADR-0016 D12）
+
+定义可声明「消息 → 实例」的绑定；durable Agent 按定义加入消费组并自动 `Start`。
+
+```yaml
+trigger:
+  topic: orders                 # 必填；topic 必须已存在（触发器不自动建）
+  filter:                       # 可选；字段与 CloudEvents 头一致
+    event_type: order.created   #   ce-type（event_types 列表 = 任一命中）
+    source: erp                 #   ce-source
+  max_attempts: 3               # 可选；1..=32，缺省 3
+```
+
+- **前置**：`data_plane="v2"` + `services.workflow_durable=true` + `services.mq=true`
+  + Server 连接；`[mq_v2].enabled=false` 时启动失败（不静默降级）。v1 集群不装配
+  MQ 触发器（v1 的 `schedule.on` 仍走进程内事件）。
+- **组**：每个定义一个组 `wf-trigger:<definition_id>`；同一定义的多个 Agent 共享组，
+  一个分区只归一个成员，再平衡后从已提交位点续读（至少一次）。**重部署产生新
+  definition_id ⇒ 新组**，不继承旧位点；新组从当前最早可用 offset 开始（保留期内的
+  历史会重放）。
+- **输入**：消息信封，不做模板语言：
+  `{topic, partition, offset, timestamp_ms, key(hex), headers, producer, payload,
+  payload_encoding}`；`payload_encoding` ∈ `json`（payload 已是 JSON 值）/ `utf8` /
+  `base64`（二进制不静默丢）。
+- **幂等**：Start 幂等键 `mq:<topic_id>:<partition>:<offset>`（`topic_id` 随删除重建
+  变化）；同键重放返回首次实例，不重置状态；`Start` **持久化后**才 `Ack`。
+- **毒消息**：连续 `max_attempts` 次 Start 失败 → `MoveToDlq`（`reason` 固定
+  `workflow_trigger_max_attempts`，`detail` 带最后一次错误）→ `Ack`；DLQ 写入失败
+  则不 `Ack`（继续重投）。
+- **过滤不命中**：对该组照常 `Ack`（消费组已消费），不启动实例、不阻塞分区。
+- **能力**：消费主体需 `coord:mq:consume`；毒消息进 DLQ 还需 `coord:mq:dlq`。
+  `Start` 使用引擎内部路径（不额外要求 `coord:workflow:execute`）。
+- **证据**：`cargo test -p coord --test mq_v2_m5_trigger_test -- --test-threads=1`
+  （过滤/组位点/`kill -9` 重投；全链路 publish → trigger → workflow → outbox →
+  下一 trigger）；分发器单测 `cargo test -p coord-agent --lib services::workflow_trigger`。
+
 ## 6. Cache（缓存）
 
 | RPC（组） | 能力 |
