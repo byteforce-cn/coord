@@ -271,5 +271,12 @@ auth:
   `test_v2_durable_requires_a_server_connection`。
 - **审批面**：审批桥与聚合只在 durable 引擎装配时注入（见上一节）；v2 durable 装配下
   审批 RPC 可用（不再是 `FAILED_PRECONDITION`）。
+- **可用（MQ 触发器）**：定义声明顶层 `trigger:{topic,filter,max_attempts}` 后，v2
+  durable Agent 按定义加入消费组 `wf-trigger:<definition_id>`，把消息信封作为输入
+  启动实例（幂等键 `mq:<topic_id>:<partition>:<offset>`，Start 持久化后才 `Ack`；
+  连续失败到 `max_attempts` 移 DLQ 并 `Ack`）。语义与边界见
+  `consumer-contract.md` §5.7。判据：
+  `cargo test -p coord --test mq_v2_m5_trigger_test -- --test-threads=1`
+  （含全链路 publish → trigger → workflow → outbox → 下一 trigger）。
 - 能力矩阵见 ADR-0015 D13；MQ v2 属 G7，`coord.mq.v2` 仍为 PROPOSED，GA 签字见
   `docs/production/ops/mq-v2-gate.md`。

@@ -409,6 +409,30 @@ impl MqV2Client {
         offset_from_i64(response.committed_offset)
     }
 
+    /// `MoveToDlq`：把一条消息移入该分区 DLQ（复制 + 主日志 tombstone）。
+    ///
+    /// 管理/维护路径，不要求 `coord:mq:manage`（ADR-0016 D9）；重复调用幂等，
+    /// 返回首次的 `dlq_offset` 且 `already_moved = true`。
+    pub async fn move_to_dlq(&self, request: &MqMoveToDlq) -> Result<MqMoveToDlqResult> {
+        let payload = move_to_dlq_request(request)?;
+        let response = self
+            .partition_call(
+                &request.topic,
+                request.partition,
+                payload,
+                |mut stub, payload| async move {
+                    stub.move_to_dlq(tonic::Request::new(payload))
+                        .await
+                        .map(|response| response.into_inner())
+                },
+            )
+            .await?;
+        Ok(MqMoveToDlqResult {
+            dlq_offset: offset_from_i64(response.dlq_offset)?,
+            already_moved: response.already_moved,
+        })
+    }
+
     /// `AckBatch`：1–256 条、同一组；任一条未分配 ⇒ 整批不写。
     pub async fn ack_batch(
         &self,
@@ -909,6 +933,26 @@ pub struct MqAckResult {
     pub committed_offset: u64,
 }
 
+/// `MoveToDlq` 请求：把 `(topic, partition, offset)` 复制进 DLQ 并在主日志写 tombstone。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqMoveToDlq {
+    pub topic: String,
+    pub partition: i32,
+    pub topic_epoch: u64,
+    pub offset: u64,
+    /// 稳定原因锚点（如 `workflow_trigger_max_attempts`）。
+    pub reason: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqMoveToDlqResult {
+    /// DLQ 内首次写入的位置。
+    pub dlq_offset: u64,
+    /// true = 该 offset 已在 DLQ（重复调用幂等）。
+    pub already_moved: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MqCommitted {
     pub topic: String,
@@ -973,9 +1017,40 @@ pub struct MqPublishBatch {
     pub entries: Vec<MqBatchEntry>,
 }
 
+/// `MoveToDlq` 请求映射（纯函数：offset 上界在这里就拒绝，不发 RPC）。
+fn move_to_dlq_request(request: &MqMoveToDlq) -> Result<mq_v2::MoveToDlqRequest> {
+    Ok(mq_v2::MoveToDlqRequest {
+        topic: request.topic.clone(),
+        partition: request.partition,
+        topic_epoch: request.topic_epoch,
+        offset: crate::client::ts_to_i64("offset", request.offset)?,
+        reason: request.reason.clone(),
+        detail: request.detail.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_to_dlq_maps_reason_and_offset_into_the_wire_request() {
+        let wire = move_to_dlq_request(&MqMoveToDlq {
+            topic: "orders".to_string(),
+            partition: 1,
+            topic_epoch: 9,
+            offset: 42,
+            reason: "workflow_trigger_max_attempts".to_string(),
+            detail: "3 consecutive start failures".to_string(),
+        })
+        .expect("map");
+        assert_eq!(wire.topic, "orders");
+        assert_eq!(wire.partition, 1);
+        assert_eq!(wire.topic_epoch, 9);
+        assert_eq!(wire.offset, 42);
+        assert_eq!(wire.reason, "workflow_trigger_max_attempts");
+        assert_eq!(wire.detail, "3 consecutive start failures");
+    }
 
     #[test]
     fn leader_hint_is_read_from_the_trailer() {

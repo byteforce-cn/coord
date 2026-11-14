@@ -1693,6 +1693,37 @@ impl AgentServer {
                 scheduler.spawn();
                 tracing::info!("Workflow scheduler started (every/cron/after/on)");
 
+                // MQ 触发器（M5-3；ADR-0016 D12）：只在 v2 + durable + mq 三前置齐备时装配。
+                // 其它组合零副作用（不建组、不 Poll），只多一行日志——v1 的 `schedule.on`
+                // 仍走进程内事件（装配路径逐字不变）。
+                if self.config.data_plane == AgentDataPlane::V2
+                    && self.config.services.workflow_durable
+                    && self.config.services.mq
+                {
+                    match inner.as_ref() {
+                        Some(inner_ref) => {
+                            let dispatcher = Arc::new(
+                                crate::services::workflow_trigger::TriggerDispatcher::new(
+                                    Arc::clone(inner_ref),
+                                    Arc::clone(engine),
+                                ),
+                            );
+                            dispatcher.spawn();
+                            tracing::info!(
+                                "Workflow MQ triggers started (coord.mq.v2 consumer groups)"
+                            );
+                        }
+                        None => tracing::warn!(
+                            "workflow triggers require a server connection; not assembled"
+                        ),
+                    }
+                } else {
+                    tracing::info!(
+                        "workflow triggers not assembled \
+                         (requires data_plane=\"v2\" + workflow_durable + mq)"
+                    );
+                }
+
                 // on 模式：订阅 EventNotification 事件 → 触发新实例
                 if let Some(event_svc) = event_grpc_svc.as_ref() {
                     let sched = Arc::clone(&scheduler);
