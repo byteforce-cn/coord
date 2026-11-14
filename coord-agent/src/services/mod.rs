@@ -33,3 +33,4 @@ pub mod workflow;
 pub mod workflow_lease;
 pub mod workflow_scheduler;
 pub mod workflow_store;
+pub mod workflow_trigger;
