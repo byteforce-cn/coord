@@ -71,6 +71,10 @@ message WorkflowStartRequest {
   string definition_dsl = 1; // CNCF Workflow DSL JSON
   bytes input = 2;
   string definition_id = 3; // 可选：按已部署定义启动（与 definition_dsl 互斥）
+
+  // 幂等键（可选）：同键重放返回**首次**创建的 workflow_id，且不会重置既有实例状态；
+  // 作用域是 definition（不同定义的同一个键互不影响）。空串 = 不启用幂等。
+  string idempotency_key = 4;
 }
 
 message WorkflowStartResponse {

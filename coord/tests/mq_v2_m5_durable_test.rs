@@ -380,6 +380,7 @@ async fn start_on_agent(workflow: &mut WorkflowClient<Channel>) -> String {
                 definition_dsl: DEFINITION.to_string(),
                 input: b"{}".to_vec(),
                 definition_id: String::new(),
+                idempotency_key: String::new(),
             })
             .await
         {

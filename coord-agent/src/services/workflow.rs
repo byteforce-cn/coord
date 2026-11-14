@@ -3038,13 +3038,16 @@ pub mod phase4 {
             // 保存原始 DSL 以便 get_definition 返回
             def.raw_yaml = Some(dsl.to_string());
 
+            // id 必须唯一到「同秒内多次部署」：`Start(definition_id)` 与 MQ 触发器的
+            // 组名都以它定位定义，同秒同 namespace 的两个定义撞 id 会让 Start 解析到
+            // 另一个定义（group 也一样）。纳秒后缀是仓内既有的 id 生成口径。
             let id = format!(
                 "{}-{:x}",
                 namespace,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs()
+                    .as_nanos()
             );
             def.id = Some(id.clone());
 
@@ -3125,13 +3128,16 @@ pub mod phase4 {
             // 回滚同样重新校验 trigger：恢复的内容必须可部署（与 Deploy 同一判据）。
             def.trigger = trigger;
             def.raw_yaml = Some(raw);
+            // id 必须唯一到「同秒内多次部署」：`Start(definition_id)` 与 MQ 触发器的
+            // 组名都以它定位定义，同秒同 namespace 的两个定义撞 id 会让 Start 解析到
+            // 另一个定义（group 也一样）。纳秒后缀是仓内既有的 id 生成口径。
             let id = format!(
                 "{}-{:x}",
                 namespace,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs()
+                    .as_nanos()
             );
             def.id = Some(id.clone());
 
@@ -3191,6 +3197,36 @@ pub mod phase4 {
             input: Value,
             initiator: Option<&str>,
         ) -> Result<WorkflowInstance, WorkflowEngineError> {
+            self.start_instance_as_with_key(definition_id, input, initiator, None)
+                .await
+        }
+
+        /// 带幂等键的 Start：同键重放返回**首次**创建的实例（不重写、不重新驱动）。
+        ///
+        /// 幂等由确定性实例 id 承担（`idempotent_instance_id`），作用域是 definition：
+        /// 不同定义的同一个键互不影响；空/空白键 = 不启用（每次新实例）。
+        /// MQ 触发器以 `mq:<topic_id>:<partition>:<offset>` 作键（ADR-0016 D12）。
+        pub async fn start_instance_as_with_key(
+            &self,
+            definition_id: &str,
+            input: Value,
+            initiator: Option<&str>,
+            idempotency_key: Option<&str>,
+        ) -> Result<WorkflowInstance, WorkflowEngineError> {
+            let key = idempotency_key.map(str::trim).filter(|key| !key.is_empty());
+            let instance_id = key
+                .map(|key| coord_core::workflow::model::idempotent_instance_id(definition_id, key));
+            // 重放：已存在就原样返回（含 COMPLETED/FAULTED），绝不重置状态。
+            if let Some(id) = instance_id.as_deref() {
+                if let Some(existing) = self
+                    .get_instance(id)
+                    .await
+                    .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
+                {
+                    return Ok(existing);
+                }
+            }
+
             let def = self
                 .get_definition(definition_id)
                 .await
@@ -3202,7 +3238,7 @@ pub mod phase4 {
                 })?;
 
             self.runtime()?
-                .start_as(&def, input, initiator)
+                .start_as_with_id(&def, input, initiator, instance_id.as_deref())
                 .await
                 .map_err(WorkflowEngineError::from)
         }
@@ -4463,6 +4499,37 @@ events:
             .any(|t| matches!(t.task, Task::Call(_))));
         assert!(loaded.do_tasks.iter().any(|t| t.name == "check"));
         assert!(loaded.do_tasks.iter().any(|t| t.name == "__end"));
+    }
+
+    #[tokio::test]
+    async fn test_deploy_assigns_distinct_ids_within_the_same_second() {
+        // 同秒两次部署必须得到两个 id：`Start(definition_id)` 与触发器组名都按 id 定位。
+        let svc = WorkflowEngineService::new_for_test();
+        let first = svc
+            .deploy_definition("test", &sample_linear_yaml())
+            .await
+            .unwrap();
+        let second_doc = sample_linear_yaml().replace("name: linear-wf", "name: linear-wf-2");
+        let second = svc.deploy_definition("test", &second_doc).await.unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            svc.get_definition(&first)
+                .await
+                .unwrap()
+                .unwrap()
+                .document
+                .name,
+            "linear-wf"
+        );
+        assert_eq!(
+            svc.get_definition(&second)
+                .await
+                .unwrap()
+                .unwrap()
+                .document
+                .name,
+            "linear-wf-2"
+        );
     }
 
     #[tokio::test]
@@ -5931,6 +5998,125 @@ do:
             .unwrap();
         let loaded = svc.get_instance(&anonymous.id).await.unwrap().unwrap();
         assert_eq!(loaded.initiator, None);
+    }
+
+    fn sample_instant_sw() -> &'static str {
+        r#"{"id":"instant","version":"1.0","start":"init","states":[{"name":"init","type":"inject","data":{"ok":true},"end":true}]}"#
+    }
+
+    /// 同键重放 = 同一实例：第二次调用不得覆盖首次落库的输入或再建一个实例。
+    #[tokio::test]
+    async fn start_with_the_same_idempotency_key_returns_the_same_instance() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc
+            .deploy_definition("test", sample_instant_sw())
+            .await
+            .unwrap();
+
+        let first = svc
+            .start_instance_as_with_key(
+                &def_id,
+                serde_json::json!({"a": 1}),
+                None,
+                Some("mq:7:0:42"),
+            )
+            .await
+            .unwrap();
+        let replay = svc
+            .start_instance_as_with_key(
+                &def_id,
+                serde_json::json!({"a": 2}),
+                None,
+                Some("mq:7:0:42"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.id, replay.id);
+        assert_eq!(
+            replay.id,
+            coord_core::workflow::model::idempotent_instance_id(&def_id, "mq:7:0:42")
+        );
+        let loaded = svc.get_instance(&first.id).await.unwrap().unwrap();
+        assert_eq!(loaded.context, serde_json::json!({"a": 1}));
+    }
+
+    /// 已完成的实例被同键重放命中时仍是 `COMPLETED`（不得重置回 `Pending`/重新驱动）。
+    #[tokio::test]
+    async fn a_completed_instance_is_not_reset_by_a_replayed_start() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc
+            .deploy_definition("test", sample_instant_sw())
+            .await
+            .unwrap();
+        let first = svc
+            .start_instance_as_with_key(&def_id, serde_json::json!({}), None, Some("k-1"))
+            .await
+            .unwrap();
+
+        let mut done = first.clone();
+        for _ in 0..40 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            done = svc.get_instance(&first.id).await.unwrap().unwrap();
+            if done.status == InstanceStatus::Completed {
+                break;
+            }
+        }
+        assert_eq!(done.status, InstanceStatus::Completed);
+
+        let replay = svc
+            .start_instance_as_with_key(&def_id, serde_json::json!({}), None, Some("k-1"))
+            .await
+            .unwrap();
+        assert_eq!(replay.id, first.id);
+        assert_eq!(replay.status, InstanceStatus::Completed);
+        assert_eq!(replay.created_at, done.created_at);
+        assert_eq!(
+            replay.updated_at, done.updated_at,
+            "replay must not rewrite the instance"
+        );
+    }
+
+    /// 幂等键作用域 = definition；无键/空键 = 旧行为（每次新实例）。
+    #[tokio::test]
+    async fn different_keys_and_definitions_get_different_instances() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_a = svc
+            .deploy_definition("test", sample_instant_sw())
+            .await
+            .unwrap();
+        // 同名同版本的部署是**同一个**定义（原子覆盖），换个 id 才是另一个定义。
+        let other = sample_instant_sw().replace("\"instant\"", "\"instant-2\"");
+        let def_b = svc.deploy_definition("test", &other).await.unwrap();
+        assert_ne!(def_a, def_b);
+
+        let a = svc
+            .start_instance_as_with_key(&def_a, serde_json::json!({}), None, Some("same"))
+            .await
+            .unwrap();
+        let b = svc
+            .start_instance_as_with_key(&def_b, serde_json::json!({}), None, Some("same"))
+            .await
+            .unwrap();
+        assert_ne!(
+            a.id, b.id,
+            "same key under another definition is another instance"
+        );
+
+        let c = svc
+            .start_instance_as_with_key(&def_a, serde_json::json!({}), None, Some("other"))
+            .await
+            .unwrap();
+        assert_ne!(a.id, c.id);
+
+        let d = svc
+            .start_instance_as_with_key(&def_a, serde_json::json!({}), None, Some("  "))
+            .await
+            .unwrap();
+        let e = svc
+            .start_instance_as_with_key(&def_a, serde_json::json!({}), None, Some("  "))
+            .await
+            .unwrap();
+        assert_ne!(d.id, e.id, "blank keys do not enable idempotency");
     }
 
     /// 非 durable（无桥）⇒ 审批命令 fail-closed（`FailedPrecondition` 语义），不退化为内存审批。
