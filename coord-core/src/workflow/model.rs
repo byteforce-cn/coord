@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::workflow::approval::model::{JoinPolicy, RejectPolicy, SeatSpec};
+use crate::workflow::trigger::TriggerConfig;
 
 // ─── Document 元信息 ───
 
@@ -285,6 +286,11 @@ pub struct WorkflowDefinition {
     /// 顶层 `schedule`（周期/CRON/after/事件触发）
     #[serde(default, skip_serializing_if = "ScheduleConfig::is_empty")]
     pub schedule: ScheduleConfig,
+    /// 顶层 `trigger`（MQ 触发器，ADR-0016 D12）
+    ///
+    /// 空配置不参与序列化 ⇒ 无 trigger 的定义 `definition_hash` 与旧版逐字相同。
+    #[serde(default, skip_serializing_if = "TriggerConfig::is_empty")]
+    pub trigger: TriggerConfig,
     /// 顶层 `auth`（认证定义，name → AuthConfig）
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub auth: HashMap<String, AuthConfig>,
@@ -1161,6 +1167,7 @@ mod tests {
             timeout: None,
             use_components: None,
             schedule: Default::default(),
+            trigger: Default::default(),
             auth: Default::default(),
             secrets: Default::default(),
             constants: Default::default(),
@@ -1203,6 +1210,7 @@ mod tests {
                 timeout: None,
                 use_components: None,
                 schedule: Default::default(),
+                trigger: Default::default(),
                 auth: Default::default(),
                 secrets: Default::default(),
                 constants: Default::default(),
@@ -1318,6 +1326,7 @@ mod tests {
                 timeout: None,
                 use_components: None,
                 schedule: Default::default(),
+                trigger: Default::default(),
                 auth,
                 secrets: Default::default(),
                 constants: Default::default(),
@@ -1347,6 +1356,49 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_trigger_is_not_serialized_so_hashes_stay_stable() {
+        // 空 `trigger` 不参与序列化 ⇒ 未声明触发器的既有定义序列化/哈希逐字不变
+        // （否则加字段会把所有存量实例误判成定义漂移）。
+        let mut def = WorkflowDefinition {
+            id: None,
+            document: Document {
+                dsl: "1.0.0".to_string(),
+                namespace: "test".to_string(),
+                name: "no-trigger".to_string(),
+                version: "1.0".to_string(),
+                title: None,
+                summary: None,
+                tags: None,
+            },
+            do_tasks: vec![],
+            input: None,
+            output: None,
+            timeout: None,
+            use_components: None,
+            schedule: Default::default(),
+            trigger: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
+            raw_yaml: None,
+        };
+        let value = serde_json::to_value(&def).expect("json");
+        assert!(value.get("trigger").is_none());
+
+        let baseline = definition_hash(&def);
+        def.trigger = crate::workflow::trigger::TriggerConfig {
+            topic: Some("orders".into()),
+            ..Default::default()
+        };
+        assert_ne!(
+            definition_hash(&def),
+            baseline,
+            "a declared trigger is semantic"
+        );
+    }
+
+    #[test]
     fn definition_hash_ignores_deploy_metadata() {
         fn sample() -> WorkflowDefinition {
             WorkflowDefinition {
@@ -1371,6 +1423,7 @@ mod tests {
                 timeout: None,
                 use_components: None,
                 schedule: Default::default(),
+                trigger: Default::default(),
                 auth: Default::default(),
                 secrets: Default::default(),
                 constants: Default::default(),
@@ -1637,6 +1690,7 @@ mod tests {
             timeout: None,
             use_components: None,
             schedule: Default::default(),
+            trigger: Default::default(),
             auth: Default::default(),
             secrets: Default::default(),
             constants: Default::default(),

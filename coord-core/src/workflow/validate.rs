@@ -326,6 +326,7 @@ impl Validator {
                 timeout,
                 use_components,
                 schedule,
+                trigger: Default::default(),
                 auth,
                 secrets,
                 constants,
