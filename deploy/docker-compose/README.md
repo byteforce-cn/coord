@@ -83,4 +83,11 @@ docker compose -f deploy/docker-compose/docker-compose.dev.yml up -d --build
   （启动 WARN、数据无保密性；见 `docs/adr/0009-dev-mode-builtin-services.md`）；
 - 数据存命名卷 `coord-dev-data`：重启保留，`down -v` 清空（默认不带 `--fresh`，
   避免每次重启清库）；
+- 数据面是 **v2**（`[kv_t]` + 单节点 Multi-Raft + 内嵌 PD + `[mq_v2]`，见
+  `docs/adr/0018-data-plane-convergence.md`）：**旧版本（v1 / 单 Raft）留下的
+  `coord-dev-data` 卷会被拒绝启动**（不就地迁移，ADR-0018 D6）——升级时先执行一次
+  `docker compose -f deploy/docker-compose/docker-compose.dev.yml down -v`
+  （或直接用新的卷名）；
+  v1 数据面服务（`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch`）在该拓扑下
+  返回 `FAILED_PRECONDITION`，消息面是 `coord.mq.v2`；
 - 镜像与集群组合共用（`byteforce/coord:local`，同一 `Dockerfile`）：已构建过则无需重复构建。

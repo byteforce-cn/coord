@@ -25,7 +25,8 @@ const EXPECTED_BUILTIN: &[&str] = &[
     "leader_election",
     "event_notification",
     "cache",
-    "mq",
+    // v1 `coord.mq` 插件在 v2 数据面下不挂载（ADR-0018：dev 只服务 v2 面，MQ 面是
+    // `coord.mq.v2`，见 EXCLUDED_BUILTIN）。
     // 服务字段名是 `workflow`，插件清单名（`BaseService::name()`）为
     // "workflow-engine"（真实注册名，逐字）。
     "workflow-engine",
@@ -39,8 +40,11 @@ const EXPECTED_BUILTIN: &[&str] = &[
     "pki",
 ];
 
-/// dev 预设的例外集：不得出现在清单里（ADR-0009）。
-const EXCLUDED_BUILTIN: &[&str] = &["replication"];
+/// dev 预设的例外集：不得出现在清单里。
+///
+/// - `replication`：dev 预设从不启用（ADR-0009）；
+/// - `mq`：ADR-0018 起 dev 跑 v2 数据面，v1 `coord.mq` 插件不挂载（MQ 面 = `coord.mq.v2`）。
+const EXCLUDED_BUILTIN: &[&str] = &["replication", "mq"];
 
 fn bindable(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
@@ -452,10 +456,12 @@ do:
 /// 等待窗口取一个采样周期 + 余量（30s + 5s），不写固定 sleep：轮询到条件满足即返回。
 #[tokio::test(flavor = "multi_thread")]
 async fn dev_mode_metrics_share_one_registry() {
-    use coord_proto::kv::kv_client::KvClient;
-    use coord_proto::kv::PutRequest;
+    use coord_proto::kv::v2::kv_client::KvClient as KvV2Client;
+    use coord_proto::kv::v2::PutRequest as PutV2;
     use coord_proto::pki::v1::pki_client::PkiClient;
     use coord_proto::pki::v1::PkiIssueCertRequest;
+    use coord_proto::tso::v2::tso_client::TsoClient;
+    use coord_proto::tso::v2::GetTsRequest;
 
     let (grpc_port, agent_port) = pick_dev_ports();
     let agent_addr = format!("127.0.0.1:{agent_port}");
@@ -496,17 +502,25 @@ async fn dev_mode_metrics_share_one_registry() {
         .await
         .expect("IssueCert must succeed in dev mode");
 
-    // 非 PKI gauge：gRPC 中间件（AgentServer 侧实例）计数一次 Put。
-    KvClient::new(channel)
-        .put(PutRequest {
+    // 非 PKI gauge：gRPC 中间件（AgentServer 侧实例）计数一次写操作。
+    // dev 跑 v2 数据面（ADR-0018），所以写走 `coord.kv.v2`（`commit_ts` 取自 TSO）。
+    let commit_ts = TsoClient::new(channel.clone())
+        .get_ts(GetTsRequest {})
+        .await
+        .expect("TSO GetTs must succeed in dev mode")
+        .into_inner()
+        .ts;
+    KvV2Client::new(channel)
+        .put(PutV2 {
             key: b"/dev-metrics-e2e/key".to_vec(),
             value: b"v".to_vec(),
+            commit_ts,
             lease_id: 0,
             prev_kv: false,
             request_id: vec![],
         })
         .await
-        .expect("KV.Put must succeed in dev mode");
+        .expect("KV v2 Put must succeed in dev mode");
 
     let metrics_addr = format!("127.0.0.1:{}", agent_port + 1);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(35);

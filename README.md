@@ -109,6 +109,17 @@ topology). `transit` is backed by a **dev-only default KEK** — a fixed, public
 with no confidentiality (startup WARN); production agents still require injected KEK
 material or refuse to start (see [ADR-0009](docs/adr/0009-dev-mode-builtin-services.md)).
 
+Dev runs the **v2 data plane** (`[kv_t]` + single-node Multi-Raft + embedded PD + `[mq_v2]`),
+so `coord.tso.v2` / `coord.kv.v2` / `coord.txn.v2` / `coord.mq.v2` are available out of the
+box and there is only one data-plane surface to code against
+(see [ADR-0018](docs/adr/0018-data-plane-convergence.md)). Consequences worth knowing:
+
+- a dev data directory created by an older (v1 / single-Raft) build is **rejected**, not
+  migrated — re-run with `--fresh` or point `--data-dir` elsewhere;
+- the v1 data-plane services (`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch`)
+  answer `FAILED_PRECONDITION` in this topology, and the v1 `Mq` plugin is not mounted
+  (`coord.mq.v2` is the messaging surface).
+
 **Or run it in a container** (Docker — dev only: authentication off, `root`/`root`):
 
 ```bash
