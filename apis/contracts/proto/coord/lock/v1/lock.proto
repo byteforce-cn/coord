@@ -9,6 +9,9 @@ syntax = "proto3";
 // 语义契约（判定摘要见 WHITEPAPER.md 的 Lock 约定）：
 //   - 线性一致互斥：同一时刻同一锁名至多一个持有者；
 //   - 自动过期：TTL 内未 Renew 即释放；
+//   - **过期粒度 = 1 秒**：锁的有效期由绑定的 lease 决定（lease 到期由服务端清理
+//     锁键），而 lease 的 TTL 是整秒。请求亚秒租约（如 150ms）**超出承诺面**：
+//     向上取整到 1s 是调用方的事，服务端不按毫秒判过期，也不接受 ttl_seconds = 0；
 //   - 持有者校验：仅 (holder_id, lease_id) 匹配者可 Release/Renew；
 //   - 不承诺公平性（先进先出）与可重入。
 // ============================================================
@@ -28,7 +31,7 @@ option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/lock
 message LockAcquireRequest {
   string name = 1;       // 锁名（资源标识）
   string holder_id = 2;  // 持有者标识（如实例 id）
-  int64 ttl_seconds = 3; // 租约 TTL（秒）
+  int64 ttl_seconds = 3; // 租约 TTL（秒，必填 > 0；上限 86400）
 }
 
 message LockAcquireResponse {
@@ -73,7 +76,9 @@ message LockGetInfoResponse {
   string holder_id = 2;
   int64 lease_id = 3;
   int64 acquired_at = 4; // 获取时间（Unix 秒）
-  int64 ttl_seconds = 5; // 剩余 TTL 快照（秒）
+  // 获取时授予的 TTL（秒）——**不是**剩余量；剩余 = max(0, acquired_at +
+  // ttl_seconds - now)。过期粒度见文件头的「过期粒度 = 1 秒」。
+  int64 ttl_seconds = 5;
   bool exists = 6;       // 锁是否存在（已过期视为不存在）
 }
 
