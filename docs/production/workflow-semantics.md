@@ -266,7 +266,13 @@ auth:
   `due_before_ms` 过滤（未知 `status` fail-closed），分页口径与待办一致；`GetTask(task_id)`
   直取席位（含投票与实例状态）。`ListInstances` 支持 `definition`（定义名或 ID）、
   `status_filter` 与 `started_after_ms` / `started_before_ms` 时间窗；过滤在服务端完成，
-  `page_size` 是扫描批次而非严格返回上限（不跳过未消费实例）。
+  `page_size` 是扫描批次而非严格返回上限（不跳过未消费实例）。`History(workflow_id)`
+  从审批聚合快照投影出稳定的 task/round/step/instance 事件流（`event_id` 确定性、按
+  `occurred_at` 排序）；`GetDefinition` 支持 `workflow_id` 或 `(namespace,name,version)`
+  二选一，并返回内容哈希与结构化 JSON（`definition_hash` / `definition_json`）。
+- **Provider 时钟**：coord 不提供独立 `Now` RPC；所有响应时间戳均为 Unix ms。适配器
+  `provider.now()` 使用本地时钟即可（与 coord 响应时间同单位），不存在服务器单调时钟
+  承诺。
 
 **已知未落地（当前口径）**：
 

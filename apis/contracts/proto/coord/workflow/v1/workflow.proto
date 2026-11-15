@@ -71,6 +71,11 @@ service Workflow {
   // 超集（默认不过滤状态）。
   rpc ListTasks(WorkflowListTasksRequest) returns (WorkflowListTasksResponse);
   rpc GetTask(WorkflowGetTaskRequest) returns (WorkflowGetTaskResponse);
+
+  // 实例历史：从审批聚合快照**确定性投影**出的事件流（task / round / step / instance 级）。
+  // 与 outbox 的 7 个生命周期事件不同，本 RPC 面向读模型：同一实例的同一状态必然产出
+  // 同一批 (event_id, event_type, occurred_at)，可重复读取。
+  rpc History(WorkflowHistoryRequest) returns (WorkflowHistoryResponse);
 }
 
 message WorkflowStartRequest {
@@ -189,6 +194,12 @@ message WorkflowDefinitionSummary {
 
 message WorkflowGetDefinitionRequest {
   string workflow_id = 1;
+  // 按 (namespace, name, version) 直取（与 workflow_id 二选一；两者都空 ⇒
+  // INVALID_ARGUMENT）。供 `FindDefinition(namespace, name, major.minor)` 语义使用：
+  // version 是定义里的版本串（coord 不强制 `major.minor`，但按字符串精确匹配）。
+  string namespace = 2;
+  string name = 3;
+  string version = 4;
 }
 
 message WorkflowGetDefinitionResponse {
@@ -198,6 +209,12 @@ message WorkflowGetDefinitionResponse {
   string version = 4;
   string status = 5;
   int64 created_at = 6;
+  // 定义内容哈希（与实例 `definition_hash` 同口径）：同 (ns,name,version) 内容漂移
+  // 即新哈希，客户端可据此判定「同版本不同内容」。
+  string definition_hash = 7;
+  // 规范化后的结构化定义（`WorkflowDefinition` 的 JSON 序列化）；客户端无需自行解析
+  // YAML。字段为 coord 的 DSL 模型，未支持字段在 Deploy 期已 fail-closed。
+  string definition_json = 8;
 }
 
 // 工作流定义版本化 / 回滚（对齐 policy PutBundle：原子覆盖 + 版本化 + 回滚）
@@ -495,6 +512,33 @@ message WorkflowGetTaskResponse {
   ApprovalTaskSummary task = 1;
   repeated ApprovalVote votes = 2;
   string instance_status = 3; // 大写实例状态（RUNNING/COMPLETED/REJECTED/...）
+}
+
+message WorkflowHistoryRequest {
+  string workflow_id = 1;
+}
+
+message WorkflowHistoryResponse {
+  repeated WorkflowHistoryEvent events = 1;
+}
+
+// 历史事件（读模型投影）。`event_type` 为稳定的 UPPER_SNAKE 标签：
+//   STEP_ENTERED / TASK_CREATED / TASK_COMPLETED / TASK_REJECTED /
+//   TASK_ACKNOWLEDGED / TASK_EXPIRED / TASK_CANCELLED /
+//   ROUND_OPENED / ROUND_PASSED / ROUND_REJECTED / ROUND_SUPERSEDED / ROUND_CANCELLED /
+//   INSTANCE_STARTED / INSTANCE_ROLLED_BACK / INSTANCE_COMPLETED / INSTANCE_REJECTED /
+//   INSTANCE_CANCELLED / INSTANCE_TERMINATED / INSTANCE_FAULTED。
+// `task / assignment` 级事件按 coord 的席位模型投影；`TASK_ASSIGNMENT_*` 与
+// `TASK_CC` 等 seedj 细分事件在对应能力落地前不会出现。
+message WorkflowHistoryEvent {
+  string event_id = 1; // 确定性 id（同状态重复读取稳定）
+  string event_type = 2;
+  string instance_id = 3;
+  string step_name = 4; // 节点名；实例级事件为空
+  string task_id = 5; // 席位级事件填；其余为空
+  string action_id = 6; // coord 不持久化客户端 action id；保留字段，当前为空
+  int64 occurred_at = 7; // Unix ms
+  string attributes_json = 8; // 事件属性（JSON 对象字符串）
 }
 
 // 实例审批详情查询。

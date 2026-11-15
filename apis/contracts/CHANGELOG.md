@@ -1,3 +1,29 @@
+## [contracts/v1.19.0] — 2026-11-15（Minor：Workflow 历史读模型与定义内容哈希，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 追加 `History` RPC 与 `GetDefinition` 的
+2 个可选响应字段 + 3 个可选请求字段；不改既有字段号/类型、不删 RPC；`buf breaking`
+基线不变）。
+
+- 新增 `History(workflow_id)`：从审批聚合快照**确定性投影** task / round / step /
+  instance 级事件。`event_type` 为稳定 UPPER_SNAKE 标签（`TASK_CREATED` /
+  `TASK_COMPLETED` / `TASK_REJECTED` / `ROUND_REJECTED` / `INSTANCE_ROLLED_BACK` 等），
+  `event_id` 确定性、按 `occurred_at` 排序；同一状态重复读取得到同一批事件。
+  `action_id` 保留为空（coord 不持久化客户端 action id）。
+- `WorkflowGetDefinitionRequest` 追加 `namespace`(2) / `name`(3) / `version`(4)：可与
+  `workflow_id` 二选一，支持 `FindDefinition(ns, name, version)` 语义。
+- `WorkflowGetDefinitionResponse` 追加 `definition_hash`(7) / `definition_json`(8)：
+  内容哈希与实例 `definition_hash` 同口径；结构化 JSON 免去客户端解析 YAML。
+- 已知缺口（不影响 wire 兼容）：seedj 细分的 `TASK_ASSIGNMENT_SUSPENDED/RESUMED`、
+  `TASK_ADD_ASSIGNEE_BEFORE`、`TASK_CC` 等事件在对应能力（#381）落地前不会出现在
+  `History` 中。
+- 能力登记：`History` → `coord:workflow:read`。
+- SDK：Rust `Client::history`；Java 后续补齐。
+
+**影响范围**：旧客户端不受影响（新增 RPC/字段为增量；`GetDefinition` 仅传
+`workflow_id` 的调用保持原行为，响应新增字段可忽略）。
+
+**回滚预案**：回滚本分支即回到无历史读模型/无哈希字段的版本；无落盘迁移。
+
 ## [contracts/v1.18.0] — 2026-11-15（Minor：Workflow 任务查询面与实例过滤，wire 向前兼容）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 追加 2 个查询 RPC 与

@@ -429,7 +429,7 @@ trigger:
 | `Workflow/GetStatus` / `ListDefinitions` / `GetDefinition` / `ListDefinitionVersions` / `ListInstances` | `coord:workflow:read` |
 | `Workflow/Deploy` / `RollbackDefinition` | `coord:workflow:define` |
 | `Workflow/Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` / `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate` | `coord:workflow:execute` |
-| `Workflow/ListPendingTasks` / `GetInstanceDetail` / `ListTasks` / `GetTask` | `coord:workflow:read` |
+| `Workflow/ListPendingTasks` / `GetInstanceDetail` / `ListTasks` / `GetTask` / `History` | `coord:workflow:read` |
 
 - 调度：认领式（`ClaimJob` 带租约，`Heartbeat` 续约），worker 崩溃由租约过期
   重派；**任务完成结果随完成持久化**（G-SC-1）——`CompleteJob` 携带 `result`
@@ -443,8 +443,8 @@ trigger:
 - **人工审批 v2（原生 `approve` 节点，ADR-0013 / ADR-0014）**：走到该节点的工作流实例进入
   `SUSPENDED`（`expected_signal = "approval.completed"`，审批实例 id = workflow 实例 id）；
   外部经 10 个命令 RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/
-  Delegate/Withdraw/Terminate`）操作席位、经 4 个查询 RPC（`ListPendingTasks`/
-  `GetInstanceDetail`/`ListTasks`/`GetTask`）读待办、任务与实例详情。命令携带 `idempotency_key`，重放返回首次响应
+  Delegate/Withdraw/Terminate`）操作席位、经 5 个查询 RPC（`ListPendingTasks`/
+  `GetInstanceDetail`/`ListTasks`/`GetTask`/`History`）读待办、任务、实例详情与历史事件流。命令携带 `idempotency_key`，重放返回首次响应
   （不重复执行）；默认主体身份取自 CCT（请求体无 actor）。
   业务服务代终端用户时：命令填 `on_behalf_of`、`ListPendingTasks` 填 `assignee`；调用方
   服务须在 agent 配置 `services.workflow_on_behalf_services` 白名单内，生效主体是被代表
