@@ -69,9 +69,17 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
 
     @Override
     public PkiCertInfo issueCert(String commonName, long ttlSeconds) {
+        return issueCert(commonName, ttlSeconds, List.of(), List.of());
+    }
+
+    @Override
+    public PkiCertInfo issueCert(String commonName, long ttlSeconds, List<String> dnsNames,
+                                 List<String> ipAddresses) {
         PkiIssueCertRequest request = PkiIssueCertRequest.newBuilder()
                 .setCommonName(commonName)
                 .setTtlSeconds(ttlSeconds)
+                .addAllDnsNames(dnsNames == null ? List.of() : dnsNames)
+                .addAllIpAddresses(ipAddresses == null ? List.of() : ipAddresses)
                 .build();
 
         PkiIssueCertResponse response = callWithRetry(
@@ -87,7 +95,9 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
                 response.getKeyPem(),
                 response.getNotBefore(),
                 response.getNotAfter(),
-                response.getSerial());
+                response.getSerial(),
+                response.getStatus(),
+                response.getParentSerial());
     }
 
     @Override
@@ -122,9 +132,17 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
 
     @Override
     public PkiCertInfo rotateCert(String commonName, long ttlSeconds) {
+        return rotateCert(commonName, ttlSeconds, List.of(), List.of());
+    }
+
+    @Override
+    public PkiCertInfo rotateCert(String commonName, long ttlSeconds, List<String> dnsNames,
+                                  List<String> ipAddresses) {
         PkiRotateCertRequest request = PkiRotateCertRequest.newBuilder()
                 .setCommonName(commonName)
                 .setTtlSeconds(ttlSeconds)
+                .addAllDnsNames(dnsNames == null ? List.of() : dnsNames)
+                .addAllIpAddresses(ipAddresses == null ? List.of() : ipAddresses)
                 .build();
 
         PkiRotateCertResponse response = callWithRetry(
