@@ -1371,7 +1371,8 @@ pub mod phase4 {
     };
     use coord_core::workflow::approval::engine::Engine as ApprovalEngine;
     use coord_core::workflow::approval::model::{
-        Branch as ApprovalBranch, Round as ApprovalRound, Task as ApprovalTask,
+        Branch as ApprovalBranch, Decision as ApprovalDecision, Round as ApprovalRound,
+        RoundStatus as ApprovalRoundStatus, Task as ApprovalTask, TaskKind as ApprovalTaskKind,
         TaskStatus as ApprovalTaskStatus,
     };
     use coord_core::workflow::approval::store::ApprovalStore;
@@ -2299,6 +2300,8 @@ pub mod phase4 {
     pub enum DeployError {
         /// 输入解析 / DSL 校验失败（gRPC → InvalidArgument）
         Validation(String),
+        /// 同 `(namespace, name, version)` 已存在且内容不同（gRPC → AlreadyExists）
+        Conflict(String),
         /// 存储 / 基础设施失败（gRPC → Internal）
         Store(String),
     }
@@ -2307,6 +2310,7 @@ pub mod phase4 {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 DeployError::Validation(msg) => write!(f, "validation error: {msg}"),
+                DeployError::Conflict(msg) => write!(f, "conflict: {msg}"),
                 DeployError::Store(msg) => write!(f, "store error: {msg}"),
             }
         }
@@ -2544,6 +2548,19 @@ pub mod phase4 {
         pub node: Option<&'a str>,
         pub status: Option<&'a str>,
         pub due_before_ms: i64,
+    }
+
+    /// 历史事件投影（`History` 读模型）。
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct HistoryEventView {
+        pub event_id: String,
+        pub event_type: String,
+        pub instance_id: String,
+        pub step_name: String,
+        pub task_id: String,
+        pub action_id: String,
+        pub occurred_at: i64,
+        pub attributes: Value,
     }
 
     /// 审批实例详情（`GetInstanceDetail` 查询投影）。
@@ -3185,13 +3202,54 @@ pub mod phase4 {
             );
             def.id = Some(id.clone());
 
-            // 原子覆盖（Txn CAS，对齐 policy PutBundle），防并发同键部署丢更新
-            self.store
-                .save_definition_atomic(&def)
+            // 同 (namespace, name, version) 的不可变语义：同内容幂等（返回既有 id），
+            // 不同内容冲突（不覆盖）。create-if-absent 让并发部署恰一个创建者；
+            // 输家重读后按同一规则判定。
+            let namespace = def.document.namespace.clone();
+            let name = def.document.name.clone();
+            let version = def.document.version.clone();
+            let same_content = |existing: &WorkflowDefinition| {
+                coord_core::workflow::model::definition_hash(existing)
+                    == coord_core::workflow::model::definition_hash(&def)
+            };
+            if let Some(existing) = self
+                .store
+                .load_definition(&namespace, &name, &version)
+                .await
+                .map_err(|e| DeployError::Store(format!("store error: {e}")))?
+            {
+                if same_content(&existing) {
+                    return Ok(existing.id.unwrap_or_default());
+                }
+                return Err(DeployError::Conflict(format!(
+                    "definition {namespace}/{name}@{version} already exists with different content"
+                )));
+            }
+            let created = self
+                .store
+                .create_definition(&def)
                 .await
                 .map_err(|e| DeployError::Store(format!("store error: {e}")))?;
-
-            Ok(id)
+            if created {
+                return Ok(id);
+            }
+            let existing = self
+                .store
+                .load_definition(&namespace, &name, &version)
+                .await
+                .map_err(|e| DeployError::Store(format!("store error: {e}")))?
+                .ok_or_else(|| {
+                    DeployError::Store(format!(
+                        "definition {namespace}/{name}@{version} vanished after create conflict"
+                    ))
+                })?;
+            if same_content(&existing) {
+                Ok(existing.id.unwrap_or_default())
+            } else {
+                Err(DeployError::Conflict(format!(
+                    "definition {namespace}/{name}@{version} already exists with different content"
+                )))
+            }
         }
 
         /// 列出某 `(namespace, name)` 定义的全部版本（回滚目标发现，对齐 policy `ListBundleVersions`）
@@ -3296,6 +3354,19 @@ pub mod phase4 {
             Ok(all_defs
                 .into_iter()
                 .find(|d| d.id.as_deref() == Some(definition_id)))
+        }
+
+        /// 按 (namespace, name, version) 直取定义（`FindDefinition` 语义）。
+        pub async fn get_definition_by_version(
+            &self,
+            namespace: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<Option<WorkflowDefinition>, String> {
+            self.store
+                .load_definition(namespace, name, version)
+                .await
+                .map_err(|e| format!("store error: {e}"))
         }
 
         pub async fn list_definitions(
@@ -3783,6 +3854,245 @@ pub mod phase4 {
             Err(BridgeError::NotFound(task_id.to_string()))
         }
 
+        /// 实例历史：把审批聚合快照投影为确定性事件流（task / round / step / instance）。
+        ///
+        /// 不读 outbox：outbox 只有 7 个生命周期事件，且可能被剪枝；本投影从当前状态 +
+        /// 投票/审计记录重建，保证同状态重复读取得到同一批 (event_id, event_type, at)。
+        pub async fn history(
+            &self,
+            workflow_id: &str,
+        ) -> Result<Vec<HistoryEventView>, BridgeError> {
+            let bridge = self.approval_bridge()?;
+            let engine = bridge
+                .store()
+                .load(workflow_id)
+                .await
+                .map_err(BridgeError::from)?
+                .map(|(engine, _rev)| engine)
+                .ok_or_else(|| BridgeError::NotFound(workflow_id.to_string()))?;
+
+            let iid = engine.instance.id.clone();
+            let mut events = Vec::new();
+            events.push(HistoryEventView {
+                event_id: format!("{iid}:instance:started"),
+                event_type: "INSTANCE_STARTED".into(),
+                instance_id: iid.clone(),
+                step_name: String::new(),
+                task_id: String::new(),
+                action_id: String::new(),
+                occurred_at: engine.instance.created_at,
+                attributes: serde_json::json!({
+                    "definition_ns": engine.instance.definition_ns,
+                    "definition_name": engine.instance.definition_name,
+                    "definition_version": engine.instance.definition_version,
+                    "definition_hash": engine.instance.definition_hash,
+                    "initiator": engine.instance.initiator,
+                }),
+            });
+
+            for branch in engine.branches.values() {
+                events.push(HistoryEventView {
+                    event_id: format!("{iid}:step:{}", branch.id),
+                    event_type: "STEP_ENTERED".into(),
+                    instance_id: iid.clone(),
+                    step_name: branch.node.clone(),
+                    task_id: String::new(),
+                    action_id: String::new(),
+                    occurred_at: branch.created_at,
+                    attributes: serde_json::json!({
+                        "branch_id": branch.id,
+                        "attempt": branch.attempt,
+                        "join": json_label(&branch.join),
+                        "reject": json_label(&branch.reject),
+                    }),
+                });
+            }
+
+            for task in engine.tasks.values() {
+                let node = engine
+                    .branches
+                    .get(&task.branch_id)
+                    .map(|b| b.node.clone())
+                    .unwrap_or_default();
+                let base = format!("{iid}:task:{}", task.id);
+                events.push(HistoryEventView {
+                    event_id: format!("{base}:created"),
+                    event_type: "TASK_CREATED".into(),
+                    instance_id: iid.clone(),
+                    step_name: node.clone(),
+                    task_id: task.id.clone(),
+                    action_id: String::new(),
+                    occurred_at: task.created_at,
+                    attributes: serde_json::json!({
+                        "kind": json_label(&task.kind),
+                        "assignee": task.assignee,
+                        "candidates": task.candidates,
+                        "deadline_ms": task.deadline.unwrap_or(0),
+                        "branch_id": task.branch_id,
+                        "round_id": task.round_id,
+                    }),
+                });
+                for (index, vote) in task.votes.iter().enumerate() {
+                    let event_type = match vote.decision {
+                        ApprovalDecision::Approve => "TASK_COMPLETED",
+                        ApprovalDecision::Reject => "TASK_REJECTED",
+                    };
+                    events.push(HistoryEventView {
+                        event_id: format!("{base}:vote:{index}"),
+                        event_type: event_type.into(),
+                        instance_id: iid.clone(),
+                        step_name: node.clone(),
+                        task_id: task.id.clone(),
+                        action_id: String::new(),
+                        occurred_at: vote.at,
+                        attributes: serde_json::json!({
+                            "decision": json_label(&vote.decision),
+                            "actor": vote.actor,
+                            "on_behalf_of": vote.on_behalf_of,
+                            "acting_service": vote.acting_service,
+                            "comment": vote.comment,
+                            "round_id": vote.round_id,
+                        }),
+                    });
+                }
+                if task.votes.is_empty() {
+                    let (event_type, suffix) = match task.status {
+                        ApprovalTaskStatus::Expired => ("TASK_EXPIRED", "expired"),
+                        ApprovalTaskStatus::Cancelled => ("TASK_CANCELLED", "cancelled"),
+                        ApprovalTaskStatus::Completed if task.kind == ApprovalTaskKind::ReadAck => {
+                            ("TASK_ACKNOWLEDGED", "ack")
+                        }
+                        _ => ("", ""),
+                    };
+                    if !event_type.is_empty() {
+                        events.push(HistoryEventView {
+                            event_id: format!("{base}:{suffix}"),
+                            event_type: event_type.into(),
+                            instance_id: iid.clone(),
+                            step_name: node,
+                            task_id: task.id.clone(),
+                            action_id: String::new(),
+                            occurred_at: task.updated_at,
+                            attributes: serde_json::json!({
+                                "assignee": task.assignee,
+                                "kind": json_label(&task.kind),
+                            }),
+                        });
+                    }
+                }
+            }
+
+            for round in engine.rounds.values() {
+                let base = format!("{iid}:round:{}", round.id);
+                events.push(HistoryEventView {
+                    event_id: format!("{base}:opened"),
+                    event_type: "ROUND_OPENED".into(),
+                    instance_id: iid.clone(),
+                    step_name: engine
+                        .branches
+                        .get(&round.branch_id)
+                        .map(|b| b.node.clone())
+                        .unwrap_or_default(),
+                    task_id: String::new(),
+                    action_id: String::new(),
+                    occurred_at: round.opened_at,
+                    attributes: serde_json::json!({
+                        "branch_id": round.branch_id,
+                        "number": round.number,
+                    }),
+                });
+                if round.status != ApprovalRoundStatus::Open {
+                    let status = round.status;
+                    events.push(HistoryEventView {
+                        event_id: format!("{base}:{}", json_label(&status)),
+                        event_type: match status {
+                            ApprovalRoundStatus::Passed => "ROUND_PASSED",
+                            ApprovalRoundStatus::Rejected => "ROUND_REJECTED",
+                            ApprovalRoundStatus::Superseded => "ROUND_SUPERSEDED",
+                            ApprovalRoundStatus::Cancelled => "ROUND_CANCELLED",
+                            ApprovalRoundStatus::Open => "ROUND_OPENED",
+                        }
+                        .into(),
+                        instance_id: iid.clone(),
+                        step_name: engine
+                            .branches
+                            .get(&round.branch_id)
+                            .map(|b| b.node.clone())
+                            .unwrap_or_default(),
+                        task_id: String::new(),
+                        action_id: String::new(),
+                        occurred_at: round.closed_at.unwrap_or(round.opened_at),
+                        attributes: serde_json::json!({
+                            "branch_id": round.branch_id,
+                            "number": round.number,
+                            "total": round.total_count,
+                            "completed": round.completed_count,
+                            "rejected": round.rejected_count,
+                            "reason": round.reject_reason,
+                        }),
+                    });
+                }
+            }
+
+            for (index, ret) in engine.instance.returns.iter().enumerate() {
+                events.push(HistoryEventView {
+                    event_id: format!("{iid}:return:{index}"),
+                    event_type: "INSTANCE_ROLLED_BACK".into(),
+                    instance_id: iid.clone(),
+                    step_name: ret.from_node.clone(),
+                    task_id: String::new(),
+                    action_id: String::new(),
+                    occurred_at: ret.at,
+                    attributes: serde_json::json!({
+                        "from_node": ret.from_node,
+                        "to_node": ret.to_node,
+                        "by": ret.by,
+                        "comment": ret.comment,
+                    }),
+                });
+            }
+
+            if engine.instance.status.is_terminal() {
+                let event_type = match engine.instance.status {
+                    coord_core::workflow::approval::model::InstanceStatus::Completed => {
+                        "INSTANCE_COMPLETED"
+                    }
+                    coord_core::workflow::approval::model::InstanceStatus::Rejected => {
+                        "INSTANCE_REJECTED"
+                    }
+                    coord_core::workflow::approval::model::InstanceStatus::Cancelled => {
+                        "INSTANCE_CANCELLED"
+                    }
+                    coord_core::workflow::approval::model::InstanceStatus::Terminated => {
+                        "INSTANCE_TERMINATED"
+                    }
+                    coord_core::workflow::approval::model::InstanceStatus::Faulted => {
+                        "INSTANCE_FAULTED"
+                    }
+                    coord_core::workflow::approval::model::InstanceStatus::Pending
+                    | coord_core::workflow::approval::model::InstanceStatus::Running => "",
+                };
+                if !event_type.is_empty() {
+                    events.push(HistoryEventView {
+                        event_id: format!("{iid}:instance:terminal"),
+                        event_type: event_type.into(),
+                        instance_id: iid.clone(),
+                        step_name: String::new(),
+                        task_id: String::new(),
+                        action_id: String::new(),
+                        occurred_at: engine.instance.updated_at,
+                        attributes: serde_json::json!({
+                            "status": json_label(&engine.instance.status).to_uppercase(),
+                            "revision": engine.instance.revision,
+                        }),
+                    });
+                }
+            }
+
+            events.sort_by(|a, b| (a.occurred_at, &a.event_id).cmp(&(b.occurred_at, &b.event_id)));
+            Ok(events)
+        }
+
         /// 审批实例详情（引擎快照投影）。
         pub async fn get_instance_detail(
             &self,
@@ -4173,6 +4483,47 @@ do:
         assert_eq!(def.document.name, "linear-wf");
         assert_eq!(def.document.namespace, "test");
         assert_eq!(def.do_tasks.len(), 2);
+    }
+
+    /// 同 (ns,name,version)：同内容幂等（返回既有 id），不同内容冲突（不覆盖）。
+    #[tokio::test]
+    async fn deploy_same_version_same_content_is_idempotent_and_diff_conflicts() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = sample_linear_yaml();
+        let first = svc.deploy_definition("test", &yaml).await.unwrap();
+        let replay = svc.deploy_definition("test", &yaml).await.unwrap();
+        assert_eq!(first, replay, "同内容重复部署必须返回同一 definition id");
+
+        let changed = yaml.replace("localhost/step2", "localhost/step2-v2");
+        let err = svc
+            .deploy_definition("test", &changed)
+            .await
+            .expect_err("different content at the same version must conflict");
+        assert!(matches!(err, DeployError::Conflict(_)), "{err:?}");
+        let loaded = svc
+            .get_definition_by_version("test", "linear-wf", "1.0")
+            .await
+            .unwrap()
+            .expect("original definition kept");
+        assert_eq!(loaded.id.as_deref(), Some(first.as_str()));
+    }
+
+    /// 结构化定义：JSON 是 YAML 的子集，可直接经 `Deploy` 提交（无需 YAML 文本）。
+    #[tokio::test]
+    async fn deploy_accepts_structured_json_definition() {
+        let svc = WorkflowEngineService::new_for_test();
+        let json = r#"{
+            "document": {"dsl": "1.0.0", "namespace": "test", "name": "json-wf", "version": "1.0"},
+            "do": [{"step": {"set": {"variable": "x", "value": "1"}}}]
+        }"#;
+        let def_id = svc.deploy_definition("test", json).await.unwrap();
+        let def = svc
+            .get_definition(&def_id)
+            .await
+            .unwrap()
+            .expect("structured definition loaded");
+        assert_eq!(def.document.name, "json-wf");
+        assert_eq!(def.do_tasks.len(), 1);
     }
 
     #[tokio::test]
@@ -7014,6 +7365,116 @@ do:
             ..Default::default()
         };
         assert!(svc.list_tasks(&filter, 10, None).await.is_err());
+    }
+
+    /// 历史投影：事件类型/顺序稳定，重复读取逐字一致；否决原因进入 ROUND_REJECTED。
+    #[tokio::test]
+    async fn history_projects_stable_task_and_round_events() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("history-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        let seat = await_open_seat(&store, &inst.id, "alice").await;
+        svc.approval_command(
+            &inst.id,
+            "alice",
+            ApprovalCommand::Approve {
+                task_id: &seat,
+                comment: Some("同意"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events = svc.history(&inst.id).await.unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        for expected in [
+            "INSTANCE_STARTED",
+            "STEP_ENTERED",
+            "TASK_CREATED",
+            "ROUND_OPENED",
+            "TASK_COMPLETED",
+            "ROUND_PASSED",
+        ] {
+            assert!(types.contains(&expected), "missing {expected}: {types:?}");
+        }
+        let task_event = events
+            .iter()
+            .find(|e| e.event_type == "TASK_COMPLETED")
+            .unwrap();
+        assert_eq!(task_event.task_id, seat);
+        assert_eq!(task_event.step_name, "review");
+        assert_eq!(task_event.attributes["actor"], serde_json::json!("alice"));
+        assert_eq!(task_event.attributes["comment"], serde_json::json!("同意"));
+        // 顺序单调 + event_id 唯一 + 重复读取逐字一致。
+        assert!(events
+            .windows(2)
+            .all(|w| (w[0].occurred_at, &w[0].event_id) <= (w[1].occurred_at, &w[1].event_id)));
+        let mut ids: Vec<&str> = events.iter().map(|e| e.event_id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), events.len(), "event_id 必须唯一");
+        assert_eq!(events, svc.history(&inst.id).await.unwrap());
+
+        // 定义按 (ns,name,version) 直取 + 内容哈希与实例钉死值一致。
+        let def = svc
+            .get_definition_by_version("test", "history-wf", "1.0")
+            .await
+            .unwrap()
+            .expect("definition by version");
+        assert_eq!(
+            coord_core::workflow::model::definition_hash(&def),
+            inst.definition_hash.clone().unwrap_or_default()
+        );
+        assert!(svc
+            .get_definition_by_version("test", "history-wf", "9.9")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// 驳回历史：ROUND_REJECTED 带 reason，实例级否决事件存在。
+    #[tokio::test]
+    async fn history_records_reject_reason_and_terminal_event() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("history-reject-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        let seat = await_open_seat(&store, &inst.id, "alice").await;
+        svc.approval_command(
+            &inst.id,
+            "alice",
+            ApprovalCommand::Reject {
+                task_id: &seat,
+                comment: Some("不同意"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events = svc.history(&inst.id).await.unwrap();
+        let rejected = events
+            .iter()
+            .find(|e| e.event_type == "ROUND_REJECTED")
+            .expect("round rejected event");
+        assert_eq!(
+            rejected.attributes["reason"],
+            serde_json::json!("any_reject")
+        );
+        assert!(events.iter().any(|e| e.event_type == "INSTANCE_REJECTED"));
+        assert!(events.iter().any(|e| e.event_type == "TASK_REJECTED"));
     }
 
     /// `ListInstances` 状态 / 定义 / 启动时间窗过滤。

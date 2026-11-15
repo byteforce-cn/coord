@@ -1,3 +1,48 @@
+## [contracts/v1.20.0] — 2026-11-15（Minor：Deploy 同版本不可变语义，wire 无改动）
+
+**发布口径**：**Minor**（无字段/RPC/枚举/错误码变更；`buf breaking` 基线不变）。
+`Deploy` 的同版本语义从「覆盖」收敛为「不可变」，属于调用方可观察的行为修正。
+
+- 同一 `(namespace, name, version)`：内容哈希相同 ⇒ 幂等成功（返回既有 definition id，
+  不写库）；内容不同 ⇒ `ALREADY_EXISTS`（要变更请提升 version 或 `RollbackDefinition`）。
+- 实现侧新增 `WorkflowStore::create_definition`（KV `VERSION == 0` 谓词），并发同版本
+  Deploy 恰一个创建者；输家重读后按同一规则判定。
+- `Deploy` 接受 JSON 或 YAML（JSON 是 YAML 子集）；结构化输入无需先转 YAML。
+  未知字段仍在 Deploy 期 fail-closed（`INVALID_ARGUMENT` 点名构造）。
+- 与 v1.19.0 的 `GetDefinition` 内容哈希/结构化 JSON 配套，客户端可自行校验不可变性。
+
+**影响范围**：此前依赖「同名同版本覆盖」的调用方会开始收到 `ALREADY_EXISTS`；这是
+有意的 fail-closed 收敛（静默覆盖会让已钉死哈希的实例与定义漂移）。正确做法是提升
+version 或用 `RollbackDefinition`。
+
+**回滚预案**：回滚本分支即恢复覆盖语义；无 wire / 落盘迁移（既有定义数据不变）。
+
+## [contracts/v1.19.0] — 2026-11-15（Minor：Workflow 历史读模型与定义内容哈希，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 追加 `History` RPC 与 `GetDefinition` 的
+2 个可选响应字段 + 3 个可选请求字段；不改既有字段号/类型、不删 RPC；`buf breaking`
+基线不变）。
+
+- 新增 `History(workflow_id)`：从审批聚合快照**确定性投影** task / round / step /
+  instance 级事件。`event_type` 为稳定 UPPER_SNAKE 标签（`TASK_CREATED` /
+  `TASK_COMPLETED` / `TASK_REJECTED` / `ROUND_REJECTED` / `INSTANCE_ROLLED_BACK` 等），
+  `event_id` 确定性、按 `occurred_at` 排序；同一状态重复读取得到同一批事件。
+  `action_id` 保留为空（coord 不持久化客户端 action id）。
+- `WorkflowGetDefinitionRequest` 追加 `namespace`(2) / `name`(3) / `version`(4)：可与
+  `workflow_id` 二选一，支持 `FindDefinition(ns, name, version)` 语义。
+- `WorkflowGetDefinitionResponse` 追加 `definition_hash`(7) / `definition_json`(8)：
+  内容哈希与实例 `definition_hash` 同口径；结构化 JSON 免去客户端解析 YAML。
+- 已知缺口（不影响 wire 兼容）：seedj 细分的 `TASK_ASSIGNMENT_SUSPENDED/RESUMED`、
+  `TASK_ADD_ASSIGNEE_BEFORE`、`TASK_CC` 等事件在对应能力（#381）落地前不会出现在
+  `History` 中。
+- 能力登记：`History` → `coord:workflow:read`。
+- SDK：Rust `Client::history`；Java 后续补齐。
+
+**影响范围**：旧客户端不受影响（新增 RPC/字段为增量；`GetDefinition` 仅传
+`workflow_id` 的调用保持原行为，响应新增字段可忽略）。
+
+**回滚预案**：回滚本分支即回到无历史读模型/无哈希字段的版本；无落盘迁移。
+
 ## [contracts/v1.18.0] — 2026-11-15（Minor：Workflow 任务查询面与实例过滤，wire 向前兼容）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 追加 2 个查询 RPC 与

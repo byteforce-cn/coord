@@ -184,9 +184,16 @@ auth:
     错误码映射：`StaleRevision → ABORTED`、`NotAuthorized → PERMISSION_DENIED`、
     `InvalidTransition → FAILED_PRECONDITION`。能力与错误码事实源见
     `coord-core/src/grpc_auth.rs` 与 `consumer-contract.md` §0.2 / §7。
+- **seedj 适配映射**：`WorkflowProvider` 字段/动作到 coord DSL/命令的逐项映射见
+  `seedj-workflow-provider-mapping.md`；**未列出的字段一律不支持**，适配器必须 fail-closed。
 - **DSL**：定义里用原生 `approve` 节点声明席位与策略（camelCase 键：`approvers / pool / readers /
-  roles / mode / veto / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
+  roles / mode / veto / reject / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
   非法 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed；语法逐字见 ADR-0013 D2。
+- **定义不可变**：同一 `(namespace, name, version)` 的内容由 `definition_hash` 判定——
+  同内容重复 `Deploy` 幂等（返回既有 definition id，不覆盖）；不同内容返回
+  `ALREADY_EXISTS`（要变更请提升 version 或先 `RollbackDefinition`）。`Deploy` 接受
+  JSON 或 YAML（JSON 是 YAML 子集）；`GetDefinition` 可按 `workflow_id` 或
+  `(namespace, name, version)` 直取，并返回 `definition_hash` / `definition_json`。
 - **动态席位（ADR-0014 D1）**：四个席位来源的单个条目可写 `${ ... }` 表达式，在节点开启时
   按实例上下文求值（`$input` / `$context` 同值；返回字符串或字符串数组）。空结果 / 非字符串
   元素 / 空主体 fail-closed 并点名来源键；`roles` 的表达式结果再经 `ApproverResolver` 展开：
@@ -266,7 +273,13 @@ auth:
   `due_before_ms` 过滤（未知 `status` fail-closed），分页口径与待办一致；`GetTask(task_id)`
   直取席位（含投票与实例状态）。`ListInstances` 支持 `definition`（定义名或 ID）、
   `status_filter` 与 `started_after_ms` / `started_before_ms` 时间窗；过滤在服务端完成，
-  `page_size` 是扫描批次而非严格返回上限（不跳过未消费实例）。
+  `page_size` 是扫描批次而非严格返回上限（不跳过未消费实例）。`History(workflow_id)`
+  从审批聚合快照投影出稳定的 task/round/step/instance 事件流（`event_id` 确定性、按
+  `occurred_at` 排序）；`GetDefinition` 支持 `workflow_id` 或 `(namespace,name,version)`
+  二选一，并返回内容哈希与结构化 JSON（`definition_hash` / `definition_json`）。
+- **Provider 时钟**：coord 不提供独立 `Now` RPC；所有响应时间戳均为 Unix ms。适配器
+  `provider.now()` 使用本地时钟即可（与 coord 响应时间同单位），不存在服务器单调时钟
+  承诺。
 
 **已知未落地（当前口径）**：
 

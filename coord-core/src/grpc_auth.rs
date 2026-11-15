@@ -278,6 +278,7 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.workflow.v1.Workflow/GetInstanceDetail" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/ListTasks" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/GetTask" => Some("coord:workflow:read"),
+        "/coord.workflow.v1.Workflow/History" => Some("coord:workflow:read"),
 
         // Policy —— 策略/OPA
         "/coord.policy.v1.Policy/CheckPermission" => Some("coord:policy:evaluate"),
@@ -824,6 +825,7 @@ mod tests {
             "/coord.workflow.v1.Workflow/GetInstanceDetail",
             "/coord.workflow.v1.Workflow/ListTasks",
             "/coord.workflow.v1.Workflow/GetTask",
+            "/coord.workflow.v1.Workflow/History",
         ] {
             assert_eq!(
                 rpc_capability(method),

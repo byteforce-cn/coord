@@ -429,7 +429,7 @@ trigger:
 | `Workflow/GetStatus` / `ListDefinitions` / `GetDefinition` / `ListDefinitionVersions` / `ListInstances` | `coord:workflow:read` |
 | `Workflow/Deploy` / `RollbackDefinition` | `coord:workflow:define` |
 | `Workflow/Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` / `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate` | `coord:workflow:execute` |
-| `Workflow/ListPendingTasks` / `GetInstanceDetail` / `ListTasks` / `GetTask` | `coord:workflow:read` |
+| `Workflow/ListPendingTasks` / `GetInstanceDetail` / `ListTasks` / `GetTask` / `History` | `coord:workflow:read` |
 
 - 调度：认领式（`ClaimJob` 带租约，`Heartbeat` 续约），worker 崩溃由租约过期
   重派；**任务完成结果随完成持久化**（G-SC-1）——`CompleteJob` 携带 `result`
@@ -439,12 +439,15 @@ trigger:
 - 工作流 Start：可选 `workflow_id` 指定实例 id——同 id + 同定义（ns/name/version + 内容
   哈希）重放返回首次实例，不重置状态；同 id + 不同定义/版本返回 `ALREADY_EXISTS`。
   `workflow_id` 与 `idempotency_key` 互斥。
+- 工作流定义：同 `(namespace, name, version)` 同内容重复 `Deploy` 幂等（返回既有 id），
+  不同内容返回 `ALREADY_EXISTS`（不覆盖；变更请提升 version）。`Deploy` 接受 JSON/YAML，
+  `GetDefinition` 可按 `(namespace, name, version)` 直取并返回内容哈希与结构化 JSON。
 - 工作流：**保留策略已落地（G-WF-1）**——`DeleteInstance`（仅终态）/`DeleteDefinition`（无实例引用才可删）；删除**不可回滚**、**无自动 TTL/归档**（`boundaries.md` B-WF-1；完整语义见 `workflow-semantics.md`）；子流程恢复为周期扫描（B-WF-2/B-WF-3）。
 - **人工审批 v2（原生 `approve` 节点，ADR-0013 / ADR-0014）**：走到该节点的工作流实例进入
   `SUSPENDED`（`expected_signal = "approval.completed"`，审批实例 id = workflow 实例 id）；
   外部经 10 个命令 RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/
-  Delegate/Withdraw/Terminate`）操作席位、经 4 个查询 RPC（`ListPendingTasks`/
-  `GetInstanceDetail`/`ListTasks`/`GetTask`）读待办、任务与实例详情。命令携带 `idempotency_key`，重放返回首次响应
+  Delegate/Withdraw/Terminate`）操作席位、经 5 个查询 RPC（`ListPendingTasks`/
+  `GetInstanceDetail`/`ListTasks`/`GetTask`/`History`）读待办、任务、实例详情与历史事件流。命令携带 `idempotency_key`，重放返回首次响应
   （不重复执行）；默认主体身份取自 CCT（请求体无 actor）。
   业务服务代终端用户时：命令填 `on_behalf_of`、`ListPendingTasks` 填 `assignee`；调用方
   服务须在 agent 配置 `services.workflow_on_behalf_services` 白名单内，生效主体是被代表
