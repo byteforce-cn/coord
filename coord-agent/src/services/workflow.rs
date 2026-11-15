@@ -4960,6 +4960,247 @@ events:
         addr
     }
 
+    /// try/catch 回归 DSL：`try` 里的 `risky` 调用失败时进 catch（`set` + 补偿 `call`），
+    /// 成功后继续执行后续任务。`object_form=true` 用对象形式 `catch: {do: [...]}`，
+    /// 否则用子句数组 `catch: [{do: [...]}]`（两种写法都必须执行同一份补偿）。
+    fn sample_try_catch_yaml(
+        name: &str,
+        risky_url: &str,
+        compensate_url: &str,
+        object_form: bool,
+    ) -> String {
+        let catch_block = if object_form {
+            format!(
+                "      catch:\n        do:\n          - markCompensated:\n              set:\n                variable: compensated\n                value: \"1\"\n          - compensate:\n              call: http\n              with:\n                method: POST\n                endpoint: \"{compensate_url}\"\n"
+            )
+        } else {
+            format!(
+                "      catch:\n        - do:\n            - markCompensated:\n                set:\n                  variable: compensated\n                  value: \"1\"\n            - compensate:\n                call: http\n                with:\n                  method: POST\n                  endpoint: \"{compensate_url}\"\n"
+            )
+        };
+        format!(
+            r#"document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - guard:
+      try:
+        - risky:
+            call: http
+            with:
+              method: POST
+              endpoint: "{risky_url}"
+{catch_block}  - after:
+      set:
+        variable: after
+        value: "2"
+"#
+        )
+    }
+
+    /// 轮询直到实例终态（超时则 panic，避免无限等待把测试挂死）。
+    async fn wait_terminal(svc: &WorkflowEngineService, id: &str) -> WorkflowInstance {
+        for _ in 0..120 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let cur = svc.get_instance(id).await.unwrap().unwrap();
+            if matches!(
+                cur.status,
+                InstanceStatus::Completed | InstanceStatus::Failed | InstanceStatus::Cancelled
+            ) {
+                return cur;
+            }
+        }
+        let cur = svc.get_instance(id).await.unwrap().unwrap();
+        panic!("instance {id} did not reach a terminal state: {cur:?}");
+    }
+
+    /// #323：try 失败 → catch 命中且无 goto ⇒ 索引必须前进。
+    ///
+    /// 旧实现把失败路径的索引留在原地，外层循环反复取出同一个 try/catch，每次追加
+    /// 一帧 COMPLETED（实测 3000+ 帧），实例永远到不了下一个任务。
+    #[tokio::test]
+    async fn test_try_catch_advances_after_catch_without_goto() {
+        let (ok_addr, _log) = spawn_recording_server().await;
+        let svc = WorkflowEngineService::new();
+        let yaml = sample_try_catch_yaml(
+            "try-catch-continue",
+            "http://127.0.0.1:1/risky",
+            &format!("http://{ok_addr}/compensate"),
+            false,
+        );
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let done = wait_terminal(&svc, &inst.id).await;
+        assert_eq!(
+            done.status,
+            InstanceStatus::Completed,
+            "fault={:?}",
+            done.fault
+        );
+
+        // 帧数有界：try/catch 一帧 + 后续任务一帧。自旋形态会在这里直接爆掉。
+        let guard_frames = done
+            .task_stack
+            .iter()
+            .filter(|f| f.task_name == "guard")
+            .count();
+        assert_eq!(
+            guard_frames, 1,
+            "try/catch 不得重跑：task_stack={:?}",
+            done.task_stack
+        );
+        assert_eq!(
+            done.task_stack.len(),
+            2,
+            "try/catch 与后续任务各执行一次：task_stack={:?}",
+            done.task_stack
+        );
+
+        // 后续任务真的执行了（索引已越过 try/catch）。
+        assert_eq!(done.context["after"], serde_json::json!(2));
+        assert_eq!(done.context["compensated"], serde_json::json!(1));
+    }
+
+    /// #324 Bug 2：`catch` 里的 `call` 必须真的派发（旧实现的 `_ => {}` 把
+    /// `Suspend(ExternalCall)` 吞掉：补偿从未发生，实例却 completed）。
+    #[tokio::test]
+    async fn test_try_catch_dispatches_catch_call_once() {
+        let (ok_addr, log) = spawn_recording_server().await;
+        let svc = WorkflowEngineService::new();
+        let yaml = sample_try_catch_yaml(
+            "try-catch-compensate",
+            "http://127.0.0.1:1/risky",
+            &format!("http://{ok_addr}/compensate"),
+            false,
+        );
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+        let done = wait_terminal(&svc, &inst.id).await;
+        assert_eq!(
+            done.status,
+            InstanceStatus::Completed,
+            "fault={:?}",
+            done.fault
+        );
+
+        let requests = log.lock().clone();
+        let compensations = requests
+            .iter()
+            .filter(|r| r.contains("/compensate"))
+            .count();
+        assert_eq!(
+            compensations, 1,
+            "catch 里的补偿调用必须恰好发出一次：{requests:?}"
+        );
+    }
+
+    /// #324 Bug 1：对象形式 `catch: {do: [...]}` 必须与数组形式同效（旧实现解析成空
+    /// catch：补偿不执行、不报错，实例沿正常路径前进）。
+    #[tokio::test]
+    async fn test_try_catch_object_form_runs_compensation() {
+        let (ok_addr, log) = spawn_recording_server().await;
+        let svc = WorkflowEngineService::new();
+        let yaml = sample_try_catch_yaml(
+            "try-catch-object-catch",
+            "http://127.0.0.1:1/risky",
+            &format!("http://{ok_addr}/compensate"),
+            true,
+        );
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+        let done = wait_terminal(&svc, &inst.id).await;
+        assert_eq!(
+            done.status,
+            InstanceStatus::Completed,
+            "fault={:?}",
+            done.fault
+        );
+
+        let requests = log.lock().clone();
+        assert!(
+            requests.iter().any(|r| r.contains("/compensate")),
+            "对象形式 catch 的补偿未派发：{requests:?}"
+        );
+        assert_eq!(done.context["compensated"], serde_json::json!(1));
+    }
+
+    /// 成功 world：try 体成功时 catch 不得执行（补偿只在失败时发生）。
+    #[tokio::test]
+    async fn test_try_catch_skips_catch_on_success() {
+        let (ok_addr, log) = spawn_recording_server().await;
+        let svc = WorkflowEngineService::new();
+        let yaml = sample_try_catch_yaml(
+            "try-catch-success",
+            &format!("http://{ok_addr}/risky"),
+            &format!("http://{ok_addr}/compensate"),
+            false,
+        );
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+        let done = wait_terminal(&svc, &inst.id).await;
+        assert_eq!(
+            done.status,
+            InstanceStatus::Completed,
+            "fault={:?}",
+            done.fault
+        );
+
+        let requests = log.lock().clone();
+        assert!(
+            requests.iter().any(|r| r.contains("/risky")),
+            "try 体未执行：{requests:?}"
+        );
+        assert!(
+            !requests.iter().any(|r| r.contains("/compensate")),
+            "正常路径不得执行补偿：{requests:?}"
+        );
+        assert!(done.context.get("compensated").is_none());
+        assert_eq!(done.context["after"], serde_json::json!(2));
+    }
+
+    /// catch 自身的失败必须 fail-closed：不得被当成"已补偿"继续沿正常路径前进。
+    #[tokio::test]
+    async fn test_try_catch_failure_inside_catch_faults_instance() {
+        let svc = WorkflowEngineService::new();
+        let yaml = sample_try_catch_yaml(
+            "try-catch-catch-fails",
+            "http://127.0.0.1:1/risky",
+            "http://127.0.0.1:1/compensate",
+            false,
+        );
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+        let done = wait_terminal(&svc, &inst.id).await;
+        assert_eq!(
+            done.status,
+            InstanceStatus::Failed,
+            "catch 内失败必须收口为 FAULTED（不得静默完成）：{done:?}"
+        );
+        let fault = done.fault.expect("failed instance must carry a fault");
+        assert!(
+            fault.detail.contains("compensate"),
+            "fault 应指向失败的补偿调用：{fault:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_http_dispatcher_full_contract() {
         use crate::services::workflow::phase4::HttpTaskDispatcher;

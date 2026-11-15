@@ -83,7 +83,7 @@
       (println "FAIL" node "Range echoed a negative read_ts:" read-ts)
       (System/exit 1))
     (println "PASS" node "kv.v2 Range(read_ts=0) on a fresh key is empty, read_ts"
-             read-ts)))
+             read-ts))
 
   ;; ── 3b. explicit read_ts > 0 also works (the echo is the oracle) ────────
   (let [node (first nodes)

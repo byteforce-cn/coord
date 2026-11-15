@@ -25,8 +25,9 @@
 #     op 的瞬时下滑会把单次 checkpoint 误判成系统性故障；
 #   * `insufficient-sample` —— 不算红（前段样本没到门槛）。
 #
-# 退出码：0 = soak 结束/被外部停止（watchdog 正常退出）；1 = 判据红、已停跑；
-# 2 = 用法/前置错误；3 = 复判器连续失败（看不到判据 = fail-closed 停跑）。
+# 退出码：0 = soak 结束/被外部停止（watchdog 正常退出）；1 = 判据红、已停跑
+# （含判据面缺失 :why "judge-surface-missing"）；2 = 用法/前置错误；
+# 3 = 复判器连续失败（看不到判据 = fail-closed 停跑）。
 set -uo pipefail
 
 PROJECT=/root/coord-test
@@ -43,6 +44,53 @@ MIN_OPS="${WATCHDOG_MIN_OPS:-200}"
 REJUDGE_EXTRA="${REJUDGE_EXTRA:-}"
 
 say() { echo "[$(date -u +%FT%TZ)] $*"; }
+
+# ─── checkpoint 判据面（单一事实源）──────────────────────────────────────────
+# 过滤面必须与实际输出的**冒号锚点**一致：rejudge 打印的是 `rejudge-op-<op>: …` /
+# `rejudge-history: …` / `rejudge-linear: …` / `rejudge-gates: …` /
+# `rejudge-mode: …`。旧的 `^rejudge-(op|history)-` 只命中前者（history 那行是
+# 冒号），于是历史读率与 gates 的 judged 面整段从 checkpoint 日志里消失（#322）。
+CHECKPOINT_PATTERN='^rejudge-(op-.+|history|linear|gates|mode):'
+
+# stdin = rejudge 的完整输出；输出带缩进的判据面明细。
+print_checkpoint() { grep -E "$CHECKPOINT_PATTERN" | sed 's/^/    /' || true; }
+
+# 判据面可见性：没有它就无从知道"红的是哪一类"，按看不到判据 fail-closed。
+judged_surface_visible() { grep -q '^rejudge-history:'; }
+
+# 过滤面自检（负控制 + 正控制）：`WATCHDOG_FILTER_SELFTEST=1` 时只跑自检。
+# 不放在 CI 里用另一份 pattern 重写一遍：两份 pattern 会各自漂移。
+if [[ "${WATCHDOG_FILTER_SELFTEST:-0}" == "1" ]]; then
+    sample="$(printf '%s\n' \
+        'rejudge-ops: 12345' \
+        'rejudge-op-v2-write: invoke=10 ok=10 info=0 fail=0' \
+        'rejudge-history: historical-reads=5 unavailable=0 ratio=1.00%' \
+        'rejudge-linear: valid=true errors=0' \
+        'rejudge-gates: valid=true premise=writes=10')$"
+    filtered="$(printf '%s\n' "$sample" | print_checkpoint)"
+    for needle in \
+        'rejudge-op-v2-write:' 'rejudge-history:' 'rejudge-linear:' 'rejudge-gates:'; do
+        if ! printf '%s\n' "$filtered" | grep -q "^    $needle"; then
+            echo "SELFTEST FAIL: checkpoint filter dropped $needle" >&2
+            echo "got: $filtered" >&2
+            exit 1
+        fi
+    done
+    if printf '%s\n' "$filtered" | grep -q 'rejudge-ops:'; then
+        echo "SELFTEST FAIL: op count line ('rejudge-ops:') must not be reported as an op class" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$sample" | judged_surface_visible; then
+        echo "SELFTEST FAIL: judged surface present but reported missing" >&2
+        exit 1
+    fi
+    if printf '%s\n' 'rejudge-op-v2-write: invoke=1 ok=1' | judged_surface_visible; then
+        echo "SELFTEST FAIL: judged surface missing but reported visible" >&2
+        exit 1
+    fi
+    echo "SELFTEST ok: checkpoint filter keeps history/linear/gates and the visibility check is not a no-op"
+    exit 0
+fi
 
 if [[ -z "$OP_LOG" ]]; then
     echo "usage: $0 <op-log> [interval-seconds]" >&2
@@ -110,9 +158,13 @@ while :; do
     fi
     judge_failures=0
 
-    # 进度快照：逐 op 比率，红了也能直接看到是哪一类。
     say "checkpoint ops=$ops verdict=$verdict reasons=${reasons:--}"
-    printf '%s\n' "$out" | grep -E '^rejudge-(op|history)-' | sed 's/^/    /' || true
+    if ! printf '%s\n' "$out" | judged_surface_visible; then
+        # 判据面不可见 = 复判器输出契约变了（或只吐了半截）：按「看不到判据」
+        # fail-closed 停跑，不让它在 72h 后被当成通过。
+        abort_run "judge-surface-missing" "$verdict" "$reasons" "${ops:-$lines}"
+    fi
+    printf '%s\n' "$out" | print_checkpoint
 
     case "$verdict" in
         valid|insufficient-sample)
