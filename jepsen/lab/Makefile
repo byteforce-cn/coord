@@ -480,6 +480,14 @@ test: $(CHECKER_GATE) ## Coord test: WORKLOAD, NEMESIS, TIME_LIMIT, CONCURRENCY,
 	    $(if $(REGIONS),--regions $(REGIONS)) $(if $(KV_T),--kv-t) $(CTRL_FLAGS))
 
 checkers: ## T0.3: run every checker fixture suite on control (red refuses to start a run)
+	# #322：Clojure 源语法预检（只用 reader，不加载命名空间）。CI 不加载 jepsen
+	# 命名空间 ⇒ `1_000` 这类 reader 级错误只在起跑时暴露。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    ./scripts/check-clj-syntax.clj --selftest)
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    ./scripts/check-clj-syntax.clj)
+	# #322：watchdog 的 checkpoint 过滤面自检（历史读率/gates 不得被静默滤掉）。
+	$(call runctl, cd $(CTRL_PROJECT) && WATCHDOG_FILTER_SELFTEST=1 ./scripts/soak-watchdog.sh)
 	# KV-T v2 配置模式（--kv-t）：先钉住 v1 配置逐字节不变，再看 v2 三段的形状。
 	# 放在最前面：它不加载任何 fixture，纯 config-str 断言。
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \

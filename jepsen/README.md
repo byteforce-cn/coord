@@ -330,6 +330,7 @@ LEIN_ROOT=true lein -o run -m clojure.main scripts/rejudge.clj <store|history.ed
 
 | 改动 | 先验证 | 再验证 | 才需要 72h |
 |:--|:--|:--|:--|
+| Clojure 源（`src/**` / `scripts/**`）语法 | `bash scripts/ci-install-clojure.sh` + `java -cp <cp> clojure.main scripts/check-clj-syntax.clj`（CI 也跑同一脚本） | `make checkers`（第一步就是同一检查） | 否 |
 | checker / 门槛 / 阈值（test-side） | `make checkers`（fixture 负控制） | `make rejudge`（既有 store，秒级） | 否 —— 最终取证时顺带 |
 | client / workload 形状 | `make checkers` | `make fast-soak`（同 workload + 加密扰动，~1h） | 否（除非改的是取证口径） |
 | server 行为 | 单测 + `make matrix-m3`（45s/格） | `make fast-soak` | 是（最终证据） |
@@ -343,7 +344,9 @@ op（invoke + 完成）追加到 `soak/soak-<name>-ops.edn`，`scripts/soak-watc
 - `:mvcc-violation` / `:history-unavailable-rate` / 判据空转 / RTO 类 ⇒ 立即停跑；
 - `:op-liveness` / `:quiet-availability` ⇒ 连续 2 次才停（分区窗口的瞬时下滑）；
 - `insufficient-sample`（前段样本没到门槛）不算红；
-- 复判器连续 3 次失败 ⇒ 也停（看不到判据 = fail-closed）。
+- 复判器连续 3 次失败 ⇒ 也停（看不到判据 = fail-closed）；checkpoint 里没有
+  `rejudge-history:`（判据面缺失）同样按看不到判据停跑，`fail-fast` 记
+  `:why "judge-surface-missing"`。
 
 停跑时写 `soak/fail-fast-<name>.edn`（原因、当时的 op 比率、op 日志路径）并
 `coord-soak.sh stop`。`make fast-soak-fail-fast` 查看结论；正常跑完则没有这个
