@@ -25,11 +25,42 @@ use coord_server::raft::{new_basic_node, new_raft, RaftConfig, WatchReceiver};
 use coord_server::server::CoordNode;
 use coord_server::storage::mvcc::MvccStorage;
 use coord_server::storage::redb_backend::RedbBackend;
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Channel;
 
-fn find_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+/// 一个节点的 gRPC / raft 监听器：**先 bind 再建节点**。
+///
+/// 旧写法 `find_port()` 是「绑定 → 取端口 → 关闭」：从关闭到 `Server::serve()` 真正
+/// bind 之间有一个窗口，同一进程里并发跑的其它用例（cargo test 默认按线程并行）可以
+/// 抢走这个端口。症状不是"端口占用"，而是 RPC 落到了**别人的 gRPC 服务**上：
+/// `test_transfer_leadership_executor` 曾因此得到 `join node 2: Unimplemented`
+/// （请求打到了另一个用例的 raft RPC server），看起来像实现缺了 Maintenance 服务。
+///
+/// 现在端口从绑定那一刻起就归本节点所有，`serve_with_incoming` 直接接管同一个
+/// listener，不存在释放窗口。
+struct NodeAddrs {
+    grpc: tokio::net::TcpListener,
+    raft: tokio::net::TcpListener,
+}
+
+impl NodeAddrs {
+    async fn bind() -> Self {
+        let grpc = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind grpc listener");
+        let raft = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind raft listener");
+        Self { grpc, raft }
+    }
+
+    fn grpc_addr(&self) -> SocketAddr {
+        self.grpc.local_addr().expect("grpc local_addr")
+    }
+
+    fn raft_addr(&self) -> SocketAddr {
+        self.raft.local_addr().expect("raft local_addr")
+    }
 }
 
 fn init_tracing() {
@@ -59,8 +90,7 @@ impl TestNode {
     /// 启动一个 raft 节点；`bootstrap=true` 时初始化单节点集群。
     async fn start(
         node_id: u64,
-        grpc_port: u16,
-        raft_port: u16,
+        addrs: NodeAddrs,
         all_raft_addrs: &BTreeMap<u64, String>,
         all_grpc_addrs: &BTreeMap<u64, String>,
         bootstrap: bool,
@@ -68,8 +98,8 @@ impl TestNode {
         let tmpdir = tempfile::tempdir().unwrap();
         let data_dir = tmpdir.path().to_path_buf();
 
-        let grpc_addr: SocketAddr = format!("127.0.0.1:{grpc_port}").parse().unwrap();
-        let raft_addr: SocketAddr = format!("127.0.0.1:{raft_port}").parse().unwrap();
+        let grpc_addr = addrs.grpc_addr();
+        let raft_addr = addrs.raft_addr();
 
         let storage_config = StorageConfig::default();
         let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
@@ -135,19 +165,21 @@ impl TestNode {
         let maint_svc = MaintenanceServer::from_arc(Arc::clone(&node));
 
         let raft_rpc_svc = RaftRpcServer::new(raft_rpc_service);
+        let raft_listener = addrs.raft;
         let raft_handle = tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(raft_rpc_svc)
-                .serve(raft_addr)
+                .serve_with_incoming(TcpListenerStream::new(raft_listener))
                 .await;
         });
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let grpc_listener = addrs.grpc;
         let grpc_handle = tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(kv_svc)
                 .add_service(maint_svc)
-                .serve_with_shutdown(grpc_addr, async {
+                .serve_with_incoming_shutdown(TcpListenerStream::new(grpc_listener), async {
                     let _ = shutdown_rx.await;
                 })
                 .await;
@@ -201,22 +233,17 @@ async fn wait_voter(raft: &coord_server::raft::CoordRaft, node_id: u64, timeout:
 #[tokio::test]
 async fn test_join_adds_node_and_cluster_serves_reads() {
     init_tracing();
-    let grpc1 = find_port();
-    let raft1 = find_port();
-    let grpc2 = find_port();
-    let raft2 = find_port();
+    let n1 = NodeAddrs::bind().await;
+    let n2 = NodeAddrs::bind().await;
+    let (grpc1, raft1) = (n1.grpc_addr(), n1.raft_addr());
+    let (grpc2, raft2) = (n2.grpc_addr(), n2.raft_addr());
+    let raft_addrs: BTreeMap<u64, String> =
+        BTreeMap::from([(1, raft1.to_string()), (2, raft2.to_string())]);
+    let grpc_addrs: BTreeMap<u64, String> =
+        BTreeMap::from([(1, grpc1.to_string()), (2, grpc2.to_string())]);
 
-    let raft_addrs: BTreeMap<u64, String> = BTreeMap::from([
-        (1, format!("127.0.0.1:{raft1}")),
-        (2, format!("127.0.0.1:{raft2}")),
-    ]);
-    let grpc_addrs: BTreeMap<u64, String> = BTreeMap::from([
-        (1, format!("127.0.0.1:{grpc1}")),
-        (2, format!("127.0.0.1:{grpc2}")),
-    ]);
-
-    let node1 = TestNode::start(1, grpc1, raft1, &raft_addrs, &grpc_addrs, true).await;
-    let node2 = TestNode::start(2, grpc2, raft2, &raft_addrs, &grpc_addrs, false).await;
+    let node1 = TestNode::start(1, n1, &raft_addrs, &grpc_addrs, true).await;
+    let node2 = TestNode::start(2, n2, &raft_addrs, &grpc_addrs, false).await;
 
     // 等待 node1 选出 leader
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -236,8 +263,8 @@ async fn test_join_adds_node_and_cluster_serves_reads() {
     let resp = maint
         .join(JoinRequest {
             node_id: 2,
-            raft_addr: format!("127.0.0.1:{raft2}"),
-            grpc_addr: format!("127.0.0.1:{grpc2}"),
+            raft_addr: raft2.to_string(),
+            grpc_addr: grpc2.to_string(),
         })
         .await
         .expect("join rpc")
@@ -296,22 +323,17 @@ async fn test_join_adds_node_and_cluster_serves_reads() {
 /// 非 leader 收到 Join 返回 leader 重定向（forward_to）。
 #[tokio::test]
 async fn test_join_redirects_to_leader() {
-    let grpc1 = find_port();
-    let raft1 = find_port();
-    let grpc2 = find_port();
-    let raft2 = find_port();
+    let n1 = NodeAddrs::bind().await;
+    let n2 = NodeAddrs::bind().await;
+    let (grpc1, raft1) = (n1.grpc_addr(), n1.raft_addr());
+    let (grpc2, raft2) = (n2.grpc_addr(), n2.raft_addr());
+    let raft_addrs: BTreeMap<u64, String> =
+        BTreeMap::from([(1, raft1.to_string()), (2, raft2.to_string())]);
+    let grpc_addrs: BTreeMap<u64, String> =
+        BTreeMap::from([(1, grpc1.to_string()), (2, grpc2.to_string())]);
 
-    let raft_addrs: BTreeMap<u64, String> = BTreeMap::from([
-        (1, format!("127.0.0.1:{raft1}")),
-        (2, format!("127.0.0.1:{raft2}")),
-    ]);
-    let grpc_addrs: BTreeMap<u64, String> = BTreeMap::from([
-        (1, format!("127.0.0.1:{grpc1}")),
-        (2, format!("127.0.0.1:{grpc2}")),
-    ]);
-
-    let node1 = TestNode::start(1, grpc1, raft1, &raft_addrs, &grpc_addrs, true).await;
-    let _node2 = TestNode::start(2, grpc2, raft2, &raft_addrs, &grpc_addrs, false).await;
+    let node1 = TestNode::start(1, n1, &raft_addrs, &grpc_addrs, true).await;
+    let _node2 = TestNode::start(2, n2, &raft_addrs, &grpc_addrs, false).await;
 
     // node1 成为 leader 后，向 node2（非 leader）发 Join → 重定向
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -330,8 +352,8 @@ async fn test_join_redirects_to_leader() {
     let resp = maint2
         .join(JoinRequest {
             node_id: 2,
-            raft_addr: format!("127.0.0.1:{raft2}"),
-            grpc_addr: format!("127.0.0.1:{grpc2}"),
+            raft_addr: raft2.to_string(),
+            grpc_addr: grpc2.to_string(),
         })
         .await
         .expect("join rpc to non-leader")
@@ -339,7 +361,7 @@ async fn test_join_redirects_to_leader() {
     assert!(!resp.success, "non-leader must not complete join");
     assert_eq!(
         resp.forward_to,
-        format!("127.0.0.1:{grpc1}"),
+        grpc1.to_string(),
         "redirect should point to leader gRPC addr"
     );
 
@@ -348,8 +370,8 @@ async fn test_join_redirects_to_leader() {
     let resp = maint1
         .join(JoinRequest {
             node_id: 2,
-            raft_addr: format!("127.0.0.1:{raft2}"),
-            grpc_addr: format!("127.0.0.1:{grpc2}"),
+            raft_addr: raft2.to_string(),
+            grpc_addr: grpc2.to_string(),
         })
         .await
         .expect("join rpc to leader")
@@ -364,12 +386,11 @@ async fn test_join_redirects_to_leader() {
 /// 单节点集群移除唯一 voter 失败（无剩余 quorum，openraft 拒绝）。
 #[tokio::test]
 async fn test_remove_leader_rejected() {
-    let grpc1 = find_port();
-    let raft1 = find_port();
-    let raft_addrs: BTreeMap<u64, String> = BTreeMap::from([(1, format!("127.0.0.1:{raft1}"))]);
-    let grpc_addrs: BTreeMap<u64, String> = BTreeMap::from([(1, format!("127.0.0.1:{grpc1}"))]);
+    let n1 = NodeAddrs::bind().await;
+    let raft_addrs: BTreeMap<u64, String> = BTreeMap::from([(1, n1.raft_addr().to_string())]);
+    let grpc_addrs: BTreeMap<u64, String> = BTreeMap::from([(1, n1.grpc_addr().to_string())]);
 
-    let node1 = TestNode::start(1, grpc1, raft1, &raft_addrs, &grpc_addrs, true).await;
+    let node1 = TestNode::start(1, n1, &raft_addrs, &grpc_addrs, true).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         if node1.raft.current_leader().await == Some(1) {
@@ -398,21 +419,17 @@ async fn test_remove_leader_rejected() {
 /// 退位），剩余节点成为 leader 且可写。
 #[tokio::test]
 async fn test_remove_leader_self_removal_two_nodes() {
-    let grpc1 = find_port();
-    let raft1 = find_port();
-    let grpc2 = find_port();
-    let raft2 = find_port();
-    let raft_addrs: BTreeMap<u64, String> = BTreeMap::from([
-        (1, format!("127.0.0.1:{raft1}")),
-        (2, format!("127.0.0.1:{raft2}")),
-    ]);
-    let grpc_addrs: BTreeMap<u64, String> = BTreeMap::from([
-        (1, format!("127.0.0.1:{grpc1}")),
-        (2, format!("127.0.0.1:{grpc2}")),
-    ]);
+    let n1 = NodeAddrs::bind().await;
+    let n2 = NodeAddrs::bind().await;
+    let (grpc1, raft1) = (n1.grpc_addr(), n1.raft_addr());
+    let (grpc2, raft2) = (n2.grpc_addr(), n2.raft_addr());
+    let raft_addrs: BTreeMap<u64, String> =
+        BTreeMap::from([(1, raft1.to_string()), (2, raft2.to_string())]);
+    let grpc_addrs: BTreeMap<u64, String> =
+        BTreeMap::from([(1, grpc1.to_string()), (2, grpc2.to_string())]);
 
-    let node1 = TestNode::start(1, grpc1, raft1, &raft_addrs, &grpc_addrs, true).await;
-    let node2 = TestNode::start(2, grpc2, raft2, &raft_addrs, &grpc_addrs, false).await;
+    let node1 = TestNode::start(1, n1, &raft_addrs, &grpc_addrs, true).await;
+    let node2 = TestNode::start(2, n2, &raft_addrs, &grpc_addrs, false).await;
 
     // node1 成为 leader
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -432,8 +449,8 @@ async fn test_remove_leader_self_removal_two_nodes() {
     let resp = maint1
         .join(JoinRequest {
             node_id: 2,
-            raft_addr: format!("127.0.0.1:{raft2}"),
-            grpc_addr: format!("127.0.0.1:{grpc2}"),
+            raft_addr: raft2.to_string(),
+            grpc_addr: grpc2.to_string(),
         })
         .await
         .expect("join node 2")
@@ -495,21 +512,17 @@ async fn test_remove_leader_self_removal_two_nodes() {
 /// -2：transfer_leadership 执行器 —— 移交后目标成为 leader。
 #[tokio::test]
 async fn test_transfer_leadership_executor() {
-    let grpc1 = find_port();
-    let raft1 = find_port();
-    let grpc2 = find_port();
-    let raft2 = find_port();
-    let raft_addrs: BTreeMap<u64, String> = BTreeMap::from([
-        (1, format!("127.0.0.1:{raft1}")),
-        (2, format!("127.0.0.1:{raft2}")),
-    ]);
-    let grpc_addrs: BTreeMap<u64, String> = BTreeMap::from([
-        (1, format!("127.0.0.1:{grpc1}")),
-        (2, format!("127.0.0.1:{grpc2}")),
-    ]);
+    let n1 = NodeAddrs::bind().await;
+    let n2 = NodeAddrs::bind().await;
+    let (grpc1, raft1) = (n1.grpc_addr(), n1.raft_addr());
+    let (grpc2, raft2) = (n2.grpc_addr(), n2.raft_addr());
+    let raft_addrs: BTreeMap<u64, String> =
+        BTreeMap::from([(1, raft1.to_string()), (2, raft2.to_string())]);
+    let grpc_addrs: BTreeMap<u64, String> =
+        BTreeMap::from([(1, grpc1.to_string()), (2, grpc2.to_string())]);
 
-    let node1 = TestNode::start(1, grpc1, raft1, &raft_addrs, &grpc_addrs, true).await;
-    let node2 = TestNode::start(2, grpc2, raft2, &raft_addrs, &grpc_addrs, false).await;
+    let node1 = TestNode::start(1, n1, &raft_addrs, &grpc_addrs, true).await;
+    let node2 = TestNode::start(2, n2, &raft_addrs, &grpc_addrs, false).await;
 
     // node1 成为 leader；node2 join
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -527,8 +540,8 @@ async fn test_transfer_leadership_executor() {
     let resp = maint1
         .join(JoinRequest {
             node_id: 2,
-            raft_addr: format!("127.0.0.1:{raft2}"),
-            grpc_addr: format!("127.0.0.1:{grpc2}"),
+            raft_addr: raft2.to_string(),
+            grpc_addr: grpc2.to_string(),
         })
         .await
         .expect("join node 2")
