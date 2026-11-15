@@ -1,6 +1,6 @@
 # 能力边界清单（Scope & non-goals）
 
-> Owner: maintainers ｜ Last verified: 2026-10-23
+> Owner: maintainers ｜ Last verified: 2026-11-15
 
 本清单逐条列出各能力**明确不承诺**的边界，与承诺同等重要（见
 `apis/contracts/WHITEPAPER.md`）。每条都带可核对的实现锚点；凡「不承诺」，
@@ -23,6 +23,7 @@
 | B-WF-8 | 审批面**只有 gRPC**：无 UI 审批界面、无 REST facade（`coord-ui` 本期仅做影响评估）；Web 接入需自行实现 | `apis/contracts/proto/coord/workflow/v1/workflow.proto`（无 REST/HTTP 映射）；语义见 `docs/production/workflow-semantics.md` §7 | 若要 Web 接入：另立里程碑建 REST facade 与 UI 面（先定鉴权/能力映射与防重放口径） |
 | B-WF-9 | `ReturnToNode` 重开目标节点的席位**不设 deadline**（旧绝对截止早已过期，沿用会立即过期）；目标节点无既有席位可复用则 fail-closed（不留「Open 但零席位」死分支） | `coord-core/src/workflow/approval/bridge.rs`（`ApprovalCommand::ReturnToNode` + `prior_seats`）；判据：`return_to_node_reopens_seats_and_can_pass_again` | 若要重开自动提醒：为 reopen 引入新的相对 deadline 语义（与首次挂起区分）后再接线 |
 | B-WF-10 | 审批命令路径**不产生审批实例 `Faulted`**：只收口为 `Completed / Rejected / Cancelled / Terminated`；版本级故障（定义漂移）落在**工作流实例** `FAULTED`（`resume_approval` 写前 fail-closed），不从审批命令返回 `Faulted` | `coord-core/src/workflow/approval/bridge.rs`（`ApprovalOutcome` / `terminal_outcome`）、`coord-core/src/workflow/runtime.rs`（`resume_approval` 漂移守卫）；判据：`resume_approval_fails_closed_on_definition_drift` | 无需（这是口径）；「无审批实例 `Faulted`」不等于「命令不会失败」——命令仍可返回 `ABORTED`/`PERMISSION_DENIED`/`FAILED_PRECONDITION` |
+| B-WF-11 | `try` / `catch` 块内**只驱动同步构造**：`call` / `set` / `switch` / `raise` / `emit` / 嵌套 `do` / 嵌套 `try`。需要主循环的 `wait` / `listen` / `approve` / `run` / `fork` / `for` 在块内没有跨步骤挂起与并行调度面：Deploy 期点名拒绝（`try.<task>` / `catch.<task>`），运行期对既有老定义同样 fail-closed（实例 `FAULTED`），不当作已完事跳过 | `coord-core/src/workflow/validate.rs`（`check_try_catch_block`）、`coord-core/src/workflow/runtime.rs`（`drive_sub_tasks`）；判据：`test_validate_try_catch_rejects_undrivable_constructs`、`test_try_catch_advances_after_catch_without_goto`、`test_try_catch_dispatches_catch_call_once` | 若要块内挂起：让块驱动复用主循环的挂起/恢复与并行调度（状态模型需为「块内游标」定持久化语义），不能只加分支 |
 
 ## 2. 存储 / Raft
 
