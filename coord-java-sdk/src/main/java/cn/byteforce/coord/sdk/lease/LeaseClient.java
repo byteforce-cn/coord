@@ -1,4 +1,4 @@
-package cn.byteforce.coord.sdk.lease.v2;
+package cn.byteforce.coord.sdk.lease;
 
 import cn.byteforce.coord.sdk.CoordException;
 

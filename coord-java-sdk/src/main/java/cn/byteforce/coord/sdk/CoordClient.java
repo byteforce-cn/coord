@@ -9,12 +9,12 @@ import cn.byteforce.coord.sdk.featureflags.FeatureFlagClient;
 import cn.byteforce.coord.sdk.health.HealthStatus;
 import cn.byteforce.coord.sdk.idgen.IdGenClient;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.kv.v2.KvClient;
-import cn.byteforce.coord.sdk.lease.v2.LeaseClient;
-import cn.byteforce.coord.sdk.storage.v2.StorageClient;
-import cn.byteforce.coord.sdk.tso.v2.TsoClient;
-import cn.byteforce.coord.sdk.txn.v2.TxnClient;
-import cn.byteforce.coord.sdk.watch.v2.WatchClient;
+import cn.byteforce.coord.sdk.kv.KvClient;
+import cn.byteforce.coord.sdk.lease.LeaseClient;
+import cn.byteforce.coord.sdk.storage.StorageClient;
+import cn.byteforce.coord.sdk.tso.TsoClient;
+import cn.byteforce.coord.sdk.txn.TxnClient;
+import cn.byteforce.coord.sdk.watch.WatchClient;
 import cn.byteforce.coord.sdk.internal.proto.HealthCheckRequest;
 import cn.byteforce.coord.sdk.internal.proto.HealthCheckResponse;
 import cn.byteforce.coord.sdk.internal.proto.HealthGrpc;
@@ -296,7 +296,7 @@ public final class CoordClient implements Closeable {
      * forwards the v2 data plane. Batches are process-local; never persist and
      * reuse them across restarts.
      */
-    public TsoClient tsoV2() {
+    public TsoClient tso() {
         return tsoV2Client;
     }
 
@@ -307,7 +307,7 @@ public final class CoordClient implements Closeable {
      * fetch one fresh timestamp. Reads with {@code readTs=0} use the server's
      * local {@code safe_ts} (not a cross-node linearizable snapshot).
      */
-    public KvClient kvV2() {
+    public KvClient kv() {
         return kvV2Client;
     }
 
@@ -329,7 +329,7 @@ public final class CoordClient implements Closeable {
      * {@code revoke} is idempotent: {@code commitTs=0} means there was no new
      * deletion decision (already revoked/expired).
      */
-    public LeaseClient leaseV2() {
+    public LeaseClient lease() {
         return leaseV2Client;
     }
 
@@ -341,7 +341,7 @@ public final class CoordClient implements Closeable {
      * {@code startTs}. Sessions are pinned to one coordinator and are lost on
      * a coordinator restart ({@code TXN_NOT_FOUND}).
      */
-    public TxnClient txnV2() {
+    public TxnClient tx() {
         return txnV2Client;
     }
 
@@ -352,7 +352,7 @@ public final class CoordClient implements Closeable {
      * transport failure; {@code HISTORY_UNAVAILABLE} is terminal (resync the
      * key space).
      */
-    public WatchClient watchV2() {
+    public WatchClient watch() {
         return watchV2Client;
     }
 
@@ -363,7 +363,7 @@ public final class CoordClient implements Closeable {
      * means its local {@code safe_ts}. Objects are buffered client-side up to
      * 256 MiB.
      */
-    public StorageClient storageV2() {
+    public StorageClient storage() {
         return storageV2Client;
     }
 

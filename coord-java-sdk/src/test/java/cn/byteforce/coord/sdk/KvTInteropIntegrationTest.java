@@ -1,7 +1,7 @@
 package cn.byteforce.coord.sdk;
 
-import cn.byteforce.coord.sdk.kv.v2.KvClient;
-import cn.byteforce.coord.sdk.txn.v2.TxnClient;
+import cn.byteforce.coord.sdk.kv.KvClient;
+import cn.byteforce.coord.sdk.txn.TxnClient;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -63,7 +63,7 @@ class KvTInteropIntegrationTest {
                 .requestTimeout(Duration.ofSeconds(10))
                 .build());
         try {
-            assertThat(client.tsoV2().getTimestamp()).isPositive();
+            assertThat(client.tso().getTimestamp()).isPositive();
         } catch (RuntimeException e) {
             client.close(Duration.ZERO);
             throw new IllegalStateException(
@@ -92,7 +92,7 @@ class KvTInteropIntegrationTest {
         for (String suffix : List.of("a", "b")) {
             String key = required(rust, "txn.key." + suffix);
             String expected = required(rust, "txn.value." + suffix);
-            KvClient.RangeResult atCommit = client.kvV2()
+            KvClient.RangeResult atCommit = client.kv()
                     .range(utf8(key), new byte[0], 0, txnCommitTs, false, false);
             assertThat(atCommit.readTs()).isEqualTo(txnCommitTs);
             assertThat(atCommit.kvs()).as("key %s visible at read_ts=%s", key, txnCommitTs)
@@ -106,14 +106,14 @@ class KvTInteropIntegrationTest {
 
         // The prefix read at the same read_ts is exactly the Rust write set:
         // a transaction writes all of its keys at one commit_ts.
-        KvClient.RangeResult range = client.kvV2()
+        KvClient.RangeResult range = client.kv()
                 .range(utf8(prefix), prefixEnd(prefix), 0, txnCommitTs, false, false);
         assertThat(range.kvs()).as("prefix %s at read_ts=%s", prefix, txnCommitTs).hasSize(2);
         assertThat(range.kvs())
                 .allSatisfy(stored -> assertThat(stored.modRevision()).isEqualTo(txnCommitTs));
 
         // A direct put (no transaction) carries its own commit_ts.
-        KvClient.RangeResult direct = client.kvV2().range(
+        KvClient.RangeResult direct = client.kv().range(
                 utf8(required(rust, "direct.key")), new byte[0], 0, directCommitTs, false, false);
         assertThat(direct.kvs()).hasSize(1);
         assertThat(text(direct.kvs().get(0).value())).isEqualTo(required(rust, "direct.value"));
@@ -135,12 +135,12 @@ class KvTInteropIntegrationTest {
         String keyB = txnPrefix + "b";
         String directKey = root + "direct/k";
 
-        long directCommitTs = client.tsoV2().getTimestamp();
-        KvClient.PutResult direct = client.kvV2()
+        long directCommitTs = client.tso().getTimestamp();
+        KvClient.PutResult direct = client.kv()
                 .put(utf8(directKey), utf8("java-direct"), directCommitTs);
         assertThat(direct.commitTs()).isEqualTo(directCommitTs);
 
-        TxnClient.Session txn = client.txnV2().begin();
+        TxnClient.Session txn = client.tx().begin();
         assertThat(txn.read(utf8(directKey)).readTs()).isEqualTo(txn.startTs());
         TxnClient.CommitResult commit = txn.commit(List.of(
                 TxnClient.Mutation.put(utf8(keyA), utf8("java-txn-a")),
@@ -153,7 +153,7 @@ class KvTInteropIntegrationTest {
 
         // Assert locally before handing the evidence over: a Rust failure must
         // mean "the other client disagrees", not "this side wrote nothing".
-        KvClient.RangeResult atCommit = client.kvV2()
+        KvClient.RangeResult atCommit = client.kv()
                 .range(utf8(txnPrefix), prefixEnd(txnPrefix), 0, txnCommitTs, false, false);
         assertThat(atCommit.kvs()).hasSize(2);
         assertThat(atCommit.kvs())

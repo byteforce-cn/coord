@@ -4,7 +4,7 @@ import cn.byteforce.coord.contracts.lease.v2.LeaseGrpc;
 import cn.byteforce.coord.contracts.lease.v2.LeaseOuterClass;
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.lease.v2.LeaseClient;
+import cn.byteforce.coord.sdk.lease.LeaseClient;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import com.google.protobuf.ByteString;
 import io.grpc.Status;
