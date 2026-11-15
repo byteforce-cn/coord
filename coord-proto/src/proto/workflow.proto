@@ -65,6 +65,12 @@ service Workflow {
   // 人工审批 v2 查询。能力门禁 `coord:workflow:read`。
   rpc ListPendingTasks(WorkflowListPendingTasksRequest) returns (WorkflowListPendingTasksResponse);
   rpc GetInstanceDetail(WorkflowGetInstanceDetailRequest) returns (WorkflowGetInstanceDetailResponse);
+
+  // 任务查询面：按实例 / 可处理主体 / 投票人 / 候选 / 节点 / 状态 / 截止时间过滤。
+  // `ListPendingTasks` 保持既有语义（未决 + 调用方/代查 assignee）；`ListTasks` 是它的
+  // 超集（默认不过滤状态）。
+  rpc ListTasks(WorkflowListTasksRequest) returns (WorkflowListTasksResponse);
+  rpc GetTask(WorkflowGetTaskRequest) returns (WorkflowGetTaskResponse);
 }
 
 message WorkflowStartRequest {
@@ -74,7 +80,14 @@ message WorkflowStartRequest {
 
   // 幂等键（可选）：同键重放返回**首次**创建的 workflow_id，且不会重置既有实例状态；
   // 作用域是 definition（不同定义的同一个键互不影响）。空串 = 不启用幂等。
+  // 与 `workflow_id` 互斥（两者都指定实例身份）。
   string idempotency_key = 4;
+
+  // 可选：调用方指定实例 id（空 = 服务端生成）。同 id 重放：
+  // - 同定义（ns/name/version + 内容哈希）⇒ 返回首次创建的实例，不重置状态；
+  // - 不同定义或不同版本 ⇒ `ALREADY_EXISTS`（不覆盖既有实例）。
+  // 合法字符集与上限：不含 `/`，不超过 128 字节。
+  string workflow_id = 5;
 }
 
 message WorkflowStartResponse {
@@ -224,6 +237,12 @@ message WorkflowListInstancesRequest {
   int32 page_size = 3;
   string page_token = 4;
   string status_filter = 5; // 可选，按状态过滤（RUNNING/SUSPENDED/COMPLETED/FAILED/CANCELLED）
+  // 可选：按定义过滤。取值可以为定义名（name）或定义 ID；与 `workflow_id` 同义
+  // （历史字段名保留）。
+  string definition = 6;
+  // 可选：按启动时间窗过滤（Unix ms，含边界）；0 = 不过滤。
+  int64 started_after_ms = 7;
+  int64 started_before_ms = 8;
 }
 
 message WorkflowListInstancesResponse {
@@ -432,6 +451,50 @@ message PendingApprovalTask {
   string assignee = 8;
   int64 deadline_ms = 9; // 超时阈值（Unix ms）；0 = 无超时
   int64 created_at_ms = 10; // 席位创建时间（Unix ms）
+}
+
+// 任务查询请求。所有过滤字段为空/0 = 不过滤。
+message WorkflowListTasksRequest {
+  int32 page_size = 1;
+  string page_token = 2; // 上一页最后扫描到的实例 id（不透明）
+  string instance_id = 3; // 只查该实例（不跨实例扫描）
+  string assignee = 4; // 可处理该席位的主体：责任人 / 候选池成员 / 被委派人
+  string completed_by = 5; // 投过票的 actor（含代批的 actor）
+  string candidate_group = 6; // 候选池包含该主体/组
+  string node = 7; // 节点（步骤）名
+  // 席位状态：created|claimed|completed|rejected|cancelled|expired；
+  // 空 = 全部。未知取值返回 INVALID_ARGUMENT。
+  string status = 8;
+  int64 due_before_ms = 9; // 仅返回 deadline <= 该值（Unix ms）；0 = 不过滤
+}
+
+message WorkflowListTasksResponse {
+  repeated ApprovalTaskSummary tasks = 1;
+  string next_page_token = 2;
+}
+
+message ApprovalTaskSummary {
+  string instance_id = 1;
+  string task_id = 2;
+  string node = 3;
+  string branch_id = 4;
+  string round_id = 5;
+  string kind = 6;
+  string status = 7;
+  string assignee = 8;
+  repeated string candidates = 9;
+  int64 deadline_ms = 10;
+  int64 created_at_ms = 11;
+}
+
+message WorkflowGetTaskRequest {
+  string task_id = 1;
+}
+
+message WorkflowGetTaskResponse {
+  ApprovalTaskSummary task = 1;
+  repeated ApprovalVote votes = 2;
+  string instance_status = 3; // 大写实例状态（RUNNING/COMPLETED/REJECTED/...）
 }
 
 // 实例审批详情查询。

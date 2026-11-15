@@ -91,16 +91,17 @@ use coord_proto::agent::{
 
 // 审批 v2（ADR-0013 D7）请求/响应类型。
 use coord_proto::agent::{
-    ApprovalAudit, ApprovalBranch, ApprovalRound, ApprovalTask, ApprovalVote, PendingApprovalTask,
-    WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse, WorkflowAddSignRequest,
-    WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse,
-    WorkflowDelegateRequest, WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest,
-    WorkflowGetInstanceDetailResponse, WorkflowListPendingTasksRequest,
-    WorkflowListPendingTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
-    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
-    WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
-    WorkflowTransferRequest, WorkflowTransferResponse, WorkflowWithdrawRequest,
-    WorkflowWithdrawResponse,
+    ApprovalAudit, ApprovalBranch, ApprovalRound, ApprovalTask, ApprovalTaskSummary, ApprovalVote,
+    PendingApprovalTask, WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse,
+    WorkflowAddSignRequest, WorkflowAddSignResponse, WorkflowApproveRequest,
+    WorkflowApproveResponse, WorkflowDelegateRequest, WorkflowDelegateResponse,
+    WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest,
+    WorkflowGetTaskResponse, WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse,
+    WorkflowListTasksRequest, WorkflowListTasksResponse, WorkflowRejectRequest,
+    WorkflowRejectResponse, WorkflowRemoveSignRequest, WorkflowRemoveSignResponse,
+    WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse, WorkflowTerminateRequest,
+    WorkflowTerminateResponse, WorkflowTransferRequest, WorkflowTransferResponse,
+    WorkflowWithdrawRequest, WorkflowWithdrawResponse,
 };
 
 use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError, SYSTEM_ACTOR};
@@ -1998,6 +1999,24 @@ impl Workflow for WorkflowService {
             "workflow approval v2 is provided by WorkflowEngineService",
         ))
     }
+
+    async fn list_tasks(
+        &self,
+        _request: Request<WorkflowListTasksRequest>,
+    ) -> Result<Response<WorkflowListTasksResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn get_task(
+        &self,
+        _request: Request<WorkflowGetTaskRequest>,
+    ) -> Result<Response<WorkflowGetTaskResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2021,6 +2040,7 @@ fn map_engine_error(e: WorkflowEngineError) -> Status {
         WorkflowEngineError::InvalidArgument(msg) => Status::invalid_argument(msg),
         WorkflowEngineError::NotFound(msg) => Status::not_found(msg),
         WorkflowEngineError::FailedPrecondition(msg) => Status::failed_precondition(msg),
+        WorkflowEngineError::AlreadyExists(msg) => Status::already_exists(msg),
         WorkflowEngineError::Internal(msg) => sanitized_internal(msg),
     }
 }
@@ -2115,6 +2135,39 @@ fn join_label(join: &JoinPolicy) -> String {
     }
 }
 
+/// 任务查询投影 → wire 摘要。
+fn task_summary(view: &crate::services::workflow::phase4::ApprovalTaskView) -> ApprovalTaskSummary {
+    ApprovalTaskSummary {
+        instance_id: view.instance_id.clone(),
+        task_id: view.task.id.clone(),
+        node: view.node.clone(),
+        branch_id: view.task.branch_id.clone(),
+        round_id: view.task.round_id.clone(),
+        kind: json_label(&view.task.kind),
+        status: json_label(&view.task.status),
+        assignee: view.task.assignee.clone().unwrap_or_default(),
+        candidates: view.task.candidates.clone(),
+        deadline_ms: view.task.deadline.unwrap_or(0),
+        created_at_ms: view.task.created_at,
+    }
+}
+
+/// 投票记录 → wire 形态（`GetInstanceDetail` / `GetTask` 共用）。
+fn map_votes(votes: &[coord_core::workflow::approval::model::VoteRecord]) -> Vec<ApprovalVote> {
+    votes
+        .iter()
+        .map(|v| ApprovalVote {
+            round_id: v.round_id.clone(),
+            decision: json_label(&v.decision),
+            actor: v.actor.clone(),
+            on_behalf_of: v.on_behalf_of.clone().unwrap_or_default(),
+            comment: v.comment.clone().unwrap_or_default(),
+            at_ms: v.at,
+            acting_service: v.acting_service.clone().unwrap_or_default(),
+        })
+        .collect()
+}
+
 #[tonic::async_trait]
 impl Workflow for WorkflowEngineService {
     async fn start(
@@ -2151,8 +2204,16 @@ impl Workflow for WorkflowEngineService {
         let initiator = non_empty(&identity.subject);
         // 幂等键（可选）：同键重放返回首个 workflow_id（ADR-0016 D12 的 Start 幂等）。
         let idempotency_key = non_empty(req.idempotency_key.trim());
+        // 调用方指定实例 id（可选）：由运行时做同定义重放 / 版本冲突判定。
+        let requested_id = non_empty(req.workflow_id.trim());
         let inst = self
-            .start_instance_as_with_key(&def_id, input, initiator, idempotency_key)
+            .start_instance_as_with_key_and_id(
+                &def_id,
+                input,
+                initiator,
+                idempotency_key,
+                requested_id,
+            )
             .await
             .map_err(map_engine_error)?;
 
@@ -2420,11 +2481,24 @@ impl Workflow for WorkflowEngineService {
             coord_core::workflow::ports::DEFAULT_LIST_PAGE_SIZE
         };
         let namespace = (!req.namespace.is_empty()).then_some(req.namespace.as_str());
-        let definition = (!req.workflow_id.is_empty()).then_some(req.workflow_id.as_str());
-        let page_token = (!req.page_token.is_empty()).then_some(req.page_token.as_str());
+        // `definition` 是新增的显式字段；`workflow_id` 保留为历史别名。
+        let definition = non_empty(&req.definition).or(non_empty(&req.workflow_id));
+        let status = non_empty(&req.status_filter);
+        if let Some(raw) = status {
+            crate::services::workflow::phase4::parse_instance_status(raw)
+                .map_err(Status::invalid_argument)?;
+        }
+        let page_token = non_empty(&req.page_token);
 
+        let query = crate::services::workflow::phase4::InstanceQuery {
+            namespace,
+            definition,
+            status,
+            started_after_ms: req.started_after_ms,
+            started_before_ms: req.started_before_ms,
+        };
         match self
-            .list_instances(namespace, definition, page_size, page_token)
+            .list_instances_filtered(&query, page_size, page_token)
             .await
         {
             Ok((instances, next_token)) => {
@@ -2462,6 +2536,51 @@ impl Workflow for WorkflowEngineService {
             }
             Err(e) => Err(sanitized_internal(e)),
         }
+    }
+
+    async fn list_tasks(
+        &self,
+        request: Request<WorkflowListTasksRequest>,
+    ) -> Result<Response<WorkflowListTasksResponse>, Status> {
+        let req = request.into_inner();
+        let filter = crate::services::workflow::phase4::TaskQuery {
+            instance_id: non_empty(&req.instance_id),
+            assignee: non_empty(&req.assignee),
+            completed_by: non_empty(&req.completed_by),
+            candidate_group: non_empty(&req.candidate_group),
+            node: non_empty(&req.node),
+            status: non_empty(&req.status),
+            due_before_ms: req.due_before_ms,
+        };
+        let page_size = req.page_size.max(0) as usize;
+        let (tasks, next) = self
+            .list_tasks(&filter, page_size, non_empty(&req.page_token))
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowListTasksResponse {
+            tasks: tasks.iter().map(task_summary).collect(),
+            next_page_token: next.unwrap_or_default(),
+        }))
+    }
+
+    async fn get_task(
+        &self,
+        request: Request<WorkflowGetTaskRequest>,
+    ) -> Result<Response<WorkflowGetTaskResponse>, Status> {
+        let req = request.into_inner();
+        // task_id 为空必然查不到；直接 NOT_FOUND，避免全量扫描。
+        if req.task_id.is_empty() {
+            return Err(Status::invalid_argument("task_id must not be empty"));
+        }
+        let view = self
+            .get_task(&req.task_id)
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowGetTaskResponse {
+            task: Some(task_summary(&view)),
+            votes: map_votes(&view.task.votes),
+            instance_status: view.instance_status,
+        }))
     }
 
     async fn delete_definition(
@@ -2874,19 +2993,7 @@ impl Workflow for WorkflowEngineService {
                     assignee: t.assignee.clone().unwrap_or_default(),
                     candidates: t.candidates.clone(),
                     deadline_ms: t.deadline.unwrap_or(0),
-                    votes: t
-                        .votes
-                        .iter()
-                        .map(|v| ApprovalVote {
-                            round_id: v.round_id.clone(),
-                            decision: json_label(&v.decision),
-                            actor: v.actor.clone(),
-                            on_behalf_of: v.on_behalf_of.clone().unwrap_or_default(),
-                            comment: v.comment.clone().unwrap_or_default(),
-                            at_ms: v.at,
-                            acting_service: v.acting_service.clone().unwrap_or_default(),
-                        })
-                        .collect(),
+                    votes: map_votes(&t.votes),
                 })
                 .collect(),
             rounds: detail
@@ -3463,6 +3570,9 @@ do:
             page_size,
             page_token: page_token.to_string(),
             status_filter: String::new(),
+            definition: String::new(),
+            started_after_ms: 0,
+            started_before_ms: 0,
         }
     }
 

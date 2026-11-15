@@ -66,6 +66,22 @@ public interface WorkflowClient {
     String startByDefinition(String definitionId, byte[] input);
 
     /**
+     * Start an instance of an already-deployed definition with a caller-chosen instance ID.
+     * <p>
+     * Replaying with the same {@code workflowId} and the same definition (namespace, name,
+     * version and content hash) returns the first instance untouched. A different definition or
+     * version under the same ID fails with {@code ALREADY_EXISTS}; the existing instance is never
+     * overwritten.
+     *
+     * @param definitionId the workflow definition ID (returned by {@link #deployDefinition})
+     * @param workflowId   caller-chosen instance ID (no '/', at most 128 bytes)
+     * @param input        initial input payload for the workflow
+     * @return the workflow instance ID (equals {@code workflowId})
+     * @throws CoordException on communication failure, definition not found, or ID conflict
+     */
+    String startByDefinitionWithId(String definitionId, String workflowId, byte[] input);
+
+    /**
      * Get the current status of a workflow instance.
      *
      * @param workflowId the workflow instance ID returned by {@link #start}

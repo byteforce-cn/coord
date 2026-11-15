@@ -357,6 +357,7 @@ do:
             input,
             definition_id: String::new(),
             idempotency_key: String::new(),
+            workflow_id: String::new(),
         })
         .await
         .expect("workflow start must deploy + run in dev mode")

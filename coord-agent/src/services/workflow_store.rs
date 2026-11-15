@@ -534,6 +534,42 @@ impl WorkflowStore for KvWorkflowStore {
     /// 缓存更新语义只在**写入生效后**发生；需要防丢更新的路径必须走
     /// [`WorkflowStore::save_instance_atomic`] / 租约的 `fenced_save`（两者在 CAS
     /// 失败时不更新缓存，避免把未生效的写落进读缓存）。
+    /// 原子 create-if-absent：`VERSION == 0` 谓词，避免并发同 id Start 双写。
+    /// 成功时同步刷新本地读缓存（与 `save_instance` 一致）。
+    async fn create_instance(&self, inst: &WorkflowInstance) -> Result<bool, StoreError> {
+        let key = Self::instance_key(&inst.id);
+        let value =
+            serde_json::to_vec(inst).map_err(|e| StoreError::SerializationError(e.to_string()))?;
+        let compare = Compare {
+            result: CompareResult::Equal as i32,
+            target: Target::Version as i32,
+            key: key.clone(),
+            target_value: Some(TargetValue::Version(0)),
+        };
+        let put = RequestOp {
+            op: Some(Op::RequestPut(PutRequest {
+                key,
+                value,
+                lease_id: 0,
+                prev_kv: false,
+                request_id: vec![],
+            })),
+        };
+        let resp = self
+            .inner
+            .client
+            .txn()
+            .txn(vec![compare], vec![put], vec![])
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+        if resp.succeeded {
+            self.cache.save_instance(inst).await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
         let key = Self::instance_key(&inst.id);
         let value =

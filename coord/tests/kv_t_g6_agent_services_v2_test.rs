@@ -550,6 +550,7 @@ async fn exercise_workflow(channel: tonic::transport::Channel) {
             input: b"{}".to_vec(),
             definition_id: String::new(),
             idempotency_key: String::new(),
+            workflow_id: String::new(),
         })
         .await
         .expect("Workflow.Start must succeed on the v2 data plane (pure KV, no MQ)")

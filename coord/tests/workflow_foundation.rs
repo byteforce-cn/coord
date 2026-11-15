@@ -190,6 +190,54 @@ async fn concurrent_resume_exactly_one_takes_effect() {
     );
 }
 
+/// 调用方指定实例 id 在真实 KV 上是 create-if-absent：并发同 id 恰一个创建者，
+/// 重放返回首次实例，不同定义版本返回 `AlreadyExists`。
+#[tokio::test(flavor = "multi_thread")]
+async fn client_instance_id_is_create_if_absent_on_kv() {
+    let (addr, _sd, _g, _r, _tmp) = common::start_test_server().await;
+    let inner = agent_inner(&addr).await;
+    let rt = make_runtime(inner.clone());
+    let def = listen_definition();
+
+    let (first, created) = rt
+        .start_as_with_id_outcome(
+            &def,
+            serde_json::json!({"a": 1}),
+            Some("init"),
+            Some("wf-kv-idem"),
+        )
+        .await
+        .expect("first start");
+    assert!(created);
+    let (replay, created_again) = rt
+        .start_as_with_id_outcome(&def, serde_json::json!({"a": 2}), None, Some("wf-kv-idem"))
+        .await
+        .expect("replay");
+    assert!(!created_again);
+    assert_eq!(replay.id, "wf-kv-idem");
+    assert_eq!(replay.context, serde_json::json!({"a": 1}));
+    assert_eq!(replay.created_at, first.created_at);
+
+    let mut other = listen_definition();
+    other.document.version = "2.0".into();
+    let err = rt
+        .start_as_with_id_outcome(&other, serde_json::json!({}), None, Some("wf-kv-idem"))
+        .await
+        .expect_err("different version must conflict");
+    assert!(matches!(err, RuntimeError::AlreadyExists(_)), "{err:?}");
+
+    // 并发同 id：KV 的 VERSION==0 谓词保证恰一个创建者。
+    let (a, b) = tokio::join!(
+        rt.start_as_with_id_outcome(&def, serde_json::json!({"n": 1}), None, Some("wf-kv-race")),
+        rt.start_as_with_id_outcome(&def, serde_json::json!({"n": 2}), None, Some("wf-kv-race")),
+    );
+    let created_count = [a.unwrap().1, b.unwrap().1]
+        .iter()
+        .filter(|created| **created)
+        .count();
+    assert_eq!(created_count, 1, "同 id 并发 Start 只允许一个创建者");
+}
+
 /// 一步到位的定义：`start` 即 inject（展开为 set 任务），无挂起 ⇒ 只要驱动起来就到终态。
 const RUN_YAML: &str = r#"
 document:

@@ -438,6 +438,19 @@ pub trait WorkflowStore: Send + Sync {
     /// 保存工作流实例
     async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError>;
 
+    /// 仅当实例 id 不存在时写入（create-if-absent）；
+    /// 返回 `true` = 本次创建成功，`false` = 同 id 实例已存在（调用方负责比较定义身份）。
+    ///
+    /// 默认实现为「读后写」：适用于单写者的内存实现；具备原子谓词的实现（KV）应覆写为
+    /// CAS（`VERSION == 0`），否则并发同 id Start 仍可能双写。
+    async fn create_instance(&self, inst: &WorkflowInstance) -> Result<bool, StoreError> {
+        if self.load_instance(&inst.id).await?.is_some() {
+            return Ok(false);
+        }
+        self.save_instance(inst).await?;
+        Ok(true)
+    }
+
     /// 原子保存工作流实例（CAS 基于 mod_revision）
     ///
     /// 用于关键状态转换（Complete/Fail/Suspend/Resume），防止并发冲突。
@@ -905,6 +918,10 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
 
     async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
         self.as_ref().save_instance(inst).await
+    }
+
+    async fn create_instance(&self, inst: &WorkflowInstance) -> Result<bool, StoreError> {
+        self.as_ref().create_instance(inst).await
     }
 
     async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError> {
