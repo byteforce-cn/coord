@@ -47,18 +47,23 @@ leaks wire types into the public surface.
 
 ## Install
 
-Available on **Maven Central** — repository version `0.4.2`
-(latest published release: `0.4.1`; use the from-source path below until `0.4.2` is live):
+Source version: `0.4.3`. **Maven Central stops at `0.4.1`** — `0.4.2` and `0.4.3` are
+not published there (releases after `0.4.1` are source/local-install only). `0.4.3` is also
+a **breaking API rename**: the data-plane entry points lost their `V2` suffix and the
+client types moved out of the `*.v2` packages (`kvV2()` → `kv()`,
+`cn.byteforce.coord.sdk.kv.v2.KvClient` → `cn.byteforce.coord.sdk.kv.KvClient`, …;
+see ADR-0018 D4). Pin `0.4.1` only if you are still on the old v1-era names *and*
+published artifacts.
+
+Build & install from source (repository root), then depend on `0.4.3`:
 
 ```xml
 <dependency>
     <groupId>cn.byteforce</groupId>
     <artifactId>coord-java-sdk</artifactId>
-    <version>0.4.2</version>
+    <version>0.4.3</version>
 </dependency>
 ```
-
-Or build & install from source (repository root):
 
 ```bash
 mvn -pl coord-java-sdk install
