@@ -17,6 +17,39 @@ use async_trait::async_trait;
 pub type ServiceError = Box<dyn std::error::Error + Send + Sync>;
 pub type ServiceResult<T> = Result<T, ServiceError>;
 
+/// 把服务层错误还原成 gRPC 状态，**保留错误码**。
+///
+/// 服务层的 `ServiceError` 是 boxed trait object：直接 `Status::internal(e.to_string())`
+/// 会把 `ClusterUnavailable` / `SAFE_TS_LAG` / 超时这类**可重试瞬态**固定成永久错误，
+/// 调用方的重试矩阵随即放弃重试。这里是 agent 内建服务（registry / config / …）
+/// 的统一出口：能 downcast 回 `coord_core::error::Error` 的走数据面唯一映射
+/// （`proxy::map_core_error`，带 `x-coord-error-code`），其余仍是 `INTERNAL`。
+pub fn service_error_status(context: &str, err: ServiceError) -> tonic::Status {
+    let status = match err.downcast::<coord_core::error::Error>() {
+        Ok(core) => crate::proxy::map_core_error(*core),
+        Err(other) => {
+            let msg = other.to_string();
+            return tonic::Status::internal(if context.is_empty() {
+                msg
+            } else {
+                format!("{context}: {msg}")
+            });
+        }
+    };
+    let code = status.code();
+    let message = status.message().to_string();
+    let mut out = tonic::Status::new(
+        code,
+        if context.is_empty() {
+            message
+        } else {
+            format!("{context}: {message}")
+        },
+    );
+    *out.metadata_mut() = status.metadata().clone();
+    out
+}
+
 // ──── ServiceStatus ────
 
 /// 服务运行状态
@@ -636,5 +669,39 @@ workflow_events_topic = "com.example.wf"
 
         // 生产默认口径不受本预设影响（另由 test_service_config_defaults 钉住）。
         assert!(!ServiceConfig::default().registry);
+    }
+}
+
+#[cfg(test)]
+mod service_error_status_tests {
+    use super::*;
+
+    /// 可重试瞬态不得被服务层压成 `INTERNAL`：调用方（SDK/适配器）按码决定重试，
+    /// `INTERNAL` 会让它直接放弃——这正是 #385 的注册路径在启动窗口里失败的形态。
+    #[test]
+    fn transient_core_errors_keep_their_code() {
+        let status = service_error_status(
+            "failed to register instance",
+            Box::new(coord_core::error::Error::ClusterUnavailable(
+                "read_ts 1028 exceeds safe_ts (global apply lag); retry later".into(),
+            )),
+        );
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(status.message().contains("read_ts 1028 exceeds safe_ts"));
+        assert!(status
+            .message()
+            .starts_with("failed to register instance: "));
+        assert_eq!(
+            coord_core::error_code::error_code_of(&status).as_deref(),
+            Some("UNAVAILABLE")
+        );
+    }
+
+    /// 非 `CoreError` 的包装错误仍走 `INTERNAL`（不猜测码）。
+    #[test]
+    fn opaque_errors_stay_internal() {
+        let status = service_error_status("boom", Box::new(std::io::Error::other("disk")));
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "boom: disk");
     }
 }
