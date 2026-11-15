@@ -1,3 +1,27 @@
+## [contracts/v1.15.0] — 2026-11-15（新增字段：MQ v2 DLQ 归因，wire 向前兼容）
+
+**发布口径**：**Minor**（只在既有 message 上追加字段，不改字段号/类型、不删 RPC；
+`buf breaking` 基线不变）。
+
+- `MoveToDlqRequest` 追加 `group`(7) / `failure_type`(8) / `attempts`(9)：
+  死信记录携带**消费组归属 / 结构化失败类别 / 累计投递次数**。
+- `PollDlqRequest` 追加 `group`(6)：服务端按组过滤；`next_dlq_offset` 按**扫描进度**
+  推进（过滤无命中时位点仍前进，避免原地重扫）。
+- `Message` 追加 `group`(11) / `failure_type`(12) / `attempts`(13)：仅 `PollDlq` 填充，
+  主日志消息为空 / 0。
+- 动机：`coord.mq.v2` 的 DLQ 是**分区级、多组共享**的。没有归因字段时，
+  "哪个组把这条消息烧进死信、失败类别是什么、重投了几次"无法回答——消费方只能
+  自建死信索引（seedj 的 `EventConsumerStore.deadLetters(topic, group, failure)`
+  即此缺口）。归因随记录落盘后，这个查询面属于 coord 本身。
+- SDK：`MqV2MoveToDlq` / `MqV2DlqMessage` 增加对应字段，`MqV2Client.pollDlq` 增加
+  带 `group` 的重载（旧重载保持不变）。
+
+**影响范围**：旧客户端不受影响（新字段为追加，缺省为空/0）；需要组归因的调用方
+改用新字段与 `pollDlq(..., group)`。
+
+**回滚预案**：回滚本分支即回到无归因版本；已写入的 DLQ 记录带旧字段签名，
+回滚后按 `serde(default)` 解码（`group` / `failure_type` 空、`attempts` 0）。
+
 ## [contracts/v1.14.0] — 2026-11-15（状态变更：v1 数据面移出承诺面，wire 无改动）
 
 **发布口径**：**状态变更**（无字段/RPC/枚举/错误码变更：`buf breaking` 基线不变；

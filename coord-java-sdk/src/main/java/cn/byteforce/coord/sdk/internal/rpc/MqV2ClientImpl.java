@@ -443,6 +443,9 @@ public final class MqV2ClientImpl extends AgentRpcClient implements MqV2Client {
                 .setOffset(move.offset())
                 .setReason(move.reason())
                 .setDetail(move.detail())
+                .setGroup(move.group())
+                .setFailureType(move.failureType())
+                .setAttempts(move.attempts())
                 .build();
         cn.byteforce.coord.contracts.mq.v2.MoveToDlqResponse response = callWithRetry(
                 (ch, req) -> stub(ch).moveToDlq((MoveToDlqRequest) req),
@@ -453,11 +456,18 @@ public final class MqV2ClientImpl extends AgentRpcClient implements MqV2Client {
     @Override
     public MqV2PollDlqResult pollDlq(String topic, int partition, long topicEpoch,
                                      Long startOffset, int maxMessages) {
+        return pollDlq(topic, partition, topicEpoch, startOffset, maxMessages, "");
+    }
+
+    @Override
+    public MqV2PollDlqResult pollDlq(String topic, int partition, long topicEpoch,
+                                     Long startOffset, int maxMessages, String group) {
         PollDlqRequest.Builder builder = PollDlqRequest.newBuilder()
                 .setTopic(topic)
                 .setPartition(partition)
                 .setTopicEpoch(topicEpoch)
-                .setMaxMessages(maxMessages);
+                .setMaxMessages(maxMessages)
+                .setGroup(group == null ? "" : group);
         if (startOffset != null) {
             builder.setStartOffset(startOffset);
         }
@@ -468,7 +478,8 @@ public final class MqV2ClientImpl extends AgentRpcClient implements MqV2Client {
         List<MqV2DlqMessage> messages = new ArrayList<>(response.getMessagesCount());
         for (cn.byteforce.coord.contracts.mq.v2.Message message : response.getMessagesList()) {
             messages.add(new MqV2DlqMessage(toSdk(message), message.getDlqReason(),
-                    message.getDlqDetail()));
+                    message.getDlqDetail(), message.getGroup(), message.getFailureType(),
+                    message.getAttempts()));
         }
         return new MqV2PollDlqResult(messages, response.getNextDlqOffset());
     }

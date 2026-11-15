@@ -37,6 +37,9 @@ async fn move_to_dlq(
             offset,
             reason: reason.to_string(),
             detail: format!("detail-{offset}"),
+            group: String::new(),
+            failure_type: String::new(),
+            attempts: 0,
         })
         .await
         .map(|response| response.into_inner())
@@ -102,6 +105,7 @@ async fn move_to_dlq_hides_the_message_from_poll_and_is_idempotent() {
             topic_epoch: 0,
             start_offset: None,
             max_messages: 10,
+            group: String::new(),
         })
         .await
         .expect("poll dlq")
@@ -145,6 +149,7 @@ async fn move_to_dlq_rejects_an_unknown_offset_and_poll_dlq_paginates() {
             topic_epoch: 0,
             start_offset: None,
             max_messages: 1,
+            group: String::new(),
         })
         .await
         .expect("poll dlq")
@@ -159,6 +164,7 @@ async fn move_to_dlq_rejects_an_unknown_offset_and_poll_dlq_paginates() {
             topic_epoch: 0,
             start_offset: Some(first.next_dlq_offset),
             max_messages: 1,
+            group: String::new(),
         })
         .await
         .expect("poll dlq page 2")
@@ -352,9 +358,101 @@ async fn dlq_is_gated_by_the_dlq_capability() {
             offset: 0,
             reason: "poison".to_string(),
             detail: String::new(),
+            group: String::new(),
+            failure_type: String::new(),
+            attempts: 0,
         }))
         .await
         .expect_err("Dlq capability is not delivered");
     assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
     assert_eq!(wire_code(&status).as_deref(), Some("FAILED_PRECONDITION"));
+}
+
+/// DLQ 归因：组 / 结构化失败类别 / 累计投递次数随死信落盘；`PollDlq` 的 group
+/// 过滤在服务端生效，且 `next_dlq_offset` 按**扫描进度**推进（过滤空结果不会
+/// 让调用方在同一位点重扫死循环）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dlq_attribution_is_persisted_and_group_filtered() {
+    let node = MqV2Node::boot(2, 1).await;
+    let mut client = node.client().await;
+    create_topic(&mut client, TOPIC, 1, None).await;
+    publish(&mut client, TOPIC, 0, b"a", "")
+        .await
+        .expect("publish");
+    publish(&mut client, TOPIC, 0, b"b", "")
+        .await
+        .expect("publish");
+
+    for (offset, group, failure_type, attempts) in [
+        (0i64, "billing", "handler_error", 3u32),
+        (1, "shipping", "max_attempts", 5),
+    ] {
+        client
+            .move_to_dlq(mq_v2::MoveToDlqRequest {
+                topic: TOPIC.to_string(),
+                partition: 0,
+                topic_epoch: 0,
+                offset,
+                reason: "poison".to_string(),
+                detail: format!("detail-{offset}"),
+                group: group.to_string(),
+                failure_type: failure_type.to_string(),
+                attempts,
+            })
+            .await
+            .expect("move to dlq");
+    }
+
+    // 不过滤：两条都回来，且各自带归因。
+    let all = client
+        .poll_dlq(mq_v2::PollDlqRequest {
+            topic: TOPIC.to_string(),
+            partition: 0,
+            topic_epoch: 0,
+            start_offset: None,
+            max_messages: 0,
+            group: String::new(),
+        })
+        .await
+        .expect("poll dlq")
+        .into_inner();
+    assert_eq!(all.messages.len(), 2);
+    assert_eq!(all.messages[0].group, "billing");
+    assert_eq!(all.messages[0].failure_type, "handler_error");
+    assert_eq!(all.messages[0].attempts, 3);
+    assert_eq!(all.messages[1].group, "shipping");
+    assert_eq!(all.messages[1].attempts, 5);
+
+    // 按组过滤：只回该组，位点仍推进到已扫描的末尾。
+    let billing = client
+        .poll_dlq(mq_v2::PollDlqRequest {
+            topic: TOPIC.to_string(),
+            partition: 0,
+            topic_epoch: 0,
+            start_offset: None,
+            max_messages: 0,
+            group: "billing".to_string(),
+        })
+        .await
+        .expect("poll dlq by group")
+        .into_inner();
+    assert_eq!(billing.messages.len(), 1, "only the billing dead letter");
+    assert_eq!(billing.messages[0].offset, 0);
+    assert_eq!(billing.next_dlq_offset, 2, "scan progress, not hit count");
+
+    // 过滤无命中：空结果但位点已推进（否则调用方原地重扫）。
+    let empty = client
+        .poll_dlq(mq_v2::PollDlqRequest {
+            topic: TOPIC.to_string(),
+            partition: 0,
+            topic_epoch: 0,
+            start_offset: None,
+            max_messages: 0,
+            group: "unknown-group".to_string(),
+        })
+        .await
+        .expect("poll dlq by unknown group")
+        .into_inner();
+    assert!(empty.messages.is_empty());
+    assert_eq!(empty.next_dlq_offset, 2);
 }

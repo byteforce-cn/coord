@@ -173,6 +173,8 @@ pub struct MqPollDlq {
     /// `None` = 从 DLQ 起点开始。
     pub start_offset: Option<u64>,
     pub max_messages: i32,
+    /// 只看该消费组的死信（空 = 不过滤）。
+    pub group: String,
 }
 
 /// 一条死信消息：原消息 + 移入原因/细节（`PollDlq` 独有）。
@@ -181,6 +183,12 @@ pub struct MqDlqMessage {
     pub message: MqMessage,
     pub reason: String,
     pub detail: String,
+    /// 归属消费组（空 = 非组归属）。
+    pub group: String,
+    /// 结构化失败类别。
+    pub failure_type: String,
+    /// 累计投递次数（0 = 未知）。
+    pub attempts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -578,6 +586,7 @@ impl MqV2Client {
                 None => None,
             },
             max_messages: request.max_messages,
+            group: request.group.clone(),
         };
         let response = self
             .partition_call(
@@ -606,6 +615,9 @@ impl MqV2Client {
                 },
                 reason: message.dlq_reason,
                 detail: message.dlq_detail,
+                group: message.group,
+                failure_type: message.failure_type,
+                attempts: message.attempts,
             });
         }
         Ok(MqPollDlqResult {
@@ -1280,6 +1292,12 @@ pub struct MqMoveToDlq {
     /// 稳定原因锚点（如 `workflow_trigger_max_attempts`）。
     pub reason: String,
     pub detail: String,
+    /// 归因：归入死信的消费组（空 = 非组归属的管理动作）。
+    pub group: String,
+    /// 结构化失败类别（供程序聚合）。
+    pub failure_type: String,
+    /// 累计投递次数（0 = 未知）。
+    pub attempts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1363,6 +1381,9 @@ fn move_to_dlq_request(request: &MqMoveToDlq) -> Result<mq_v2::MoveToDlqRequest>
         offset: crate::client::ts_to_i64("offset", request.offset)?,
         reason: request.reason.clone(),
         detail: request.detail.clone(),
+        group: request.group.clone(),
+        failure_type: request.failure_type.clone(),
+        attempts: request.attempts,
     })
 }
 
@@ -1379,6 +1400,9 @@ mod tests {
             offset: 42,
             reason: "workflow_trigger_max_attempts".to_string(),
             detail: "3 consecutive start failures".to_string(),
+            group: "workflow-triggers".to_string(),
+            failure_type: "max_attempts".to_string(),
+            attempts: 3,
         })
         .expect("map");
         assert_eq!(wire.topic, "orders");
@@ -1387,6 +1411,9 @@ mod tests {
         assert_eq!(wire.offset, 42);
         assert_eq!(wire.reason, "workflow_trigger_max_attempts");
         assert_eq!(wire.detail, "3 consecutive start failures");
+        assert_eq!(wire.group, "workflow-triggers");
+        assert_eq!(wire.failure_type, "max_attempts");
+        assert_eq!(wire.attempts, 3);
     }
 
     #[test]

@@ -393,6 +393,9 @@ impl MqV2Node {
                 reason: "test".to_string(),
                 detail: String::new(),
                 now_ms: coord_server::mq_v2::now_ms(),
+                group: String::new(),
+                failure_type: String::new(),
+                attempts: 0,
             }))
             .await
             .expect("propose move to dlq");

@@ -100,4 +100,15 @@ public interface MqV2Client {
     /** Read DLQ entries; {@code nextDlqOffset} is the DLQ cursor, not the main-log offset. */
     MqV2PollDlqResult pollDlq(String topic, int partition, long topicEpoch,
                               Long startOffset, int maxMessages);
+
+    /**
+     * Read the DLQ entries of one consumer group.
+     *
+     * <p>A partition DLQ is shared by all groups, so serving-side filtering is the
+     * only way to page one group's dead letters: {@code nextDlqOffset} still
+     * advances with the scan, which keeps a low-hit filter from re-reading the same
+     * record forever. Empty {@code group} = no filter.
+     */
+    MqV2PollDlqResult pollDlq(String topic, int partition, long topicEpoch,
+                              Long startOffset, int maxMessages, String group);
 }

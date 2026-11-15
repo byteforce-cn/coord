@@ -2688,6 +2688,9 @@ mod tests {
                 reason: "poison".to_string(),
                 detail: String::new(),
                 now_ms: 5,
+                group: String::new(),
+                failure_type: String::new(),
+                attempts: 0,
             }),
             3,
         );
