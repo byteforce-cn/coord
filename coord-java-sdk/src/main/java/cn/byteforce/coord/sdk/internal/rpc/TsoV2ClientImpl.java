@@ -5,7 +5,7 @@ import cn.byteforce.coord.contracts.tso.v2.Tso;
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
-import cn.byteforce.coord.sdk.tso.v2.TsoClient;
+import cn.byteforce.coord.sdk.tso.TsoClient;
 
 import java.util.concurrent.TimeUnit;
 

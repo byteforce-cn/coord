@@ -1,7 +1,7 @@
 package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.contracts.kv.v2.Kv;
-import cn.byteforce.coord.sdk.kv.v2.KvClient;
+import cn.byteforce.coord.sdk.kv.KvClient;
 import com.google.protobuf.ByteString;
 
 import java.util.ArrayList;

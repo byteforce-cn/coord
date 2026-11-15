@@ -2,16 +2,16 @@ package cn.byteforce.coord.sdk;
 
 import cn.byteforce.coord.sdk.config.ConfigSnapshot;
 import cn.byteforce.coord.sdk.config.ConfigWatchSubscription;
-import cn.byteforce.coord.sdk.kv.v2.KvClient;
-import cn.byteforce.coord.sdk.lease.v2.LeaseClient;
+import cn.byteforce.coord.sdk.kv.KvClient;
+import cn.byteforce.coord.sdk.lease.LeaseClient;
 import cn.byteforce.coord.sdk.lock.LockInfo;
 import cn.byteforce.coord.sdk.registry.Registration;
 import cn.byteforce.coord.sdk.registry.ServiceInstance;
 import cn.byteforce.coord.sdk.workflow.WorkflowState;
-import cn.byteforce.coord.sdk.storage.v2.StorageClient;
-import cn.byteforce.coord.sdk.tso.v2.TsoClient;
-import cn.byteforce.coord.sdk.txn.v2.TxnClient;
-import cn.byteforce.coord.sdk.watch.v2.WatchClient;
+import cn.byteforce.coord.sdk.storage.StorageClient;
+import cn.byteforce.coord.sdk.tso.TsoClient;
+import cn.byteforce.coord.sdk.txn.TxnClient;
+import cn.byteforce.coord.sdk.watch.WatchClient;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -71,7 +71,7 @@ class KvTV2ClusterIntegrationTest {
         // Probe before the first assertion so "cluster missing" reports the
         // startup command instead of a bare UNAVAILABLE from an arbitrary RPC.
         try {
-            assertThat(client.tsoV2().getTimestamp()).isPositive();
+            assertThat(client.tso().getTimestamp()).isPositive();
         } catch (RuntimeException e) {
             client.close(Duration.ZERO);
             throw new IllegalStateException(
@@ -93,18 +93,18 @@ class KvTV2ClusterIntegrationTest {
     @Order(1)
     @DisplayName("TSO is monotonic; commit_ts becomes mod_revision; prev_kv/delete")
     void tsoAndKvRoundTrip() {
-        long first = client.tsoV2().getTimestamp();
-        long second = client.tsoV2().getTimestamp();
+        long first = client.tso().getTimestamp();
+        long second = client.tso().getTimestamp();
         assertThat(second)
                 .as("GetTs must strictly increase")
                 .isGreaterThan(first);
 
-        TsoClient.TimestampBatch batch = client.tsoV2().allocate(8);
+        TsoClient.TimestampBatch batch = client.tso().allocate(8);
         assertThat(batch.endTs()).isEqualTo(batch.startTs() + 8);
         // Explicit allocations reserve disjoint ranges; the local GetTs cache is
         // an independent (older) batch, so only batch-to-batch monotonicity is
         // guaranteed here.
-        TsoClient.TimestampBatch next = client.tsoV2().allocate(8);
+        TsoClient.TimestampBatch next = client.tso().allocate(8);
         assertThat(next.startTs())
                 .as("explicit timestamp batches must not overlap or go backwards")
                 .isGreaterThanOrEqualTo(batch.endTs());
@@ -113,11 +113,11 @@ class KvTV2ClusterIntegrationTest {
         // 取号后立刻写：safe-point fence 随 TSO 分配高水位前进，越过已发放但未使用的
         // 值后写入只能 COMMIT_REJECTED（ADR-0015 D12.3）。中间再插 Allocate/其它 RPC
         // 会把这个窗口撑到一个 advancer 周期。
-        long writeTs = client.tsoV2().getTimestamp();
-        KvClient.PutResult put = client.kvV2().put(key, utf8("v1"), writeTs);
+        long writeTs = client.tso().getTimestamp();
+        KvClient.PutResult put = client.kv().put(key, utf8("v1"), writeTs);
         assertThat(put.commitTs()).isEqualTo(writeTs);
 
-        KvClient.RangeResult atCommit = client.kvV2()
+        KvClient.RangeResult atCommit = client.kv()
                 .range(key, new byte[0], 0, writeTs, false, false);
         assertThat(atCommit.readTs()).isEqualTo(writeTs);
         assertThat(atCommit.kvs()).hasSize(1);
@@ -126,17 +126,17 @@ class KvTV2ClusterIntegrationTest {
         assertThat(stored.modRevision()).isEqualTo(writeTs);
         assertThat(stored.version()).isEqualTo(1);
 
-        long overwriteTs = client.tsoV2().getTimestamp();
-        KvClient.PutResult overwrite = client.kvV2()
+        long overwriteTs = client.tso().getTimestamp();
+        KvClient.PutResult overwrite = client.kv()
                 .put(key, utf8("v2"), overwriteTs, true, new byte[0]);
         assertThat(overwrite.prevKv()).isNotNull();
         assertThat(text(overwrite.prevKv().value())).isEqualTo("v1");
 
-        long deleteTs = client.tsoV2().getTimestamp();
-        KvClient.DeleteResult deleted = client.kvV2()
+        long deleteTs = client.tso().getTimestamp();
+        KvClient.DeleteResult deleted = client.kv()
                 .delete(key, new byte[0], deleteTs, false, new byte[0]);
         assertThat(deleted.deleted()).isEqualTo(1);
-        assertThat(client.kvV2().range(key, new byte[0], 0, deleteTs, false, false).kvs())
+        assertThat(client.kv().range(key, new byte[0], 0, deleteTs, false, false).kvs())
                 .isEmpty();
     }
 
@@ -147,10 +147,10 @@ class KvTV2ClusterIntegrationTest {
         // Start the subscription at a revision that does not exist yet: the
         // stream may be established after the commit and still replays it,
         // so the test never races the watch coordinator with a sleep.
-        long base = client.tsoV2().getTimestamp();
+        long base = client.tso().getTimestamp();
         LinkedBlockingQueue<WatchClient.Batch> batches = new LinkedBlockingQueue<>();
         AtomicReference<CoordException> watchError = new AtomicReference<>();
-        WatchClient.Subscription subscription = client.watchV2().watch(
+        WatchClient.Subscription subscription = client.watch().watch(
                 WatchClient.Options.key(utf8("a/"))
                         .range(utf8("z0"))
                         .fromRevision(base + 1)
@@ -169,7 +169,7 @@ class KvTV2ClusterIntegrationTest {
         try {
             byte[] left = runKey("a/cross");
             byte[] right = runKey("z/cross");
-            TxnClient.Session txn = client.txnV2().begin();
+            TxnClient.Session txn = client.tx().begin();
             TxnClient.CommitResult committed = txn.commit(List.of(
                     TxnClient.Mutation.put(left, utf8("left")),
                     TxnClient.Mutation.put(right, utf8("right"))));
@@ -183,7 +183,7 @@ class KvTV2ClusterIntegrationTest {
 
             // read_ts = commit_ts waits for safe_ts, so both regions are visible
             // under the same snapshot even though apply is asynchronous.
-            KvClient.RangeResult snapshot = client.kvV2()
+            KvClient.RangeResult snapshot = client.kv()
                     .range(utf8("a/"), utf8("z0"), 0, commitTs, false, false);
             assertThat(keys(snapshot.kvs())).contains(text(left), text(right));
         } finally {
@@ -196,16 +196,16 @@ class KvTV2ClusterIntegrationTest {
     @DisplayName("OCC conflict is a CommitResult, not an exception")
     void occConflictIsReturnedNotThrown() {
         byte[] key = runKey("a/conflict");
-        TxnClient.Session reader = client.txnV2().begin();
+        TxnClient.Session reader = client.tx().begin();
         reader.read(key);
 
-        TxnClient.Session writer = client.txnV2().begin();
+        TxnClient.Session writer = client.tx().begin();
         TxnClient.CommitResult written = writer.commit(
                 List.of(TxnClient.Mutation.put(key, utf8("new"))));
         assertThat(written.committed()).isTrue();
         // read_ts = commit_ts waits for safe_ts, so the snapshot is served after the
         // decision applied (the server also orders direct writes behind it, #244).
-        KvClient.RangeResult visible = client.kvV2()
+        KvClient.RangeResult visible = client.kv()
                 .range(key, new byte[0], 0, written.commitTs(), false, false);
         assertThat(visible.kvs()).hasSize(1);
         assertThat(text(visible.kvs().get(0).value())).isEqualTo("new");
@@ -222,23 +222,23 @@ class KvTV2ClusterIntegrationTest {
     @Order(4)
     @DisplayName("lease revoke atomically deletes bound keys")
     void leaseRevokeDeletesBoundKeys() {
-        LeaseClient.Grant grant = client.leaseV2().grant(60);
+        LeaseClient.Grant grant = client.lease().grant(60);
         assertThat(grant.leaseId()).isPositive();
 
         byte[] key = runKey("z/leased");
-        long putTs = client.tsoV2().getTimestamp();
-        client.kvV2().putWithLease(key, utf8("leased"), grant.leaseId(), putTs,
+        long putTs = client.tso().getTimestamp();
+        client.kv().putWithLease(key, utf8("leased"), grant.leaseId(), putTs,
                 false, new byte[0]);
 
-        LeaseClient.State state = client.leaseV2().timeToLive(grant.leaseId(), true);
+        LeaseClient.State state = client.lease().timeToLive(grant.leaseId(), true);
         assertThat(state.ttlSeconds()).isPositive();
         assertThat(state.keys()).anyMatch(bound -> Arrays.equals(bound, key));
 
-        long revokeTs = client.leaseV2().revoke(grant.leaseId(), new byte[0]);
+        long revokeTs = client.lease().revoke(grant.leaseId(), new byte[0]);
         assertThat(revokeTs)
                 .as("a granted lease with bound keys must produce a deletion decision")
                 .isPositive();
-        assertThat(client.kvV2().range(key, new byte[0], 0, revokeTs, false, false).kvs())
+        assertThat(client.kv().range(key, new byte[0], 0, revokeTs, false, false).kvs())
                 .isEmpty();
     }
 
@@ -250,26 +250,26 @@ class KvTV2ClusterIntegrationTest {
         byte[] objectId = runKey("storage-object");
         byte[] payload = utf8("hello kv-t v2 storage");
 
-        StorageClient.PutResult put = client.storageV2().put(bucket, objectId, payload);
+        StorageClient.PutResult put = client.storage().put(bucket, objectId, payload);
         assertThat(put.commitTs()).isPositive();
         assertThat(put.size()).isEqualTo(payload.length);
 
-        StorageClient.ObjectData fetched = client.storageV2().get(bucket, objectId);
+        StorageClient.ObjectData fetched = client.storage().get(bucket, objectId);
         assertThat(fetched.data()).isEqualTo(payload);
         assertThat(fetched.stat().exists()).isTrue();
         assertThat(fetched.stat().commitTs()).isEqualTo(put.commitTs());
 
         CoordException duplicate = catchThrowableOfType(CoordException.class,
-                () -> client.storageV2().put(bucket, objectId, payload));
+                () -> client.storage().put(bucket, objectId, payload));
         assertThat(duplicate).isNotNull();
         assertThat(duplicate.getErrorCode())
                 .as("v2 does not support overwrite: the original code must survive the agent")
                 .isEqualTo(ErrorCode.ALREADY_EXISTS);
 
-        StorageClient.DeleteResult deleted = client.storageV2()
+        StorageClient.DeleteResult deleted = client.storage()
                 .delete(bucket, objectId, new byte[0]);
         assertThat(deleted.deleted()).isTrue();
-        assertThat(client.storageV2().stat(bucket, objectId).exists()).isFalse();
+        assertThat(client.storage().stat(bucket, objectId).exists()).isFalse();
     }
 
     @Test
@@ -278,12 +278,12 @@ class KvTV2ClusterIntegrationTest {
     void rangeSpansRegions() {
         byte[] left = runKey("a/range");
         byte[] right = runKey("z/range");
-        long leftTs = client.tsoV2().getTimestamp();
-        client.kvV2().put(left, utf8("l"), leftTs);
-        long rightTs = client.tsoV2().getTimestamp();
-        client.kvV2().put(right, utf8("r"), rightTs);
+        long leftTs = client.tso().getTimestamp();
+        client.kv().put(left, utf8("l"), leftTs);
+        long rightTs = client.tso().getTimestamp();
+        client.kv().put(right, utf8("r"), rightTs);
 
-        KvClient.RangeResult ranged = client.kvV2()
+        KvClient.RangeResult ranged = client.kv()
                 .range(utf8("a/"), utf8("z0"), 0, rightTs, false, false);
         assertThat(keys(ranged.kvs())).contains(text(left), text(right));
     }
@@ -295,7 +295,7 @@ class KvTV2ClusterIntegrationTest {
         byte[] txnKey = runKey("a/order-txn");
         byte[] directKey = runKey("a/order-direct");
 
-        TxnClient.Session txn = client.txnV2().begin();
+        TxnClient.Session txn = client.tx().begin();
         TxnClient.CommitResult committed = txn.commit(
                 List.of(TxnClient.Mutation.put(txnKey, utf8("txn"))));
         assertThat(committed.committed()).isTrue();
@@ -304,18 +304,18 @@ class KvTV2ClusterIntegrationTest {
         // 不等决策 apply：立刻用更大的 commit_ts 直写同一 Region。服务端必须先把该
         // 决策 apply（或返回可重试的 SAFE_TS_LAG），不能把 Region revision 推过它
         // —— 那会让决策永久无法 apply，safe_ts 卡死且不自愈。
-        long directTs = client.tsoV2().getTimestamp();
+        long directTs = client.tso().getTimestamp();
         assertThat(directTs).isGreaterThan(commitTs);
-        KvClient.PutResult direct = client.kvV2().put(directKey, utf8("direct"), directTs);
+        KvClient.PutResult direct = client.kv().put(directKey, utf8("direct"), directTs);
         assertThat(direct.commitTs()).isEqualTo(directTs);
 
         // safe_ts 追过两者：同一 read_ts 的快照同时看到事务与直写（无部分可见）。
-        KvClient.RangeResult snapshot = client.kvV2().range(
+        KvClient.RangeResult snapshot = client.kv().range(
                 runKey("a/order"), runKey("a/order~"), 0, directTs, false, false);
         assertThat(keys(snapshot.kvs())).containsExactlyInAnyOrder(text(txnKey), text(directKey));
 
         // 决策没有卡住：后续事务仍能在更高 commit_ts 上提交。
-        TxnClient.CommitResult next = client.txnV2()
+        TxnClient.CommitResult next = client.tx()
                 .begin()
                 .commit(List.of(TxnClient.Mutation.put(runKey("a/order-next"), utf8("next"))));
         assertThat(next.committed()).isTrue();

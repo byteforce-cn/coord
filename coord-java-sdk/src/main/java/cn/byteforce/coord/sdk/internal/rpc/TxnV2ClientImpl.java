@@ -7,7 +7,7 @@ import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.ErrorCode;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
-import cn.byteforce.coord.sdk.txn.v2.TxnClient;
+import cn.byteforce.coord.sdk.txn.TxnClient;
 import com.google.protobuf.ByteString;
 
 import java.util.ArrayList;

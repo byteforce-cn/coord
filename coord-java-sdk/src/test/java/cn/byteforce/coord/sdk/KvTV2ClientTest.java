@@ -6,9 +6,9 @@ import cn.byteforce.coord.contracts.lease.v2.LeaseGrpc;
 import cn.byteforce.coord.contracts.lease.v2.LeaseOuterClass;
 import cn.byteforce.coord.contracts.tso.v2.TSOGrpc;
 import cn.byteforce.coord.contracts.tso.v2.Tso;
-import cn.byteforce.coord.sdk.kv.v2.KvClient;
-import cn.byteforce.coord.sdk.lease.v2.LeaseClient;
-import cn.byteforce.coord.sdk.tso.v2.TsoClient;
+import cn.byteforce.coord.sdk.kv.KvClient;
+import cn.byteforce.coord.sdk.lease.LeaseClient;
+import cn.byteforce.coord.sdk.tso.TsoClient;
 import io.grpc.Metadata;
 import io.grpc.Server;
 import io.grpc.Status;
@@ -72,41 +72,41 @@ class KvTV2ClientTest {
 
     @Test
     void tsoAllocatesAndKvRoundTrips() {
-        long ts = client.tsoV2().getTimestamp();
+        long ts = client.tso().getTimestamp();
         assertThat(ts).isPositive();
 
-        TsoClient.TimestampBatch batch = client.tsoV2().allocate(8);
+        TsoClient.TimestampBatch batch = client.tso().allocate(8);
         assertThat(batch.endTs()).isGreaterThan(batch.startTs());
 
-        KvClient.PutResult put = client.kvV2()
+        KvClient.PutResult put = client.kv()
                 .put(bytes("k"), bytes("v"), ts, false, new byte[0]);
         assertThat(put.commitTs()).isEqualTo(ts);
 
-        KvClient.RangeResult ranged = client.kvV2().range(bytes("k"));
+        KvClient.RangeResult ranged = client.kv().range(bytes("k"));
         assertThat(ranged.kvs()).hasSize(1);
         assertThat(text(ranged.kvs().get(0).key())).isEqualTo("k");
         assertThat(text(ranged.kvs().get(0).value())).isEqualTo("v");
         assertThat(ranged.readTs()).isEqualTo(ts);
 
-        KvClient.DeleteResult deleted = client.kvV2().delete(bytes("k"));
+        KvClient.DeleteResult deleted = client.kv().delete(bytes("k"));
         assertThat(deleted.deleted()).isEqualTo(1);
     }
 
     @Test
     void leaseGrantKeepAliveTimeToLiveAndRevoke() {
-        LeaseClient.Grant grant = client.leaseV2().grant(30);
+        LeaseClient.Grant grant = client.lease().grant(30);
         assertThat(grant.leaseId()).isEqualTo(7);
         assertThat(grant.ttlSeconds()).isEqualTo(30);
         assertThat(grant.grantedTs()).isPositive();
 
-        assertThat(client.leaseV2().keepAlive(7)).isEqualTo(29);
+        assertThat(client.lease().keepAlive(7)).isEqualTo(29);
 
-        LeaseClient.State state = client.leaseV2().timeToLive(7, true);
+        LeaseClient.State state = client.lease().timeToLive(7, true);
         assertThat(state.ttlSeconds()).isEqualTo(29);
         assertThat(state.keys()).hasSize(1);
         assertThat(text(state.keys().get(0))).isEqualTo("k");
 
-        assertThat(client.leaseV2().revoke(7, new byte[0])).isEqualTo(42);
+        assertThat(client.lease().revoke(7, new byte[0])).isEqualTo(42);
     }
 
     @Test
@@ -114,7 +114,7 @@ class KvTV2ClientTest {
         kv.rejectPut = true;
 
         CoordException err = catchThrowableOfType(
-                () -> client.kvV2().put(bytes("k"), bytes("v"), 1, false, new byte[0]),
+                () -> client.kv().put(bytes("k"), bytes("v"), 1, false, new byte[0]),
                 CoordException.class);
 
         assertThat(err.getErrorCode()).isEqualTo(ErrorCode.COMMIT_REJECTED);
@@ -124,7 +124,7 @@ class KvTV2ClientTest {
     void safeTsLagIsRetried() {
         kv.failFirstRangeWithSafeTsLag = true;
 
-        KvClient.RangeResult ranged = client.kvV2().range(bytes("k"));
+        KvClient.RangeResult ranged = client.kv().range(bytes("k"));
 
         assertThat(kv.rangeCalls.get()).isEqualTo(2);
         assertThat(ranged.readTs()).isPositive();

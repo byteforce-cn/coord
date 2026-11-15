@@ -93,12 +93,12 @@ try (CoordClient client = CoordClient.create(config)) {
     }
 
     // KV-T v2 (requires a v2 cluster — `[kv_t]` enabled — and a v2-aware agent)
-    long commitTs = client.tsoV2().getTimestamp();
-    client.kvV2().put("/app/k".getBytes(), "v".getBytes(), commitTs, false, new byte[0]);
-    var ranged = client.kvV2().range("/app/k".getBytes());
+    long commitTs = client.tso().getTimestamp();
+    client.kv().put("/app/k".getBytes(), "v".getBytes(), commitTs, false, new byte[0]);
+    var ranged = client.kv().range("/app/k".getBytes());
 
     // Serializable transaction: a conflict is a result, not an error.
-    var session = client.txnV2().begin();                       // server-allocated start_ts
+    var session = client.tx().begin();                       // server-allocated start_ts
     var read = session.read("/app/k".getBytes());
     var commit = session.commit(java.util.List.of(
             cn.byteforce.coord.sdk.txn.v2.TxnClient.Mutation.put(
@@ -110,7 +110,7 @@ try (CoordClient client = CoordClient.create(config)) {
 
     // Watch is at-least-once and resumes from the cursor after a reconnect;
     // HISTORY_UNAVAILABLE is terminal (resync the key space).
-    var subscription = client.watchV2().watch(
+    var subscription = client.watch().watch(
             cn.byteforce.coord.sdk.watch.v2.WatchClient.Options
                     .key("/app/".getBytes()).fromRevision(0),
             new cn.byteforce.coord.sdk.watch.v2.WatchClient.Listener() {
@@ -124,18 +124,20 @@ try (CoordClient client = CoordClient.create(config)) {
             });
 
     // Objects: the server allocates the manifest commit_ts; readTs=0 = safe_ts.
-    var put = client.storageV2().put("bucket", "obj".getBytes(), "data".getBytes());
-    var object = client.storageV2().get("bucket", "obj".getBytes(), 0);
+    var put = client.storage().put("bucket", "obj".getBytes(), "data".getBytes());
+    var object = client.storage().get("bucket", "obj".getBytes(), 0);
     subscription.close();
 }
 ```
 
 ## Client surfaces
 
-The SDK covers the **agent-side service surfaces**. The complete KV-T v2 data
-plane is available as `client.tsoV2()` / `client.kvV2()` / `client.leaseV2()` /
-`client.txnV2()` / `client.watchV2()` / `client.storageV2()`; the agent forwards
-all six v2 services (direct server access is not part of this SDK surface).
+The SDK covers the **agent-side service surfaces**. The data plane is exactly
+one surface — `client.tso()` / `client.kv()` / `client.lease()` / `client.tx()` /
+`client.watch()` / `client.storage()` (`coord.*.v2`) — and the agent forwards all
+six services (direct server access is not part of this SDK surface). v1 data-plane
+packages are no longer part of the contract (ADR-0018), so there is no
+per-deployment accessor choice to make.
 Transactions are server-side sessions pinned to one coordinator: a coordinator
 restart loses the session (`TXN_NOT_FOUND`) and the transaction must be
 replayed, while an OCC conflict comes back as `commit(...).committed() == false`.
@@ -156,7 +158,7 @@ is terminal.
 | Transit | `client.transit()` | envelope encryption + purpose-bound HMAC (`hmacSignWithPurpose` / `hmacVerifyWithPurpose`; persist the returned `keyId`); `rewrap` migrates DEKs during KEK rotation |
 | CircuitBreaker / RateLimiter / FeatureFlags | `client.circuitBreaker()`, `client.rateLimiter()`, `client.featureFlags()` | breaker/limiter are local (per-agent); feature flags live in the shared KV — `putFlag` / `putPercentageFlag` / `deleteFlag` / `listFlags` (management plane; takes effect immediately) |
 | ObjectStore | `client.objectStore()` | see `docs/production/volume-object-storage.md` |
-| KV-T v2 | `client.tsoV2()`, `client.kvV2()`, `client.leaseV2()`, `client.txnV2()`, `client.watchV2()`, `client.storageV2()` | `[kv_t]` enabled (default on multi-Region clusters, ADR-0017); writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; txn conflicts are results (replay with a new `startTs`); watch is at-least-once with cursor resume; storage buffers up to 256 MiB |
+| Data plane (KV / Txn / TSO / Lease / Watch / Storage) | `client.tso()`, `client.kv()`, `client.lease()`, `client.tx()`, `client.watch()`, `client.storage()` | **the only data plane** (`coord.*.v2`; v1 data-plane surfaces were removed from the contract in ADR-0018). Types live in `cn.byteforce.coord.sdk.{kv,txn,tso,lease,watch,storage}` — the old `kvV2()`-style accessors are gone. Writes take an explicit TSO `commitTs`; `readTs=0` = server-local `safe_ts`; txn conflicts are results (replay with a new `startTs`); watch is at-least-once with cursor resume; storage buffers up to 256 MiB |
 | Health | `client.healthCheck()` | agent health check |
 
 ## MQ v2 (`client.mqV2()`) — COMMITTED (GA 2026-11-14)

@@ -68,7 +68,7 @@ class MqV2ClusterIntegrationTest {
                 .requestTimeout(Duration.ofSeconds(10))
                 .build());
         try {
-            assertThat(client.tsoV2().getTimestamp()).isPositive();
+            assertThat(client.tso().getTimestamp()).isPositive();
             client.mqV2().listTopics(TOPIC, 1, "");
         } catch (RuntimeException e) {
             client.close(Duration.ZERO);

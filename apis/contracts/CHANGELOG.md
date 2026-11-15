@@ -1,3 +1,21 @@
+## [contracts/v1.14.0] — 2026-11-15（状态变更：v1 数据面移出承诺面，wire 无改动）
+
+**发布口径**：**状态变更**（无字段/RPC/枚举/错误码变更：`buf breaking` 基线不变；
+`apis/contracts/proto/coord/{kv,txn,lease,watch,storage}` 文件与 `coord-proto` 逐项一致，
+删除动作不在本版发生）。
+
+- `STATUS.md` 删除 `coord.kv` / `coord.txn` / `coord.lease` / `coord.watch` 四条 STABLE 行，
+  以及 `coord.storage`(v1) 的 COMMITTED 行（其仍成立的对象存储事实并入
+  `coord.storage.v2` 行）。承诺面收敛到 `coord.*.v2`（ADR-0018 D3）。
+- 既有 v1 集群**不受影响**：v1 数据面继续按其冻结语义运行（B-KVT-2），实现与 wire 保留；
+  wire 级删除需另立 ADR（涉及既有 v1 集群与 Jepsen v1 夹具退役）。
+- SDK 面同步改名（0.x 一次性断代，不保留别名）：入口 `kv()/tx()/tso()/lease()/watch()/storage()`，
+  类型落在 `cn.byteforce.coord.sdk.{kv,txn,tso,lease,watch,storage}`；旧 `kvV2()` 等已删除。
+
+**影响范围**：SDK 消费方需跟改入口名（0.x 内一次性）；wire 与 v1 集群行为不变。
+
+**回滚预案**：回滚本分支即恢复旧 STATUS 行与旧 SDK 入口名；无 wire / 落盘迁移。
+
 ## [contracts/v1.13.1] — 2026-11-15（Patch：已知限制的事实性更正，wire 无改动）
 
 **发布口径**：**Patch**（无字段/RPC/枚举/错误码变更：`buf breaking` 基线不变，

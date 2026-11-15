@@ -1,4 +1,4 @@
-package cn.byteforce.coord.sdk.kv.v2;
+package cn.byteforce.coord.sdk.kv;
 
 import cn.byteforce.coord.sdk.CoordException;
 
@@ -38,7 +38,7 @@ public interface KvClient {
 
     /**
      * Convenience: allocate one fresh timestamp from {@code coord.tso.v2}.
-     * Equivalent to {@code client.tsoV2().getTimestamp()}.
+     * Equivalent to {@code client.tso().getTimestamp()}.
      */
     long getCommitTs();
 

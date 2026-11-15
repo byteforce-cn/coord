@@ -30,11 +30,15 @@ coord 曾经有两个数据面：v1（`coord.kv` / `coord.txn` / `coord.watch` /
 2. **D2 `coord dev`（单机一体化拓扑）= v2**：单节点 `[multi_raft]` + `[multi_raft.pd]`
    （`target_replicas = 1`）+ `[kv_t].enabled = true`，Agent `data_plane = "v2"`。
    dev 不再提供 v1 数据面拓扑（需要 v1 的调试场景用 `coord server` + `coord agent` 显式配置）。
-3. **D3 v1 数据面 DEPRECATED**：既有 v1 集群继续按原语义服务（不移除、不改语义），
-   但契约状态由 STABLE 降为 DEPRECATED，且**移除另立 ADR**（不在本决策内做删除）。
-4. **D4 客户端入口按语义命名、不带平面后缀**：唯一数据面后，SDK 的规范入口为
-   `client.kv()` / `txn()` / `tso()` / `lease()` / `watch()` / `storage()`；既有 `*V2()` 保留为
-   别名一个 minor 周期后移除。**禁止**再新增带平面后缀的客户端入口。
+3. **D3 v1 数据面移出承诺面**：`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch` /
+   `coord.storage`(v1) 从 `STATUS.md` 删除——不再承诺、不再演进、不再要求 SDK 覆盖。
+   既有 v1 集群继续按原来的**冻结语义**运行（B-KVT-2），实现与 wire 均保留；
+   **wire 级删除需另立 ADR**（涉及既有 v1 集群与 Jepsen v1 夹具的退役节奏）。
+4. **D4 客户端入口按语义命名、不带平面后缀**：唯一数据面后，SDK 的入口为
+   `client.kv()` / `tx()` / `tso()` / `lease()` / `watch()` / `storage()`，客户端类型落在
+   `cn.byteforce.coord.sdk.{kv,txn,tso,lease,watch,storage}`；带平面后缀的旧入口
+   （`kvV2()` …）**已删除**（0.x 内的一次性改名，不保留别名——别名会让"两套面"重新长回来）。
+   **禁止**再新增带平面后缀的客户端入口。
 5. **D5 不做数据面探测**：D2 之后不存在"这台集群跑哪个平面"的问题，`Handshake` 不新增
    `data_plane` 字段——部署细节不进协议。
 6. **D6 dev 数据目录不就地迁移**：检测到 v1 布局（`store.db` / `raft-log/`）时 fail-closed，

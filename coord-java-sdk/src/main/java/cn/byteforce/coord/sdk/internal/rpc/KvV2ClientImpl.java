@@ -4,9 +4,9 @@ import cn.byteforce.coord.contracts.kv.v2.KVGrpc;
 import cn.byteforce.coord.contracts.kv.v2.Kv;
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.kv.v2.KvClient;
+import cn.byteforce.coord.sdk.kv.KvClient;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
-import cn.byteforce.coord.sdk.tso.v2.TsoClient;
+import cn.byteforce.coord.sdk.tso.TsoClient;
 
 import java.util.concurrent.TimeUnit;
 

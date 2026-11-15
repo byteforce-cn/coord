@@ -1,7 +1,7 @@
-package cn.byteforce.coord.sdk.txn.v2;
+package cn.byteforce.coord.sdk.txn;
 
 import cn.byteforce.coord.sdk.CoordException;
-import cn.byteforce.coord.sdk.kv.v2.KvClient;
+import cn.byteforce.coord.sdk.kv.KvClient;
 
 import java.util.List;
 

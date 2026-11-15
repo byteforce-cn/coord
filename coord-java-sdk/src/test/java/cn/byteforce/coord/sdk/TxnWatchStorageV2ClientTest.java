@@ -7,9 +7,9 @@ import cn.byteforce.coord.contracts.txn.v2.TxnGrpc;
 import cn.byteforce.coord.contracts.txn.v2.TxnOuterClass;
 import cn.byteforce.coord.contracts.watch.v2.WatchGrpc;
 import cn.byteforce.coord.contracts.watch.v2.WatchOuterClass;
-import cn.byteforce.coord.sdk.storage.v2.StorageClient;
-import cn.byteforce.coord.sdk.txn.v2.TxnClient;
-import cn.byteforce.coord.sdk.watch.v2.WatchClient;
+import cn.byteforce.coord.sdk.storage.StorageClient;
+import cn.byteforce.coord.sdk.txn.TxnClient;
+import cn.byteforce.coord.sdk.watch.WatchClient;
 import com.google.protobuf.ByteString;
 import io.grpc.Metadata;
 import io.grpc.Server;
@@ -86,7 +86,7 @@ class TxnWatchStorageV2ClientTest {
 
     @Test
     void txnBeginReadCommitRoundTrip() {
-        TxnClient.Session session = client.txnV2().begin();
+        TxnClient.Session session = client.tx().begin();
 
         assertThat(text(session.txnId())).isEqualTo("t-1");
         assertThat(session.startTs()).isEqualTo(120);
@@ -107,7 +107,7 @@ class TxnWatchStorageV2ClientTest {
 
     @Test
     void txnConflictIsReturnedAsAResultNotAnError() {
-        TxnClient.Session session = client.txnV2().begin();
+        TxnClient.Session session = client.tx().begin();
         txn.conflict = true;
 
         TxnClient.CommitResult commit = session.commit(
@@ -121,7 +121,7 @@ class TxnWatchStorageV2ClientTest {
 
     @Test
     void txnAbortOfAnExpiredSessionIsIdempotent() {
-        TxnClient.Session session = client.txnV2().begin();
+        TxnClient.Session session = client.tx().begin();
         txn.abortNotFound = true;
 
         session.abort();
@@ -131,7 +131,7 @@ class TxnWatchStorageV2ClientTest {
 
     @Test
     void txnCommitRetriesEpochStaleWithTheSameRequestId() {
-        TxnClient.Session session = client.txnV2().begin();
+        TxnClient.Session session = client.tx().begin();
         txn.epochStaleOnce = true;
 
         TxnClient.CommitResult commit = session.commit(
@@ -168,7 +168,7 @@ class TxnWatchStorageV2ClientTest {
                     .build());
         };
 
-        WatchClient.Subscription sub = client.watchV2().watch(
+        WatchClient.Subscription sub = client.watch().watch(
                 WatchClient.Options.key(bytes("k")).fromRevision(30),
                 listener(batches, new LinkedBlockingQueue<>()));
 
@@ -219,7 +219,7 @@ class TxnWatchStorageV2ClientTest {
                     .build());
         };
 
-        WatchClient.Subscription sub = client.watchV2().watch(
+        WatchClient.Subscription sub = client.watch().watch(
                 WatchClient.Options.key(bytes("k")),
                 listener(batches, new LinkedBlockingQueue<>()));
 
@@ -243,7 +243,7 @@ class TxnWatchStorageV2ClientTest {
                 Status.OUT_OF_RANGE.withDescription("compacted"), "HISTORY_UNAVAILABLE"));
 
         BlockingQueue<WatchClient.Batch> batches = new LinkedBlockingQueue<>();
-        WatchClient.Subscription sub = client.watchV2().watch(
+        WatchClient.Subscription sub = client.watch().watch(
                 WatchClient.Options.key(bytes("k")).fromRevision(1),
                 listener(batches, errors));
 
@@ -269,7 +269,7 @@ class TxnWatchStorageV2ClientTest {
                 .setCursor(cursor(1, 50))
                 .build());
 
-        WatchClient.Subscription sub = client.watchV2().watch(
+        WatchClient.Subscription sub = client.watch().watch(
                 WatchClient.Options.key(bytes("k")),
                 listener(batches, new LinkedBlockingQueue<>()));
         assertThat(batches.poll(5, TimeUnit.SECONDS)).isNotNull();
@@ -290,23 +290,23 @@ class TxnWatchStorageV2ClientTest {
     void storagePutGetStatDeleteRoundTrip() {
         byte[] payload = bytes("0123456789");
 
-        StorageClient.PutResult put = client.storageV2().put("bucket", bytes("obj"), payload, 4);
+        StorageClient.PutResult put = client.storage().put("bucket", bytes("obj"), payload, 4);
         assertThat(put.commitTs()).isEqualTo(200);
         assertThat(put.size()).isEqualTo(10);
         assertThat(put.chunks()).isEqualTo(3);
         assertThat(storage.lastDeclaredSize).isEqualTo(10);
 
-        StorageClient.ObjectData data = client.storageV2().get("bucket", bytes("obj"), 0);
+        StorageClient.ObjectData data = client.storage().get("bucket", bytes("obj"), 0);
         assertThat(data.data()).isEqualTo(payload);
         assertThat(data.stat().commitTs()).isEqualTo(200);
         assertThat(data.stat().committed()).isTrue();
 
-        StorageClient.ObjectStat stat = client.storageV2().stat("bucket", bytes("obj"), 0);
+        StorageClient.ObjectStat stat = client.storage().stat("bucket", bytes("obj"), 0);
         assertThat(stat.exists()).isTrue();
         assertThat(stat.size()).isEqualTo(10);
 
         StorageClient.DeleteResult deleted =
-                client.storageV2().delete("bucket", bytes("obj"), bytes("req-9"));
+                client.storage().delete("bucket", bytes("obj"), bytes("req-9"));
         assertThat(deleted.deleted()).isTrue();
         assertThat(deleted.commitTs()).isEqualTo(210);
     }
@@ -314,7 +314,7 @@ class TxnWatchStorageV2ClientTest {
     @Test
     void storageStatOfAMissingObjectIsAZeroStat() {
         StorageClient.ObjectStat stat =
-                client.storageV2().stat("bucket", bytes("absent"), 0);
+                client.storage().stat("bucket", bytes("absent"), 0);
 
         assertThat(stat.exists()).isFalse();
         assertThat(stat.commitTs()).isZero();
@@ -324,7 +324,7 @@ class TxnWatchStorageV2ClientTest {
     @Test
     void storageRejectsAnEmptyObjectBeforeSendingIt() {
         CoordException err = catchThrowableOfType(
-                () -> client.storageV2().put("bucket", bytes("obj"), new byte[0]),
+                () -> client.storage().put("bucket", bytes("obj"), new byte[0]),
                 CoordException.class);
 
         assertThat(err.getErrorCode()).isEqualTo(ErrorCode.INVALID_ARGUMENT);

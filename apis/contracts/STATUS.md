@@ -30,18 +30,15 @@
 | 特性开关 | coord.featureflags.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/feature_flags.rs：已迁移至契约包；**KV 化（重启不丢）已落地**；**管理面（PutFlag / DeleteFlag / ListFlags）已落地**——读路径直读存储无本地缓存 ⇒ 写入立即生效（跨 agent 一致） |
 | 工作流（Saga） | coord.workflow.v1 | COMMITTED | 2027-03-31 | coord-agent/src/services/workflow_store.rs（KvWorkflowStore）：已迁移至契约包；补偿语义端到端已落地（sw 编译器 `compensatedBy`；三步**逆序**补偿 e2e `test_sw_three_step_failure_compensates_in_reverse_order_and_replays`——该用例暴露并修掉两处静默丢副作用缺陷：try 体内层索引未归零、包装器改名导致 goto 失配）；**保留策略（G-WF-1）已落地**：`DeleteInstance`/`DeleteDefinition`（终态/引用守卫；KV 删除 + watch 缓存失效 + 对账剪枝）；**人工审批 v2（ADR-0013 / ADR-0014）已落地**：原生 `approve` 节点 DSL（席位来源支持 `${ ... }` 运行时表达式）+ 12 个审批 RPC（命令可带 `on_behalf_of`、查询可按 `assignee`，审计区分 `actor`/`acting_service`）（10 命令 `coord:workflow:execute`：Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/Delegate/Withdraw/Terminate；2 查询 `coord:workflow:read`：ListPendingTasks/GetInstanceDetail）、挂起/恢复（`expected_signal="approval.completed"`）、引擎级授权矩阵、命令幂等（`/_workflow/v4/idempotency/{instance}/{key}` 同 Txn）、事件 `.v1` + JSON Schema（`apis/contracts/schemas/events/`）；语义见 docs/production/workflow-semantics.md §7 |
 | 调度 | coord.scheduler.v1 | COMMITTED | 2027-03-31 | coord-agent/src/services/scheduler.rs：已迁移至契约包；KV 存储（KvSchedulerStore + CAS 认领，重启不丢/跨 Agent 唯一）已落地；**complete 的 result 随任务记录持久化（G-SC-1） + `GetJob` 结果回读（只读/幂等；重启/换 agent 可读）已落地** |
-| 对象存储（Server） | coord.storage | COMMITTED | 2026-12-31 | 数据面闭环 v1（docs/production/volume-object-storage.md）：manifest raft 强一致 + chunk 文件旁路 MVCC/快照 + 流式 Put/Get 绕 4MiB + 配额/磁盘水位/GC；chunk 加密 DEK 化（HKDF KEK 包裹随机 DEK + key_id 版本 + encryption_rotation_days 轮换，v1 兼容读）+ PD Region 心跳「存储字节」维度/split 阈值纳入/存储 Region 均衡 + Rust/Java SDK 对象方法 + Agent 存储代理 + 进程级 e2e 与 kill/pause/partition 混沌矩阵；流式上传支持**未知长度**（`PutMeta.total_size = -1`，以 max_object_size 封顶、Commit 时定长；`>0` 声明长度语义不变）；已知边界：快照恢复落后节点本地 chunk 清空 rebuild（Get UNAVAILABLE）、全集群配置须一致、创建对象在保留前缀 /obj/ |
 
 ## 底座原语（STABLE）
 
 | 能力 | 契约包 | 状态 | 期限 | 实现落点/边界说明 |
 |:---|:---|:---:|:---|:---|
-| KV | coord.kv | STABLE | - | coord/src/main.rs:2693；由 wire-sync 校验 |
-| 事务（CAS） | coord.txn | STABLE | - | coord/src/main.rs:2694 |
-| 租约 | coord.lease | STABLE | - | coord/src/main.rs:2695 |
-| 变更监听 | coord.watch | STABLE | - | coord/src/main.rs:2696 |
 | 探活 | coord.maintenance | STABLE | - | 仅 Status（裁剪承诺） |
 | 健康检查 | grpc.health.v1 | STABLE | - | 标准协议 |
+
+> **v1 数据面已移出承诺面（ADR-0018 D3）**：`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch` / `coord.storage`(v1) 不再列为承诺项——既有 v1 集群继续按其冻结语义运行（B-KVT-2），但不再演进、不再要求 SDK 覆盖；新装与服务面一律用 `coord.*.v2`。wire 级删除需要单独 ADR（涉及既有 v1 集群与 Jepsen v1 夹具的退役）。
 
 ## KV-T v2（ADR-0015、ADR-0017；GA 2026-11-11）
 
@@ -57,7 +54,7 @@
 | Txn v2 | coord.txn.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/txn/v2/`；G3（OCC + Commit Sequencer）；服务端读集会话，冲突 `TXN_CONFLICT`；上限 4MiB/4096/10000 |
 | Watch v2 | coord.watch.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/watch/v2/`；G4（Commit Log/Coordinator/RPC）；按 `commit_ts` 全局有序、事务原子批、窗口不足 `HISTORY_UNAVAILABLE`；`Watch` 双向流（Create/Cancel/ack/cursor 续订）与 `coord-client` 的 `watch_v2()` 断线重连已落地，订阅指标见 consumer-contract |
 | Lease v2 | coord.lease.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/lease/v2/`；G2（region 0 租约表 + 跨区 revoke 最终一致清理）；`LeaseTimeToLive` 能力 `data:lease:read` |
-| Storage v2 | coord.storage.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/storage/v2/`；G5（manifest commit_ts + `/obj/` 固定区间）；`/obj/` 不参与任意 KV split；Put/Get/Stat/Delete 已在 v2 集群可用（`read_ts` 快照读 manifest，chunk 字节不版本化 ⇒ 历史 chunk 不可用时 `OUT_OF_RANGE`） |
+| Storage v2 | coord.storage.v2 | COMMITTED | 2027-12-31 | 契约包：`proto/coord/storage/v2/`；G5（manifest commit_ts + `/obj/` 固定区间）；`/obj/` 不参与任意 KV split；Put/Get/Stat/Delete 已在 v2 集群可用（`read_ts` 快照读 manifest，chunk 字节不版本化 ⇒ 历史 chunk 不可用时 `OUT_OF_RANGE`）；对象存储的其余承诺面事实（chunk DEK 加密 + key_id 轮换、流式 Put/Get 绕 4MiB、未知长度上传 `PutMeta.total_size = -1`、配额/磁盘水位/GC、快照恢复落后节点 chunk rebuild ⇒ Get UNAVAILABLE、全集群配置一致、对象前缀 /obj/）由 v1 实现承载，v2 面沿用同一语义（docs/production/volume-object-storage.md） |
 
 ## MQ v2（COMMITTED；ADR-0016；GA 2026-11-14）
 

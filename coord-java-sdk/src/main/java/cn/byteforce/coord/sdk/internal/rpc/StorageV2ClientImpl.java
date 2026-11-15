@@ -7,7 +7,7 @@ import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.ErrorCode;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
-import cn.byteforce.coord.sdk.storage.v2.StorageClient;
+import cn.byteforce.coord.sdk.storage.StorageClient;
 import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;

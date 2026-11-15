@@ -1,4 +1,4 @@
-package cn.byteforce.coord.sdk.tso.v2;
+package cn.byteforce.coord.sdk.tso;
 
 import cn.byteforce.coord.sdk.CoordException;
 

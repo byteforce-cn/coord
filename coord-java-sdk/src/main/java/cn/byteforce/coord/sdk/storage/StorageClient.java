@@ -1,4 +1,4 @@
-package cn.byteforce.coord.sdk.storage.v2;
+package cn.byteforce.coord.sdk.storage;
 
 import cn.byteforce.coord.sdk.CoordException;
 
