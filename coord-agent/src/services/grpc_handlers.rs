@@ -94,15 +94,16 @@ use coord_proto::agent::{
     ApprovalAudit, ApprovalBranch, ApprovalRound, ApprovalTask, ApprovalTaskSummary, ApprovalVote,
     PendingApprovalTask, WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse,
     WorkflowAddSignRequest, WorkflowAddSignResponse, WorkflowApproveRequest,
-    WorkflowApproveResponse, WorkflowDelegateRequest, WorkflowDelegateResponse,
-    WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest,
-    WorkflowGetTaskResponse, WorkflowHistoryEvent, WorkflowHistoryRequest, WorkflowHistoryResponse,
-    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowListTasksRequest,
-    WorkflowListTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
-    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
-    WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
-    WorkflowTransferRequest, WorkflowTransferResponse, WorkflowWithdrawRequest,
-    WorkflowWithdrawResponse,
+    WorkflowApproveResponse, WorkflowCcRequest, WorkflowCcResponse, WorkflowDelegateRequest,
+    WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse,
+    WorkflowGetTaskRequest, WorkflowGetTaskResponse, WorkflowHistoryEvent, WorkflowHistoryRequest,
+    WorkflowHistoryResponse, WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse,
+    WorkflowListTasksRequest, WorkflowListTasksResponse, WorkflowRejectRequest,
+    WorkflowRejectResponse, WorkflowRemoveSignRequest, WorkflowRemoveSignResponse,
+    WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse, WorkflowTerminateRequest,
+    WorkflowTerminateResponse, WorkflowTransferRequest, WorkflowTransferResponse,
+    WorkflowUrgeRequest, WorkflowUrgeResponse, WorkflowWithdrawRequest, WorkflowWithdrawResponse,
+    WorkflowWithdrawTaskRequest, WorkflowWithdrawTaskResponse,
 };
 
 use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError, SYSTEM_ACTOR};
@@ -1987,6 +1988,33 @@ impl Workflow for WorkflowService {
         ))
     }
 
+    async fn urge(
+        &self,
+        _request: Request<WorkflowUrgeRequest>,
+    ) -> Result<Response<WorkflowUrgeResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn cc(
+        &self,
+        _request: Request<WorkflowCcRequest>,
+    ) -> Result<Response<WorkflowCcResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn withdraw_task(
+        &self,
+        _request: Request<WorkflowWithdrawTaskRequest>,
+    ) -> Result<Response<WorkflowWithdrawTaskResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
     async fn list_pending_tasks(
         &self,
         _request: Request<WorkflowListPendingTasksRequest>,
@@ -2983,6 +3011,99 @@ impl Workflow for WorkflowEngineService {
             .await
             .map_err(map_approval_error)?;
         Ok(Response::new(WorkflowTerminateResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn urge(
+        &self,
+        request: Request<WorkflowUrgeRequest>,
+    ) -> Result<Response<WorkflowUrgeResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        let (actor, acting) = approval_target(self, &identity, &req.on_behalf_of)?;
+        let (instance_id, status) = self
+            .approval_command_with(
+                &req.workflow_id,
+                &actor,
+                acting.as_deref(),
+                ApprovalCommand::Urge {
+                    task_id: &req.task_id,
+                    message: &req.message,
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowUrgeResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn cc(
+        &self,
+        request: Request<WorkflowCcRequest>,
+    ) -> Result<Response<WorkflowCcResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        if req.recipients.is_empty() || req.recipients.iter().any(|r| r.trim().is_empty()) {
+            return Err(Status::invalid_argument(
+                "recipients must contain at least one non-empty principal",
+            ));
+        }
+        let (actor, acting) = approval_target(self, &identity, &req.on_behalf_of)?;
+        let recipients: Vec<String> = req
+            .recipients
+            .iter()
+            .map(|r| r.trim().to_string())
+            .collect();
+        let (instance_id, status) = self
+            .approval_command_with(
+                &req.workflow_id,
+                &actor,
+                acting.as_deref(),
+                ApprovalCommand::Cc {
+                    task_id: non_empty(&req.task_id),
+                    recipients,
+                    message: non_empty(&req.message),
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowCcResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn withdraw_task(
+        &self,
+        request: Request<WorkflowWithdrawTaskRequest>,
+    ) -> Result<Response<WorkflowWithdrawTaskResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        if req.target_node.is_empty() {
+            return Err(Status::invalid_argument("target_node must not be empty"));
+        }
+        let (actor, acting) = approval_target(self, &identity, &req.on_behalf_of)?;
+        let (instance_id, status) = self
+            .approval_command_with(
+                &req.workflow_id,
+                &actor,
+                acting.as_deref(),
+                ApprovalCommand::WithdrawTask {
+                    task_id: &req.task_id,
+                    target_node: &req.target_node,
+                    comment: non_empty(&req.comment),
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowWithdrawTaskResponse {
             instance_id,
             status,
         }))
@@ -4226,6 +4347,41 @@ do:
         });
         let err = Workflow::terminate(&svc, req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// 抄送空收件人 / 撤回空目标节点在 RPC 边界拒绝。
+    #[tokio::test]
+    async fn cc_empty_recipients_and_withdraw_task_empty_target_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let err = Workflow::cc(
+            &svc,
+            Request::new(WorkflowCcRequest {
+                workflow_id: "w".into(),
+                task_id: String::new(),
+                recipients: vec![],
+                message: String::new(),
+                idempotency_key: String::new(),
+                on_behalf_of: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = Workflow::withdraw_task(
+            &svc,
+            Request::new(WorkflowWithdrawTaskRequest {
+                workflow_id: "w".into(),
+                task_id: "t".into(),
+                target_node: String::new(),
+                comment: String::new(),
+                idempotency_key: String::new(),
+                on_behalf_of: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     /// 空批次在 RPC 边界拒绝（引擎空批次语义未定义）。

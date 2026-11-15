@@ -1730,6 +1730,7 @@ impl Validator {
             "onReject",
             "signAdmins",
             "allowSelfApprove",
+            "allowCc",
         ];
         let unknown: Vec<String> = body
             .keys()
@@ -1845,6 +1846,19 @@ impl Validator {
             return None;
         }
 
+        let allow_cc = match body.get("allowCc") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::TypeMismatch("approve.allowCc".to_string()),
+                    message: "approve.allowCc must be a boolean".to_string(),
+                });
+                return None;
+            }
+        };
+
         let allow_self_approve = match body.get("allowSelfApprove") {
             None => false,
             Some(Value::Bool(b)) => *b,
@@ -1920,6 +1934,7 @@ impl Validator {
             on_reject,
             sign_admins,
             allow_self_approve,
+            allow_cc,
         }))
     }
 
@@ -5365,6 +5380,7 @@ do:
                 assert_eq!(a.mode, JoinPolicy::All);
                 assert!(a.veto, "default veto must be true");
                 assert!(!a.allow_self_approve);
+                assert!(!a.allow_cc, "default allowCc must be false");
                 assert!(a.pool.is_empty());
                 assert!(a.readers.is_empty());
                 assert!(a.roles.is_empty());
@@ -5517,6 +5533,32 @@ do:
 "#;
         let errs = parse_and_validate_yaml(yaml).expect_err("unknown approve.mode must reject");
         assert!(error_kind_naming(&errs, "approve.mode"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn parse_approve_allow_cc() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-cc
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        allowCc: true
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("allowCc must parse");
+        match &def.do_tasks[0].task {
+            Task::Approve(a) => assert!(a.allow_cc),
+            other => panic!("expected Approve task, got {other:?}"),
+        }
+        let bad = yaml.replace("allowCc: true", "allowCc: yes");
+        assert!(
+            parse_and_validate_yaml(&bad).is_err(),
+            "non-boolean allowCc must reject"
+        );
     }
 
     #[test]

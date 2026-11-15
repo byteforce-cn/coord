@@ -38,7 +38,8 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | `rejectCompletion.RecordAndContinue` | `reject: recordAndContinue` | 剩余席位不可能满足通过条件时立即回退（`SIGN_COMPLETION_UNSATISFIABLE`）。 |
 | `rejectTargets` | 已进入节点白名单 | coord 的驳回目标必须是**已到达**的节点；更宽的 per-task 白名单未建模，适配器需自行校验后映射。 |
 | `dueIn` | `deadline`（ISO8601 duration） | 到期只置 `Expired` 并从计票分母剔除，**不自动通过/驳回**（B-WF-5）；`WAITING` 恢复策略未实现。 |
-| `allowAddAssignee` / `allowRemove` / `allowTransfer` / `allowDelegate` / `allowWithdraw` / `allowUrge` / `allowCc` | 未建模 | 适配器按能力矩阵声明；不得默认放行。 |
+| `allowCc` | `allowCc` | 缺省 `false`；仅任务级抄送读取。 |
+| `allowAddAssignee` / `allowRemove` / `allowTransfer` / `allowDelegate` / `allowWithdraw` / `allowUrge` | 未建模 | 适配器按能力矩阵声明；不得默认放行。 |
 | `formKey` / `formSchema` / `formData` | 未建模 | `Approve/Reject` 只带 `comment`；表单数据由 seedj 侧存储并在读视图合并。 |
 
 ## 3. 动作（`act`）
@@ -49,10 +50,10 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | `Reject(targetStep)` | `Reject` + `target_node` | ✅（原子投票 + 回退） |
 | `Transfer` | `Transfer` | ✅（原责任人进 `transferred_from`，不携带投票记录） |
 | `Delegate(delegateFor)` | `Delegate` | ⚠️ 无到期自动恢复；`delegateFor` 须由适配器用定时任务调用撤回复原 |
-| `Withdraw(任务级)` | — | ❌ 未实现（#381）；仅实例级 `Withdraw` 可用 |
+| `Withdraw(任务级)` | `WithdrawTask` + `target_node` | ✅（仅原审批人；保留通过记录；带否决票的席位拒绝撤回） |
 | `WithdrawInstance` | `Withdraw` | ✅（仅发起人；级联取消实例） |
-| `Urge` | — | ❌ 未实现（#381） |
-| `Cc` | — | ❌ 未实现（#381） |
+| `Urge` | `Urge` | ✅（只写审计/通知，不写历史） |
+| `Cc` | `Cc` | ✅（任务级要求节点 `allowCc: true`；实例级限发起人/`sign_admins`） |
 | `AddAssignee(position)` | `AddSign` | ⚠️ 只支持“向当前轮次加席位”；`BEFORE/AFTER` 派生任务、assignment 挂起/恢复未建模（#381） |
 | `RemoveAssignee` | `RemoveSign` | ⚠️ 按席位 id；适配器先用 `GetTask`/`ListTasks` 把 assignee 映射到 task id；重算结果通过 `GetInstanceDetail` 读回 |
 | `Resume(newDueIn)` | — | ❌ 未实现（无 `WAITING` 状态策略与 `Resume` RPC） |
@@ -74,8 +75,8 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 
 ## 5. 已知缺口（跟踪）
 
-- 任务级撤回、催办、抄送、前后加签、减签重算、委派到期、`WAITING` + `Resume`
-  → issue #381。
+- 前后加签（`AddAssigneePosition.BEFORE/AFTER`）、减签重算的 assignment 级视图、委派到期、
+  `WAITING` + `Resume` → issue #381 剩余项；任务级撤回/催办/抄送已落地（见 §3）。
 - seedj `HumanTask` 的 `predecessorTaskId` / `successorTaskId` / `spawnedByActionId` /
   assignment 级 `SUSPENDED|TRANSFERRED|DELEGATED` 状态：依赖 #381 的派生任务与
   assignment 状态机；当前只能由 task 的 `transferred_from` / `delegation` / votes

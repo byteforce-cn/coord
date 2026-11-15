@@ -2113,3 +2113,326 @@ fn reject_to_node_rejects_non_whitelisted_target_without_side_effects() {
     assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Created);
     assert_eq!(e.rounds.values().next().unwrap().status, RoundStatus::Open);
 }
+
+// ------------------------------------------------- 动态动作（#381）
+
+/// 催办只写审计，不改席位状态/计票，也不产生事件。
+#[test]
+fn urge_records_audit_without_state_change() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let rev = e.instance.revision;
+    let out = e
+        .urge(rev, &seats[0], "zhangsan", "请尽快处理", tick(&mut t))
+        .unwrap();
+    assert!(out.is_empty(), "催办不得产生状态效果");
+    assert_eq!(e.instance.revision, rev + 1);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Created);
+    assert_eq!(e.rounds[&r].completed_count, 0);
+    let last = e.instance.audit.last().unwrap();
+    assert_eq!(last.action, "urge");
+    assert_eq!(last.task.as_deref(), Some(seats[0].as_str()));
+}
+
+/// 终态席位催办 → 冲突；非参与者 → 拒绝。
+#[test]
+fn urge_rejects_terminal_task_and_outsider() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    assert!(matches!(
+        e.urge(
+            e.instance.revision,
+            &seats[0],
+            "mallory",
+            "hi",
+            tick(&mut t)
+        )
+        .unwrap_err(),
+        ApprovalError::NotAuthorized(_)
+    ));
+    e.approve(e.instance.revision, &seats[0], "alice", None, tick(&mut t))
+        .unwrap();
+    assert!(matches!(
+        e.urge(
+            e.instance.revision,
+            &seats[0],
+            "zhangsan",
+            "hi",
+            tick(&mut t)
+        )
+        .unwrap_err(),
+        ApprovalError::InvalidTransition(_)
+    ));
+}
+
+/// 抄送受节点 `allowCc` 约束；终态席位拒绝。
+#[test]
+fn cc_requires_allow_cc_and_open_task() {
+    let mut e = start();
+    let mut t = 1_000;
+    let policy = ApprovalPolicy {
+        allow_cc: true,
+        ..Default::default()
+    };
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            policy,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.cc(
+        e.instance.revision,
+        Some(&seats[0]),
+        &["observer".into()],
+        Some("请知悉"),
+        "zhangsan",
+        tick(&mut t),
+    )
+    .unwrap();
+    let last = e.instance.audit.last().unwrap();
+    assert_eq!(last.action, "cc");
+    assert_eq!(last.task.as_deref(), Some(seats[0].as_str()));
+
+    // 未开启 allowCc 的节点：任务级抄送 fail-closed。
+    let mut e2 = start();
+    let mut t2 = 1_000;
+    let (b2, _) = e2
+        .enter_branch(
+            e2.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t2),
+        )
+        .unwrap();
+    let (_, seats2, _) = e2
+        .open_approval(
+            e2.instance.revision,
+            &b2,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t2),
+        )
+        .unwrap();
+    assert!(matches!(
+        e2.cc(
+            e2.instance.revision,
+            Some(&seats2[0]),
+            &["observer".into()],
+            None,
+            "zhangsan",
+            tick(&mut t2)
+        )
+        .unwrap_err(),
+        ApprovalError::NotAuthorized(_)
+    ));
+
+    // 终态席位拒绝。
+    e.approve(e.instance.revision, &seats[0], "alice", None, tick(&mut t))
+        .unwrap();
+    assert!(matches!(
+        e.cc(
+            e.instance.revision,
+            Some(&seats[0]),
+            &["observer".into()],
+            None,
+            "zhangsan",
+            tick(&mut t)
+        )
+        .unwrap_err(),
+        ApprovalError::InvalidTransition(_)
+    ));
+}
+
+/// 任务级撤回：保留通过记录并回退到目标节点；否决记录不可撤销。
+#[test]
+fn withdraw_task_keeps_record_and_rolls_back() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (apply, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, apply_seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &apply,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(
+        e.instance.revision,
+        &apply_seats[0],
+        "alice",
+        None,
+        tick(&mut t),
+    )
+    .unwrap();
+
+    let (review, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &review,
+            vec![SeatSpec::approver("bob"), SeatSpec::approver("carol")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(e.instance.revision, &seats[0], "bob", None, tick(&mut t))
+        .unwrap();
+
+    let (new_branch, out) = e
+        .withdraw_task(
+            e.instance.revision,
+            &seats[0],
+            "bob",
+            "apply",
+            Some("口径错了"),
+            tick(&mut t),
+        )
+        .unwrap();
+    assert_eq!(e.branches[&new_branch].node, "apply");
+    assert_eq!(e.branches[&new_branch].attempt, 2);
+    assert_eq!(e.branches[&new_branch].status, BranchStatus::Open);
+    assert_eq!(e.branches[&review].status, BranchStatus::Returned);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Completed);
+    assert_eq!(e.tasks[&seats[0]].votes.len(), 1, "撤回不得删除通过记录");
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+    assert_eq!(e.instance.returns.last().unwrap().to_node, "apply");
+    let last = e.instance.audit.last().unwrap();
+    assert_eq!(last.action, "withdraw_task");
+    assert_eq!(last.task.as_deref(), Some(seats[0].as_str()));
+    assert!(has_event(&out, "com.china-workflow.instance.returned.v1"));
+}
+
+/// 带否决票的席位不可撤回；非原审批人不可撤回。
+#[test]
+fn withdraw_task_rejects_reject_record_and_outsider() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::OnExhausted,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice"), SeatSpec::approver("bob")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(e.instance.revision, &seats[0], "alice", None, tick(&mut t))
+        .unwrap();
+    assert!(matches!(
+        e.withdraw_task(
+            e.instance.revision,
+            &seats[0],
+            "bob",
+            "review",
+            None,
+            tick(&mut t)
+        )
+        .unwrap_err(),
+        ApprovalError::NotAuthorized(_)
+    ));
+
+    e.reject(e.instance.revision, &seats[1], "bob", None, tick(&mut t))
+        .unwrap();
+    assert!(matches!(
+        e.withdraw_task(
+            e.instance.revision,
+            &seats[1],
+            "bob",
+            "review",
+            None,
+            tick(&mut t)
+        )
+        .unwrap_err(),
+        ApprovalError::InvalidTransition(_)
+    ));
+}

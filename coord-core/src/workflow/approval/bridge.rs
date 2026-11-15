@@ -143,6 +143,23 @@ pub enum ApprovalCommand<'a> {
         comment: Option<&'a str>,
         target_node: &'a str,
     },
+    /// 催办：只写审计/通知，不改状态机。
+    Urge {
+        task_id: &'a str,
+        message: &'a str,
+    },
+    /// 抄送：任务级（`task_id = Some`）或实例级（`task_id = None`），只写审计/通知。
+    Cc {
+        task_id: Option<&'a str>,
+        recipients: Vec<String>,
+        message: Option<&'a str>,
+    },
+    /// 任务级撤回：保留通过记录，回退到目标节点（同一条命令内完成）。
+    WithdrawTask {
+        task_id: &'a str,
+        target_node: &'a str,
+        comment: Option<&'a str>,
+    },
     Transfer {
         task_id: &'a str,
         to: &'a str,
@@ -251,6 +268,7 @@ impl ApprovalBridge {
         let policy = ApprovalPolicy {
             allow_self_approve: task.allow_self_approve,
             sign_admins: task.sign_admins.clone(),
+            allow_cc: task.allow_cc,
         };
         let now = self.clock.now_ms();
         let deadline = task.deadline_ms(now);
@@ -402,6 +420,9 @@ impl ApprovalBridge {
                     .and_then(|t| engine.branches.get(&t.branch_id))
                     .filter(|b| b.status == BranchStatus::Rejected)
                     .map(|_| (*target_node).to_string()),
+                ApprovalCommand::WithdrawTask { target_node, .. } => {
+                    Some((*target_node).to_string())
+                }
                 _ => None,
             };
             let response = response_for(&engine);
@@ -833,6 +854,28 @@ impl ApprovalBridge {
                 }
                 Ok(effects)
             }
+            ApprovalCommand::Urge { task_id, message } => {
+                engine.urge(expected, task_id, actor, message, now)
+            }
+            ApprovalCommand::Cc {
+                task_id,
+                recipients,
+                message,
+            } => engine.cc(expected, task_id, &recipients, message, actor, now),
+            ApprovalCommand::WithdrawTask {
+                task_id,
+                target_node,
+                comment,
+            } => {
+                // 目标席位必须在回退前取（回退会作废目标节点最近 attempt）。
+                let seats = prior_seats(engine, target_node)?;
+                let (branch, mut effects) =
+                    engine.withdraw_task(expected, task_id, actor, target_node, comment, now)?;
+                let rev = engine.instance.revision;
+                let (_, _, open_effects) = engine.open_approval(rev, &branch, seats, None, now)?;
+                effects.extend(open_effects);
+                Ok(effects)
+            }
             ApprovalCommand::Withdraw => engine.withdraw(expected, actor, now),
             ApprovalCommand::Terminate { reason } => {
                 self.guard_terminate(engine, actor)?;
@@ -949,9 +992,16 @@ impl ApprovalBridge {
             | ApprovalCommand::RejectToNode { task_id, .. }
             | ApprovalCommand::Acknowledge { task_id }
             | ApprovalCommand::Transfer { task_id, .. }
-            | ApprovalCommand::Delegate { task_id, .. } => {
+            | ApprovalCommand::Delegate { task_id, .. }
+            | ApprovalCommand::Urge { task_id, .. }
+            | ApprovalCommand::Cc {
+                task_id: Some(task_id),
+                ..
+            }
+            | ApprovalCommand::WithdrawTask { task_id, .. } => {
                 engine.tasks.get(*task_id).map(|t| t.branch_id.clone())
             }
+            ApprovalCommand::Cc { task_id: None, .. } => None,
             ApprovalCommand::AddSign { branch_id, .. }
             | ApprovalCommand::ReturnToNode { branch_id, .. } => Some((*branch_id).to_string()),
             ApprovalCommand::RemoveSign { task_ids } => self.branch_of_tasks(engine, task_ids).ok(),
@@ -1135,6 +1185,7 @@ mod tests {
             on_reject: None,
             sign_admins: vec![],
             allow_self_approve: false,
+            allow_cc: false,
         }
     }
 
@@ -1994,6 +2045,7 @@ mod tests {
         let with_policy = Branch {
             policy: ApprovalPolicy {
                 allow_self_approve: true,
+                allow_cc: false,
                 sign_admins: vec!["admin".into()],
             },
             ..branch
@@ -2001,7 +2053,11 @@ mod tests {
         let round = serde_json::to_value(&with_policy).unwrap();
         assert_eq!(
             round["policy"],
-            json!({"allow_self_approve": true, "sign_admins": ["admin"]})
+            json!({
+                "allow_self_approve": true,
+                "sign_admins": ["admin"],
+                "allow_cc": false
+            })
         );
         let back: Branch = serde_json::from_value(round).unwrap();
         assert_eq!(back.policy, with_policy.policy);

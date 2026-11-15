@@ -61,6 +61,10 @@ service Workflow {
   rpc Delegate(WorkflowDelegateRequest) returns (WorkflowDelegateResponse);
   rpc Withdraw(WorkflowWithdrawRequest) returns (WorkflowWithdrawResponse);
   rpc Terminate(WorkflowTerminateRequest) returns (WorkflowTerminateResponse);
+  // 任务级动作：催办 / 抄送 / 撤回（不改实例终态；撤回在一条命令内回退到目标节点）。
+  rpc Urge(WorkflowUrgeRequest) returns (WorkflowUrgeResponse);
+  rpc Cc(WorkflowCcRequest) returns (WorkflowCcResponse);
+  rpc WithdrawTask(WorkflowWithdrawTaskRequest) returns (WorkflowWithdrawTaskResponse);
 
   // 人工审批 v2 查询。能力门禁 `coord:workflow:read`。
   rpc ListPendingTasks(WorkflowListPendingTasksRequest) returns (WorkflowListPendingTasksResponse);
@@ -429,6 +433,48 @@ message WorkflowWithdrawRequest {
 }
 
 message WorkflowWithdrawResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowUrgeRequest {
+  string workflow_id = 1;
+  string task_id = 2;
+  string message = 3;
+  string idempotency_key = 4;
+  string on_behalf_of = 5;
+}
+
+message WorkflowUrgeResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowCcRequest {
+  string workflow_id = 1;
+  // 可选：任务级抄送（要求该节点 `allowCc: true`）；空 = 实例级抄送。
+  string task_id = 2;
+  repeated string recipients = 3; // 至少一个；空主体 INVALID_ARGUMENT
+  string message = 4;
+  string idempotency_key = 5;
+  string on_behalf_of = 6;
+}
+
+message WorkflowCcResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowWithdrawTaskRequest {
+  string workflow_id = 1;
+  string task_id = 2;
+  string target_node = 3; // 已进入节点白名单内的回退目标
+  string comment = 4;
+  string idempotency_key = 5;
+  string on_behalf_of = 6;
+}
+
+message WorkflowWithdrawTaskResponse {
   string instance_id = 1;
   string status = 2;
 }

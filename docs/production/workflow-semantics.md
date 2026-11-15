@@ -187,7 +187,8 @@ auth:
 - **seedj 适配映射**：`WorkflowProvider` 字段/动作到 coord DSL/命令的逐项映射见
   `seedj-workflow-provider-mapping.md`；**未列出的字段一律不支持**，适配器必须 fail-closed。
 - **DSL**：定义里用原生 `approve` 节点声明席位与策略（camelCase 键：`approvers / pool / readers /
-  roles / mode / veto / reject / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
+  roles / mode / veto / reject / deadline / onPass / onReject / signAdmins / allowSelfApprove /
+  allowCc`），未知键、
   非法 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed；语法逐字见 ADR-0013 D2。
 - **定义不可变**：同一 `(namespace, name, version)` 的内容由 `definition_hash` 判定——
   同内容重复 `Deploy` 幂等（返回既有 definition id，不覆盖）；不同内容返回
@@ -221,6 +222,11 @@ auth:
   席位归属判定不变。`VoteRecord.actor` / `AuditEntry.by` 记被代表用户，新增
   `acting_service` 记执行服务（经 `GetInstanceDetail` 的 votes/audit 可见）。
   保留主体 `system` 两侧都拒绝；未授权代操作在任何副作用前 `PERMISSION_DENIED`。
+- **任务级动作（`Urge` / `Cc` / `WithdrawTask`）**：催办与抄送只写审计/通知，不改审批
+  计数与工作流状态（催办不写历史；抄送投影为 `TASK_CC`）。任务级抄送要求该节点定义
+  `allowCc: true`；实例级抄送仅限发起人或 `sign_admins`。任务级撤回仅原审批人可发起、
+  保留通过记录（带否决票的席位拒绝撤回），在同一条命令内回退到目标节点并重新驱动
+  工作流；回退事件带 `reason=task_withdrawn`，历史额外投影 `TASK_WITHDRAWN`。
 - **驳回判定（`reject` / `target_node`）**：`approve.reject` 声明 `anyReject`（缺省，等价
   `veto: true`）/ `onExhausted`（等价 `veto: false`）/ `atLeastRejects:<n>` /
   `recordAndContinue`；`veto` 与 `reject` 同时显式给出解析期 fail-closed。`Reject` 请求带
