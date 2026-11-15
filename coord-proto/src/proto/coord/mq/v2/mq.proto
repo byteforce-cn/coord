@@ -458,6 +458,11 @@ message Message {
   // 仅 `PollDlq` 填充：移入原因（如 `poison` / `workflow_max_attempts`）。
   string dlq_reason = 9;
   string dlq_detail = 10;
+  // 仅 `PollDlq` 填充的归因（主日志消息为空 / 0）：
+  // 归属消费组、结构化失败类别、累计投递次数。
+  string group = 11;
+  string failure_type = 12;
+  uint32 attempts = 13;
 }
 
 message AckRequest {
@@ -648,6 +653,14 @@ message MoveToDlqRequest {
   // 可读原因（稳定锚点，如 `poison` / `workflow_max_attempts`）。
   string reason = 5;
   string detail = 6;
+  // 归因：哪个消费组的投递把它推进死信（空 = 非组归属的管理动作，如人工排障）。
+  // DLQ 记录本身是**分区级、多组共享**的，组归属只能随消息一起落盘。
+  string group = 7;
+  // 结构化失败类别（如 `poison` / `max_attempts` / `handler_error`；空 = 未分类）。
+  // 与 `reason` 的分工：`reason` 是运维可读的稳定锚点，`failure_type` 供程序聚合。
+  string failure_type = 8;
+  // 该消息累计投递次数（0 = 未知）。
+  uint32 attempts = 9;
 }
 
 message MoveToDlqResponse {
@@ -665,6 +678,9 @@ message PollDlqRequest {
   optional int64 start_offset = 4;
   // 0 = `[mq_v2].poll_max_messages`。
   int32 max_messages = 5;
+  // 只看该消费组的死信（空 = 不过滤）。过滤在服务端做；`next_dlq_offset`
+  // 仍按**扫描进度**推进，不会因为过滤而重复投递同一条记录。
+  string group = 6;
 }
 
 message PollDlqResponse {

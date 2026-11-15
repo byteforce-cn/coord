@@ -406,6 +406,7 @@ fn published_messages_start_the_triggered_workflow() {
                     topic_epoch: 0,
                     start_offset: None,
                     max_messages: 10,
+                    group: String::new(),
                 })
                 .await
                 .expect("PollDlq")

@@ -1368,6 +1368,9 @@ fn mq_message(message: coord_client::MqMessage) -> Result<mq_v2::Message, tonic:
         producer: message.producer,
         dlq_reason: String::new(),
         dlq_detail: String::new(),
+        group: String::new(),
+        failure_type: String::new(),
+        attempts: 0,
     })
 }
 
@@ -1375,6 +1378,9 @@ fn mq_dlq_message(message: coord_client::MqDlqMessage) -> Result<mq_v2::Message,
     let mut mapped = mq_message(message.message)?;
     mapped.dlq_reason = message.reason;
     mapped.dlq_detail = message.detail;
+    mapped.group = message.group;
+    mapped.failure_type = message.failure_type;
+    mapped.attempts = message.attempts;
     Ok(mapped)
 }
 
@@ -1949,6 +1955,9 @@ impl mq_v2::mq_server::Mq for MqV2Proxy {
                 offset: ts_from_i64("offset", request.offset)?,
                 reason: request.reason,
                 detail: request.detail,
+                group: request.group,
+                failure_type: request.failure_type,
+                attempts: request.attempts,
             })
             .await
             .map_err(map_v2_error)?;
@@ -1976,6 +1985,7 @@ impl mq_v2::mq_server::Mq for MqV2Proxy {
                     None => None,
                 },
                 max_messages: request.max_messages,
+                group: request.group,
             })
             .await
             .map_err(map_v2_error)?;

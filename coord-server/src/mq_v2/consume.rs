@@ -419,6 +419,10 @@ fn message_from_record(topic: &str, partition: u32, record: MqStoredRecord) -> m
         producer: record.producer,
         dlq_reason: String::new(),
         dlq_detail: String::new(),
+        // 主日志消息没有死信归因（只有 `PollDlq` 填充）。
+        group: String::new(),
+        failure_type: String::new(),
+        attempts: 0,
     }
 }
 

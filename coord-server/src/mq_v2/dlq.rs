@@ -48,6 +48,9 @@ impl CoordNode {
                     reason: request.reason,
                     detail: request.detail,
                     now_ms: now_ms(),
+                    group: request.group,
+                    failure_type: request.failure_type,
+                    attempts: request.attempts,
                 }),
                 target.region_id,
             )
@@ -117,15 +120,18 @@ impl CoordNode {
                 )
             })?,
         };
-        let records = target
+        let group_filter = (!request.group.is_empty()).then(|| request.group.clone());
+        let (records, next_dlq_offset) = target
             .runtime
             .mvcc
-            .mq_dlq_records(target.topic_id, target.partition, start, max_messages)
+            .mq_dlq_records_filtered(
+                target.topic_id,
+                target.partition,
+                start,
+                max_messages,
+                group_filter.as_deref(),
+            )
             .map_err(map_err)?;
-        let next_dlq_offset = records
-            .last()
-            .map(|record| record.dlq_offset.saturating_add(1))
-            .unwrap_or(start);
         let messages: Vec<mq_v2::Message> = records
             .into_iter()
             .map(|record| dlq_message(&target.topic_name, target.partition, record))
@@ -154,6 +160,9 @@ fn dlq_message(topic: &str, partition: u32, record: MqDlqRecord) -> mq_v2::Messa
         producer: record.producer,
         dlq_reason: record.reason,
         dlq_detail: record.detail,
+        group: record.group,
+        failure_type: record.failure_type,
+        attempts: record.attempts,
     }
 }
 
@@ -179,6 +188,9 @@ mod tests {
                 reason: "poison".to_string(),
                 detail: "bad payload".to_string(),
                 moved_at_ms: 10,
+                group: "billing-consumers".to_string(),
+                failure_type: "handler_error".to_string(),
+                attempts: 3,
             },
         );
         assert_eq!(message.topic, "orders");
@@ -186,5 +198,9 @@ mod tests {
         assert_eq!(message.offset, 42, "DLQ messages carry the original offset");
         assert_eq!(message.dlq_reason, "poison");
         assert_eq!(message.dlq_detail, "bad payload");
+        // 归因：组 / 结构化失败类别 / 累计投递次数随死信一起持久化。
+        assert_eq!(message.group, "billing-consumers");
+        assert_eq!(message.failure_type, "handler_error");
+        assert_eq!(message.attempts, 3);
     }
 }

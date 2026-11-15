@@ -299,6 +299,32 @@ class MqV2ClientTest {
     }
 
     @Test
+    void dlqAttributionTravelsWithTheRecordAndFiltersByGroup() {
+        client.mqV2().moveToDlq(new MqV2MoveToDlq("orders", 0, 3, 11, "max_attempts",
+                "3 consecutive failures", "billing", "max_attempts", 3));
+
+        MoveToDlqRequest move = (MoveToDlqRequest) fake.requests.get("moveToDlq");
+        assertThat(move.getGroup()).isEqualTo("billing");
+        assertThat(move.getFailureType()).isEqualTo("max_attempts");
+        assertThat(move.getAttempts()).isEqualTo(3);
+
+        MqV2PollDlqResult dlq = client.mqV2().pollDlq("orders", 0, 3, null, 10, "billing");
+        PollDlqRequest pollDlq = (PollDlqRequest) fake.requests.get("pollDlq");
+        assertThat(pollDlq.getGroup()).isEqualTo("billing");
+
+        MqV2DlqMessage dead = dlq.messages().get(0);
+        assertThat(dead.group()).isEqualTo("billing");
+        assertThat(dead.failureType()).isEqualTo("handler_error");
+        assertThat(dead.attempts()).isEqualTo(3);
+
+        // 不带归因的管理动作：默认空值，不改既有调用形状。
+        client.mqV2().moveToDlq(new MqV2MoveToDlq("orders", 0, 3, 11, "poison", "manual"));
+        MoveToDlqRequest manual = (MoveToDlqRequest) fake.requests.get("moveToDlq");
+        assertThat(manual.getGroup()).isEmpty();
+        assertThat(manual.getAttempts()).isZero();
+    }
+
+    @Test
     void topicLeadersExposeTheShardRoutingSnapshot() {
         MqV2Leaders leaders = client.mqV2().getTopicLeaders("orders");
         assertThat(leaders.topicId()).isEqualTo(7);
@@ -527,7 +553,8 @@ class MqV2ClientTest {
                             .setTopic(request.getTopic()).setPartition(request.getPartition())
                             .setOffset(11).setTimestampMs(1700000000000L)
                             .setPayload(bin("body"))
-                            .setDlqReason("poison").setDlqDetail("decode failed"))
+                            .setDlqReason("poison").setDlqDetail("decode failed")
+                            .setGroup("billing").setFailureType("handler_error").setAttempts(3))
                     .setNextDlqOffset(3).build());
             observer.onCompleted();
         }

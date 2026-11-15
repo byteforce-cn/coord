@@ -305,5 +305,11 @@ class MqV2ConsumerTest {
                                          Long startOffset, int maxMessages) {
             throw new UnsupportedOperationException();
         }
+
+        @Override
+        public MqV2PollDlqResult pollDlq(String topic, int partition, long topicEpoch,
+                                         Long startOffset, int maxMessages, String group) {
+            throw new UnsupportedOperationException();
+        }
     }
 }

@@ -91,6 +91,15 @@ pub struct MqDlqRecord {
     pub reason: String,
     pub detail: String,
     pub moved_at_ms: i64,
+    /// 归因：哪个消费组的投递把它推进死信（空 = 非组归属）。
+    #[serde(default)]
+    pub group: String,
+    /// 结构化失败类别（供程序聚合；与运维可读的 `reason` 分工）。
+    #[serde(default)]
+    pub failure_type: String,
+    /// 该消息累计投递次数（0 = 未知）。
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 /// 一个分片的状态机元数据（apply 水位 + 最近一次 append 的响应）。
@@ -223,6 +232,13 @@ pub struct MqMoveToDlq {
     pub reason: String,
     pub detail: String,
     pub now_ms: i64,
+    /// 归因：消费组 / 结构化失败类别 / 累计投递次数。
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub failure_type: String,
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 // ──── apply 结果（与请求一一对应，顺序一致）────
@@ -586,6 +602,9 @@ impl<B: StorageBackend> MvccStorage<B> {
                 reason: op.reason.clone(),
                 detail: op.detail.clone(),
                 moved_at_ms: op.now_ms,
+                group: op.group.clone(),
+                failure_type: op.failure_type.clone(),
+                attempts: op.attempts,
             };
             let dlq_value = encode(&dlq_record)?;
             let dlq_bytes = dlq_value.len() as u64;
@@ -713,7 +732,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         Ok(records)
     }
 
-    /// 读 DLQ 消息 `[start_dlq_offset, ...)`（最多 `limit` 条）。
+    /// 读 DLQ 消息 `[start_dlq_offset, ...)`（最多 `limit` 条，不过滤组）。
     pub fn mq_dlq_records(
         &self,
         topic_id: u64,
@@ -721,19 +740,45 @@ impl<B: StorageBackend> MvccStorage<B> {
         start_dlq_offset: u64,
         limit: usize,
     ) -> Result<Vec<MqDlqRecord>> {
+        Ok(self
+            .mq_dlq_records_filtered(topic_id, partition, start_dlq_offset, limit, None)?
+            .0)
+    }
+
+    /// 读 DLQ 消息并按消费组过滤（`group = None` = 不过滤）。
+    ///
+    /// 返回 `(命中记录, 下一个扫描位点)`：位点按**扫描进度**推进而不是命中数，
+    /// 否则"过滤后没有命中"会让调用方每次都从同一位点重扫同一条记录（死循环）。
+    pub fn mq_dlq_records_filtered(
+        &self,
+        topic_id: u64,
+        partition: u32,
+        start_dlq_offset: u64,
+        limit: usize,
+        group: Option<&str>,
+    ) -> Result<(Vec<MqDlqRecord>, u64)> {
         let rows = self.backend().read(|tx| {
             let start = record_key(topic_id, partition, start_dlq_offset);
             let end = partition_successor(topic_id, partition);
             tx.iter_range(TABLE_MQ_DLQ, &start, &end)
         })?;
         let mut records = Vec::with_capacity(limit.min(rows.len()));
+        let mut next = start_dlq_offset;
         for (_, value) in rows {
             if records.len() >= limit {
+                // 命中上限后不再推进位点：下一轮从这条（未读）记录继续。
                 break;
             }
-            records.push(decode(&value)?);
+            let record: MqDlqRecord = decode(&value)?;
+            next = record.dlq_offset.saturating_add(1);
+            if let Some(want) = group {
+                if record.group != want {
+                    continue;
+                }
+            }
+            records.push(record);
         }
-        Ok(records)
+        Ok((records, next))
     }
 }
 
@@ -1081,6 +1126,9 @@ mod tests {
                     reason: "poison".to_string(),
                     detail: String::new(),
                     now_ms: 1_700_000_000_100,
+                    group: String::new(),
+                    failure_type: String::new(),
+                    attempts: 0,
                 },
                 applied(2),
             )
@@ -1327,6 +1375,9 @@ mod tests {
                     reason: "poison".to_string(),
                     detail: "bad".to_string(),
                     now_ms: 2,
+                    group: String::new(),
+                    failure_type: String::new(),
+                    attempts: 0,
                 },
                 applied(2),
             )
@@ -1342,6 +1393,9 @@ mod tests {
                     reason: "poison".to_string(),
                     detail: "bad".to_string(),
                     now_ms: 3,
+                    group: String::new(),
+                    failure_type: String::new(),
+                    attempts: 0,
                 },
                 applied(3),
             )
@@ -1374,6 +1428,9 @@ mod tests {
                     reason: "poison".to_string(),
                     detail: "bad".to_string(),
                     now_ms: 2,
+                    group: String::new(),
+                    failure_type: String::new(),
+                    attempts: 0,
                 },
                 applied(2),
             )
@@ -1657,6 +1714,9 @@ mod tests {
                         reason: "poison".to_string(),
                         detail: "bad".to_string(),
                         now_ms: 2,
+                        group: String::new(),
+                        failure_type: String::new(),
+                        attempts: 0,
                     },
                     applied(2),
                 )

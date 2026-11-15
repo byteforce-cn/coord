@@ -430,6 +430,7 @@ fn mq_v2_publish_on_a_three_node_cluster() {
                 topic_epoch: agent_topic.topic_epoch,
                 start_offset: None,
                 max_messages: 10,
+                group: String::new(),
             })
             .await
             .expect("PollDlq through the agent")
@@ -444,6 +445,9 @@ fn mq_v2_publish_on_a_three_node_cluster() {
                 offset: 0,
                 reason: "poison".to_string(),
                 detail: "proxied move".to_string(),
+                group: String::new(),
+                failure_type: String::new(),
+                attempts: 0,
             })
             .await
             .expect("MoveToDlq through the agent")
@@ -458,6 +462,7 @@ fn mq_v2_publish_on_a_three_node_cluster() {
                 topic_epoch: agent_topic.topic_epoch,
                 start_offset: None,
                 max_messages: 10,
+                group: String::new(),
             })
             .await
             .expect("PollDlq after move")

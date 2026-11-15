@@ -57,11 +57,13 @@ pub(crate) trait TriggerStarter: Send + Sync {
 #[async_trait]
 pub(crate) trait TriggerChannel: Send + Sync {
     async fn ack(&self, message: &MqMessage) -> Result<(), String>;
+    /// `attempts` = 已累计失败的投递次数（死信归因，写进 DLQ 记录）。
     async fn move_to_dlq(
         &self,
         message: &MqMessage,
         reason: &str,
         detail: &str,
+        attempts: u32,
     ) -> Result<(), String>;
 }
 
@@ -210,6 +212,7 @@ pub(crate) async fn handle_message(
                             message,
                             DLQ_REASON_MAX_ATTEMPTS,
                             &format!("{attempts} consecutive Start failures: {err}"),
+                            attempts,
                         )
                         .await?;
                     tracing::error!(
@@ -272,6 +275,9 @@ struct LiveChannel {
     consumer: Mutex<MqConsumer>,
     mq: MqV2Client,
     topic_epoch: u64,
+    /// 该触发器定义的消费组名（死信归因：DLQ 记录是分区级、多组共享的，
+    /// 组归属只能随消息一起落盘）。
+    group: String,
 }
 
 impl LiveChannel {
@@ -305,6 +311,7 @@ impl TriggerChannel for LiveChannel {
         message: &MqMessage,
         reason: &str,
         detail: &str,
+        attempts: u32,
     ) -> Result<(), String> {
         self.mq
             .move_to_dlq(&MqMoveToDlq {
@@ -314,6 +321,9 @@ impl TriggerChannel for LiveChannel {
                 offset: message.offset,
                 reason: reason.to_string(),
                 detail: detail.to_string(),
+                group: self.group.clone(),
+                failure_type: reason.to_string(),
+                attempts,
             })
             .await
             .map(|_| ())
@@ -423,6 +433,7 @@ async fn run_trigger(
             consumer: Mutex::new(consumer),
             mq: mq.clone(),
             topic_epoch,
+            group: group.clone(),
         };
 
         loop {
@@ -544,6 +555,7 @@ mod tests {
             _message: &MqMessage,
             reason: &str,
             detail: &str,
+            _attempts: u32,
         ) -> Result<(), String> {
             if self.dlq_fails {
                 return Err("dlq unavailable".to_string());

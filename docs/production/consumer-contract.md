@@ -304,6 +304,14 @@ Raft 集群仍是 v1；显式 `false` 时 v2 服务注册（reflection 可见）
 
 - 显式管理路径 `MoveToDlq`（净额记账、分区不被阻塞）；`reason` / `detail`
   随消息存入，`PollDlq` 可读（`MqMessage.dlqReason/dlqDetail`）。
+- **归因随记录落盘**：`MoveToDlq` 的 `group` / `failure_type` / `attempts` 与
+  死信一起持久化，`PollDlq` 原样返回（`MqMessage.group/failureType/attempts`）。
+  分工：`reason` 是运维可读的稳定锚点（如 `poison`），`failure_type` 供程序聚合，
+  `attempts` 是死信时刻的投递次数。
+  **DLQ 是分区级、多组共享的**——组归属只能随消息走，不能从 DLQ 结构推断；
+  因此按组取死信必须用 `PollDlq.group` 过滤（服务端过滤），不要拉全量再自己筛。
+- **过滤不改变位点语义**：`next_dlq_offset` 按扫描进度推进，过滤后无命中时
+  返回空页且位点已前进（否则低命中过滤会原地重扫同一条记录）。
 - **最小权限**：毒消息处置只需 `coord:mq:consume + coord:mq:dlq`；
   `coord:mq:manage` 只覆盖 topic 生命周期（`CreateTopic` / `DeleteTopic`），
   不得为处置毒消息而授予。
