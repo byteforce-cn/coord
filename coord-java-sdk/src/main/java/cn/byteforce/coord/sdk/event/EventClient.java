@@ -12,13 +12,18 @@ import cn.byteforce.coord.sdk.CoordException;
  * <ul>
  *   <li><b>Delivery is at-least-once while the stream is alive</b>, in publish order
  *       within one subscription;</li>
- *   <li><b>Reconnect replay (G-EV-1):</b> by default the disconnect window is
- *       <i>not</i> replayed (live-only). Connect with
- *       {@link #subscribe(String, long, EventListener)} carrying the last seen
- *       {@link CloudEvent#getSeq() seq} to have events published since then
- *       replayed (within the server's retention window = events still present in
- *       storage), then hand over to live delivery — replay/live do not lose
- *       events, but the handoff may duplicate (keep consumers idempotent);</li>
+ *   <li><b>Reconnect (G-EV-1):</b> the subscription survives coord/agent restarts
+ *       and connection drops. The SDK tracks the last delivered
+ *       {@link CloudEvent#getSeq() seq} and re-subscribes from that cursor, so the
+ *       disconnect window is replayed (within the server's retention window = events
+ *       still present in storage) and then hands over to live delivery. Replay/live
+ *       do not lose events, but the handoff may duplicate (keep consumers idempotent).
+ *       {@link #subscribe(String, long, EventListener)} takes an explicit cursor as
+ *       the <i>floor</i> (use it after a process restart, when the SDK has no
+ *       in-memory watermark yet). Reconnects use exponential backoff (200ms → 30s);
+ *       after {@code 20} consecutive failures the subscription is declared dead and
+ *       {@link EventListener#onError(Throwable)} is called — a subscription never
+ *       silently stops delivering;</li>
  *   <li><b>{@code Unsubscribe} is a compatibility no-op.</b> Subscriptions live in the
  *       gRPC stream itself, so the way to unsubscribe is to
  *       {@link EventSubscription#close() close the subscription} (which cancels the
@@ -85,10 +90,13 @@ public interface EventClient {
      * are replayed in seq order, then delivery goes live without losing events
      * (the handoff may duplicate — keep consumers idempotent).
      * <p>
-     * Persist {@link CloudEvent#getSeq()} of the last successfully processed
-     * event and pass it here on reconnect. A cursor outside the retention window
-     * replays only what is still retained (the gap is not detectable from the
-     * cursor alone — treat replay as best-effort catch-up over retained state).
+     * The cursor is the <b>floor</b> for reconnects: once an event is delivered the
+     * SDK resumes from that event's seq instead (so a live subscription never replays
+     * from a stale persisted cursor). Persist {@link CloudEvent#getSeq()} of the last
+     * successfully processed event and pass it here after a <b>process</b> restart.
+     * A cursor outside the retention window replays only what is still retained (the
+     * gap is not detectable from the cursor alone — treat replay as best-effort
+     * catch-up over retained state).
      *
      * @param eventType event type to match exactly; empty string = no filter (all events)
      * @param cursor    last processed {@link CloudEvent#getSeq() seq}; 0 = replay
@@ -120,6 +128,22 @@ public interface EventClient {
          * back-pressure to the stream, not to other subscriptions.
          */
         void onEvent(CloudEvent event);
+
+        /**
+         * Called when the SDK <b>gives up</b> on this subscription: reconnects were
+         * attempted with backoff and the consecutive-failure budget is exhausted, so
+         * no further events will be delivered. Always log/observe this — a
+         * subscription that keeps running without reporting its own death is exactly
+         * the failure this callback exists to prevent.
+         *
+         * <p>Transient drops that <i>do</i> reconnect are reported through the SDK log
+         * only; this callback is reserved for the terminal case. Runs on the SDK's
+         * streaming executor; throwing from it does not break cleanup.
+         *
+         * @param error why the subscription terminated
+         */
+        default void onError(Throwable error) {
+        }
     }
 
     /**
