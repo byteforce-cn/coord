@@ -49,7 +49,7 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | `Approve` | `Approve` | ✅（`formData` / `occurredAt` 未建模） |
 | `Reject(targetStep)` | `Reject` + `target_node` | ✅（原子投票 + 回退） |
 | `Transfer` | `Transfer` | ✅（原责任人进 `transferred_from`，不携带投票记录） |
-| `Delegate(delegateFor)` | `Delegate` | ⚠️ 无到期自动恢复；`delegateFor` 须由适配器用定时任务调用撤回复原 |
+| `Delegate(delegateFor)` | `Delegate` | ⚠️ proto 无 `delegate_for_ms`，到期自动恢复未建模；`delegateFor` 须由适配器用定时任务撤回复原；SDK 只能传 5 参（无委派时长） |
 | `Withdraw(任务级)` | `WithdrawTask` + `target_node` | ✅（仅原审批人；保留通过记录；带否决票的席位拒绝撤回） |
 | `WithdrawInstance` | `Withdraw` | ✅（仅发起人；级联取消实例） |
 | `Urge` | `Urge` | ✅（只写审计/通知，不写历史） |

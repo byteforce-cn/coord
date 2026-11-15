@@ -12,7 +12,9 @@ import java.util.concurrent.CompletableFuture;
  * backed by Coord's core primitives (KV + Txn + Lease + Watch).
  * <p>
  * <b>Capability level:</b> Full workflow engine support — DSL-driven execution,
- * instance lifecycle (start/signal/cancel), definition CRUD, and filtered listing.
+ * instance lifecycle (start/signal/cancel), definition CRUD, filtered listing, approval v2
+ * decisions (approve/reject/add-sign/transfer/…), task-level actions (urge/cc/withdraw-task),
+ * and the task query surface ({@code listTasks} / {@code getTask} / {@code history}).
  *
  * <pre>{@code
  * try (CoordClient client = CoordClient.create(config)) {
@@ -450,6 +452,68 @@ public interface WorkflowClient {
     String terminateOnBehalfOf(String workflowId, String reason, String idempotencyKey,
                                String onBehalfOf);
 
+    // ──── 任务级动作（催办 / 抄送 / 撤回）────
+
+    /**
+     * Urge (催办) one approval seat. Only writes audit / notification records — the instance
+     * state and the history projection are unchanged.
+     *
+     * <p><b>Capability:</b> {@code coord:workflow:execute}.<br>
+     * <b>Idempotency:</b> replaying the same {@code idempotencyKey} returns the first response
+     * and does not send a second urge.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param note           optional note to the assignee (may be null)
+     * @param idempotencyKey unique key so retries do not urge twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String urge(String workflowId, String taskId, String note, String idempotencyKey);
+
+    /**
+     * Add CC recipients (抄送).
+     *
+     * <p>A non-empty {@code taskId} is task-level CC and requires the node to allow CC
+     * ({@code allowCc: true}); an empty {@code taskId} is instance-level CC and is limited to
+     * the initiator / sign admins. CC never changes the instance state.</p>
+     *
+     * <p><b>Capability:</b> {@code coord:workflow:execute}.<br>
+     * <b>Idempotency:</b> replaying the same {@code idempotencyKey} returns the first response
+     * and does not notify twice.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID, or null/empty for instance-level CC
+     * @param targets        the recipient identities (at least one; empty is rejected with
+     *                       {@code INVALID_ARGUMENT})
+     * @param comment        optional comment to the recipients (may be null)
+     * @param idempotencyKey unique key so retries do not notify twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String cc(String workflowId, String taskId, List<String> targets, String comment,
+              String idempotencyKey);
+
+    /**
+     * Withdraw one approval seat and roll the instance back to {@code targetNode} in the same
+     * command (任务级撤回). Only the current assignee may withdraw; votes already recorded on
+     * the seat are kept, except that a seat carrying a veto cannot be withdrawn.
+     *
+     * <p><b>Capability:</b> {@code coord:workflow:execute}.<br>
+     * <b>Idempotency:</b> replaying the same {@code idempotencyKey} returns the first response
+     * and does not withdraw twice.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param targetNode     node to return to (must be in the reached-node whitelist)
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not withdraw twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String withdrawTask(String workflowId, String taskId, String targetNode, String comment,
+                        String idempotencyKey);
+
     /**
      * List pending approval seats (待办) for the current principal.
      *
@@ -483,6 +547,51 @@ public interface WorkflowClient {
      * @throws CoordException on not found or communication failure
      */
     ApprovalInstanceDetail getInstanceDetail(String workflowId);
+
+    /**
+     * List approval seats with full filtering (superset of
+     * {@link #listPendingTasks(int, String)}; no status filter by default).
+     *
+     * <p><b>Capability:</b> {@code coord:workflow:read}.<br>
+     * <b>Idempotency:</b> a read — the same {@code pageToken} returns the same page; there is no
+     * mutation to replay.</p>
+     *
+     * @param filter    optional filter; a null filter (or null fields) filters nothing
+     * @param pageSize  max results per page (1-200; server caps at 200)
+     * @param pageToken pagination token from previous response (empty for first page)
+     * @return the seats matching the filter
+     * @throws CoordException on communication failure or an unknown {@code status} value
+     */
+    List<PendingApprovalTask> listTasks(TaskQueryFilter filter, int pageSize, String pageToken);
+
+    /**
+     * Get one approval seat with its vote records.
+     *
+     * <p><b>Capability:</b> {@code coord:workflow:read}.<br>
+     * <b>Idempotency:</b> a read — repeated calls return the same seat state.</p>
+     *
+     * @param taskId the approval task (seat) ID
+     * @return the seat detail
+     * @throws CoordException on not found or communication failure
+     */
+    TaskDetail getTask(String taskId);
+
+    /**
+     * Read the deterministic history projection of an instance (task / round / step / instance
+     * level events).
+     *
+     * <p>Unlike the outbox lifecycle events, the projection is derived from the approval
+     * snapshot: the same instance state always yields the same
+     * {@code (eventId, eventType, occurredAtMs)} triples, so repeated reads are comparable.</p>
+     *
+     * <p><b>Capability:</b> {@code coord:workflow:read}.<br>
+     * <b>Idempotency:</b> a read — no mutation to replay.</p>
+     *
+     * @param workflowId the workflow instance ID
+     * @return the projected events
+     * @throws CoordException on not found or communication failure
+     */
+    List<ApprovalHistoryEvent> history(String workflowId);
 
     // ──── 异步回调 ────
 
