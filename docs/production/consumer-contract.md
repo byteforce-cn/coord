@@ -1,6 +1,6 @@
 # 消费方契约页（Consumer Contract）
 
-> Owner: maintainers ｜ Last verified: 2026-10-23
+> Owner: maintainers ｜ Last verified: 2026-11-15
 
 面向**接入方**的聚合页：按服务给出「一致性 / 路由 / 失败语义 + 推荐消费范式」，
 并把每 RPC 的能力名与已接受的边界汇总为可检索的表。
@@ -263,6 +263,11 @@ Raft 集群仍是 v1；显式 `false` 时 v2 服务注册（reflection 可见）
 - `seq` 全局单调（跨 topic 无关事件类型），随每条 `CloudEventMessage.seq`
   下发；**持久化它**作为下次重连的游标；
 - `Unsubscribe` 为兼容空操作（订阅 = gRPC 流本身；真正取消 = 关闭流）。
+- **SDK 重连（coord-java-sdk 的 `EventClient`）**：SDK 自行跟踪最后一条已交付的
+  `seq`，断流（含 agent/coord 重启）后按该位点自动重连（指数退避 200ms→30s），
+  所以「不带 cursor 不补投」是 **wire** 口径——SDK 订阅重连时一定会带 cursor。
+  连续 20 次失败判定终态并回调 `EventListener.onError`（订阅不会静默死亡）；
+  `CoordClient.close()` 会先关掉全部事件订阅，避免 shutdown 后继续重连。
 - 保留窗口 = 存储中仍存在的事件；早于窗口的缺口无法从 cursor 感知——把补投
   当 best-effort catch-up，配上权威状态重读。
 

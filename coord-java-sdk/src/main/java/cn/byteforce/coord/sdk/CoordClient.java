@@ -541,13 +541,21 @@ public final class CoordClient implements Closeable {
             log.debug("Cancelled {} MQ subscription(s)", cancelledSubs);
         }
 
-        // 4. Shutdown watch manager (cancel all watch streams)
+        // 4. Cancel event subscriptions. 不先关闭它们，下面的 channel shutdown 会让
+        //    每条订阅的取流线程进入"断流 → 重连"路径（#325 的重连逻辑），在客户端
+        //    已经关闭之后继续制造重连尝试。关闭顺序必须在 channel 之前。
+        int cancelledEventSubs = eventClient.closeAllSubscriptions();
+        if (cancelledEventSubs > 0) {
+            log.debug("Cancelled {} event subscription(s)", cancelledEventSubs);
+        }
+
+        // 5. Shutdown watch manager (cancel all watch streams)
         watchManager.shutdown();
 
-        // 5. Shutdown channel
+        // 6. Shutdown channel
         channelManager.shutdown();
 
-        // 6. Shutdown thread pools (interrupts any in-flight polling)
+        // 7. Shutdown thread pools (interrupts any in-flight polling)
         threadPoolManager.close();
 
         log.info("CoordClient shutdown complete");
