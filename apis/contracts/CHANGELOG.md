@@ -1,3 +1,42 @@
+## [contracts/v1.22.0] — 2026-11-15（Minor：Workflow assignment 状态机 / 加签位置 / 超时策略 / Resume，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 追加 `ResumeWorkflow` RPC、`AddSign` 的
+`position`/`task_id`/`action_id`、`RemoveSign` 的 `assignees`/`task_id`、`Delegate` 的
+`delegate_for_ms`，以及 `ApprovalTask`/`ApprovalTaskSummary` 的 assignment 读面字段；
+`approve` DSL 追加 `timeoutPolicy`；无字段号/类型变更、不删 RPC；`buf breaking` 基线不变）。
+
+- `AddSign` 支持 `position = CURRENT|BEFORE|AFTER`：BEFORE 派生前加签轮次并挂起原轮次，
+  完成后恢复；AFTER 在原轮次通过后、下一业务节点前执行（默认或签），原轮次否决/回退时
+  丢弃派生任务（`TASK_AFTER_SPAWN_DISCARDED`）。响应返回 `derived_task_ids`。
+- `RemoveSign` 支持按 `assignees` 减签（候选池移除单个候选，池清空才取消席位），响应
+  返回 `removed_task_ids` 与重算后的 `round`。
+- `Delegate` 支持 `delegate_for_ms`：到期撤销代理权（`DELEGATION_EXPIRED`），终态席位
+  撤销代理 assignment；响应返回 `delegate_expires_at_ms`。
+- `ApprovalTask` / `ApprovalTaskSummary` 追加 `origin`、`predecessor_task_id`、
+  `successor_task_id`、`spawned_by_action_id`、`assignments`（`ApprovalAssignment`：
+  pending/scheduled/suspended/transferred/delegated/completed/rejected/cancelled/expired）。
+- `approve.timeoutPolicy`（`none` 缺省 / `fail` / `waiting`，ADR-0013 D13）：
+  - `none` = 现有 B-WF-5（只过期、不自动收口）；
+  - `fail` = 到期置工作流 `FAULTED`（`TASK_OVERDUE`）；
+  - `waiting` = 到期置 `WAITING`，由新增 `ResumeWorkflow(workflow_id, new_due_in_ms,
+    reason)` 按上一轮席位重建任务并重新挂起（步骤 `timeout` 预算校验）。
+- 能力登记：`ResumeWorkflow` → `coord:workflow:execute`；`approve.timeoutPolicy` 仍属
+  定义面 `coord:workflow:define`。
+- `History` 新增投影：`TASK_URGED` / `TASK_ASSIGNEE_REMOVED` / `TASK_ASSIGNMENT_SUSPENDED`
+  / `TASK_ASSIGNMENT_RESUMED` / `TASK_ADD_ASSIGNEE_BEFORE` / `TASK_ADD_ASSIGNEE_AFTER` /
+  `TASK_AFTER_SPAWN_DISCARDED` / `DELEGATION_EXPIRED` / `INSTANCE_WAITING` /
+  `INSTANCE_RESUMED`。
+- SDK：Rust `Client::add_assignee` / `remove_assignee` / `delegate_for` /
+  `resume_workflow`；既有 `add_sign` / `remove_sign` / `delegate` 保持原签名。
+- **不扩承诺**：`formData` 按 ADR-0013 D9 不实现（seedj 侧存储并在读视图合并）。
+
+**影响范围**：旧客户端不受影响（新增字段/枚举/ RPC 为增量；`AddSign.position` 缺省
+`CURRENT` 保持原语义；`timeoutPolicy` 缺省 `none` 保持 B-WF-5）。显式启用 `fail` /
+`waiting` 的定义会改变超时行为（opt-in）。
+
+**回滚预案**：回滚本分支即回到无加签位置/assignment 读面/超时策略的版本；既有实例文档
+反序列化向后兼容（新增字段 `serde(default)`），无落盘迁移。
+
 ## [contracts/v1.21.0] — 2026-11-15（Minor：Workflow 任务级催办/抄送/撤回，wire 向前兼容）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 追加 3 个命令 RPC；`approve` DSL 追加

@@ -27,8 +27,8 @@ use crate::workflow::ports::{Clock, StoreError};
 use super::engine::{Engine, StartSpec};
 use super::events::event_record;
 use super::model::{
-    ApprovalError, ApprovalPolicy, BranchStatus, Effect, Id, InstanceStatus, Principal, Scope,
-    SeatSpec, TaskKind,
+    AddAssigneePosition, ApprovalError, ApprovalPolicy, BranchStatus, Effect, Id, InstanceStatus,
+    Principal, Scope, SeatSpec, TaskKind, TaskStatus, TimeoutPolicy,
 };
 use super::store::{ApprovalStore, ExpectedRev, IdemRecord};
 
@@ -89,8 +89,28 @@ pub enum CommandOutcome {
 /// 通过 / 否决」这一混合判定（全员过期 / 仍 open 为 `None`）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpireOutcome {
+    /// 本次截止路径处理的席位数；`timed_out` 非空时这些席位被取消而非置 `Expired`。
     pub expired: u32,
     pub node_outcome: Option<NodeOutcome>,
+    /// 非空表示本轮到期触发了显式超时策略（`approve.timeoutPolicy`）；调用方须据此
+    /// 切换工作流状态，而不是按 `node_outcome` 路由。
+    pub timed_out: Option<TimeoutDisposition>,
+}
+
+/// `ResumeWorkflow` 的回执：响应 + 是否为幂等重放。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResumeOutcome {
+    pub response: Value,
+    pub duplicate: bool,
+}
+
+/// 显式超时策略的处置结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutDisposition {
+    /// `timeoutPolicy: fail` ⇒ 工作流 `FAULTED`（`TASK_OVERDUE`）。
+    Failed,
+    /// `timeoutPolicy: waiting` ⇒ 工作流 `WAITING`，等 `ResumeWorkflow`。
+    Waiting,
 }
 
 /// 节点（分支/轮次）本轮的外部上报口径：通过或否决。
@@ -125,11 +145,21 @@ pub enum ApprovalCommand<'a> {
     },
     AddSign {
         branch_id: &'a str,
+        task_id: Option<&'a str>,
         seats: Vec<SeatSpec>,
+        position: AddAssigneePosition,
+        /// 触发派生任务的客户端 action id（通常取 `idempotency_key`）。
+        spawned_by: Option<&'a str>,
         comment: Option<&'a str>,
     },
     RemoveSign {
         task_ids: Vec<String>,
+    },
+    /// 减签（按 assignee）：只移除当前轮次的未决席位，返回移除的 task id 与重算结果。
+    RemoveAssignee {
+        task_id: &'a str,
+        assignees: Vec<String>,
+        comment: Option<&'a str>,
     },
     ReturnToNode {
         branch_id: &'a str,
@@ -167,6 +197,8 @@ pub enum ApprovalCommand<'a> {
     Delegate {
         task_id: &'a str,
         to: &'a str,
+        /// 委派时长（毫秒）；0 = 不自动到期。
+        delegate_for_ms: i64,
     },
     Withdraw,
     Terminate {
@@ -269,6 +301,8 @@ impl ApprovalBridge {
             allow_self_approve: task.allow_self_approve,
             sign_admins: task.sign_admins.clone(),
             allow_cc: task.allow_cc,
+            timeout_policy: task.timeout_policy,
+            timeout_ms: task.deadline_duration_ms(),
         };
         let now = self.clock.now_ms();
         let deadline = task.deadline_ms(now);
@@ -425,7 +459,7 @@ impl ApprovalBridge {
                 }
                 _ => None,
             };
-            let response = response_for(&engine);
+            let response = response_for(&engine, &cmd, &effects);
             let node_outcome = branch_id
                 .as_deref()
                 .and_then(|id| engine.branches.get(id))
@@ -479,8 +513,20 @@ impl ApprovalBridge {
         Ok(engine
             .tasks
             .values()
-            .filter(|t| t.status.is_open())
-            .filter_map(|t| t.deadline)
+            .filter(|t| t.status.is_live())
+            .flat_map(|t| {
+                // 席位 deadline 只对未决席位生效；挂起/待激活席位保留 deadline 也不得
+                // 反复重排定时器（否则每次触发都返回同一个已过去的值）。
+                let task_deadline = if t.status.is_open() { t.deadline } else { None };
+                let delegation_deadline = t.delegation.as_ref().and_then(|d| {
+                    if d.revoked_at.is_none() {
+                        d.expires_at
+                    } else {
+                        None
+                    }
+                });
+                [task_deadline, delegation_deadline].into_iter().flatten()
+            })
             .min())
     }
 
@@ -509,12 +555,60 @@ impl ApprovalBridge {
                 .filter(|t| t.status.is_open() && t.deadline.is_some_and(|d| d <= now_ms))
                 .map(|t| t.id.clone())
                 .collect();
-            if due.is_empty() {
+            let delegations_due = engine.tasks.values().any(|t| {
+                t.delegation.as_ref().is_some_and(|d| {
+                    d.revoked_at.is_none() && d.expires_at.is_some_and(|at| at <= now_ms)
+                })
+            });
+            if due.is_empty() && !delegations_due {
                 return Ok(ExpireOutcome {
                     expired: 0,
                     node_outcome: None,
+                    timed_out: None,
                 });
             }
+
+            // 显式超时策略只由到期席位所属分支决定（v2 同时最多一个 open 分支）。
+            let policy = due
+                .first()
+                .and_then(|id| engine.tasks.get(id))
+                .and_then(|t| engine.branches.get(&t.branch_id))
+                .map(|b| b.policy.timeout_policy)
+                .unwrap_or(TimeoutPolicy::None);
+            if !due.is_empty() && policy != TimeoutPolicy::None {
+                let disposition = if policy == TimeoutPolicy::Fail {
+                    TimeoutDisposition::Failed
+                } else {
+                    TimeoutDisposition::Waiting
+                };
+                let expected = engine.instance.revision;
+                let effects = match policy {
+                    TimeoutPolicy::Fail => engine.timeout_fail(expected, "TASK_OVERDUE", now_ms)?,
+                    TimeoutPolicy::Waiting => {
+                        engine.timeout_wait(expected, "TASK_OVERDUE", now_ms)?
+                    }
+                    TimeoutPolicy::None => Vec::new(),
+                };
+                let rev_after = engine.instance.revision;
+                let events = self.effects_to_records(approval_id, &effects, rev_after, now_ms)?;
+                let committed = self
+                    .store
+                    .commit(&engine, &events, ExpectedRev::Exact(mod_rev))
+                    .await
+                    .map_err(BridgeError::from)?;
+                if committed {
+                    return Ok(ExpireOutcome {
+                        expired: due.len() as u32,
+                        node_outcome: None,
+                        timed_out: Some(disposition),
+                    });
+                }
+                if attempt >= MAX_COMMIT_ATTEMPTS {
+                    return Err(BridgeError::Stale(format!("expire_due on {approval_id}")));
+                }
+                continue;
+            }
+
             // 过期前记录 due 席位所属且仍 open 的分支：过期收敛后据此判定是否形成结论。
             let affected: Vec<Id> = due
                 .iter()
@@ -528,6 +622,10 @@ impl ApprovalBridge {
                 .map(|t| t.branch_id.clone())
                 .collect();
             let mut effects = Vec::new();
+            if delegations_due {
+                let expected = engine.instance.revision;
+                effects.extend(engine.expire_delegations(expected, now_ms)?);
+            }
             for task_id in &due {
                 let expected = engine.instance.revision;
                 effects.extend(engine.expire(expected, task_id, now_ms)?);
@@ -547,10 +645,113 @@ impl ApprovalBridge {
                 return Ok(ExpireOutcome {
                     expired: due.len() as u32,
                     node_outcome,
+                    timed_out: None,
                 });
             }
             if attempt >= MAX_COMMIT_ATTEMPTS {
                 return Err(BridgeError::Stale(format!("expire_due on {approval_id}")));
+            }
+        }
+    }
+
+    /// 等待态恢复（`ResumeWorkflow`）：按上一轮席位重建任务、写新截止并回到 `Running`。
+    ///
+    /// 仅实例 `Waiting` 可恢复；发起人或任一分支 `sign_admins` 可调用。步骤配置了
+    /// `timeout` 时校验「已消耗 + 新截止」不超出预算——超出返回 `InvalidArgument`，
+    /// 不改变状态（错误路径零副作用）。
+    pub async fn resume_workflow(
+        &self,
+        approval_id: &str,
+        actor: &str,
+        acting_service: Option<&str>,
+        new_due_ms: i64,
+        reason: &str,
+        idem_key: Option<&str>,
+    ) -> Result<ResumeOutcome, BridgeError> {
+        if new_due_ms <= 0 {
+            return Err(BridgeError::InvalidArgument("new_due_in_ms".into()));
+        }
+        let now = self.clock.now_ms();
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            if let Some(key) = idem_key {
+                if let Some(cached) = self
+                    .store
+                    .load_idem(approval_id, key)
+                    .await
+                    .map_err(BridgeError::from)?
+                {
+                    return Ok(ResumeOutcome {
+                        response: cached,
+                        duplicate: true,
+                    });
+                }
+            }
+            let (mut engine, mod_rev) = self
+                .store
+                .load(approval_id)
+                .await
+                .map_err(BridgeError::from)?
+                .ok_or_else(|| BridgeError::NotFound(approval_id.to_string()))?;
+            if engine.instance.status != InstanceStatus::Waiting {
+                return Err(BridgeError::InvalidTransition(format!(
+                    "instance is {:?}, not Waiting",
+                    engine.instance.status
+                )));
+            }
+            let allowed = engine.instance.initiator == actor
+                || engine
+                    .branches
+                    .values()
+                    .any(|b| b.policy.sign_admins.iter().any(|a| a == actor));
+            if !allowed {
+                return Err(BridgeError::NotAuthorized(format!(
+                    "{actor} cannot resume {approval_id}"
+                )));
+            }
+            let branch = engine
+                .branches
+                .values()
+                .find(|b| b.status == BranchStatus::Open)
+                .cloned()
+                .ok_or_else(|| BridgeError::InvalidTransition("no open branch to resume".into()))?;
+            if let Some(budget) = branch.policy.timeout_ms {
+                let elapsed = now.saturating_sub(branch.created_at);
+                if elapsed.saturating_add(new_due_ms) > budget {
+                    return Err(BridgeError::InvalidArgument("new_due_in_ms".into()));
+                }
+            }
+            let expected = engine.instance.revision;
+            engine.set_acting_service(acting_service.map(str::to_string));
+            let resumed = engine.resume_waiting(expected, new_due_ms, actor, reason, now);
+            engine.set_acting_service(None);
+            let (task_ids, effects) = resumed?;
+            let rev_after = engine.instance.revision;
+            let events = self.effects_to_records(approval_id, &effects, rev_after, now)?;
+            let response = json!({
+                "instance_id": engine.instance.id,
+                "status": status_label(engine.instance.status),
+                "deadline_ms": now.saturating_add(new_due_ms),
+                "task_ids": task_ids,
+            });
+            let idem = idem_key.map(|key| IdemRecord {
+                key: key.to_string(),
+                response: response.clone(),
+            });
+            let committed = self
+                .store
+                .commit_with_idem(&engine, &events, ExpectedRev::Exact(mod_rev), idem.as_ref())
+                .await
+                .map_err(BridgeError::from)?;
+            if committed {
+                return Ok(ResumeOutcome {
+                    response,
+                    duplicate: false,
+                });
+            }
+            if attempt >= MAX_COMMIT_ATTEMPTS {
+                return Err(BridgeError::Stale(format!("resume_workflow {approval_id}")));
             }
         }
     }
@@ -796,24 +997,80 @@ impl ApprovalBridge {
                 self.guard_self_approve(engine, actor, task_id)?;
                 engine.transfer(expected, task_id, to, actor, now)
             }
-            ApprovalCommand::Delegate { task_id, to } => {
+            ApprovalCommand::Delegate {
+                task_id,
+                to,
+                delegate_for_ms,
+            } => {
                 self.guard_self_approve(engine, actor, task_id)?;
-                engine.delegate(expected, task_id, to, actor, now)
+                let expires_at = (delegate_for_ms > 0).then(|| now.saturating_add(delegate_for_ms));
+                engine.delegate(expected, task_id, to, expires_at, actor, now)
             }
             ApprovalCommand::AddSign {
                 branch_id,
+                task_id,
                 seats,
+                position,
+                spawned_by,
                 comment,
             } => {
-                self.guard_sign_admin(engine, actor, branch_id)?;
-                engine
-                    .add_sign(expected, branch_id, seats, actor, comment, now)
-                    .map(|(_, effects)| effects)
+                let branch = match task_id {
+                    Some(tid) => engine
+                        .tasks
+                        .get(tid)
+                        .map(|t| t.branch_id.clone())
+                        .ok_or_else(|| BridgeError::NotFound((*tid).to_string()))?,
+                    None => (*branch_id).to_string(),
+                };
+                self.guard_sign_admin(engine, actor, &branch)?;
+                if position != AddAssigneePosition::Current && task_id.is_none() {
+                    return Err(BridgeError::InvalidArgument("add_sign.task_id".into()));
+                }
+                match task_id {
+                    Some(tid) if position != AddAssigneePosition::Current => {
+                        let mut assignees = Vec::with_capacity(seats.len());
+                        for seat in seats {
+                            if seat.kind != TaskKind::Approval {
+                                return Err(BridgeError::InvalidArgument(
+                                    "add_assignee.readers".into(),
+                                ));
+                            }
+                            let Some(assignee) = seat.assignee.clone() else {
+                                return Err(BridgeError::InvalidArgument(
+                                    "add_assignee.assignees".into(),
+                                ));
+                            };
+                            assignees.push(assignee);
+                        }
+                        engine
+                            .add_assignee(
+                                expected, tid, &assignees, position, spawned_by, actor, comment,
+                                now,
+                            )
+                            .map(|(_, effects)| effects)
+                    }
+                    _ => engine
+                        .add_sign(expected, &branch, seats, actor, comment, now)
+                        .map(|(_, effects)| effects),
+                }
             }
             ApprovalCommand::RemoveSign { task_ids } => {
                 let branch_id = self.branch_of_tasks(engine, &task_ids)?;
                 self.guard_sign_admin(engine, actor, &branch_id)?;
                 engine.remove_sign(expected, &branch_id, &task_ids, actor, now)
+            }
+            ApprovalCommand::RemoveAssignee {
+                task_id, assignees, ..
+            } => {
+                let branch_id = engine
+                    .tasks
+                    .get(task_id)
+                    .map(|t| t.branch_id.clone())
+                    .ok_or_else(|| BridgeError::NotFound((*task_id).to_string()))?;
+                self.guard_sign_admin(engine, actor, &branch_id)?;
+                engine
+                    .remove_assignee(expected, task_id, &assignees, actor, now)
+                    .map(|(_, _, effects)| effects)
             }
             ApprovalCommand::ReturnToNode {
                 branch_id,
@@ -998,7 +1255,8 @@ impl ApprovalBridge {
                 task_id: Some(task_id),
                 ..
             }
-            | ApprovalCommand::WithdrawTask { task_id, .. } => {
+            | ApprovalCommand::WithdrawTask { task_id, .. }
+            | ApprovalCommand::RemoveAssignee { task_id, .. } => {
                 engine.tasks.get(*task_id).map(|t| t.branch_id.clone())
             }
             ApprovalCommand::Cc { task_id: None, .. } => None,
@@ -1051,6 +1309,7 @@ fn status_label(status: InstanceStatus) -> &'static str {
     match status {
         InstanceStatus::Pending => "PENDING",
         InstanceStatus::Running => "RUNNING",
+        InstanceStatus::Waiting => "WAITING",
         InstanceStatus::Completed => "COMPLETED",
         InstanceStatus::Rejected => "REJECTED",
         InstanceStatus::Terminated => "TERMINATED",
@@ -1060,11 +1319,63 @@ fn status_label(status: InstanceStatus) -> &'static str {
 }
 
 /// 命令响应：`{"instance_id": ..., "status": <UPPERCASE>}`（幂等缓存同值）。
-fn response_for(engine: &Engine) -> Value {
-    json!({
+fn response_for(engine: &Engine, cmd: &ApprovalCommand<'_>, effects: &[Effect]) -> Value {
+    let mut response = json!({
         "instance_id": engine.instance.id.clone(),
         "status": status_label(engine.instance.status),
-    })
+    });
+    match cmd {
+        ApprovalCommand::AddSign { .. } => {
+            let derived: Vec<String> = effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::TaskCreated { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            response["derived_task_ids"] = json!(derived);
+        }
+        ApprovalCommand::RemoveSign { .. } | ApprovalCommand::RemoveAssignee { .. } => {
+            let removed: Vec<String> = effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::TaskStatus { id, to, .. } if *to == TaskStatus::Cancelled => {
+                        Some(id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let round = removed
+                .first()
+                .and_then(|id| engine.tasks.get(id))
+                .and_then(|t| engine.rounds.get(&t.round_id));
+            response["removed_task_ids"] = json!(removed);
+            if let Some(r) = round {
+                response["round"] = json!({
+                    "id": r.id,
+                    "branch_id": r.branch_id,
+                    "number": r.number,
+                    "status": serde_json::to_value(r.status).unwrap_or(Value::Null),
+                    "total_count": r.total_count,
+                    "completed_count": r.completed_count,
+                    "rejected_count": r.rejected_count,
+                    "reject_reason": r.reject_reason,
+                });
+            }
+        }
+        ApprovalCommand::Delegate { task_id, .. } => {
+            if let Some(expires_at) = engine
+                .tasks
+                .get(*task_id)
+                .and_then(|t| t.delegation.as_ref())
+                .and_then(|d| d.expires_at)
+            {
+                response["delegate_expires_at_ms"] = json!(expires_at);
+            }
+        }
+        _ => {}
+    }
+    response
 }
 
 /// 终态映射：仅 `Completed/Rejected/Cancelled/Terminated` 产生外部终态。
@@ -1074,7 +1385,10 @@ fn terminal_outcome(status: InstanceStatus) -> Option<ApprovalOutcome> {
         InstanceStatus::Rejected => Some(ApprovalOutcome::Rejected),
         InstanceStatus::Cancelled => Some(ApprovalOutcome::Cancelled),
         InstanceStatus::Terminated => Some(ApprovalOutcome::Terminated),
-        InstanceStatus::Pending | InstanceStatus::Running | InstanceStatus::Faulted => None,
+        InstanceStatus::Pending
+        | InstanceStatus::Running
+        | InstanceStatus::Waiting
+        | InstanceStatus::Faulted => None,
     }
 }
 
@@ -1113,6 +1427,9 @@ fn prior_seats(engine: &Engine, target_node: &str) -> Result<Vec<SeatSpec>, Appr
             assignee: t.assignee.clone(),
             candidates: t.candidates.clone(),
             kind: t.kind,
+            origin: t.origin,
+            predecessor: t.predecessor.clone(),
+            spawned_by: t.spawned_by.clone(),
         })
         .collect();
     if seats.is_empty() {
@@ -1135,7 +1452,8 @@ fn workflow_scope(context: &Value) -> Scope {
 mod tests {
     use super::*;
     use crate::workflow::approval::model::{
-        Branch, InstanceStatus as ApprovalStatus, JoinPolicy, RejectPolicy, RoundStatus, TaskStatus,
+        Branch, InstanceStatus as ApprovalStatus, JoinPolicy, RejectPolicy, RoundStatus,
+        TaskOrigin, TaskStatus,
     };
     use crate::workflow::approval::store::{ApprovalInstanceEntry, MemoryApprovalStore};
     use crate::workflow::ports::test_utils::TestClock;
@@ -1186,6 +1504,7 @@ mod tests {
             sign_admins: vec![],
             allow_self_approve: false,
             allow_cc: false,
+            timeout_policy: TimeoutPolicy::None,
         }
     }
 
@@ -1503,7 +1822,10 @@ mod tests {
                 "mallory",
                 ApprovalCommand::AddSign {
                     branch_id: &branch_id,
+                    task_id: None,
                     seats: vec![SeatSpec::approver("dave")],
+                    position: AddAssigneePosition::Current,
+                    spawned_by: None,
                     comment: None,
                 },
                 None,
@@ -1518,7 +1840,10 @@ mod tests {
                 "admin",
                 ApprovalCommand::AddSign {
                     branch_id: &branch_id,
+                    task_id: None,
                     seats: vec![SeatSpec::approver("dave")],
+                    position: AddAssigneePosition::Current,
+                    spawned_by: None,
                     comment: None,
                 },
                 None,
@@ -2047,6 +2372,8 @@ mod tests {
                 allow_self_approve: true,
                 allow_cc: false,
                 sign_admins: vec!["admin".into()],
+                timeout_policy: TimeoutPolicy::None,
+                timeout_ms: None,
             },
             ..branch
         };
@@ -2056,10 +2383,254 @@ mod tests {
             json!({
                 "allow_self_approve": true,
                 "sign_admins": ["admin"],
-                "allow_cc": false
+                "allow_cc": false,
+                "timeout_policy": "none"
             })
         );
         let back: Branch = serde_json::from_value(round).unwrap();
         assert_eq!(back.policy, with_policy.policy);
+    }
+    /// AddSign BEFORE/AFTER：桥接受任务级锚点并返回派生任务 id。
+    #[tokio::test]
+    async fn add_sign_before_suspends_and_after_runs_before_next_step() {
+        let (bridge, store) = build(None);
+        let mut task = approve_task(&["u1"]);
+        task.deadline = Some("PT1H".into());
+        bridge
+            .ensure_node_open(&wf(), "review", &task)
+            .await
+            .unwrap();
+        let anchor = task_id_for(&store, "u1").await;
+
+        let outcome = bridge
+            .command(
+                ID,
+                "zhangsan",
+                ApprovalCommand::AddSign {
+                    branch_id: "",
+                    task_id: Some(&anchor),
+                    seats: vec![SeatSpec::approver("u2")],
+                    position: AddAssigneePosition::Before,
+                    spawned_by: Some("action-before"),
+                    comment: Some("pre"),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let before_id = match outcome {
+            CommandOutcome::Applied { response, .. } => response["derived_task_ids"][0]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            other => panic!("expected Applied, got {other:?}"),
+        };
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(engine.tasks[&anchor].status, TaskStatus::Suspended);
+        assert_eq!(engine.tasks[&before_id].origin, TaskOrigin::BeforeAdded);
+        assert_eq!(
+            engine.tasks[&before_id].predecessor.as_deref(),
+            Some(anchor.as_str())
+        );
+        assert_eq!(
+            engine.tasks[&before_id].spawned_by.as_deref(),
+            Some("action-before")
+        );
+
+        // 前加签完成后恢复原席位。
+        bridge
+            .command(
+                ID,
+                "u2",
+                ApprovalCommand::Approve {
+                    task_id: &before_id,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(engine.tasks[&anchor].status, TaskStatus::Created);
+
+        // AFTER：原轮次通过后激活后加签席位。
+        let outcome = bridge
+            .command(
+                ID,
+                "zhangsan",
+                ApprovalCommand::AddSign {
+                    branch_id: "",
+                    task_id: Some(&anchor),
+                    seats: vec![SeatSpec::approver("u3")],
+                    position: AddAssigneePosition::After,
+                    spawned_by: None,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, CommandOutcome::Applied { .. }));
+        bridge
+            .command(
+                ID,
+                "u1",
+                ApprovalCommand::Approve {
+                    task_id: &anchor,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        let after = engine
+            .tasks
+            .values()
+            .find(|t| t.origin == TaskOrigin::AfterAdded)
+            .expect("after task");
+        assert_eq!(after.status, TaskStatus::Created);
+        assert_eq!(after.successor, None);
+    }
+
+    /// 超时策略 fail：到期直接收口，`ExpireOutcome` 带 `timed_out`。
+    #[tokio::test]
+    async fn expire_due_with_fail_policy_terminates_instance() {
+        let (bridge, store) = build(None);
+        let mut task = approve_task(&["u1"]);
+        task.deadline = Some("PT1S".into());
+        task.timeout_policy = TimeoutPolicy::Fail;
+        bridge
+            .ensure_node_open(&wf(), "review", &task)
+            .await
+            .unwrap();
+        let deadline = task.deadline_ms(T0).unwrap();
+
+        let outcome = bridge.expire_due(ID, deadline).await.unwrap();
+        assert_eq!(outcome.timed_out, Some(TimeoutDisposition::Failed));
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(engine.instance.status, ApprovalStatus::Terminated);
+        assert!(engine
+            .tasks
+            .values()
+            .all(|t| t.status == TaskStatus::Cancelled));
+    }
+
+    /// 超时策略 waiting：到期停 Waiting，ResumeWorkflow 重建任务并恢复。
+    #[tokio::test]
+    async fn expire_due_with_waiting_policy_then_resume_workflow() {
+        let (bridge, store) = build(None);
+        let mut task = approve_task(&["u1"]);
+        task.deadline = Some("PT1H".into());
+        task.timeout_policy = TimeoutPolicy::Waiting;
+        bridge
+            .ensure_node_open(&wf(), "review", &task)
+            .await
+            .unwrap();
+        let deadline = task.deadline_ms(T0).unwrap();
+
+        let outcome = bridge.expire_due(ID, deadline).await.unwrap();
+        assert_eq!(outcome.timed_out, Some(TimeoutDisposition::Waiting));
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(engine.instance.status, ApprovalStatus::Waiting);
+        assert!(bridge.next_open_deadline(ID).await.unwrap().is_none());
+
+        let outcome = bridge
+            .resume_workflow(ID, "zhangsan", None, 30_000, "extended", Some("resume-1"))
+            .await
+            .unwrap();
+        let response = outcome.response;
+        assert_eq!(response["status"], "RUNNING");
+        assert_eq!(
+            response["task_ids"].as_array().unwrap().len(),
+            1,
+            "恢复必须重建席位"
+        );
+        let (_, rev_after) = store.load(ID).await.unwrap().unwrap();
+        // 同 key 重放：返回首次响应，不再重建第二轮。
+        let replay = bridge
+            .resume_workflow(ID, "zhangsan", None, 30_000, "extended", Some("resume-1"))
+            .await
+            .unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(replay.response, response);
+        let (engine, rev_replay) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(rev_replay, rev_after, "幂等重放不得再提交");
+        assert_eq!(engine.instance.status, ApprovalStatus::Running);
+        assert_eq!(engine.open_tasks_for_at("u1", T0).len(), 1);
+    }
+
+    /// Resume 仅 Waiting 有效；超出步骤 timeout 预算时拒绝且零副作用。
+    #[tokio::test]
+    async fn resume_workflow_requires_waiting_and_time_budget() {
+        let (bridge, _store) = build(None);
+        let mut task = approve_task(&["u1"]);
+        task.deadline = Some("PT1S".into());
+        task.timeout_policy = TimeoutPolicy::Waiting;
+        bridge
+            .ensure_node_open(&wf(), "review", &task)
+            .await
+            .unwrap();
+        let deadline = task.deadline_ms(T0).unwrap();
+        bridge.expire_due(ID, deadline).await.unwrap();
+
+        let err = bridge
+            .resume_workflow(ID, "zhangsan", None, 30_000, "too long", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err, BridgeError::InvalidArgument("new_due_in_ms".into()));
+
+        let err = bridge
+            .resume_workflow(ID, "mallory", None, 10, "not allowed", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BridgeError::NotAuthorized(_)), "{err:?}");
+
+        let (bridge2, _store2) = build(None);
+        bridge2
+            .ensure_node_open(&wf(), "review", &approve_task(&["u1"]))
+            .await
+            .unwrap();
+        let err = bridge2
+            .resume_workflow(ID, "zhangsan", None, 10, "not waiting", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BridgeError::InvalidTransition(_)), "{err:?}");
+    }
+
+    /// 委派到期：`next_open_deadline` 暴露委派截止，`expire_due` 撤销代理权。
+    #[tokio::test]
+    async fn delegation_deadline_is_expired_by_expire_due() {
+        let (bridge, store) = build(None);
+        bridge
+            .ensure_node_open(&wf(), "review", &approve_task(&["u1"]))
+            .await
+            .unwrap();
+        let task = task_id_for(&store, "u1").await;
+        bridge
+            .command(
+                ID,
+                "u1",
+                ApprovalCommand::Delegate {
+                    task_id: &task,
+                    to: "u2",
+                    delegate_for_ms: 500,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let due = bridge.next_open_deadline(ID).await.unwrap();
+        assert_eq!(due, Some(T0 + 500));
+
+        let outcome = bridge.expire_due(ID, T0 + 500).await.unwrap();
+        assert_eq!(outcome.expired, 0, "委派到期不改席位状态");
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        let delegation = engine.tasks[&task].delegation.as_ref().unwrap();
+        assert_eq!(
+            delegation.revoke_reason.as_deref(),
+            Some("DELEGATION_EXPIRED")
+        );
+        assert!(engine.open_tasks_for_at("u2", T0 + 500).is_empty());
     }
 }

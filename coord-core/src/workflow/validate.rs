@@ -22,7 +22,7 @@ use super::model::{
     UseComponents, ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition, WorkflowRef,
 };
 
-use crate::workflow::approval::model::{JoinPolicy, RejectPolicy};
+use crate::workflow::approval::model::{JoinPolicy, RejectPolicy, TimeoutPolicy};
 
 use super::parser::{
     RawFunctionDef, RawNamedTask, RawRetryPolicy, RawTimeoutConfig, RawUseComponents,
@@ -1731,6 +1731,7 @@ impl Validator {
             "signAdmins",
             "allowSelfApprove",
             "allowCc",
+            "timeoutPolicy",
         ];
         let unknown: Vec<String> = body
             .keys()
@@ -1859,6 +1860,36 @@ impl Validator {
             }
         };
 
+        let timeout_policy = match body.get("timeoutPolicy") {
+            None => TimeoutPolicy::None,
+            Some(Value::String(s)) => match s.as_str() {
+                "none" => TimeoutPolicy::None,
+                "fail" => TimeoutPolicy::Fail,
+                "waiting" => TimeoutPolicy::Waiting,
+                other => {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(
+                            "approve.timeoutPolicy".to_string(),
+                        ),
+                        message: format!(
+                            "unimplemented construct 'approve.timeoutPolicy': expected \
+                             none|fail|waiting, got '{other}'"
+                        ),
+                    });
+                    return None;
+                }
+            },
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::TypeMismatch("approve.timeoutPolicy".to_string()),
+                    message: "approve.timeoutPolicy must be a string".to_string(),
+                });
+                return None;
+            }
+        };
+
         let allow_self_approve = match body.get("allowSelfApprove") {
             None => false,
             Some(Value::Bool(b)) => *b,
@@ -1894,6 +1925,17 @@ impl Validator {
                 Some(dur)
             }
         };
+
+        // 超时策略必须与 deadline 配套：没有 deadline 时 `fail`/`waiting` 永远不会触发，
+        // 静默接受会让调用方以为已启用超时处置。
+        if timeout_policy != TimeoutPolicy::None && deadline.is_none() {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::MissingRequiredField("approve.deadline".to_string()),
+                message: "approve.timeoutPolicy requires approve.deadline".to_string(),
+            });
+            return None;
+        }
 
         let on_pass = match body.get("onPass") {
             None => None,
@@ -1935,6 +1977,7 @@ impl Validator {
             sign_admins,
             allow_self_approve,
             allow_cc,
+            timeout_policy,
         }))
     }
 
@@ -5558,6 +5601,44 @@ do:
         assert!(
             parse_and_validate_yaml(&bad).is_err(),
             "non-boolean allowCc must reject"
+        );
+    }
+
+    #[test]
+    fn parse_approve_timeout_policy_variants() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-timeout
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        deadline: PT1H
+        timeoutPolicy: waiting
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("timeoutPolicy must parse");
+        match &def.do_tasks[0].task {
+            Task::Approve(a) => assert_eq!(a.timeout_policy, TimeoutPolicy::Waiting),
+            other => panic!("expected Approve task, got {other:?}"),
+        }
+        let bad = yaml.replace("waiting", "bogus");
+        let errs = parse_and_validate_yaml(&bad).expect_err("unknown timeoutPolicy must reject");
+        assert!(
+            error_kind_naming(&errs, "approve.timeoutPolicy"),
+            "errors: {errs:?}"
+        );
+        let without_deadline = yaml.replace("        deadline: PT1H\n", "");
+        let errs = parse_and_validate_yaml(&without_deadline)
+            .expect_err("timeoutPolicy without deadline must reject");
+        assert!(
+            errs.iter().any(|e| matches!(
+                &e.kind,
+                ValidationErrorKind::MissingRequiredField(field) if field == "approve.deadline"
+            )),
+            "errors: {errs:?}"
         );
     }
 

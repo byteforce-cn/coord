@@ -2585,13 +2585,15 @@ pub mod phase4 {
         match raw.to_ascii_lowercase().as_str() {
             "created" => Ok(ApprovalTaskStatus::Created),
             "claimed" => Ok(ApprovalTaskStatus::Claimed),
+            "suspended" => Ok(ApprovalTaskStatus::Suspended),
+            "scheduled" => Ok(ApprovalTaskStatus::Scheduled),
             "completed" => Ok(ApprovalTaskStatus::Completed),
             "rejected" => Ok(ApprovalTaskStatus::Rejected),
             "cancelled" => Ok(ApprovalTaskStatus::Cancelled),
             "expired" => Ok(ApprovalTaskStatus::Expired),
             other => Err(format!(
                 "unknown task status '{other}'; expected \
-                 created|claimed|completed|rejected|cancelled|expired"
+                 created|claimed|suspended|scheduled|completed|rejected|cancelled|expired"
             )),
         }
     }
@@ -2685,7 +2687,9 @@ pub mod phase4 {
     }
 
     /// 桥命令响应 `{"instance_id", "status"}` → `(instance_id, status)` 元组。
-    fn approval_response_status(response: &Value) -> Result<(String, String), BridgeError> {
+    pub(crate) fn approval_response_status(
+        response: &Value,
+    ) -> Result<(String, String), BridgeError> {
         let instance_id = response
             .get("instance_id")
             .and_then(Value::as_str)
@@ -3545,6 +3549,11 @@ pub mod phase4 {
         // ─── 审批 v2（ADR-0013 D7）命令 / 查询 ───
 
         /// 审批桥（`None` ⇒ 非 durable 装配）。
+        /// 服务时钟（毫秒）：handler 投影 assignment 的委派到期判定用。
+        pub fn now_ms(&self) -> i64 {
+            self.clock.now_ms()
+        }
+
         fn approval_bridge(&self) -> Result<&Arc<ApprovalBridge>, BridgeError> {
             self.approval.as_ref().ok_or_else(|| {
                 BridgeError::InvalidTransition("workflow durable engine disabled".into())
@@ -3600,6 +3609,28 @@ pub mod phase4 {
             cmd: ApprovalCommand<'_>,
             idempotency_key: Option<&str>,
         ) -> Result<(String, String), BridgeError> {
+            self.approval_command_with_receipt(
+                workflow_id,
+                actor,
+                acting_service,
+                cmd,
+                idempotency_key,
+            )
+            .await
+            .map(|(instance_id, status, _response)| (instance_id, status))
+        }
+
+        /// 命令执行的完整回执：`(instance_id, status, response)`。`response` 含
+        /// `derived_task_ids` / `removed_task_ids` / `round` / `delegate_expires_at_ms`
+        /// 等命令专属字段，供 gRPC handler 投影。
+        pub async fn approval_command_with_receipt(
+            &self,
+            workflow_id: &str,
+            actor: &str,
+            acting_service: Option<&str>,
+            cmd: ApprovalCommand<'_>,
+            idempotency_key: Option<&str>,
+        ) -> Result<(String, String, Value), BridgeError> {
             let bridge = self.approval_bridge()?;
             // `ReturnToNode` / `RejectToNode` 的恢复目标由桥的回执给出（桥只重开**目标
             // 节点**的分支，工作流仍挂在**返回节点**上）。若不把实例重新驱动到目标节点，
@@ -3618,7 +3649,10 @@ pub mod phase4 {
                 }
             };
             match outcome {
-                CommandOutcome::Duplicate(response) => approval_response_status(&response),
+                CommandOutcome::Duplicate(response) => {
+                    let (instance_id, status) = approval_response_status(&response)?;
+                    Ok((instance_id, status, response))
+                }
                 CommandOutcome::Applied {
                     response,
                     node_outcome,
@@ -3641,15 +3675,66 @@ pub mod phase4 {
                                 )
                                 .await
                                 .map_err(map_runtime_to_bridge)?;
+                            // 后台 drive 需在命令返回前重新挂起目标审批节点；否则调用方
+                            // 立即审批重开席位会撞上「工作流尚未挂起」的假冲突。
+                            runtime
+                                .await_resume_settled(workflow_id, 5_000)
+                                .await
+                                .map_err(map_runtime_to_bridge)?;
                         }
                         None => {
                             self.drive_approval_outcome(workflow_id, node_outcome, terminal)
                                 .await?;
                         }
                     }
-                    approval_response_status(&response)
+                    // 命令可能引入新的截止（如 `Delegate.delegate_for_ms`），补排定时器。
+                    if let Some(runtime) = self.runtime.as_ref() {
+                        runtime.reschedule_approval_deadline(workflow_id).await;
+                    }
+                    let (instance_id, status) = approval_response_status(&response)?;
+                    Ok((instance_id, status, response))
                 }
             }
+        }
+
+        /// 等待态恢复（`approve.timeoutPolicy: waiting`）：桥重建任务，运行时把工作流
+        /// 重新挂起到审批（同一节点、同一 approval 实例，新的 deadline 定时器）。
+        pub async fn resume_workflow(
+            &self,
+            workflow_id: &str,
+            actor: &str,
+            acting_service: Option<&str>,
+            new_due_in_ms: i64,
+            reason: &str,
+            idempotency_key: Option<&str>,
+        ) -> Result<Value, BridgeError> {
+            let bridge = self.approval_bridge()?;
+            let outcome = bridge
+                .resume_workflow(
+                    workflow_id,
+                    actor,
+                    acting_service,
+                    new_due_in_ms,
+                    reason,
+                    idempotency_key,
+                )
+                .await?;
+            if !outcome.duplicate {
+                let deadline_ms = outcome
+                    .response
+                    .get("deadline_ms")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| BridgeError::Serialization("missing deadline_ms".into()))?;
+                let runtime = self
+                    .runtime
+                    .as_ref()
+                    .ok_or_else(|| BridgeError::Store("runtime not initialized".into()))?;
+                runtime
+                    .renew_approval_deadline(workflow_id, deadline_ms)
+                    .await
+                    .map_err(map_runtime_to_bridge)?;
+            }
+            Ok(outcome.response)
         }
 
         /// 审批结论 → 工作流恢复 / 路由 / 故障。
@@ -3726,10 +3811,11 @@ pub mod phase4 {
                 .await
                 .map_err(BridgeError::from)?;
             let scanned = entries.len();
+            let now = self.clock.now_ms();
             let mut tasks = Vec::new();
             for entry in &entries {
                 let engine = &entry.engine;
-                for task in engine.open_tasks_for(actor) {
+                for task in engine.open_tasks_for_at(actor, now) {
                     let node = engine
                         .branches
                         .get(&task.branch_id)
@@ -4003,6 +4089,12 @@ pub mod phase4 {
                 });
                 if round.status != ApprovalRoundStatus::Open {
                     let status = round.status;
+                    if matches!(
+                        status,
+                        ApprovalRoundStatus::Suspended | ApprovalRoundStatus::Scheduled
+                    ) {
+                        continue;
+                    }
                     events.push(HistoryEventView {
                         event_id: format!("{base}:{}", json_label(&status)),
                         event_type: match status {
@@ -4010,6 +4102,8 @@ pub mod phase4 {
                             ApprovalRoundStatus::Rejected => "ROUND_REJECTED",
                             ApprovalRoundStatus::Superseded => "ROUND_SUPERSEDED",
                             ApprovalRoundStatus::Cancelled => "ROUND_CANCELLED",
+                            ApprovalRoundStatus::Suspended => "ROUND_SUSPENDED",
+                            ApprovalRoundStatus::Scheduled => "ROUND_SCHEDULED",
                             ApprovalRoundStatus::Open => "ROUND_OPENED",
                         }
                         .into(),
@@ -4058,6 +4152,17 @@ pub mod phase4 {
                 let event_type = match entry.action.as_str() {
                     "cc" => "TASK_CC",
                     "withdraw_task" => "TASK_WITHDRAWN",
+                    "urge" => "TASK_URGED",
+                    "add_assignee_before" => "TASK_ADD_ASSIGNEE_BEFORE",
+                    "add_assignee_after" => "TASK_ADD_ASSIGNEE_AFTER",
+                    "task_suspended" => "TASK_ASSIGNMENT_SUSPENDED",
+                    "task_resumed" => "TASK_ASSIGNMENT_RESUMED",
+                    "remove_assignee" => "TASK_ASSIGNEE_REMOVED",
+                    "after_spawn_discarded" => "TASK_AFTER_SPAWN_DISCARDED",
+                    "delegation_expired" => "DELEGATION_EXPIRED",
+                    "timeout_fail" => "TASK_OVERDUE",
+                    "timeout_wait" => "INSTANCE_WAITING",
+                    "resume_workflow" => "INSTANCE_RESUMED",
                     _ => continue,
                 };
                 let attributes = serde_json::from_str::<Value>(&entry.detail)
@@ -4075,11 +4180,18 @@ pub mod phase4 {
                     task_id: entry.task.clone().unwrap_or_default(),
                     action_id: String::new(),
                     occurred_at: entry.at,
-                    attributes,
+                    attributes: attributes.clone(),
                 });
             }
 
             if engine.instance.status.is_terminal() {
+                // 超时失败在审批聚合上是 `Terminated`（引擎不产生 Faulted），但工作流
+                // 侧是 `FAILED` + `TASK_OVERDUE`；投影按审计还原 seedj 的 `INSTANCE_FAILED`。
+                let timed_out = engine
+                    .instance
+                    .audit
+                    .iter()
+                    .any(|a| a.action == "timeout_fail");
                 let event_type = match engine.instance.status {
                     coord_core::workflow::approval::model::InstanceStatus::Completed => {
                         "INSTANCE_COMPLETED"
@@ -4090,6 +4202,11 @@ pub mod phase4 {
                     coord_core::workflow::approval::model::InstanceStatus::Cancelled => {
                         "INSTANCE_CANCELLED"
                     }
+                    coord_core::workflow::approval::model::InstanceStatus::Terminated
+                        if timed_out =>
+                    {
+                        "INSTANCE_FAILED"
+                    }
                     coord_core::workflow::approval::model::InstanceStatus::Terminated => {
                         "INSTANCE_TERMINATED"
                     }
@@ -4097,7 +4214,8 @@ pub mod phase4 {
                         "INSTANCE_FAULTED"
                     }
                     coord_core::workflow::approval::model::InstanceStatus::Pending
-                    | coord_core::workflow::approval::model::InstanceStatus::Running => "",
+                    | coord_core::workflow::approval::model::InstanceStatus::Running
+                    | coord_core::workflow::approval::model::InstanceStatus::Waiting => "",
                 };
                 if !event_type.is_empty() {
                     events.push(HistoryEventView {
@@ -4222,6 +4340,18 @@ pub mod phase4 {
             &self,
         ) -> Arc<dyn coord_core::workflow::ports::WorkflowStore + Send + Sync> {
             Arc::clone(&self.store)
+        }
+
+        /// 测试辅助：暴露审批桥（仅测试构建可见）。
+        #[cfg(test)]
+        pub(crate) fn approval_bridge_for_test(&self) -> Option<&Arc<ApprovalBridge>> {
+            self.approval.as_ref()
+        }
+
+        /// 测试辅助：暴露运行时（仅测试构建可见）。
+        #[cfg(test)]
+        pub(crate) fn runtime_for_test(&self) -> Option<&Arc<EngineRuntime>> {
+            self.runtime.as_ref()
         }
 
         /// 删除实例（保留策略，G-WF-1）。
@@ -6859,6 +6989,10 @@ do:
     }
 
     /// 内存审批存储 + 桥的测试服务（驱动路径与命令/查询路径共用同一桥）。
+    fn tests_now_ms(_svc: &WorkflowEngineService) -> i64 {
+        coord_core::workflow::ports::Clock::now_ms(&SystemClock)
+    }
+
     fn approve_service(
         roles: HashMap<String, Vec<String>>,
     ) -> (WorkflowEngineService, Arc<MemoryApprovalStore>) {
@@ -7630,8 +7764,12 @@ do:
         assert_eq!(detail.audit.last().unwrap().action, "cc");
         let history = svc.history(&inst.id).await.unwrap();
         assert!(history.iter().any(|e| e.event_type == "TASK_CC"));
-        // 催办不写历史（seedj 口径）。
-        assert!(!history.iter().any(|e| e.event_type.contains("URGED")));
+        // 催办写 TASK_URGED（seedj TCK 口径；不改状态机，仅审计投影）。
+        let urged = history
+            .iter()
+            .find(|e| e.event_type == "TASK_URGED")
+            .expect("TASK_URGED");
+        assert_eq!(urged.attributes["targetStatus"], "PENDING");
 
         // 任务级抄送：未开启 allowCc 的节点拒绝。
         let plain = svc
@@ -7656,6 +7794,114 @@ do:
             )
             .await
             .is_err());
+    }
+
+    /// 超时策略 fail：`History` 投影 `TASK_OVERDUE` 与 `INSTANCE_FAILED`。
+    #[tokio::test]
+    async fn timeout_policy_fail_projects_task_overdue_and_instance_failed() {
+        let (svc, store) = approve_service(HashMap::new());
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: timeout-fail-wf
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        deadline: PT1S
+        timeoutPolicy: fail
+"#;
+        let def_id = svc.deploy_definition("test", yaml).await.unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &inst.id, "alice").await;
+        let bridge = svc.approval_bridge_for_test().expect("approval bridge");
+        let outcome = bridge
+            .expire_due(&inst.id, tests_now_ms(&svc) + 2_000)
+            .await
+            .unwrap();
+        assert!(outcome.timed_out.is_some());
+        let history = svc.history(&inst.id).await.unwrap();
+        assert!(history.iter().any(|e| e.event_type == "TASK_OVERDUE"));
+        assert!(history.iter().any(|e| e.event_type == "INSTANCE_FAILED"));
+        let (engine, _) = store.load(&inst.id).await.unwrap().unwrap();
+        assert_eq!(
+            engine.instance.status,
+            coord_core::workflow::approval::model::InstanceStatus::Terminated
+        );
+    }
+
+    /// 超时策略 waiting：等待态经 `ResumeWorkflow` 重建任务并重新挂起工作流。
+    #[tokio::test]
+    async fn timeout_policy_waiting_resumes_through_service() {
+        let (svc, store) = approve_service(HashMap::new());
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: timeout-wait-wf
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        deadline: PT1H
+        timeoutPolicy: waiting
+"#;
+        let def_id = svc.deploy_definition("test", yaml).await.unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &inst.id, "alice").await;
+        let bridge = svc.approval_bridge_for_test().expect("approval bridge");
+        let outcome = bridge
+            .expire_due(&inst.id, tests_now_ms(&svc) + 3_601_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.timed_out,
+            Some(coord_core::workflow::approval::bridge::TimeoutDisposition::Waiting)
+        );
+        svc.runtime_for_test()
+            .expect("runtime")
+            .mark_approval_waiting(&inst.id)
+            .await
+            .unwrap();
+        assert!(svc
+            .history(&inst.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.event_type == "INSTANCE_WAITING"));
+
+        let response = svc
+            .resume_workflow(
+                &inst.id,
+                "initor",
+                None,
+                30_000,
+                "extended",
+                Some("resume-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "RUNNING");
+        let (engine, _) = store.load(&inst.id).await.unwrap().unwrap();
+        assert_eq!(
+            engine.instance.status,
+            coord_core::workflow::approval::model::InstanceStatus::Running
+        );
+        assert_eq!(engine.open_tasks_for("alice").len(), 1);
+        let workflow = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(
+            workflow.status,
+            coord_core::workflow::model::InstanceStatus::Suspended
+        );
     }
 
     /// 任务级撤回：保留通过记录、回退目标节点并重新驱动工作流。

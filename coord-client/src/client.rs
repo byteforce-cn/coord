@@ -38,14 +38,15 @@ use coord_proto::watch::{
 };
 use coord_proto::workflow::v1::workflow_client::WorkflowClient as WorkflowStub;
 use coord_proto::workflow::v1::{
-    WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse, WorkflowAddSignRequest,
-    WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse, WorkflowCcRequest,
-    WorkflowCcResponse, WorkflowDelegateRequest, WorkflowDelegateResponse,
-    WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest,
-    WorkflowGetTaskResponse, WorkflowHistoryRequest, WorkflowHistoryResponse,
-    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowListTasksRequest,
-    WorkflowListTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
-    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
+    AddAssigneePosition, WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse,
+    WorkflowAddSignRequest, WorkflowAddSignResponse, WorkflowApproveRequest,
+    WorkflowApproveResponse, WorkflowCcRequest, WorkflowCcResponse, WorkflowDelegateRequest,
+    WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse,
+    WorkflowGetTaskRequest, WorkflowGetTaskResponse, WorkflowHistoryRequest,
+    WorkflowHistoryResponse, WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse,
+    WorkflowListTasksRequest, WorkflowListTasksResponse, WorkflowRejectRequest,
+    WorkflowRejectResponse, WorkflowRemoveSignRequest, WorkflowRemoveSignResponse,
+    WorkflowResumeWorkflowRequest, WorkflowResumeWorkflowResponse, WorkflowReturnToNodeRequest,
     WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
     WorkflowTransferRequest, WorkflowTransferResponse, WorkflowUrgeRequest, WorkflowUrgeResponse,
     WorkflowWithdrawRequest, WorkflowWithdrawResponse, WorkflowWithdrawTaskRequest,
@@ -1799,6 +1800,68 @@ impl ApprovalClient {
             .await
     }
 
+    /// 任务级加签（BEFORE / AFTER）：以 `task_id` 为锚派生前/后加签席位。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_assignee(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        assignees: &[String],
+        position: AddAssigneePosition,
+        action_id: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowAddSignResponse> {
+        let request = WorkflowAddSignRequest {
+            workflow_id: workflow_id.to_string(),
+            branch_id: String::new(),
+            approvers: assignees.to_vec(),
+            pool: vec![],
+            readers: vec![],
+            comment: comment.to_string(),
+            idempotency_key: optional_idempotency_key(idempotency_key),
+            on_behalf_of: String::new(),
+            position: position as i32,
+            task_id: task_id.to_string(),
+            action_id: action_id.to_string(),
+        };
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.add_sign(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 按 assignee 减签：移除锚定轮次中匹配的未决席位，并返回重算后的轮次。
+    pub async fn remove_assignee(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        assignees: &[String],
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowRemoveSignResponse> {
+        let request = WorkflowRemoveSignRequest {
+            workflow_id: workflow_id.to_string(),
+            branch_id: String::new(),
+            task_ids: vec![],
+            comment: comment.to_string(),
+            idempotency_key: optional_idempotency_key(idempotency_key),
+            on_behalf_of: String::new(),
+            assignees: assignees.to_vec(),
+            task_id: task_id.to_string(),
+        };
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.remove_sign(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
     /// 减签：按席位 task id 撤销，并从计票分母剔除。
     pub async fn remove_sign(
         &self,
@@ -1878,6 +1941,58 @@ impl ApprovalClient {
                 let mut stub = WorkflowStub::new(channel);
                 let request = request.clone();
                 async move { stub.delegate(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 带到期时间的委托：到期后由截止定时器撤销代理权，原审批人继续可批。
+    pub async fn delegate_for(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        to: &str,
+        delegate_for_ms: i64,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowDelegateResponse> {
+        let request = WorkflowDelegateRequest {
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.to_string(),
+            to: to.to_string(),
+            comment: comment.to_string(),
+            idempotency_key: optional_idempotency_key(idempotency_key),
+            on_behalf_of: String::new(),
+            delegate_for_ms,
+        };
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.delegate(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 等待态恢复（`approve.timeoutPolicy: waiting`）：重建任务并写新的相对截止。
+    pub async fn resume_workflow(
+        &self,
+        workflow_id: &str,
+        new_due_in_ms: i64,
+        reason: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowResumeWorkflowResponse> {
+        let request = WorkflowResumeWorkflowRequest {
+            workflow_id: workflow_id.to_string(),
+            new_due_in_ms,
+            reason: reason.to_string(),
+            idempotency_key: optional_idempotency_key(idempotency_key),
+            on_behalf_of: String::new(),
+        };
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.resume_workflow(request).await.map(|r| r.into_inner()) }
             })
             .await
     }
@@ -2153,6 +2268,9 @@ fn add_sign_request(
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
         on_behalf_of: String::new(),
+        position: AddAssigneePosition::Current as i32,
+        task_id: String::new(),
+        action_id: String::new(),
     }
 }
 
@@ -2170,6 +2288,8 @@ fn remove_sign_request(
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
         on_behalf_of: String::new(),
+        assignees: vec![],
+        task_id: String::new(),
     }
 }
 
@@ -2221,6 +2341,7 @@ fn delegate_request(
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
         on_behalf_of: String::new(),
+        delegate_for_ms: 0,
     }
 }
 

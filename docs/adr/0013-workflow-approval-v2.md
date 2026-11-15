@@ -112,6 +112,7 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
       onReject: rework          # 可选；缺省 = 工作流 fault（approval_rejected）
       signAdmins: [admin]       # 可选；加签/减签/驳回重开/终止的授权名单
       allowSelfApprove: false   # 默认 false（发起人不可自批）
+      timeoutPolicy: none       # 可选；none（默认）| fail | waiting（见 D13）
 ```
 
 - **增量（ADR-0014 D1）**：四个席位来源的单个条目可写 `${ ... }` 运行时表达式，
@@ -197,7 +198,8 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 - **增量（ADR-0014 D2）**：命令请求可带 `on_behalf_of`、`ListPendingTasks` 可带
   `assignee`；调用方服务须在 `services.workflow_on_behalf_services` 白名单内，
   生效主体为被代表用户，`acting_service` 记执行服务（详见 ADR-0014）。
-- 契约面：`coord.workflow.v1` **增量新增 12 个 RPC**（WHITEPAPER §4.2 允许的 Minor）：
+- 契约面：`coord.workflow.v1` **增量新增 12 个 RPC**（WHITEPAPER §4.2 允许的 Minor；
+  后续增量见 D13：任务级动作 3 个 + `ResumeWorkflow`，当前命令面 14 个/查询面 5 个）：
   命令 10 个——`Approve / Reject / Acknowledge / AddSign / RemoveSign / ReturnToNode /
   Transfer / Delegate / Withdraw / Terminate`；查询 2 个——`ListPendingTasks /
   GetInstanceDetail`。命令请求带 `idempotency_key`（复用 Signal 模式），主体身份取自
@@ -212,9 +214,10 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   | 操作 | 授权主体 |
   |:--|:--|
   | `Approve / Reject / Acknowledge / Transfer / Delegate` | 席位责任人 / 候选池成员 / 被委派人（引擎 `actor_can_act`）；当节点 `allowSelfApprove=false` 时附加 `actor != initiator`（`initiator == "anonymous"` 豁免——匿名发起无自审约束） |
-  | `AddSign / RemoveSign` | 分支 `signAdmins` ∪ 实例发起人 |
+  | `AddSign / RemoveSign`（含 BEFORE/AFTER 派生与按 assignee 减签） | 分支 `signAdmins` ∪ 实例发起人 |
   | `ReturnToNode` | 分支未决席位持有人（`assignee`/`candidate`/被委派人）∪ `signAdmins` ∪ 发起人 |
   | `Withdraw` | 仅发起人（引擎自身强制） |
+| `ResumeWorkflow` | 实例发起人 ∪ 任一分支 `signAdmins` |
   | `Terminate` | `signAdmins`（任一分支声明者）；保留内部 `SYSTEM_ACTOR="system"` 生命周期权威——恒可终止，用于 `cancel_instance` 运行时收口，不对用户暴露 |
   | `expire` | 仅桥（持久化定时器），无 RPC |
 
@@ -256,9 +259,9 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 - v2.0 不承诺：流程级并行分支（多 Open 分支）与嵌套子流程的结果记账；
   如需要，另立 ADR 扩展（Spike 1 GAPS Q8/Q9）。
 - 查询外部化（评估报告 §11）不在本期承诺；Spike 5 容量评估超阈值时另议。
-- deadline 到期**无自动处置**（Q4）：过期只把席位置 `Expired` 并从计票分母剔除，既不自动
-  通过也不自动驳回；全员过期/被减签的轮次保持 `Open`，实例不因超时收口。处置由人决定
-  （`AddSign` 补席或 `Terminate` 终止是唯一出口）。
+- deadline 到期**默认无自动处置**（Q4）：未声明 `approve.timeoutPolicy` 时仍只把席位置
+  `Expired` 并从计票分母剔除，既不自动通过也不自动驳回；全员过期/被减签的轮次保持
+  `Open`。显式声明 `fail` / `waiting` 时按 D13 处置（增量：不改变缺省承诺）。
 - 命令路径**不产生审批实例 `Faulted`**：RPC 命令只收口为 `Completed / Rejected / Cancelled /
   Terminated`；`Faulted` 保留给版本级故障——定义漂移时 `resume_approval` 在写前 fail-closed，
   工作流实例置 `Failed`（`FAULTED`），审批命令不返回 `Faulted`。`cancel_instance` 对所有非终态
@@ -345,6 +348,34 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   `sign_completion_unsatisfiable` / `on_exhausted`。
 - **不撤销否决记录**：否决票是已发生事实，后续回退/重开不得删除或改写（任务级撤回
   落地时同样受此约束）。
+
+### D13 超时策略与 assignment 状态机（#381 增量，2026-11-15）
+
+本增量把 seedj `WorkflowProvider` 的任务级状态机映射到 coord，不扩大默认承诺：
+
+- **加签位置**：`AddSign` 请求增加 `position = CURRENT|BEFORE|AFTER` 与锚定 `task_id`
+  （`action_id` 映射 `spawnedByActionId`）。`BEFORE` 生成前加签轮次并把原轮次置
+  `Suspended`（原席位对外仍是原任务，但不进待办、不可投票）；前加签轮次通过后原轮次
+  恢复。`AFTER` 生成 `Scheduled` 轮次，原轮次通过后、下一业务节点前激活；默认
+  `AnyApprove`；原轮次被否决/上游回退时丢弃派生任务（`TASK_AFTER_SPAWN_DISCARDED`）。
+- **assignment 读面**：`Task` 增加 `origin` / `predecessor` / `successor` / `spawned_by` /
+  `suspended_from`；`ApprovalTask.assignments` 展开原责任人、代理人、转办来源，状态为
+  `pending|scheduled|suspended|transferred|delegated|completed|rejected|cancelled|expired`。
+- **减签按 assignee**：`RemoveSign` 增加 `assignees` + 锚定 `task_id`，只移除未决席位；
+  候选池移除单个候选，池清空才取消席位；响应返回被移除席位与重算后的轮次。
+- **委派到期**：`Delegate` 增加 `delegate_for_ms`；到期由审批 deadline 定时器撤销代理权
+  （`DELEGATION_EXPIRED`），原审批人继续可批；席位终态撤销代理 assignment（原因
+  `RULE_SATISFIED` / `TASK_REJECTED` / `TASK_CANCELLED` / `TASK_EXPIRED`）。
+- **超时策略（B-WF-5 的显式 opt-in）**：
+  - 缺省 `timeoutPolicy: none` = B-WF-5 现状（只过期、不自动收口）；
+  - `fail`：到期取消全部活跃席位、审批聚合置 `Terminated`，工作流 `FAULTED`
+    （`TASK_OVERDUE`）；
+  - `waiting`：到期取消当前轮次未决席位、审批聚合与工作流置 `WAITING`（保留审批挂起
+    元信息）；`ResumeWorkflow(workflow_id, new_due_in_ms, reason)` 由发起人 / `signAdmins`
+    调用，按上一轮席位重建任务并重新挂起。步骤配置了 `timeout` 时校验
+    「已消耗 + 新截止」不超出预算，超出 `INVALID_ARGUMENT` 且零副作用。
+  - 缺省仍为 `none`：既有的「deadline 到期无自动处置」承诺不改变；seedj 适配器按
+    `HumanTaskSpec.metadata.timeoutPolicy` 显式设置 `fail` / `waiting`。
 
 ## 后果
 

@@ -37,26 +37,26 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | `rejectCompletion.AtLeastRejects(n)` | `reject: "atLeastRejects:<n>"` | |
 | `rejectCompletion.RecordAndContinue` | `reject: recordAndContinue` | 剩余席位不可能满足通过条件时立即回退（`SIGN_COMPLETION_UNSATISFIABLE`）。 |
 | `rejectTargets` | 已进入节点白名单 | coord 的驳回目标必须是**已到达**的节点；更宽的 per-task 白名单未建模，适配器需自行校验后映射。 |
-| `dueIn` | `deadline`（ISO8601 duration） | 到期只置 `Expired` 并从计票分母剔除，**不自动通过/驳回**（B-WF-5）；`WAITING` 恢复策略未实现。 |
+| `dueIn` | `deadline`（ISO8601 duration） | 缺省只置 `Expired` 并从计票分母剔除，**不自动通过/驳回**（B-WF-5）；seedj 的默认「超时失败」映射为 `timeoutPolicy: fail`，`metadata.timeoutPolicy=WAITING` 映射为 `timeoutPolicy: waiting`（ADR-0013 D13）。 |
 | `allowCc` | `allowCc` | 缺省 `false`；仅任务级抄送读取。 |
-| `allowAddAssignee` / `allowRemove` / `allowTransfer` / `allowDelegate` / `allowWithdraw` / `allowUrge` | 未建模 | 适配器按能力矩阵声明；不得默认放行。 |
-| `formKey` / `formSchema` / `formData` | 未建模 | `Approve/Reject` 只带 `comment`；表单数据由 seedj 侧存储并在读视图合并。 |
+| `allowAddAssignee` / `allowRemove` / `allowTransfer` / `allowDelegate` / `allowWithdraw` / `allowUrge` | 未建模 | 适配器按能力矩阵声明；不得默认放行。`allowAddAssignee` 的 `position` 由 `AddSign.position` 表达。 |
+| `formKey` / `formSchema` / `formData` | **不支持（不扩承诺）** | ADR-0013 D9 明确不做业务表单/业务数据存储；`Approve/Reject` 只带 `comment`。表单数据由 seedj 侧存储并在读视图合并，coord 不在 wire 上新增 `formData`。 |
 
 ## 3. 动作（`act`）
 
 | seedj `WorkflowAction` | coord 命令 | 支持状态 |
 |:--|:--|:--|
-| `Approve` | `Approve` | ✅（`formData` / `occurredAt` 未建模） |
+| `Approve` | `Approve` | ✅（`formData` 按 D9 不支持，由 seedj 侧存储；时间戳取 coord 服务端时钟） |
 | `Reject(targetStep)` | `Reject` + `target_node` | ✅（原子投票 + 回退） |
 | `Transfer` | `Transfer` | ✅（原责任人进 `transferred_from`，不携带投票记录） |
-| `Delegate(delegateFor)` | `Delegate` | ⚠️ 无到期自动恢复；`delegateFor` 须由适配器用定时任务调用撤回复原 |
+| `Delegate(delegateFor)` | `Delegate` + `delegate_for_ms` | ✅ 到期由审批 deadline 定时器撤销代理权（`DELEGATION_EXPIRED`）；终态撤销代理 assignment。 |
 | `Withdraw(任务级)` | `WithdrawTask` + `target_node` | ✅（仅原审批人；保留通过记录；带否决票的席位拒绝撤回） |
 | `WithdrawInstance` | `Withdraw` | ✅（仅发起人；级联取消实例） |
-| `Urge` | `Urge` | ✅（只写审计/通知，不写历史） |
+| `Urge` | `Urge` | ✅（只写审计/通知；`History` 投影 `TASK_URGED`） |
 | `Cc` | `Cc` | ✅（任务级要求节点 `allowCc: true`；实例级限发起人/`sign_admins`） |
-| `AddAssignee(position)` | `AddSign` | ⚠️ 只支持“向当前轮次加席位”；`BEFORE/AFTER` 派生任务、assignment 挂起/恢复未建模（#381） |
-| `RemoveAssignee` | `RemoveSign` | ⚠️ 按席位 id；适配器先用 `GetTask`/`ListTasks` 把 assignee 映射到 task id；重算结果通过 `GetInstanceDetail` 读回 |
-| `Resume(newDueIn)` | — | ❌ 未实现（无 `WAITING` 状态策略与 `Resume` RPC） |
+| `AddAssignee(position)` | `AddSign` + `position`/`task_id`/`action_id` | ✅ `CURRENT` / `BEFORE` / `AFTER`；响应 `derived_task_ids`；BEFORE 挂起原席位、完成后恢复；AFTER 原轮次通过后执行、否决/回退时丢弃（`TASK_AFTER_SPAWN_DISCARDED`）。 |
+| `RemoveAssignee` | `RemoveSign` + `assignees`/`task_id` | ✅ 按 assignee 移除未决席位（候选池移除单个候选），响应 `removed_task_ids` + 重算后的 `round`。 |
+| `Resume(newDueIn)` | `ResumeWorkflow` | ✅ 仅 `WAITING` 有效；按上一轮席位重建任务并写新截止（`timeoutPolicy: waiting` 超时后）。coord 工作流仍为 `SUSPENDED`（审批挂起），审批聚合与 seedj `RUNNING` 对齐。 |
 | `Signal(name)` | `Signal` | ✅（`signal_name` 必须匹配挂起等待） |
 | `Cancel` / `Terminate` | `Cancel` / `Terminate` | ✅（终态不可再变更） |
 
@@ -65,21 +65,18 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | seedj | coord |
 |:--|:--|
 | `describe(instanceId)` / `status` | `GetStatus` + `GetInstanceDetail`（`revision` 为 CAS 守卫） |
-| `describeTask(taskId)` | `GetTask`（席位 + votes + 实例状态） |
+| `describeTask(taskId)` | `GetTask`（席位 + votes + 实例状态 + `origin`/`predecessor`/`successor`/`spawned_by`/`assignments`） |
 | `listTasks(TaskQuery)` | `ListTasks`：`instance_id` / `assignee` / `completed_by` / `candidate_group` / `node` / `status` / `due_before_ms` |
 | `pendingFor` | `ListTasks{assignee, status=created|claimed}`（或 `ListPendingTasks`） |
 | `search(WorkflowSearchQuery)` | `ListInstances`：`definition` / `status_filter` / `started_after_ms` / `started_before_ms` |
-| `history(instanceId)` | `History`：`STEP_ENTERED` / `TASK_*` / `ROUND_*` / `INSTANCE_*`；`actionId` 当前为空 |
+| `history(instanceId)` | `History`：`STEP_ENTERED` / `TASK_*` / `ROUND_*` / `INSTANCE_*` + `TASK_URGED` / `TASK_CC` / `TASK_WITHDRAWN` / `TASK_ASSIGNEE_REMOVED` / `TASK_ASSIGNMENT_SUSPENDED|RESUMED` / `TASK_ADD_ASSIGNEE_BEFORE|AFTER` / `TASK_AFTER_SPAWN_DISCARDED` / `DELEGATION_EXPIRED`；`actionId` 当前为空（派生任务用 `spawned_by_action_id`） |
 | `provider.now()` | 无独立时钟 RPC；响应时间戳均为 Unix ms，使用本地时钟即可 |
 | `capabilities` | 由适配器按本表声明；未实现项必须报 `false`（或回退本地 provider） |
 
 ## 5. 已知缺口（跟踪）
 
-- 前后加签（`AddAssigneePosition.BEFORE/AFTER`）、减签重算的 assignment 级视图、委派到期、
-  `WAITING` + `Resume` → issue #381 剩余项；任务级撤回/催办/抄送已落地（见 §3）。
-- seedj `HumanTask` 的 `predecessorTaskId` / `successorTaskId` / `spawnedByActionId` /
-  assignment 级 `SUSPENDED|TRANSFERRED|DELEGATED` 状态：依赖 #381 的派生任务与
-  assignment 状态机；当前只能由 task 的 `transferred_from` / `delegation` / votes
-  近似映射。
-- `History` 不含 `TASK_ASSIGNMENT_SUSPENDED/RESUMED`、`TASK_ADD_ASSIGNEE_BEFORE`、
-  `TASK_CC`（对应能力未落地）。
+- **无未落地项**：#381 的剩余项（前后加签、assignment 读面、按 assignee 减签、委派到期、
+  `WAITING` + `Resume`）已随 ADR-0013 D13 落地。
+- `formData`：按 ADR-0013 D9 **不实现**，由 seedj 侧存储并在读视图合并（见 §2）。
+- `History.actionId` 仍为空；seedj `actionId` 只在加签派生任务上映射为
+  `spawned_by_action_id`。

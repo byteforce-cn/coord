@@ -925,6 +925,7 @@ fn delegate_allows_proxy_and_keeps_principal() {
         e.instance.revision,
         &seats[0],
         "dave",
+        None,
         "alice",
         tick(&mut t),
     )
@@ -964,6 +965,7 @@ fn delegate_allows_proxy_and_keeps_principal() {
         e2.instance.revision,
         &seats2[0],
         "dave",
+        None,
         "alice",
         tick(&mut t2),
     )
@@ -2433,6 +2435,757 @@ fn withdraw_task_rejects_reject_record_and_outsider() {
             tick(&mut t)
         )
         .unwrap_err(),
+        ApprovalError::InvalidTransition(_)
+    ));
+}
+
+// ------------------------------------------------- 前后加签 / assignment 状态机
+
+/// 前加签：挂起原席位（对外仍属原任务、但不可见/不可投票），前加签完成后恢复。
+#[test]
+fn before_add_suspends_original_and_resumes_after_completion() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let original = seats[0].clone();
+
+    let (derived, _) = e
+        .add_assignee(
+            e.instance.revision,
+            &original,
+            &["u2".into()],
+            AddAssigneePosition::Before,
+            Some("action-1"),
+            "admin",
+            Some("pre"),
+            tick(&mut t),
+        )
+        .unwrap();
+    assert_eq!(derived.len(), 1);
+    assert_eq!(e.tasks[&original].status, TaskStatus::Suspended);
+    assert_eq!(e.tasks[&original].suspended_from, Some(TaskStatus::Created));
+    assert!(
+        e.open_tasks_for_at("u1", t).is_empty(),
+        "挂起席位不得进入待办"
+    );
+    let before = &e.tasks[&derived[0]];
+    assert_eq!(before.origin, TaskOrigin::BeforeAdded);
+    assert_eq!(before.predecessor.as_deref(), Some(original.as_str()));
+    assert_eq!(before.spawned_by.as_deref(), Some("action-1"));
+    assert_eq!(e.open_tasks_for_at("u2", t).len(), 1);
+
+    e.approve(e.instance.revision, &derived[0], "u2", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.tasks[&original].status, TaskStatus::Created);
+    assert_eq!(e.open_tasks_for_at("u1", t).len(), 1);
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+    assert_eq!(e.branches[&branch].status, BranchStatus::Open);
+    assert!(e
+        .instance
+        .audit
+        .iter()
+        .any(|a| a.action == "task_suspended"));
+    assert!(e.instance.audit.iter().any(|a| a.action == "task_resumed"));
+
+    e.approve(e.instance.revision, &original, "u1", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.branches[&branch].status, BranchStatus::Completed);
+    e.finish(e.instance.revision, tick(&mut t)).unwrap();
+    assert_eq!(e.instance.status, InstanceStatus::Completed);
+}
+
+/// 后加签：原轮次通过后、下一业务节点前执行；默认 Any，任一通过即取消其余。
+#[test]
+fn after_add_runs_after_original_and_defaults_to_any() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1"), SeatSpec::approver("u2")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    let (derived, _) = e
+        .add_assignee(
+            e.instance.revision,
+            &seats[0],
+            &["u4".into(), "u5".into()],
+            AddAssigneePosition::After,
+            Some("action-2"),
+            "admin",
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    assert_eq!(derived.len(), 2);
+    assert_eq!(
+        e.tasks[&seats[0]].successor.as_deref(),
+        Some(derived[0].as_str())
+    );
+    assert!(derived
+        .iter()
+        .all(|id| e.tasks[id].status == TaskStatus::Scheduled));
+    assert!(e.open_tasks_for_at("u4", t).is_empty(), "待激活席位不可见");
+
+    e.approve(e.instance.revision, &seats[0], "u1", None, tick(&mut t))
+        .unwrap();
+    e.approve(e.instance.revision, &seats[1], "u2", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(
+        e.branches[&branch].status,
+        BranchStatus::Open,
+        "后加签未完成前不得关闭分支"
+    );
+    assert_eq!(e.open_tasks_for_at("u4", t).len(), 1);
+    assert_eq!(e.open_tasks_for_at("u5", t).len(), 1);
+
+    e.approve(e.instance.revision, &derived[0], "u4", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.tasks[&derived[1]].status, TaskStatus::Cancelled);
+    assert_eq!(e.branches[&branch].status, BranchStatus::Completed);
+}
+
+/// 原任务被否决：后加签派生任务丢弃并写审计原因。
+#[test]
+fn after_spawn_is_discarded_when_original_is_rejected() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1"), SeatSpec::approver("u2")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (derived, _) = e
+        .add_assignee(
+            e.instance.revision,
+            &seats[0],
+            &["u5".into()],
+            AddAssigneePosition::After,
+            None,
+            "admin",
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    e.reject(e.instance.revision, &seats[0], "u1", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.tasks[&derived[0]].status, TaskStatus::Cancelled);
+    assert_eq!(e.branches[&branch].status, BranchStatus::Rejected);
+    let discarded = e
+        .instance
+        .audit
+        .iter()
+        .find(|a| a.action == "after_spawn_discarded")
+        .expect("discard audit");
+    assert!(discarded.detail.contains("REJECTED"));
+}
+
+/// 后加签先挂起、前加签完成后仍保留；前加签被否决时按上游回退丢弃。
+#[test]
+fn after_pending_survives_before_completion_and_discards_on_before_reject() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (after, _) = e
+        .add_assignee(
+            e.instance.revision,
+            &seats[0],
+            &["u3".into()],
+            AddAssigneePosition::After,
+            None,
+            "admin",
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (before, _) = e
+        .add_assignee(
+            e.instance.revision,
+            &seats[0],
+            &["u2".into()],
+            AddAssigneePosition::Before,
+            None,
+            "admin",
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(e.instance.revision, &before[0], "u2", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(
+        e.tasks[&after[0]].status,
+        TaskStatus::Scheduled,
+        "前加签完成不得丢弃后加签"
+    );
+    assert!(e
+        .instance
+        .audit
+        .iter()
+        .all(|a| !(a.action == "after_spawn_discarded")));
+
+    // 第二条实例：前加签被否决 ⇒ 后加签丢弃（UPSTREAM_ROLLBACK）。
+    let mut rejected = start();
+    let mut t2 = 1_000;
+    let (b2, _) = rejected
+        .enter_branch(
+            rejected.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t2),
+        )
+        .unwrap();
+    let (_, s2, _) = rejected
+        .open_approval(
+            rejected.instance.revision,
+            &b2,
+            vec![SeatSpec::approver("u1")],
+            None,
+            tick(&mut t2),
+        )
+        .unwrap();
+    let (after2, _) = rejected
+        .add_assignee(
+            rejected.instance.revision,
+            &s2[0],
+            &["u3".into()],
+            AddAssigneePosition::After,
+            None,
+            "admin",
+            None,
+            tick(&mut t2),
+        )
+        .unwrap();
+    let (before2, _) = rejected
+        .add_assignee(
+            rejected.instance.revision,
+            &s2[0],
+            &["u2".into()],
+            AddAssigneePosition::Before,
+            None,
+            "admin",
+            None,
+            tick(&mut t2),
+        )
+        .unwrap();
+    rejected
+        .reject(
+            rejected.instance.revision,
+            &before2[0],
+            "u2",
+            None,
+            tick(&mut t2),
+        )
+        .unwrap();
+    assert_eq!(rejected.tasks[&after2[0]].status, TaskStatus::Cancelled);
+    let discarded = rejected
+        .instance
+        .audit
+        .iter()
+        .find(|a| a.action == "after_spawn_discarded")
+        .expect("discard audit");
+    assert!(discarded.detail.contains("UPSTREAM_ROLLBACK"));
+}
+
+/// 按 assignee 减签：只移除 PENDING 席位并按剩余席位重算。
+#[test]
+fn remove_assignee_by_principal_recounts_round() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1"), SeatSpec::approver("u2")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (removed, round, out) = e
+        .remove_assignee(
+            e.instance.revision,
+            &seats[0],
+            &["u2".into()],
+            "admin",
+            tick(&mut t),
+        )
+        .unwrap();
+    assert_eq!(removed, vec![seats[1].clone()]);
+    assert_eq!(round.total_count, 1);
+    assert!(has_event(&out, "com.china-workflow.approval.round.passed.v1") == false);
+    assert_eq!(e.tasks[&seats[1]].status, TaskStatus::Cancelled);
+    e.approve(e.instance.revision, &seats[0], "u1", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.branches[&branch].status, BranchStatus::Completed);
+}
+
+/// 委派到期：代理权撤销，原审批人继续可批；assignment 读面给出 DELEGATED / CANCELLED。
+#[test]
+fn delegation_expiry_restores_original_and_terminal_cancels_assignment() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let task = seats[0].clone();
+    e.delegate(
+        e.instance.revision,
+        &task,
+        "u2",
+        Some(1_500),
+        "u1",
+        tick(&mut t),
+    )
+    .unwrap();
+    assert!(e.open_tasks_for_at("u2", 1_400).len() == 1);
+    assert!(e.open_tasks_for_at("u2", 1_600).is_empty());
+    assert_eq!(
+        e.tasks[&task].assignments(1_400)[0].status,
+        AssignmentStatus::Delegated
+    );
+
+    e.expire_delegations(e.instance.revision, 1_600).unwrap();
+    let delegation = e.tasks[&task].delegation.as_ref().unwrap();
+    assert_eq!(
+        delegation.revoke_reason.as_deref(),
+        Some("DELEGATION_EXPIRED")
+    );
+    assert_eq!(
+        e.tasks[&task].assignments(1_600)[0].status,
+        AssignmentStatus::Cancelled
+    );
+    assert!(e.open_tasks_for_at("u2", 1_600).is_empty());
+    assert_eq!(e.open_tasks_for_at("u1", 1_600).len(), 1);
+
+    e.approve(e.instance.revision, &task, "u1", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.tasks[&task].status, TaskStatus::Completed);
+}
+
+/// 终态取消代理 assignment：完成时原责任人 assignment 变 CANCELLED（RULE_SATISFIED）。
+#[test]
+fn terminal_task_cancels_delegated_assignment() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1"), SeatSpec::approver("u3")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let task = seats[0].clone();
+    e.delegate(
+        e.instance.revision,
+        &task,
+        "u2",
+        Some(t + 30_000),
+        "u1",
+        tick(&mut t),
+    )
+    .unwrap();
+    e.approve(e.instance.revision, &task, "u2", None, tick(&mut t))
+        .unwrap();
+    e.approve(e.instance.revision, &seats[1], "u3", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.tasks[&task].status, TaskStatus::Completed);
+    let assignments = e.tasks[&task].assignments(t);
+    let original = assignments
+        .iter()
+        .find(|a| a.principal == "u1")
+        .expect("original assignment");
+    assert_eq!(original.status, AssignmentStatus::Cancelled);
+    assert_eq!(original.resolved_reason.as_deref(), Some("RULE_SATISFIED"));
+}
+
+/// 超时策略 fail / waiting + Resume：失败收口、等待态重建任务。
+#[test]
+fn timeout_policy_fail_and_waiting_resume() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy {
+                timeout_policy: TimeoutPolicy::Fail,
+                timeout_ms: Some(10_000),
+                ..Default::default()
+            },
+            tick(&mut t),
+        )
+        .unwrap();
+    e.open_approval(
+        e.instance.revision,
+        &branch,
+        vec![SeatSpec::approver("u1")],
+        Some(1_500),
+        tick(&mut t),
+    )
+    .unwrap();
+    e.timeout_fail(e.instance.revision, "TASK_OVERDUE", 1_600)
+        .unwrap();
+    assert_eq!(e.instance.status, InstanceStatus::Terminated);
+
+    let mut w = start();
+    let mut tw = 1_000;
+    let (wb, _) = w
+        .enter_branch(
+            w.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy {
+                timeout_policy: TimeoutPolicy::Waiting,
+                timeout_ms: Some(10_000),
+                ..Default::default()
+            },
+            tick(&mut tw),
+        )
+        .unwrap();
+    let (_, old, _) = w
+        .open_approval(
+            w.instance.revision,
+            &wb,
+            vec![SeatSpec::approver("u1")],
+            Some(1_500),
+            tick(&mut tw),
+        )
+        .unwrap();
+    w.timeout_wait(w.instance.revision, "TASK_OVERDUE", 1_600)
+        .unwrap();
+    assert_eq!(w.instance.status, InstanceStatus::Waiting);
+    assert_eq!(w.tasks[&old[0]].status, TaskStatus::Cancelled);
+    assert!(matches!(
+        w.approve(w.instance.revision, &old[0], "u1", None, 1_700)
+            .unwrap_err(),
+        ApprovalError::InvalidTransition(_)
+    ));
+
+    let (new_tasks, _) = w
+        .resume_waiting(w.instance.revision, 5_000, "u1", "extended", 2_000)
+        .unwrap();
+    assert_eq!(w.instance.status, InstanceStatus::Running);
+    assert_eq!(new_tasks.len(), 1);
+    assert_ne!(new_tasks[0], old[0]);
+    assert_eq!(w.tasks[&new_tasks[0]].deadline, Some(7_000));
+    assert_eq!(w.open_tasks_for_at("u1", 2_000).len(), 1);
+}
+
+/// Resume 仅 Waiting 有效：Running 实例恢复返回冲突。
+#[test]
+fn resume_requires_waiting_instance() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    e.open_approval(
+        e.instance.revision,
+        &branch,
+        vec![SeatSpec::approver("u1")],
+        None,
+        tick(&mut t),
+    )
+    .unwrap();
+    assert!(matches!(
+        e.resume_waiting(e.instance.revision, 1_000, "u1", "x", tick(&mut t))
+            .unwrap_err(),
+        ApprovalError::InvalidTransition(_)
+    ));
+}
+
+/// 前加签席位被整批减签：门禁视为满足，原轮次恢复而不是永久挂起。
+#[test]
+fn removing_before_spawn_resumes_original_round() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let original = seats[0].clone();
+    let (before, _) = e
+        .add_assignee(
+            e.instance.revision,
+            &original,
+            &["u2".into()],
+            AddAssigneePosition::Before,
+            None,
+            "admin",
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    e.remove_assignee(
+        e.instance.revision,
+        &before[0],
+        &["u2".into()],
+        "admin",
+        tick(&mut t),
+    )
+    .unwrap();
+    assert_eq!(e.tasks[&original].status, TaskStatus::Created);
+    assert_eq!(e.open_tasks_for_at("u1", t).len(), 1);
+    e.approve(e.instance.revision, &original, "u1", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.branches[&branch].status, BranchStatus::Completed);
+}
+
+/// 等待恢复后仍应执行已排队的后加签轮次（恢复轮次序号大于后加签）。
+#[test]
+fn resume_waiting_keeps_scheduled_after_alive() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy {
+                timeout_policy: TimeoutPolicy::Waiting,
+                timeout_ms: Some(60_000),
+                ..Default::default()
+            },
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1")],
+            Some(1_500),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (after, _) = e
+        .add_assignee(
+            e.instance.revision,
+            &seats[0],
+            &["u3".into()],
+            AddAssigneePosition::After,
+            None,
+            "admin",
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.timeout_wait(e.instance.revision, "TASK_OVERDUE", 1_600)
+        .unwrap();
+    assert_eq!(e.tasks[&after[0]].status, TaskStatus::Scheduled);
+    let (new_seats, _) = e
+        .resume_waiting(e.instance.revision, 5_000, "u1", "extended", 2_000)
+        .unwrap();
+    e.approve(e.instance.revision, &new_seats[0], "u1", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(
+        e.tasks[&after[0]].status,
+        TaskStatus::Created,
+        "恢复后的原轮次通过时必须激活排队的后加签"
+    );
+    assert_eq!(e.branches[&branch].status, BranchStatus::Open);
+}
+
+/// 前加签挂起期间允许催办（只写审计），终态席位拒绝。
+#[test]
+fn urge_allowed_while_suspended_and_rejected_when_terminal() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (branch, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &branch,
+            vec![SeatSpec::approver("u1")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let original = seats[0].clone();
+    let (before, _) = e
+        .add_assignee(
+            e.instance.revision,
+            &original,
+            &["u2".into()],
+            AddAssigneePosition::Before,
+            None,
+            "admin",
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    e.urge(e.instance.revision, &original, "u1", "hurry", tick(&mut t))
+        .unwrap();
+    let audit = e
+        .instance
+        .audit
+        .iter()
+        .find(|a| a.action == "urge")
+        .expect("urge audit");
+    assert!(audit.detail.contains("SUSPENDED"));
+
+    e.approve(e.instance.revision, &before[0], "u2", None, tick(&mut t))
+        .unwrap();
+    e.approve(e.instance.revision, &original, "u1", None, tick(&mut t))
+        .unwrap();
+    assert!(matches!(
+        e.urge(e.instance.revision, &original, "u1", "again", tick(&mut t))
+            .unwrap_err(),
         ApprovalError::InvalidTransition(_)
     ));
 }
