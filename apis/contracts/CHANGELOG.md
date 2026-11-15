@@ -1,3 +1,22 @@
+## [contracts/v1.17.0] — 2026-11-15（Minor：Workflow Start 可选调用方实例 id，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 的 `WorkflowStartRequest` 追加可选字段
+`workflow_id = 5`；不改既有字段号/类型、不删 RPC；`buf breaking` 基线不变）。
+
+- 调用方指定实例 id（空 = 服务端生成；不含 `/`、≤128 字节）。同 id + 同定义
+  （namespace/name/version + 内容哈希）重放返回首次实例、不重置状态（含 `FAULTED`）；
+  同 id + 不同定义/版本返回 `ALREADY_EXISTS`，既有实例不被覆盖。
+- `workflow_id` 与 `idempotency_key` 互斥（两者都指定实例身份），同时非空返回
+  `INVALID_ARGUMENT`。
+- 实现侧新增 create-if-absent 写路径（KV `VERSION == 0` 谓词），并发同 id Start 恰一个
+  创建者；输家返回首次实例且不重驱动。
+- SDK：Java `WorkflowClient.startByDefinitionWithId`。
+
+**影响范围**：旧客户端不受影响（新字段缺省为空 = 服务端生成 id）。
+
+**回滚预案**：回滚本分支即回到服务端生成 id 的旧行为；已写入的实例 id 是普通字符串，
+无落盘迁移。
+
 ## [contracts/v1.16.0] — 2026-11-15（Minor：Workflow 驳回即回退与判定原因，wire 向前兼容）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 追加字段：`WorkflowRejectRequest.target_node = 6`、

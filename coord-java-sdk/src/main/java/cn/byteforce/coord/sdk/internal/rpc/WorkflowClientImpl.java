@@ -140,6 +140,26 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     }
 
     @Override
+    public String startByDefinitionWithId(String definitionId, String workflowId, byte[] input) {
+        WorkflowStartRequest.Builder req = WorkflowStartRequest.newBuilder()
+                .setDefinitionId(definitionId)
+                .setWorkflowId(workflowId);
+        if (input != null && input.length > 0) {
+            req.setInput(ByteString.copyFrom(input));
+        }
+
+        WorkflowStartResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .start((WorkflowStartRequest) r),
+                req.build(), "workflow.startByDefinitionWithId");
+
+        log.debug("Workflow started by definition with id: id={}, defId={}",
+                response.getWorkflowId(), definitionId);
+        return response.getWorkflowId();
+    }
+
+    @Override
     public WorkflowStatus getStatus(String workflowId) {
         WorkflowGetStatusRequest request = WorkflowGetStatusRequest.newBuilder()
                 .setWorkflowId(workflowId)

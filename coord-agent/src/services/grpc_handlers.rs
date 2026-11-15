@@ -2021,6 +2021,7 @@ fn map_engine_error(e: WorkflowEngineError) -> Status {
         WorkflowEngineError::InvalidArgument(msg) => Status::invalid_argument(msg),
         WorkflowEngineError::NotFound(msg) => Status::not_found(msg),
         WorkflowEngineError::FailedPrecondition(msg) => Status::failed_precondition(msg),
+        WorkflowEngineError::AlreadyExists(msg) => Status::already_exists(msg),
         WorkflowEngineError::Internal(msg) => sanitized_internal(msg),
     }
 }
@@ -2151,8 +2152,16 @@ impl Workflow for WorkflowEngineService {
         let initiator = non_empty(&identity.subject);
         // 幂等键（可选）：同键重放返回首个 workflow_id（ADR-0016 D12 的 Start 幂等）。
         let idempotency_key = non_empty(req.idempotency_key.trim());
+        // 调用方指定实例 id（可选）：由运行时做同定义重放 / 版本冲突判定。
+        let requested_id = non_empty(req.workflow_id.trim());
         let inst = self
-            .start_instance_as_with_key(&def_id, input, initiator, idempotency_key)
+            .start_instance_as_with_key_and_id(
+                &def_id,
+                input,
+                initiator,
+                idempotency_key,
+                requested_id,
+            )
             .await
             .map_err(map_engine_error)?;
 

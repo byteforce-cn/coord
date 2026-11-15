@@ -74,7 +74,14 @@ message WorkflowStartRequest {
 
   // 幂等键（可选）：同键重放返回**首次**创建的 workflow_id，且不会重置既有实例状态；
   // 作用域是 definition（不同定义的同一个键互不影响）。空串 = 不启用幂等。
+  // 与 `workflow_id` 互斥（两者都指定实例身份）。
   string idempotency_key = 4;
+
+  // 可选：调用方指定实例 id（空 = 服务端生成）。同 id 重放：
+  // - 同定义（ns/name/version + 内容哈希）⇒ 返回首次创建的实例，不重置状态；
+  // - 不同定义或不同版本 ⇒ `ALREADY_EXISTS`（不覆盖既有实例）。
+  // 合法字符集与上限：不含 `/`，不超过 128 字节。
+  string workflow_id = 5;
 }
 
 message WorkflowStartResponse {

@@ -2325,6 +2325,8 @@ pub mod phase4 {
         NotFound(String),
         /// 状态冲突：对非挂起 / 终端实例操作（gRPC → FailedPrecondition）
         FailedPrecondition(String),
+        /// 实例 id 已被另一定义/版本占用（gRPC → AlreadyExists）
+        AlreadyExists(String),
         /// 存储 / 内部（gRPC → Internal）
         Internal(String),
     }
@@ -2337,6 +2339,7 @@ pub mod phase4 {
                 WorkflowEngineError::FailedPrecondition(msg) => {
                     write!(f, "failed precondition: {msg}")
                 }
+                WorkflowEngineError::AlreadyExists(msg) => write!(f, "already exists: {msg}"),
                 WorkflowEngineError::Internal(msg) => write!(f, "internal error: {msg}"),
             }
         }
@@ -2354,6 +2357,7 @@ pub mod phase4 {
                 RuntimeError::AlreadyCompleted(id) => WorkflowEngineError::FailedPrecondition(
                     format!("instance already in terminal state: {id}"),
                 ),
+                RuntimeError::AlreadyExists(msg) => WorkflowEngineError::AlreadyExists(msg),
                 RuntimeError::StaleRevision(id) => WorkflowEngineError::FailedPrecondition(
                     format!("stale revision for instance: {id}"),
                 ),
@@ -2567,6 +2571,7 @@ pub mod phase4 {
             RuntimeError::DefinitionDrift { instance_id, .. } => {
                 BridgeError::InvalidTransition(format!("definition drift: {instance_id}"))
             }
+            RuntimeError::AlreadyExists(msg) => BridgeError::InvalidTransition(msg),
         }
     }
 
@@ -3213,17 +3218,60 @@ pub mod phase4 {
             initiator: Option<&str>,
             idempotency_key: Option<&str>,
         ) -> Result<WorkflowInstance, WorkflowEngineError> {
+            self.start_instance_as_with_key_and_id(
+                definition_id,
+                input,
+                initiator,
+                idempotency_key,
+                None,
+            )
+            .await
+        }
+
+        /// 带幂等键或调用方指定实例 id 的 Start。
+        ///
+        /// `workflow_id` 与 `idempotency_key` 互斥（两者都在指定实例身份）。指定
+        /// `workflow_id` 时：同定义（ns/name/version + 内容哈希）重放返回首次实例；
+        /// 不同定义/版本返回 [`WorkflowEngineError::AlreadyExists`]，既有实例不被覆盖。
+        pub async fn start_instance_as_with_key_and_id(
+            &self,
+            definition_id: &str,
+            input: Value,
+            initiator: Option<&str>,
+            idempotency_key: Option<&str>,
+            workflow_id: Option<&str>,
+        ) -> Result<WorkflowInstance, WorkflowEngineError> {
             let key = idempotency_key.map(str::trim).filter(|key| !key.is_empty());
-            let instance_id = key
-                .map(|key| coord_core::workflow::model::idempotent_instance_id(definition_id, key));
-            // 重放：已存在就原样返回（含 COMPLETED/FAULTED），绝不重置状态。
-            if let Some(id) = instance_id.as_deref() {
-                if let Some(existing) = self
-                    .get_instance(id)
-                    .await
-                    .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
-                {
-                    return Ok(existing);
+            let requested = workflow_id.map(str::trim).filter(|id| !id.is_empty());
+            if key.is_some() && requested.is_some() {
+                return Err(WorkflowEngineError::InvalidArgument(
+                    "workflow_id and idempotency_key are mutually exclusive".into(),
+                ));
+            }
+            if let Some(id) = requested {
+                // 同 engine 的实例 id 约束：`/` 会越出 KV 键层级，超长会越过键边界。
+                if id.contains('/') || id.len() > 128 {
+                    return Err(WorkflowEngineError::InvalidArgument(
+                        "workflow_id must not contain '/' and must be at most 128 bytes".into(),
+                    ));
+                }
+            }
+            let instance_id = requested.map(str::to_string).or_else(|| {
+                key.map(|key| {
+                    coord_core::workflow::model::idempotent_instance_id(definition_id, key)
+                })
+            });
+            // 幂等键重放：不加载定义直接返回首次实例（含 COMPLETED/FAULTED），绝不重置。
+            // 指定 workflow_id 的冲突判定需要定义内容哈希，交给运行时在加载定义后做。
+            if key.is_some() {
+                if let Some(id) = instance_id.as_deref() {
+                    if let Some(existing) = self
+                        .get_instance(id)
+                        .await
+                        .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
+                    {
+                        return Ok(existing);
+                    }
                 }
             }
 
@@ -6274,6 +6322,111 @@ do:
         );
         let loaded = svc.get_instance(&first.id).await.unwrap().unwrap();
         assert_eq!(loaded.context, serde_json::json!({"a": 1}));
+    }
+
+    /// 调用方指定实例 id：同定义重放返回首次实例，不覆盖输入。
+    #[tokio::test]
+    async fn start_with_client_instance_id_is_idempotent_for_same_definition() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc
+            .deploy_definition("test", sample_instant_sw())
+            .await
+            .unwrap();
+
+        let first = svc
+            .start_instance_as_with_key_and_id(
+                &def_id,
+                serde_json::json!({"a": 1}),
+                None,
+                None,
+                Some("wf-client-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.id, "wf-client-1");
+
+        let replay = svc
+            .start_instance_as_with_key_and_id(
+                &def_id,
+                serde_json::json!({"a": 2}),
+                None,
+                None,
+                Some("wf-client-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.id, "wf-client-1");
+        assert_eq!(replay.created_at, first.created_at, "重放不得重置实例");
+        let loaded = svc.get_instance("wf-client-1").await.unwrap().unwrap();
+        assert_eq!(loaded.context, serde_json::json!({"a": 1}));
+    }
+
+    /// 同实例 id + 不同定义版本 ⇒ `AlreadyExists`（既有实例不被覆盖）。
+    #[tokio::test]
+    async fn start_with_client_instance_id_rejects_different_definition_version() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_v1 = svc
+            .deploy_definition("test", sample_instant_sw())
+            .await
+            .unwrap();
+        let def_v2 = svc
+            .deploy_definition(
+                "test",
+                r#"{"id":"instant","version":"2.0","start":"init","states":[{"name":"init","type":"inject","data":{"ok":true},"end":true}]}"#,
+            )
+            .await
+            .unwrap();
+
+        svc.start_instance_as_with_key_and_id(
+            &def_v1,
+            serde_json::json!({}),
+            None,
+            None,
+            Some("wf-version-clash"),
+        )
+        .await
+        .unwrap();
+
+        let err = svc
+            .start_instance_as_with_key_and_id(
+                &def_v2,
+                serde_json::json!({}),
+                None,
+                None,
+                Some("wf-version-clash"),
+            )
+            .await
+            .expect_err("different definition version must conflict");
+        assert!(
+            matches!(err, WorkflowEngineError::AlreadyExists(_)),
+            "{err:?}"
+        );
+        let loaded = svc.get_instance("wf-version-clash").await.unwrap().unwrap();
+        assert_eq!(loaded.definition_version, "1.0");
+    }
+
+    /// `workflow_id` 与 `idempotency_key` 互斥：两者都指定实例身份。
+    #[tokio::test]
+    async fn start_rejects_workflow_id_with_idempotency_key() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc
+            .deploy_definition("test", sample_instant_sw())
+            .await
+            .unwrap();
+        let err = svc
+            .start_instance_as_with_key_and_id(
+                &def_id,
+                serde_json::json!({}),
+                None,
+                Some("k-1"),
+                Some("wf-both"),
+            )
+            .await
+            .expect_err("mutually exclusive identity fields");
+        assert!(
+            matches!(err, WorkflowEngineError::InvalidArgument(_)),
+            "{err:?}"
+        );
     }
 
     /// 已完成的实例被同键重放命中时仍是 `COMPLETED`（不得重置回 `Pending`/重新驱动）。

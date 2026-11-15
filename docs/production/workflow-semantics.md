@@ -49,6 +49,10 @@
   `FAILED_PRECONDITION`**（状态守卫）。取消**不自动触发补偿**——是否补偿由
   DSL 连线决定。
 - `resume`（按序列恢复）：仅挂起/等待实例；运行中实例返回状态冲突。
+- **`Start` 实例身份**：`WorkflowStartRequest.workflow_id` 可指定实例 id（空 = 服务端
+  生成；不含 `/`、≤128 字节）。同 id + 同定义（namespace/name/version + 内容哈希）重放
+  返回首次实例、不重置状态（含 `FAULTED`）；不同定义/版本返回 `ALREADY_EXISTS`，既有
+  实例不被覆盖。`workflow_id` 与 `idempotency_key` 互斥（两者都指定实例身份）。
 
 ## 4. 保留策略（G-WF-1）
 

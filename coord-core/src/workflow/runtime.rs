@@ -29,8 +29,8 @@ use super::approval::bridge::{ApprovalBridge, BridgeError, NodeOutcome, SYSTEM_A
 use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
-    ApproveTask, CatchClause, EventFilter, InstanceStatus, NamedTask, StepResult, SuspendReason,
-    SuspensionMeta, Task, TaskFrame, TaskStatus, WorkflowDefinition, WorkflowFault,
+    definition_hash, ApproveTask, CatchClause, EventFilter, InstanceStatus, NamedTask, StepResult,
+    SuspendReason, SuspensionMeta, Task, TaskFrame, TaskStatus, WorkflowDefinition, WorkflowFault,
     WorkflowInstance,
 };
 use super::ports::{
@@ -296,6 +296,8 @@ pub enum RuntimeError {
     NotFound(String),
     /// 实例已处于终端状态
     AlreadyCompleted(String),
+    /// 调用方指定的实例 id 已被另一个定义/版本占用（gRPC → AlreadyExists）
+    AlreadyExists(String),
     /// 工作流定义未找到
     DefinitionNotFound(String),
     /// 存储错误
@@ -321,6 +323,7 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::AlreadyCompleted(id) => {
                 write!(f, "instance already in terminal state: {id}")
             }
+            RuntimeError::AlreadyExists(msg) => write!(f, "already exists: {msg}"),
             RuntimeError::DefinitionNotFound(id) => {
                 write!(f, "workflow definition not found: {id}")
             }
@@ -360,6 +363,40 @@ pub fn assert_definition_pin(
         }),
         None => Ok(()),
     }
+}
+
+/// Start 同 id 命中的判定：同定义（ns/name/version + 内容哈希）返回既有实例，
+/// 否则 `AlreadyExists`。
+///
+/// 旧快照未钉死哈希（`None`）时按同定义处理：兼容升级前的实例，不因缺字段误报冲突。
+fn reused_instance(
+    existing: &WorkflowInstance,
+    definition: &WorkflowDefinition,
+) -> Result<WorkflowInstance, RuntimeError> {
+    let requested_hash = definition_hash(definition);
+    let same_version = existing.definition_ns == definition.document.namespace
+        && existing.definition_name == definition.document.name
+        && existing.definition_version == definition.document.version;
+    let same_hash = existing
+        .definition_hash
+        .as_deref()
+        .map(|hash| hash == requested_hash)
+        .unwrap_or(true);
+    if same_version && same_hash {
+        return Ok(existing.clone());
+    }
+    Err(RuntimeError::AlreadyExists(format!(
+        "workflow instance {} already exists with definition {}@{}; requested {}@{} — \
+         use a different workflow_id",
+        existing.id,
+        format_args!("{}/{}", existing.definition_ns, existing.definition_name),
+        existing.definition_version,
+        format_args!(
+            "{}/{}",
+            definition.document.namespace, definition.document.name
+        ),
+        definition.document.version,
+    )))
 }
 
 /// 钉死哈希与加载定义不一致时返回 `(expected, actual)`；未钉死则 `None`。
@@ -1574,9 +1611,10 @@ where
             .await
     }
 
-    /// 同 [`EngineRuntime::start_as`]，但可指定实例 id（Start 幂等键的确定性 id）。
+    /// 同 [`EngineRuntime::start_as`]，但可指定实例 id（Start 幂等键 / 调用方指定 id）。
     ///
     /// `None` = 随机 UUID（旧行为逐字不变）；`Some(id)` = 调用方派生，重放命中同一实例。
+    /// 返回实例本体；需要知道「本次是否真的创建」时用 [`Self::start_as_with_id_outcome`]。
     pub async fn start_as_with_id(
         &self,
         definition: &WorkflowDefinition,
@@ -1584,7 +1622,36 @@ where
         initiator: Option<&str>,
         instance_id: Option<&str>,
     ) -> Result<WorkflowInstance, RuntimeError> {
+        self.start_as_with_id_outcome(definition, input, initiator, instance_id)
+            .await
+            .map(|(inst, _)| inst)
+    }
+
+    /// [`Self::start_as_with_id`] 的完整结果：`created == false` 表示命中重放/并发同 id。
+    ///
+    /// 同 id 且同定义（ns/name/version + 内容哈希）⇒ 返回既有实例；不同定义/版本/内容
+    /// ⇒ [`RuntimeError::AlreadyExists`]，既有实例不被覆盖。
+    pub async fn start_as_with_id_outcome(
+        &self,
+        definition: &WorkflowDefinition,
+        input: Value,
+        initiator: Option<&str>,
+        instance_id: Option<&str>,
+    ) -> Result<(WorkflowInstance, bool), RuntimeError> {
         let now_ms = self.clock.now_ms();
+
+        // 调用方指定实例 id：先判重放/冲突，再走输入变换——重放不得覆盖首次结果（含
+        // faulted 实例），冲突必须在任何写入前 fail-closed。
+        if let Some(id) = instance_id {
+            if let Some(existing) = self
+                .store
+                .load_instance(id)
+                .await
+                .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            {
+                return Ok((reused_instance(&existing, definition)?, false));
+            }
+        }
 
         // 工作流级输入变换/校验
         let input_val = match self.apply_workflow_input(definition, input) {
@@ -1600,11 +1667,10 @@ where
                 inst.fault = Some(fault);
                 inst.initiator = initiator.map(str::to_string);
                 inst.updated_at = now_ms;
-                self.store
-                    .save_instance(&inst)
-                    .await
-                    .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
-                return Ok(inst);
+                let (inst, _created) = self
+                    .persist_new_instance(inst, definition, instance_id.is_some())
+                    .await?;
+                return Ok((inst, false));
             }
         };
 
@@ -1614,10 +1680,13 @@ where
         };
         inst.initiator = initiator.map(str::to_string);
 
-        self.store
-            .save_instance(&inst)
-            .await
-            .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
+        let (inst, created) = self
+            .persist_new_instance(inst, definition, instance_id.is_some())
+            .await?;
+        if !created {
+            // 并发同 id Start 的败者：返回首次创建的实例，不再重驱动/重排超时。
+            return Ok((inst, false));
+        }
 
         // 后台 drive（受监督：见 [`Self::spawn_drive`]）
         self.spawn_drive(inst.id.clone(), definition.clone(), Arc::clone(&self.store));
@@ -1635,7 +1704,45 @@ where
             }
         }
 
-        Ok(inst)
+        Ok((inst, true))
+    }
+
+    /// create-if-absent 写入新实例；冲突时返回既有实例（同定义）或 `AlreadyExists`。
+    ///
+    /// 返回 `(instance, created)`：`created == false` 表示命中并发/重放，调用方不得再驱动。
+    async fn persist_new_instance(
+        &self,
+        inst: WorkflowInstance,
+        definition: &WorkflowDefinition,
+        pinned: bool,
+    ) -> Result<(WorkflowInstance, bool), RuntimeError> {
+        let created = if pinned {
+            self.store
+                .create_instance(&inst)
+                .await
+                .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+        } else {
+            self.store
+                .save_instance(&inst)
+                .await
+                .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
+            true
+        };
+        if created {
+            return Ok((inst, true));
+        }
+        let existing = self
+            .store
+            .load_instance(&inst.id)
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| {
+                RuntimeError::StoreError(format!(
+                    "instance {} disappeared after create conflict",
+                    inst.id
+                ))
+            })?;
+        Ok((reused_instance(&existing, definition)?, false))
     }
 
     /// 应用工作流级输入配置：`default` → `from` 变换 → `schema` 校验
