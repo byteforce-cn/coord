@@ -17,10 +17,15 @@ import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongFunction;
 
 /**
  * Implementation of {@link EventClient} backed by gRPC to the Coord Agent.
@@ -41,8 +46,18 @@ public final class EventClientImpl extends AgentRpcClient implements EventClient
 
     private static final Logger log = LoggerFactory.getLogger(EventClientImpl.class);
 
+    /**
+     * 重连退避与放弃阈值（与 {@code WatchManager} 同口径：200ms 起、30s 上限、连续 20 次放弃）。
+     * 不设上限意味着"永远重试"——那同样是静默：订阅看起来活着，实际永远收不到事件。
+     */
+    static final long INITIAL_RETRY_BACKOFF_MS = 200L;
+    static final long MAX_RETRY_BACKOFF_MS = 30_000L;
+    static final int MAX_CONSECUTIVE_FAILURES = 20;
+
     private final CoordConfig config;
     private final ExecutorService streamExecutor;
+    /** 活跃订阅（`CoordClient.close()` 时逐条关闭，避免 shutdown 后重连风暴）。 */
+    private final Set<EventSubscriptionImpl> subscriptions = ConcurrentHashMap.newKeySet();
 
     public EventClientImpl(AgentChannelManager channelManager, ErrorMapper errorMapper,
                            RetryTemplate retryTemplate, ObservabilityProvider observability,
@@ -86,21 +101,43 @@ public final class EventClientImpl extends AgentRpcClient implements EventClient
         }
         String filter = nullToEmpty(eventType);
 
-        EventSubscribeRequest.Builder req = EventSubscribeRequest.newBuilder()
-                .setEventType(filter);
-        if (cursor >= 0) {
-            // 位点是十进制 seq 字符串（uint64 全范围）；-1 = 不携带 cursor（默认实时）。
-            req.setCursor(Long.toUnsignedString(cursor));
-        }
+        // 每次（重）连都现取 channel：agent 重启后 AgentChannelManager 交给我们的仍是
+        // 当前可用通道，而不是订阅建立那一刻的快照。
+        LongFunction<CancellableStream> streamFactory = resumeCursor -> {
+            EventSubscribeRequest.Builder req = EventSubscribeRequest.newBuilder()
+                    .setEventType(filter);
+            if (resumeCursor >= 0) {
+                // 位点是十进制 seq 字符串（uint64 全范围）；-1 = 不携带 cursor（默认实时）。
+                req.setCursor(Long.toUnsignedString(resumeCursor));
+            }
+            return new GrpcWatchStream(
+                    channelManager.getChannel(),
+                    EventGrpc.getSubscribeMethod(),
+                    req.build());
+        };
 
-        CancellableStream stream = new GrpcWatchStream(
-                channelManager.getChannel(),
-                EventGrpc.getSubscribeMethod(),
-                req.build());
-
-        EventSubscriptionImpl sub = new EventSubscriptionImpl(deriveSubscriptionId(filter), stream, listener);
+        EventSubscriptionImpl sub = new EventSubscriptionImpl(
+                deriveSubscriptionId(filter), streamFactory, cursor, listener,
+                INITIAL_RETRY_BACKOFF_MS, MAX_RETRY_BACKOFF_MS, MAX_CONSECUTIVE_FAILURES,
+                this::forget);
+        subscriptions.add(sub);
         sub.start(streamExecutor);
         return sub;
+    }
+
+    /** 关闭全部活跃订阅（{@code CoordClient.close()} 调用）；返回取消条数。 */
+    public int closeAllSubscriptions() {
+        int cancelled = 0;
+        for (EventSubscriptionImpl sub : subscriptions) {
+            sub.close();
+            cancelled++;
+        }
+        subscriptions.clear();
+        return cancelled;
+    }
+
+    private void forget(EventSubscriptionImpl sub) {
+        subscriptions.remove(sub);
     }
 
     @Override
@@ -136,49 +173,183 @@ public final class EventClientImpl extends AgentRpcClient implements EventClient
         return s == null ? "" : s;
     }
 
-    /** 取流循环 + 取消句柄。 */
-    private static final class EventSubscriptionImpl implements EventSubscription {
+    /**
+     * 一条订阅的取流循环 + 重连/报告（#325）。
+     *
+     * <p><b>缺陷形态</b>：循环只迭代**一条**流，正常结束或异常都只打一条日志就收尾。
+     * 于是 coord（agent）重启、连接抖动、服务端关闭流之后，订阅**永久结束**：不重连、
+     * 不续订、也不通知调用方——调用方看到的是一个"活着"的订阅对象和一条再也不来的
+     * 事件流。这与 {@code WatchManager} 修掉的是同一类"静默死亡"。
+     *
+     * <p><b>现在</b>：
+     * <ul>
+     *   <li><b>断流即重连</b>（指数退避 200ms→30s），并从**最后一条已交付事件的 seq**
+     *       续订（服务端的 {@code cursor} 语义是"已处理到的位点"，重放 {@code seq > cursor}）
+     *       ——断线窗口不再丢事件，重放/实时的交接可能重复，消费方按既有契约保持幂等；</li>
+     *   <li><b>连续失败有上限</b>（20 次）并**通知调用方**（{@link EventListener#onError}）：
+     *       放弃时必须说出来，这才是"报告"；</li>
+     *   <li><b>取消立即生效</b>：{@link #close()} 真取消底层 {@code ClientCall}
+     *       并唤醒阻塞中的取流线程，不再等到下一条事件。</li>
+     * </ul>
+     */
+    static final class EventSubscriptionImpl implements EventSubscription {
 
         private final String subscriptionId;
-        private final CancellableStream stream;
+        private final LongFunction<CancellableStream> streamFactory;
+        private final long callerCursor;
         private final EventListener listener;
+        private final long initialBackoffMs;
+        private final long maxBackoffMs;
+        private final int maxConsecutiveFailures;
+        private final java.util.function.Consumer<EventSubscriptionImpl> onTerminated;
         private final AtomicBoolean closed = new AtomicBoolean(false);
+        /** 最后一条已交付事件的 seq；-1 = 尚未交付（服务端 seq 从 0 起，永不为负）。 */
+        private final AtomicLong lastSeq = new AtomicLong(-1L);
+        private final AtomicReference<CancellableStream> currentStream = new AtomicReference<>();
 
-        EventSubscriptionImpl(String subscriptionId, CancellableStream stream, EventListener listener) {
+        EventSubscriptionImpl(String subscriptionId,
+                              LongFunction<CancellableStream> streamFactory,
+                              long callerCursor,
+                              EventListener listener,
+                              long initialBackoffMs,
+                              long maxBackoffMs,
+                              int maxConsecutiveFailures,
+                              java.util.function.Consumer<EventSubscriptionImpl> onTerminated) {
             this.subscriptionId = subscriptionId;
-            this.stream = stream;
+            this.streamFactory = streamFactory;
+            this.callerCursor = callerCursor;
             this.listener = listener;
+            this.initialBackoffMs = initialBackoffMs;
+            this.maxBackoffMs = maxBackoffMs;
+            this.maxConsecutiveFailures = maxConsecutiveFailures;
+            this.onTerminated = onTerminated;
+        }
+
+        /** 重连位点：优先"最后一条已交付"，否则用调用方给的位点（-1 = 实时）。 */
+        long resumeCursor() {
+            long seen = lastSeq.get();
+            return seen >= 0 ? seen : callerCursor;
         }
 
         void start(ExecutorService executor) {
-            executor.submit(() -> {
-                try {
-                    while (!closed.get() && stream.hasNext()) {
-                        Object msg = stream.next();
-                        if (msg instanceof CloudEventMessage ce) {
-                            listener.onEvent(new CloudEvent(
-                                    ce.getId(),
-                                    ce.getSpecversion(),
-                                    ce.getType(),
-                                    ce.getSource(),
-                                    ce.getData().toByteArray(),
-                                    ce.getDataContentType(),
-                                    ce.getSubject(),
-                                    ce.getTime(),
-                                    ce.getSeq()));
+            executor.submit(this::run);
+        }
+
+        void run() {
+            long backoffMs = initialBackoffMs;
+            int consecutiveFailures = 0;
+            try {
+                while (!closed.get() && !Thread.currentThread().isInterrupted()) {
+                    CancellableStream stream = null;
+                    boolean delivered = false;
+                    try {
+                        stream = streamFactory.apply(resumeCursor());
+                        currentStream.set(stream);
+                        while (!closed.get() && stream.hasNext()) {
+                            Object msg = stream.next();
+                            if (!(msg instanceof CloudEventMessage ce)) {
+                                continue;
+                            }
+                            // 水位必须在派发**之前**推进：回调抛异常时重连不能退回旧位点
+                            // （否则同一条事件会无限重投）。消费方按契约保持幂等。
+                            long seq = ce.getSeq();
+                            if (seq > 0) {
+                                lastSeq.set(seq);
+                            }
+                            delivered = true;
+                            try {
+                                listener.onEvent(toCloudEvent(ce));
+                            } catch (RuntimeException e) {
+                                // 一条坏事件不能杀死整条订阅（与 Watch 派发同口径）。
+                                log.warn("Event listener for '{}' threw on seq={}: {}",
+                                        subscriptionId, seq, e.toString());
+                            }
+                        }
+                        if (closed.get() || Thread.currentThread().isInterrupted()) {
+                            return;
+                        }
+                        Throwable failure = stream.failure();
+                        consecutiveFailures++;
+                        log.warn("Event subscription '{}' stream ended (attempt {}): {}; "
+                                        + "reconnecting from seq {}",
+                                subscriptionId, consecutiveFailures,
+                                failure == null ? "server closed the stream" : failure.toString(),
+                                resumeCursor());
+                    } catch (RuntimeException e) {
+                        if (closed.get() || Thread.currentThread().isInterrupted()) {
+                            return;
+                        }
+                        consecutiveFailures++;
+                        log.warn("Event subscription '{}' loop error (attempt {}): {}",
+                                subscriptionId, consecutiveFailures, e.toString());
+                    } finally {
+                        currentStream.compareAndSet(stream, null);
+                        if (stream != null) {
+                            stream.close();
                         }
                     }
-                } catch (RuntimeException e) {
-                    // 连接断了/被拒：这不是"订阅正常结束"，但对调用方而言两者都只是
-                    // "不会再有事件了"。cancel() 之后到达的异常属预期，不再上抛。
-                    if (!closed.get()) {
-                        log.warn("Event subscription '{}' terminated abnormally: {}",
-                                subscriptionId, e.toString());
+
+                    // 连接健康过一次就重置预算：长期订阅偶发一次抖动不该攒到放弃。
+                    if (delivered) {
+                        consecutiveFailures = 0;
+                        backoffMs = initialBackoffMs;
                     }
-                } finally {
+                    if (consecutiveFailures >= maxConsecutiveFailures) {
+                        Throwable terminal = new IllegalStateException(
+                                "event subscription '" + subscriptionId + "' gave up after "
+                                        + consecutiveFailures + " consecutive failures (last seq "
+                                        + lastSeq.get() + "); events are NO LONGER being delivered");
+                        log.error(terminal.getMessage());
+                        notify(listener, terminal);
+                        return;
+                    }
+                    if (!sleepBackoff(backoffMs)) {
+                        return;
+                    }
+                    backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
+                }
+            } finally {
+                CancellableStream stream = currentStream.getAndSet(null);
+                if (stream != null) {
                     stream.close();
                 }
-            });
+                if (onTerminated != null) {
+                    onTerminated.accept(this);
+                }
+            }
+        }
+
+        /** 终态报告；回调自身抛异常不得把清理路径带崩。 */
+        private void notify(EventListener listener, Throwable terminal) {
+            try {
+                listener.onError(terminal);
+            } catch (RuntimeException e) {
+                log.warn("Event listener onError for '{}' threw: {}", subscriptionId, e.toString());
+            }
+        }
+
+        /** @return false 表示被中断（应退出循环）。 */
+        private static boolean sleepBackoff(long ms) {
+            try {
+                Thread.sleep(ms);
+                return true;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        private static CloudEvent toCloudEvent(CloudEventMessage ce) {
+            return new CloudEvent(
+                    ce.getId(),
+                    ce.getSpecversion(),
+                    ce.getType(),
+                    ce.getSource(),
+                    ce.getData().toByteArray(),
+                    ce.getDataContentType(),
+                    ce.getSubject(),
+                    ce.getTime(),
+                    ce.getSeq());
         }
 
         @Override
@@ -190,7 +361,10 @@ public final class EventClientImpl extends AgentRpcClient implements EventClient
         public void close() {
             if (closed.compareAndSet(false, true)) {
                 // 立即取消 RPC 并唤醒阻塞中的取流线程（不需要等下一跳事件）
-                stream.close();
+                CancellableStream stream = currentStream.get();
+                if (stream != null) {
+                    stream.close();
+                }
             }
         }
     }
