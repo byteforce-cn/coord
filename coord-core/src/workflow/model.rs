@@ -677,6 +677,9 @@ pub struct ApproveTask {
     /// 发起人是否可审批自己发起的节点。
     #[serde(default)]
     pub allow_self_approve: bool,
+    /// 是否允许任务级抄送（`Cc`）；缺省 `false`，定义必须显式开启。
+    #[serde(default)]
+    pub allow_cc: bool,
 }
 
 /// approve 默认通过策略：会签。
@@ -1297,6 +1300,7 @@ mod tests {
             on_reject: Some("rejected".into()),
             sign_admins: vec!["admin".into()],
             allow_self_approve: true,
+            allow_cc: false,
         };
         let value = serde_json::to_value(&task).unwrap();
         // DSL/持久化契约是 camelCase 键；下划线拼写会静默丢字段。
@@ -1593,6 +1597,7 @@ mod tests {
             on_reject: None,
             sign_admins: vec![],
             allow_self_approve: false,
+            allow_cc: false,
         };
         assert_eq!(
             task.to_seats(),
@@ -1619,6 +1624,7 @@ mod tests {
             on_reject: None,
             sign_admins: vec![],
             allow_self_approve: false,
+            allow_cc: false,
         };
         assert_eq!(task.deadline_ms(i64::MAX), Some(i64::MAX));
         assert_eq!(task.deadline_ms(1_000), Some(1_000 + 1_000));

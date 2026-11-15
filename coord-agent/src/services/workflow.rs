@@ -4052,6 +4052,33 @@ pub mod phase4 {
                 });
             }
 
+            // 任务级动作（抄送 / 撤回）没有独立 outbox 事件类型，从审计记录投影；
+            // 催办按 seedj 口径不写历史。
+            for (index, entry) in engine.instance.audit.iter().enumerate() {
+                let event_type = match entry.action.as_str() {
+                    "cc" => "TASK_CC",
+                    "withdraw_task" => "TASK_WITHDRAWN",
+                    _ => continue,
+                };
+                let attributes = serde_json::from_str::<Value>(&entry.detail)
+                    .unwrap_or_else(|_| serde_json::json!({ "detail": entry.detail }));
+                events.push(HistoryEventView {
+                    event_id: format!("{iid}:audit:{index}:{}", entry.action),
+                    event_type: event_type.into(),
+                    instance_id: iid.clone(),
+                    step_name: entry
+                        .branch
+                        .as_ref()
+                        .and_then(|bid| engine.branches.get(bid))
+                        .map(|b| b.node.clone())
+                        .unwrap_or_default(),
+                    task_id: entry.task.clone().unwrap_or_default(),
+                    action_id: String::new(),
+                    occurred_at: entry.at,
+                    attributes,
+                });
+            }
+
             if engine.instance.status.is_terminal() {
                 let event_type = match engine.instance.status {
                     coord_core::workflow::approval::model::InstanceStatus::Completed => {
@@ -7545,6 +7572,184 @@ do:
             ..Default::default()
         };
         assert!(svc.list_instances_filtered(&bogus, 10, None).await.is_err());
+    }
+
+    /// 催办 / 抄送：只写审计，不改审批状态机；任务级抄送受 `allowCc` 约束。
+    #[tokio::test]
+    async fn urge_and_cc_are_audited_and_gated() {
+        let (svc, store) = approve_service(HashMap::new());
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: urge-wf
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        allowCc: true
+"#;
+        let def_id = svc.deploy_definition("test", yaml).await.unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        let seat = await_open_seat(&store, &inst.id, "alice").await;
+
+        let (_, status) = svc
+            .approval_command(
+                &inst.id,
+                "initor",
+                ApprovalCommand::Urge {
+                    task_id: &seat,
+                    message: "请尽快处理",
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, "RUNNING", "催办不改实例状态");
+
+        let (_, status) = svc
+            .approval_command(
+                &inst.id,
+                "initor",
+                ApprovalCommand::Cc {
+                    task_id: Some(&seat),
+                    recipients: vec!["observer".into()],
+                    message: Some("请知悉"),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, "RUNNING");
+
+        let detail = svc.get_instance_detail(&inst.id).await.unwrap();
+        assert_eq!(detail.audit.last().unwrap().action, "cc");
+        let history = svc.history(&inst.id).await.unwrap();
+        assert!(history.iter().any(|e| e.event_type == "TASK_CC"));
+        // 催办不写历史（seedj 口径）。
+        assert!(!history.iter().any(|e| e.event_type.contains("URGED")));
+
+        // 任务级抄送：未开启 allowCc 的节点拒绝。
+        let plain = svc
+            .deploy_definition("test", &sample_approve_yaml("cc-gated-wf"))
+            .await
+            .unwrap();
+        let gated = svc
+            .start_instance_as(&plain, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        let gated_seat = await_open_seat(&store, &gated.id, "alice").await;
+        assert!(svc
+            .approval_command(
+                &gated.id,
+                "initor",
+                ApprovalCommand::Cc {
+                    task_id: Some(&gated_seat),
+                    recipients: vec!["observer".into()],
+                    message: None,
+                },
+                None,
+            )
+            .await
+            .is_err());
+    }
+
+    /// 任务级撤回：保留通过记录、回退目标节点并重新驱动工作流。
+    #[tokio::test]
+    async fn withdraw_task_resumes_workflow_at_target() {
+        let (svc, store) = approve_service(HashMap::new());
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: withtask-wf
+  version: "1.0"
+do:
+  - first:
+      approve:
+        approvers: ["u1"]
+  - second:
+      approve:
+        approvers: ["u2", "u3"]
+  - done:
+      set:
+        variable: done
+        value: '"yes"'
+"#;
+        let def_id = svc.deploy_definition("test", yaml).await.unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        let first = await_open_seat(&store, &inst.id, "u1").await;
+        svc.approval_command(
+            &inst.id,
+            "u1",
+            ApprovalCommand::Approve {
+                task_id: &first,
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let second = await_open_seat(&store, &inst.id, "u2").await;
+        svc.approval_command(
+            &inst.id,
+            "u2",
+            ApprovalCommand::Approve {
+                task_id: &second,
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (_, status) = svc
+            .approval_command(
+                &inst.id,
+                "u2",
+                ApprovalCommand::WithdrawTask {
+                    task_id: &second,
+                    target_node: "first",
+                    comment: Some("口径错了"),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, "RUNNING");
+
+        // 重新挂起在 first attempt 2，且通过的席位记录仍在。
+        let reopened = store.load(&inst.id).await.unwrap().unwrap().0;
+        assert_eq!(
+            reopened.instance.status,
+            coord_core::workflow::approval::model::InstanceStatus::Running
+        );
+        assert_eq!(
+            reopened.tasks[&second].status,
+            coord_core::workflow::approval::model::TaskStatus::Completed
+        );
+        assert_eq!(reopened.tasks[&second].votes.len(), 1);
+        let first2 = reopened
+            .branches
+            .values()
+            .find(|b| b.node == "first" && b.attempt == 2)
+            .expect("first attempt 2");
+        assert_eq!(
+            first2.status,
+            coord_core::workflow::approval::model::BranchStatus::Open
+        );
+        let history = svc.history(&inst.id).await.unwrap();
+        assert!(history.iter().any(|e| e.event_type == "TASK_WITHDRAWN"));
+        assert!(history
+            .iter()
+            .any(|e| e.event_type == "INSTANCE_ROLLED_BACK"));
     }
 
     /// 实例详情：返回快照字段（大写状态、发起人、修订号、分支/席位/轮次）。

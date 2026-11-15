@@ -100,6 +100,9 @@ pub struct AuditEntry {
     pub at: i64,
     pub action: String,
     pub branch: Option<Id>,
+    /// 目标席位（催办 / 抄送 / 任务撤回等任务级动作）；实例级动作为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<Id>,
     pub by: Principal,
     pub detail: String,
     /// 代终端用户执行的管理动作的服务主体；直接操作为 `None`。
@@ -175,6 +178,9 @@ pub struct ApprovalPolicy {
     /// 管理动作（加签 / 减签 / 驳回至节点 / 终止）的授权人集合。
     #[serde(default)]
     pub sign_admins: Vec<Principal>,
+    /// 是否允许任务级抄送（`Cc`）。缺省 `false`：只有定义显式开启才放行。
+    #[serde(default)]
+    pub allow_cc: bool,
 }
 
 /// 分支：一个节点的一次运行实例。
@@ -523,6 +529,7 @@ mod tests {
                 at: 100,
                 action: "enter".into(),
                 branch: Some("inst-1:b0000".into()),
+                task: None,
                 by: "u-initiator".into(),
                 detail: "root".into(),
                 acting_service: None,
@@ -551,6 +558,7 @@ mod tests {
             reject: RejectPolicy::OnExhausted,
             policy: ApprovalPolicy {
                 allow_self_approve: true,
+                allow_cc: false,
                 sign_admins: vec!["u-admin".into()],
             },
             scope: BTreeMap::from([("level".to_string(), json!("l2"))]),

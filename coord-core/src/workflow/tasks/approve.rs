@@ -74,6 +74,7 @@ mod tests {
             on_reject: None,
             sign_admins: vec![],
             allow_self_approve: false,
+            allow_cc: false,
         }
     }
 

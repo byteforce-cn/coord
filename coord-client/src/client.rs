@@ -39,15 +39,17 @@ use coord_proto::watch::{
 use coord_proto::workflow::v1::workflow_client::WorkflowClient as WorkflowStub;
 use coord_proto::workflow::v1::{
     WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse, WorkflowAddSignRequest,
-    WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse,
-    WorkflowDelegateRequest, WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest,
-    WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest, WorkflowGetTaskResponse,
-    WorkflowHistoryRequest, WorkflowHistoryResponse, WorkflowListPendingTasksRequest,
-    WorkflowListPendingTasksResponse, WorkflowListTasksRequest, WorkflowListTasksResponse,
-    WorkflowRejectRequest, WorkflowRejectResponse, WorkflowRemoveSignRequest,
-    WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse,
-    WorkflowTerminateRequest, WorkflowTerminateResponse, WorkflowTransferRequest,
-    WorkflowTransferResponse, WorkflowWithdrawRequest, WorkflowWithdrawResponse,
+    WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse, WorkflowCcRequest,
+    WorkflowCcResponse, WorkflowDelegateRequest, WorkflowDelegateResponse,
+    WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest,
+    WorkflowGetTaskResponse, WorkflowHistoryRequest, WorkflowHistoryResponse,
+    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowListTasksRequest,
+    WorkflowListTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
+    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
+    WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
+    WorkflowTransferRequest, WorkflowTransferResponse, WorkflowUrgeRequest, WorkflowUrgeResponse,
+    WorkflowWithdrawRequest, WorkflowWithdrawResponse, WorkflowWithdrawTaskRequest,
+    WorkflowWithdrawTaskResponse,
 };
 
 use crate::config::Config;
@@ -1972,6 +1974,88 @@ impl ApprovalClient {
             workflow_id: workflow_id.to_string(),
         };
         match stub.history(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp.into_inner())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// 催办：只记录审计/通知，不改审批状态机。
+    pub async fn urge(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        message: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowUrgeResponse> {
+        let request = WorkflowUrgeRequest {
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.to_string(),
+            message: message.to_string(),
+            idempotency_key: optional_idempotency_key(idempotency_key),
+            on_behalf_of: String::new(),
+        };
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = WorkflowStub::new(channel.clone());
+        match stub.urge(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp.into_inner())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// 抄送：`task_id = None` 为实例级；任务级要求该节点 `allowCc: true`。
+    pub async fn cc(
+        &self,
+        workflow_id: &str,
+        task_id: Option<&str>,
+        recipients: Vec<String>,
+        message: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowCcResponse> {
+        let request = WorkflowCcRequest {
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.unwrap_or_default().to_string(),
+            recipients,
+            message: message.to_string(),
+            idempotency_key: optional_idempotency_key(idempotency_key),
+            on_behalf_of: String::new(),
+        };
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = WorkflowStub::new(channel.clone());
+        match stub.cc(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp.into_inner())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// 任务级撤回：保留通过记录并回退到 `target_node`。
+    pub async fn withdraw_task(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        target_node: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowWithdrawTaskResponse> {
+        let request = WorkflowWithdrawTaskRequest {
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.to_string(),
+            target_node: target_node.to_string(),
+            comment: comment.to_string(),
+            idempotency_key: optional_idempotency_key(idempotency_key),
+            on_behalf_of: String::new(),
+        };
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = WorkflowStub::new(channel.clone());
+        match stub.withdraw_task(request).await {
             Ok(resp) => {
                 self.client.return_channel(&endpoint, channel);
                 Ok(resp.into_inner())

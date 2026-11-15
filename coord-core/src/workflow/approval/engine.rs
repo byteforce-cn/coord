@@ -169,6 +169,7 @@ impl Engine {
             branch: Some(id.clone()),
             by: "engine".into(),
             detail: format!("node={node} attempt={attempt}"),
+            task: None,
             acting_service: self.acting_service.clone(),
         });
         self.touch(now);
@@ -281,6 +282,7 @@ impl Engine {
             branch: Some(branch.id.clone()),
             by: by.into(),
             detail: format!("seats={} comment={}", ids.len(), comment.unwrap_or("")),
+            task: None,
             acting_service: self.acting_service.clone(),
         });
         self.touch(now);
@@ -376,6 +378,7 @@ impl Engine {
             branch: Some(branch.id.clone()),
             by: by.into(),
             detail: format!("seats={cancelled}"),
+            task: None,
             acting_service: self.acting_service.clone(),
         });
         self.touch(now);
@@ -619,6 +622,223 @@ impl Engine {
         }])
     }
 
+    /// 催办：只写审计 / 通知，不改状态机；终态席位拒绝。
+    ///
+    /// 授权：发起人、分支 `sign_admins`、席位责任人/候选/被委派人。
+    pub fn urge(
+        &mut self,
+        expected: u64,
+        task_id: &str,
+        by: &str,
+        message: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        let task = self
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
+        if !task.status.is_open() {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "task {} is {:?}",
+                task.id, task.status
+            )));
+        }
+        let branch = self
+            .branches
+            .get(&task.branch_id)
+            .ok_or_else(|| ApprovalError::NotFound(task.branch_id.clone()))?;
+        self.ensure_participant(branch, Some(&task), by)?;
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "urge".into(),
+            branch: Some(task.branch_id.clone()),
+            task: Some(task.id.clone()),
+            by: by.into(),
+            detail: message.to_string(),
+            acting_service: self.acting_service.clone(),
+        });
+        self.touch(now);
+        Ok(Vec::new())
+    }
+
+    /// 抄送：只写审计 / 通知，不改变审批计数。
+    ///
+    /// 任务级抄送要求该节点定义 `allowCc: true`；实例级抄送仅限发起人或 `sign_admins`。
+    /// 终态席位拒绝（`Rejected/Cancelled/Expired/Completed`）。
+    pub fn cc(
+        &mut self,
+        expected: u64,
+        task_id: Option<&str>,
+        recipients: &[Principal],
+        message: Option<&str>,
+        by: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        if recipients.is_empty() || recipients.iter().any(|r| r.is_empty()) {
+            return Err(ApprovalError::InvalidArgument("recipients".into()));
+        }
+        let (branch_id, task) = match task_id {
+            Some(tid) => {
+                let task = self
+                    .tasks
+                    .get(tid)
+                    .cloned()
+                    .ok_or_else(|| ApprovalError::NotFound(tid.into()))?;
+                if !task.status.is_open() {
+                    return Err(ApprovalError::InvalidTransition(format!(
+                        "task {} is {:?}",
+                        task.id, task.status
+                    )));
+                }
+                let branch = self
+                    .branches
+                    .get(&task.branch_id)
+                    .cloned()
+                    .ok_or_else(|| ApprovalError::NotFound(task.branch_id.clone()))?;
+                if !branch.policy.allow_cc {
+                    return Err(ApprovalError::NotAuthorized(format!(
+                        "node {} does not allow cc",
+                        branch.node
+                    )));
+                }
+                self.ensure_participant(&branch, Some(&task), by)?;
+                (Some(branch.id), Some(task.id))
+            }
+            None => {
+                let allowed = self.instance.initiator == by
+                    || self
+                        .branches
+                        .values()
+                        .any(|b| b.policy.sign_admins.iter().any(|a| a == by));
+                if !allowed {
+                    return Err(ApprovalError::NotAuthorized(format!(
+                        "{by} cannot cc this instance"
+                    )));
+                }
+                (None, None)
+            }
+        };
+        let detail = json!({
+            "recipients": recipients,
+            "message": message,
+        })
+        .to_string();
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "cc".into(),
+            branch: branch_id,
+            task,
+            by: by.into(),
+            detail,
+            acting_service: self.acting_service.clone(),
+        });
+        self.touch(now);
+        Ok(Vec::new())
+    }
+
+    /// 任务级撤回：保留已产生的通过记录，关闭当前分支并回退到 `target_node`。
+    ///
+    /// 仅该席位的原审批人（或其被委派人）可发起；**带否决票的席位不可撤回**（否决记录
+    /// 不可撤销）。当前必须存在 Open 分支（下游未完成）。
+    pub fn withdraw_task(
+        &mut self,
+        expected: u64,
+        task_id: &str,
+        by: &str,
+        target_node: &str,
+        comment: Option<&str>,
+        now: i64,
+    ) -> Result<(Id, Vec<Effect>), ApprovalError> {
+        self.guard(expected)?;
+        let task = self
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
+        if task.kind != TaskKind::Approval {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "task {} is not an approval task",
+                task.id
+            )));
+        }
+        let approved = task.votes.iter().any(|v| {
+            v.decision == Decision::Approve
+                && (v.actor == by || v.on_behalf_of.as_deref() == Some(by))
+        });
+        if !approved {
+            return Err(ApprovalError::NotAuthorized(format!(
+                "{by} has no approve record on {}",
+                task.id
+            )));
+        }
+        if task.votes.iter().any(|v| v.decision == Decision::Reject) {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "task {} has a reject record and cannot be withdrawn",
+                task.id
+            )));
+        }
+        let current = self
+            .branches
+            .values()
+            .find(|b| b.status == BranchStatus::Open)
+            .cloned()
+            .ok_or_else(|| {
+                ApprovalError::InvalidTransition("no open branch to roll back from".into())
+            })?;
+        if !self.node_attempts.contains_key(target_node) {
+            return Err(ApprovalError::InvalidArgument(format!(
+                "target node {target_node} is not in the reached-node whitelist"
+            )));
+        }
+        let mut out = Vec::new();
+        let new_branch = self.rollback_to_node(
+            &current.id,
+            target_node,
+            by,
+            comment,
+            "task_withdrawn",
+            Some(&task.id),
+            now,
+            &mut out,
+        )?;
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "withdraw_task".into(),
+            branch: Some(current.id),
+            task: Some(task.id),
+            by: by.into(),
+            detail: comment.unwrap_or("").to_string(),
+            acting_service: self.acting_service.clone(),
+        });
+        Ok((new_branch, out))
+    }
+
+    /// 催办/抄送的参与者判定：发起人、分支 `sign_admins`、席位责任人/候选/被委派人。
+    fn ensure_participant(
+        &self,
+        branch: &Branch,
+        task: Option<&Task>,
+        by: &str,
+    ) -> Result<(), ApprovalError> {
+        if self.instance.initiator == by || branch.policy.sign_admins.iter().any(|a| a == by) {
+            return Ok(());
+        }
+        if task.is_some_and(|t| {
+            t.assignee.as_deref() == Some(by)
+                || t.candidates.iter().any(|c| c == by)
+                || t.delegation.as_ref().map(|d| d.to == by).unwrap_or(false)
+        }) {
+            return Ok(());
+        }
+        Err(ApprovalError::NotAuthorized(format!(
+            "{by} is not a participant of {}",
+            branch.id
+        )))
+    }
+
     /// 驳回至节点：关闭当前分支（`Returned`），作废目标节点旧尝试，重开新尝试。
     ///
     /// 目标必须在已进入节点白名单（`node_attempts`）内；累计次数受 [`MAX_JUMPS`] 限制。
@@ -755,6 +975,7 @@ impl Engine {
             branch: Some(branch.id.clone()),
             by: by.into(),
             detail: format!("{} -> {} ({reason})", branch.node, target_node),
+            task: None,
             acting_service: self.acting_service.clone(),
         });
         let jump_count = self.instance.jump_count;
@@ -877,6 +1098,7 @@ impl Engine {
             branch: None,
             by: by.into(),
             detail: String::new(),
+            task: None,
             acting_service: self.acting_service.clone(),
         });
         self.emit(
@@ -914,6 +1136,7 @@ impl Engine {
             branch: None,
             by: by.into(),
             detail: reason.into(),
+            task: None,
             acting_service: self.acting_service.clone(),
         });
         self.emit(

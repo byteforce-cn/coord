@@ -1,3 +1,27 @@
+## [contracts/v1.21.0] — 2026-11-15（Minor：Workflow 任务级催办/抄送/撤回，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 追加 3 个命令 RPC；`approve` DSL 追加
+`allowCc`；无字段号/类型变更、不删 RPC；`buf breaking` 基线不变）。
+
+- 新增 `Urge` / `Cc` / `WithdrawTask`：
+  - `Urge`：只写审计/通知，不改审批计数与工作流状态；终态席位 → `FAILED_PRECONDITION`。
+    按 seedj 口径**不写历史**。
+  - `Cc`：任务级要求节点 `allowCc: true`（新增 DSL 键，缺省 `false`）；实例级限发起人/
+    `sign_admins`；写审计并在 `History` 投影为 `TASK_CC`；终态席位拒绝。
+  - `WithdrawTask`：仅原审批人（或其被委派人）可撤回已通过的席位；**带否决票的席位
+    拒绝撤回**；保留通过记录，在同一条命令内关闭当前分支并回退到 `target_node`，
+    回退事件 `reason=task_withdrawn`，`History` 投影 `TASK_WITHDRAWN`。
+- 能力登记：三个命令 → `coord:workflow:execute`。
+- SDK：Rust `Client::urge` / `cc` / `withdraw_task`；Java 后续补齐。
+- 仍属 #381 未落地：`AddAssigneePosition.BEFORE/AFTER` 派生任务与 assignment 挂起/恢复、
+  减签 assignment 级视图、委派到期、`WAITING` + `Resume`、`formData`。
+
+**影响范围**：旧客户端不受影响（新增 RPC/DSL 键为增量）。任务级抄送在未开启 `allowCc`
+的节点上会返回 `PERMISSION_DENIED`（有意 fail-closed）。
+
+**回滚预案**：回滚本分支即回到无这三个命令的版本；审计记录中的新 action 字符串
+（`urge`/`cc`/`withdraw_task`）在旧版本读路径可忽略，无落盘迁移。
+
 ## [contracts/v1.20.0] — 2026-11-15（Minor：Deploy 同版本不可变语义，wire 无改动）
 
 **发布口径**：**Minor**（无字段/RPC/枚举/错误码变更；`buf breaking` 基线不变）。

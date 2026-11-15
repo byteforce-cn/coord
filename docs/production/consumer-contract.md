@@ -428,7 +428,7 @@ trigger:
 | `Workflow/Start` / `Signal` / `Cancel` | `coord:workflow:execute` |
 | `Workflow/GetStatus` / `ListDefinitions` / `GetDefinition` / `ListDefinitionVersions` / `ListInstances` | `coord:workflow:read` |
 | `Workflow/Deploy` / `RollbackDefinition` | `coord:workflow:define` |
-| `Workflow/Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` / `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate` | `coord:workflow:execute` |
+| `Workflow/Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` / `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate` / `Urge` / `Cc` / `WithdrawTask` | `coord:workflow:execute` |
 | `Workflow/ListPendingTasks` / `GetInstanceDetail` / `ListTasks` / `GetTask` / `History` | `coord:workflow:read` |
 
 - 调度：认领式（`ClaimJob` 带租约，`Heartbeat` 续约），worker 崩溃由租约过期
@@ -445,8 +445,8 @@ trigger:
 - 工作流：**保留策略已落地（G-WF-1）**——`DeleteInstance`（仅终态）/`DeleteDefinition`（无实例引用才可删）；删除**不可回滚**、**无自动 TTL/归档**（`boundaries.md` B-WF-1；完整语义见 `workflow-semantics.md`）；子流程恢复为周期扫描（B-WF-2/B-WF-3）。
 - **人工审批 v2（原生 `approve` 节点，ADR-0013 / ADR-0014）**：走到该节点的工作流实例进入
   `SUSPENDED`（`expected_signal = "approval.completed"`，审批实例 id = workflow 实例 id）；
-  外部经 10 个命令 RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/
-  Delegate/Withdraw/Terminate`）操作席位、经 5 个查询 RPC（`ListPendingTasks`/
+  外部经 13 个命令 RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/
+  Delegate/Withdraw/Terminate/Urge/Cc/WithdrawTask`）操作席位、经 5 个查询 RPC（`ListPendingTasks`/
   `GetInstanceDetail`/`ListTasks`/`GetTask`/`History`）读待办、任务、实例详情与历史事件流。命令携带 `idempotency_key`，重放返回首次响应
   （不重复执行）；默认主体身份取自 CCT（请求体无 actor）。
   业务服务代终端用户时：命令填 `on_behalf_of`、`ListPendingTasks` 填 `assignee`；调用方
