@@ -96,12 +96,13 @@ use coord_proto::agent::{
     WorkflowAddSignRequest, WorkflowAddSignResponse, WorkflowApproveRequest,
     WorkflowApproveResponse, WorkflowDelegateRequest, WorkflowDelegateResponse,
     WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest,
-    WorkflowGetTaskResponse, WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse,
-    WorkflowListTasksRequest, WorkflowListTasksResponse, WorkflowRejectRequest,
-    WorkflowRejectResponse, WorkflowRemoveSignRequest, WorkflowRemoveSignResponse,
-    WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse, WorkflowTerminateRequest,
-    WorkflowTerminateResponse, WorkflowTransferRequest, WorkflowTransferResponse,
-    WorkflowWithdrawRequest, WorkflowWithdrawResponse,
+    WorkflowGetTaskResponse, WorkflowHistoryEvent, WorkflowHistoryRequest, WorkflowHistoryResponse,
+    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowListTasksRequest,
+    WorkflowListTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
+    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
+    WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
+    WorkflowTransferRequest, WorkflowTransferResponse, WorkflowWithdrawRequest,
+    WorkflowWithdrawResponse,
 };
 
 use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError, SYSTEM_ACTOR};
@@ -1813,6 +1814,10 @@ impl Workflow for WorkflowService {
                 version: def.version,
                 status: def.status,
                 created_at: def.created_at,
+                // 遗留 v1 存储无结构化定义/内容哈希；引擎路径（WorkflowEngineService）
+                // 才提供这两项。
+                definition_hash: String::new(),
+                definition_json: String::new(),
             })),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -2013,6 +2018,15 @@ impl Workflow for WorkflowService {
         &self,
         _request: Request<WorkflowGetTaskRequest>,
     ) -> Result<Response<WorkflowGetTaskResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn history(
+        &self,
+        _request: Request<WorkflowHistoryRequest>,
+    ) -> Result<Response<WorkflowHistoryResponse>, Status> {
         Err(Status::unimplemented(
             "workflow approval v2 is provided by WorkflowEngineService",
         ))
@@ -2409,15 +2423,41 @@ impl Workflow for WorkflowEngineService {
         request: Request<WorkflowGetDefinitionRequest>,
     ) -> Result<Response<WorkflowGetDefinitionResponse>, Status> {
         let req = request.into_inner();
-        match self.get_definition(&req.workflow_id).await {
-            Ok(Some(def)) => Ok(Response::new(WorkflowGetDefinitionResponse {
-                workflow_id: def.id.unwrap_or_default(),
-                name: def.document.name,
-                definition_yaml: def.raw_yaml.unwrap_or_default(),
-                version: def.document.version,
-                status: "active".into(),
-                created_at: 0,
-            })),
+        let by_version =
+            !req.namespace.is_empty() || !req.name.is_empty() || !req.version.is_empty();
+        if req.workflow_id.is_empty() && !by_version {
+            return Err(Status::invalid_argument(
+                "either workflow_id or namespace/name/version is required",
+            ));
+        }
+        if req.workflow_id.is_empty()
+            && (req.namespace.is_empty() || req.name.is_empty() || req.version.is_empty())
+        {
+            return Err(Status::invalid_argument(
+                "namespace, name and version must all be set for a by-version lookup",
+            ));
+        }
+        let loaded = if !req.workflow_id.is_empty() {
+            self.get_definition(&req.workflow_id).await
+        } else {
+            self.get_definition_by_version(&req.namespace, &req.name, &req.version)
+                .await
+        };
+        match loaded {
+            Ok(Some(def)) => {
+                let hash = coord_core::workflow::model::definition_hash(&def);
+                let json = serde_json::to_string(&def).unwrap_or_default();
+                Ok(Response::new(WorkflowGetDefinitionResponse {
+                    workflow_id: def.id.unwrap_or_default(),
+                    name: def.document.name,
+                    definition_yaml: def.raw_yaml.unwrap_or_default(),
+                    version: def.document.version,
+                    status: "active".into(),
+                    created_at: 0,
+                    definition_hash: hash,
+                    definition_json: json,
+                }))
+            }
             Ok(None) => Err(Status::not_found("definition not found")),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -2580,6 +2620,35 @@ impl Workflow for WorkflowEngineService {
             task: Some(task_summary(&view)),
             votes: map_votes(&view.task.votes),
             instance_status: view.instance_status,
+        }))
+    }
+
+    async fn history(
+        &self,
+        request: Request<WorkflowHistoryRequest>,
+    ) -> Result<Response<WorkflowHistoryResponse>, Status> {
+        let req = request.into_inner();
+        if req.workflow_id.is_empty() {
+            return Err(Status::invalid_argument("workflow_id must not be empty"));
+        }
+        let events = self
+            .history(&req.workflow_id)
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowHistoryResponse {
+            events: events
+                .into_iter()
+                .map(|e| WorkflowHistoryEvent {
+                    event_id: e.event_id,
+                    event_type: e.event_type,
+                    instance_id: e.instance_id,
+                    step_name: e.step_name,
+                    task_id: e.task_id,
+                    action_id: e.action_id,
+                    occurred_at: e.occurred_at,
+                    attributes_json: serde_json::to_string(&e.attributes).unwrap_or_default(),
+                })
+                .collect(),
         }))
     }
 

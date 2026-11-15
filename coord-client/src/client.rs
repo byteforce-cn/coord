@@ -42,12 +42,12 @@ use coord_proto::workflow::v1::{
     WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse,
     WorkflowDelegateRequest, WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest,
     WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest, WorkflowGetTaskResponse,
-    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowListTasksRequest,
-    WorkflowListTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
-    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
-    WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
-    WorkflowTransferRequest, WorkflowTransferResponse, WorkflowWithdrawRequest,
-    WorkflowWithdrawResponse,
+    WorkflowHistoryRequest, WorkflowHistoryResponse, WorkflowListPendingTasksRequest,
+    WorkflowListPendingTasksResponse, WorkflowListTasksRequest, WorkflowListTasksResponse,
+    WorkflowRejectRequest, WorkflowRejectResponse, WorkflowRemoveSignRequest,
+    WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse,
+    WorkflowTerminateRequest, WorkflowTerminateResponse, WorkflowTransferRequest,
+    WorkflowTransferResponse, WorkflowWithdrawRequest, WorkflowWithdrawResponse,
 };
 
 use crate::config::Config;
@@ -1956,6 +1956,22 @@ impl ApprovalClient {
             task_id: task_id.to_string(),
         };
         match stub.get_task(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp.into_inner())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// 实例历史（task / round / step / instance 级确定性投影）。
+    pub async fn history(&self, workflow_id: &str) -> Result<WorkflowHistoryResponse> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = WorkflowStub::new(channel.clone());
+        let request = WorkflowHistoryRequest {
+            workflow_id: workflow_id.to_string(),
+        };
+        match stub.history(request).await {
             Ok(resp) => {
                 self.client.return_channel(&endpoint, channel);
                 Ok(resp.into_inner())
