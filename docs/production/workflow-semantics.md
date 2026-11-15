@@ -1,6 +1,6 @@
 # 工作流语义（补偿 / 重试 / 信号 / 保留）
 
-> Owner: maintainers ｜ Last verified: 2026-10-16
+> Owner: maintainers ｜ Last verified: 2026-11-15
 
 面向接入方的语义单一归属页（G-WF-1）。事实源：`coord.workflow.v1` 的 proto 声明
 （wire 字段）、`coord-core/src/workflow/`（sw 编译器 + runtime）与
@@ -14,6 +14,14 @@
   catch-all 兜底。
 - **执行**：被包裹状态的动作失败（含 `call` 派发失败）⇒ 转入补偿状态并执行其
   动作；正常路径**不得**执行补偿。
+- **catch 命中后的行进**：catch 子句里没有显式转场时就顺延到下一个任务（catch 已
+  消费掉这次失败）；有显式转场（`switch`）时才路由到目标。两条路径都必须推进游标——
+  停在原地只会把同一个 try/catch 重跑成帧数无上限。
+- **catch 体可执行的构造**：`call` / `set` / `switch` / `raise` / `emit` / 嵌套 `do` /
+  嵌套 `try`。块内的 `call` 与 try 体同口径**真实派发**；块内 `set` 写入实例上下文。
+  `wait` / `listen` / `approve` / `run` / `fork` / `for` 在块内没有跨步骤挂起/并行
+  调度面，Deploy 直接拒绝（点名 `try.<task>` / `catch.<task>`）；历史定义在运行期
+  命中它们时实例 `FAULTED`，不当"已完成"跳过（B-WF-11）。
 - **逆序补偿**：引擎**不内置**自动逆序栈；逆序由 DSL 连线表达——把补偿状态
   串起来（`undo2` 的 `transition: undo1`），失败状态的 `compensatedBy` 指向
   链头。三步链路判据：

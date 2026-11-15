@@ -435,7 +435,7 @@ impl Validator {
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let do_val = &map["do"];
-        let tasks = self.parse_sub_tasks(do_val, raw.span);
+        let tasks = self.parse_sub_tasks(do_val, raw.span, "do");
         Some(Task::Do(DoTask { tasks }))
     }
 
@@ -661,9 +661,9 @@ impl Validator {
         if let Some(name) = obj.get("name").and_then(Value::as_str) {
             let name = name.to_string();
             let tasks = if let Some(do_val) = obj.get("do") {
-                self.parse_sub_tasks(do_val, span)
+                self.parse_sub_tasks(do_val, span, "fork.branch.do")
             } else if let Some(tasks_val) = obj.get("tasks") {
-                self.parse_sub_tasks(tasks_val, span)
+                self.parse_sub_tasks(tasks_val, span, "fork.branch.tasks")
             } else {
                 Vec::new()
             };
@@ -674,7 +674,8 @@ impl Validator {
         // 分支项本身就是一个 taskList 项，交由 parse_sub_tasks 解析其 body。
         if obj.len() == 1 {
             if let Some(name) = obj.keys().next() {
-                let tasks = self.parse_sub_tasks(&Value::Array(vec![branch.clone()]), span);
+                let tasks =
+                    self.parse_sub_tasks(&Value::Array(vec![branch.clone()]), span, "fork.branch");
                 return Some(ForkBranch {
                     name: name.clone(),
                     tasks,
@@ -778,7 +779,7 @@ impl Validator {
             self.reject_for_field("for.do", raw.span);
             return None;
         };
-        let tasks = self.parse_sub_tasks(body, raw.span);
+        let tasks = self.parse_sub_tasks(body, raw.span, "for.do");
         // 空循环体等于跑零次迭代——字段在场却无语义，fail-closed 而非静默接受。
         if tasks.is_empty() {
             self.reject_for_field("for.do", raw.span);
@@ -1420,23 +1421,39 @@ impl Validator {
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let try_val = &map["try"];
-        let try_tasks = self.parse_sub_tasks(try_val, raw.span);
+        let try_tasks = self.parse_sub_tasks(try_val, raw.span, "try");
 
-        let catch_val = map.get("catch");
-        let catch_clauses = if let Some(catch_val) = catch_val {
-            if let Some(arr) = catch_val.as_array() {
-                arr.iter()
-                    .filter_map(|c| self.parse_catch_clause(c, raw.span))
-                    .collect()
-            } else {
-                vec![CatchClause {
-                    errors: None,
-                    tasks: self.parse_sub_tasks(catch_val, raw.span),
-                }]
+        // `catch` 有两种合法形状：子句数组，或**单个子句对象**（`catch: {do: [...]}`，
+        // catch-all 的简写）。旧实现把对象直接丢给 `parse_sub_tasks`，而那里只认数组 ⇒
+        // 解析结果为空、不报错，运行时"命中 catch 并成功"却什么都没做。两种形状都必须
+        // 得到非空子句，或得到一条点名错误；不允许静默降级为空 catch。
+        let catch_clauses = match map.get("catch") {
+            None => Vec::new(),
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|c| self.parse_catch_clause(c, raw.span))
+                .collect(),
+            Some(Value::Object(_)) => self
+                .parse_catch_clause(&map["catch"], raw.span)
+                .into_iter()
+                .collect(),
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::TypeMismatch("catch".to_string()),
+                    message: "'catch' must be an array of clauses or a single clause object"
+                        .to_string(),
+                });
+                Vec::new()
             }
-        } else {
-            Vec::new()
         };
+
+        // try/catch 块内只驱动同步构造（见 runtime::drive_sub_tasks）；其余构造在块内会被
+        // 跳过 —— 解析期点名拒绝，不把"接受但语义不同"留在运行期。
+        self.check_try_catch_block(&try_tasks, raw.span, "try");
+        for clause in &catch_clauses {
+            self.check_try_catch_block(&clause.tasks, raw.span, "catch");
+        }
 
         Some(Task::TryCatch(TryCatchTask {
             r#try: try_tasks,
@@ -1445,24 +1462,117 @@ impl Validator {
     }
 
     fn parse_catch_clause(&mut self, clause: &Value, span: Span) -> Option<CatchClause> {
-        let obj = clause.as_object()?;
-        let errors = obj.get("errors").and_then(|v| {
-            v.as_array().map(|arr| {
-                arr.iter()
-                    .filter_map(|e| e.as_str().map(String::from))
-                    .collect()
-            })
-        });
+        let Some(obj) = clause.as_object() else {
+            self.errors.push(ValidationError {
+                span: Some(span),
+                kind: ValidationErrorKind::TypeMismatch("catch clause".to_string()),
+                message: "each catch clause must be an object with 'do' (or 'tasks')".to_string(),
+            });
+            return None;
+        };
 
-        let tasks = if let Some(do_val) = obj.get("do") {
-            self.parse_sub_tasks(do_val, span)
-        } else if let Some(tasks_val) = obj.get("tasks") {
-            self.parse_sub_tasks(tasks_val, span)
-        } else {
-            Vec::new()
+        // 子句对象里的未知键不得静默丢弃（例如把 `do` 拼错成 `tasks` 之外的键，或把
+        // `errors` 写成对象）：内容会被当作不存在，补偿静默不执行。
+        for key in obj.keys() {
+            if key != "errors" && key != "do" && key != "tasks" {
+                let construct = format!("catch.{key}");
+                self.errors.push(ValidationError {
+                    span: Some(span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                    message: format!(
+                        "unimplemented construct '{construct}': a catch clause accepts only \
+                         'errors' and 'do'/'tasks'"
+                    ),
+                });
+            }
+        }
+
+        let errors = match obj.get("errors") {
+            None => None,
+            Some(Value::Array(arr)) => {
+                let mut names = Vec::with_capacity(arr.len());
+                for item in arr {
+                    match item.as_str() {
+                        Some(name) => names.push(name.to_string()),
+                        None => {
+                            self.errors.push(ValidationError {
+                                span: Some(span),
+                                kind: ValidationErrorKind::TypeMismatch("catch.errors".to_string()),
+                                message: "catch clause 'errors' entries must be error-type strings"
+                                    .to_string(),
+                            });
+                            return None;
+                        }
+                    }
+                }
+                Some(names)
+            }
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(span),
+                    kind: ValidationErrorKind::TypeMismatch("catch.errors".to_string()),
+                    message: "catch clause 'errors' must be an array of error-type strings"
+                        .to_string(),
+                });
+                return None;
+            }
+        };
+
+        let tasks = match obj.get("do").or_else(|| obj.get("tasks")) {
+            Some(body) => self.parse_sub_tasks(body, span, "catch"),
+            None => {
+                self.errors.push(ValidationError {
+                    span: Some(span),
+                    kind: ValidationErrorKind::MissingRequiredField("do".to_string()),
+                    message: "a catch clause requires a 'do' (or 'tasks') task list".to_string(),
+                });
+                return None;
+            }
         };
 
         Some(CatchClause { errors, tasks })
+    }
+
+    /// try/catch 块内的可驱动面校验。
+    ///
+    /// 块内任务由 `runtime::drive_sub_tasks` 同步驱动：它只能推进 call / set /
+    /// switch / raise / emit / do / 嵌套 try-catch。需要主循环的构造（跨挂起
+    /// wait / listen / approve / run，以及并行 fork / 迭代 for）在块内没有等价执行，
+    /// 旧行为是把它们当"已完成"跳过 —— 静默丢副作用。这里点名拒绝。
+    fn check_try_catch_block(&mut self, tasks: &[NamedTask], span: Span, construct: &str) {
+        for task in tasks {
+            let unsupported = match &task.task {
+                Task::Do(do_task) => {
+                    self.check_try_catch_block(&do_task.tasks, span, construct);
+                    None
+                }
+                Task::TryCatch(tc) => {
+                    self.check_try_catch_block(&tc.r#try, span, construct);
+                    for clause in &tc.catch {
+                        self.check_try_catch_block(&clause.tasks, span, construct);
+                    }
+                    None
+                }
+                Task::Wait(_) => Some("wait"),
+                Task::Listen(_) => Some("listen"),
+                Task::Approve(_) => Some("approve"),
+                Task::Run(_) => Some("run"),
+                Task::Fork(_) => Some("fork"),
+                Task::ForEach(_) => Some("for"),
+                _ => None,
+            };
+            if let Some(kind) = unsupported {
+                let named = format!("{construct}.{}", task.name);
+                self.errors.push(ValidationError {
+                    span: Some(span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(named.clone()),
+                    message: format!(
+                        "unimplemented construct '{named}': '{kind}' cannot be driven inside a \
+                         try/catch block (it needs the workflow main loop); move it outside"
+                    ),
+                });
+            }
+        }
     }
 
     fn parse_run(
@@ -1850,39 +1960,60 @@ impl Validator {
         }
     }
 
-    /// 解析子任务列表（do/try/catch 中的嵌套任务）
-    fn parse_sub_tasks(&mut self, val: &Value, parent_span: Span) -> Vec<NamedTask> {
-        match val {
-            Value::Array(arr) => arr
-                .iter()
-                .filter_map(|item| {
-                    let obj = item.as_object()?;
-                    if obj.len() != 1 {
-                        self.errors.push(ValidationError {
-                            span: Some(parent_span),
-                            kind: ValidationErrorKind::TypeMismatch(
-                                "sub-task key count".to_string(),
-                            ),
-                            message: "sub-task must have exactly one key".to_string(),
-                        });
-                        return None;
-                    }
-                    let (name, body) = obj.iter().next()?;
-                    let raw = RawNamedTask {
-                        span: parent_span,
-                        name: name.clone(),
-                        body: body.clone(),
-                    };
-                    // 嵌套任务不在顶层 do 列表末尾：`then: exit|end` 在此处已被忽略
-                    self.check_then_directive(&raw.body, false, raw.span);
-                    self.resolve_task(&raw).map(|task| NamedTask {
-                        name: name.clone(),
-                        task,
-                    })
+    /// 解析子任务列表（do/try/catch 中的嵌套任务）。
+    ///
+    /// `construct` 只用于错误点名（如 `do` / `try` / `catch`）。非数组输入与
+    /// 无法解析的项一律登记错误：返回空 Vec 且不报错就是「源文本写了、引擎当作
+    /// 不存在」—— 补偿静默不执行正是这一类。
+    fn parse_sub_tasks(
+        &mut self,
+        val: &Value,
+        parent_span: Span,
+        construct: &str,
+    ) -> Vec<NamedTask> {
+        let arr = match val {
+            Value::Array(arr) => arr,
+            _ => {
+                self.errors.push(ValidationError {
+                    span: Some(parent_span),
+                    kind: ValidationErrorKind::TypeMismatch(construct.to_string()),
+                    message: format!("'{construct}' must be an array of tasks"),
+                });
+                return Vec::new();
+            }
+        };
+        arr.iter()
+            .filter_map(|item| {
+                let Some(obj) = item.as_object() else {
+                    self.errors.push(ValidationError {
+                        span: Some(parent_span),
+                        kind: ValidationErrorKind::TypeMismatch(construct.to_string()),
+                        message: format!("each item in '{construct}' must be a task object"),
+                    });
+                    return None;
+                };
+                if obj.len() != 1 {
+                    self.errors.push(ValidationError {
+                        span: Some(parent_span),
+                        kind: ValidationErrorKind::TypeMismatch("sub-task key count".to_string()),
+                        message: "sub-task must have exactly one key".to_string(),
+                    });
+                    return None;
+                }
+                let (name, body) = obj.iter().next()?;
+                let raw = RawNamedTask {
+                    span: parent_span,
+                    name: name.clone(),
+                    body: body.clone(),
+                };
+                // 嵌套任务不在顶层 do 列表末尾：`then: exit|end` 在此处已被忽略
+                self.check_then_directive(&raw.body, false, raw.span);
+                self.resolve_task(&raw).map(|task| NamedTask {
+                    name: name.clone(),
+                    task,
                 })
-                .collect(),
-            _ => Vec::new(),
-        }
+            })
+            .collect()
     }
 
     // ─── 引用校验 ───
@@ -3382,6 +3513,153 @@ do:
             }
             _ => panic!("expected TryCatch task"),
         }
+    }
+
+    /// #324 Bug 1：对象形式的 `catch`（`catch: {do: [...]}`）必须解析成catch-all
+    /// 子句，不能静默降级成"空的 catch"。
+    #[test]
+    fn test_validate_try_catch_accepts_object_form_catch() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: tc-object-catch
+  version: "1.0"
+do:
+  - guard:
+      try:
+        - risky:
+            call: http
+            with:
+              method: POST
+              endpoint: "https://api/risky"
+      catch:
+        do:
+          - compensate:
+              call: http
+              with:
+                method: POST
+                endpoint: "https://api/compensate"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("object-form catch must validate");
+        match &def.do_tasks[0].task {
+            Task::TryCatch(tc) => {
+                assert_eq!(
+                    tc.catch.len(),
+                    1,
+                    "object form must produce one catch-all clause"
+                );
+                assert!(
+                    tc.catch[0].errors.is_none(),
+                    "object form has no errors filter"
+                );
+                assert_eq!(tc.catch[0].tasks.len(), 1);
+                assert_eq!(tc.catch[0].tasks[0].name, "compensate");
+            }
+            other => panic!("expected TryCatch task, got {other:?}"),
+        }
+    }
+
+    /// #324：源文本写了 catch 却没有可执行的子句/任务列表时必须报错——
+    /// "解析结果为空但源文本非空"正是静默丢补偿的入口。
+    #[test]
+    fn test_validate_try_catch_rejects_clause_without_tasks() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: tc-empty-catch
+  version: "1.0"
+do:
+  - guard:
+      try:
+        - risky:
+            call: http
+            with:
+              method: POST
+              endpoint: "https://api/risky"
+      catch:
+        - errors:
+            - TimeoutError
+"#;
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("catch clause without tasks must be rejected");
+        assert!(
+            errs.iter().any(|e| e.message.contains("'do'")),
+            "expected a 'do' required-field error, got {errs:?}"
+        );
+    }
+
+    /// #324：非数组的 `try` / 非对象的 catch 子句都不得静默变成空列表。
+    #[test]
+    fn test_validate_try_catch_rejects_wrong_shapes() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: tc-bad-shape
+  version: "1.0"
+do:
+  - guard:
+      try:
+        risky:
+          call: http
+          with:
+            method: POST
+            endpoint: "https://api/risky"
+      catch:
+        - "HTTPError"
+"#;
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("wrong try/catch shapes must be rejected");
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("must be an array of tasks")),
+            "expected 'try must be an array' error, got {errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("each catch clause must be an object")),
+            "expected 'catch clause must be an object' error, got {errs:?}"
+        );
+    }
+
+    /// #324：块内无法驱动的构造（wait/listen/approve/run/fork/for）必须点名拒绝，
+    /// 不能"接受但运行时静默跳过"。
+    #[test]
+    fn test_validate_try_catch_rejects_undrivable_constructs() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: tc-undrivable
+  version: "1.0"
+do:
+  - guard:
+      try:
+        - pause:
+            wait: PT5S
+      catch:
+        - do:
+            - fan:
+                fork:
+                  branches:
+                    - b1:
+                        set:
+                          variable: x
+                          value: "1"
+"#;
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("undrivable constructs must be rejected");
+        assert!(
+            error_kind_naming(&errs, "try.pause"),
+            "expected 'try.pause' unsupported-construct error, got {errs:?}"
+        );
+        assert!(
+            error_kind_naming(&errs, "catch.fan"),
+            "expected 'catch.fan' unsupported-construct error, got {errs:?}"
+        );
     }
 
     #[test]

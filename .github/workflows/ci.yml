@@ -286,6 +286,29 @@ jobs:
       - name: Unit tests (vitest, coverage)
         run: pnpm test:coverage
 
+  jepsen-precheck:
+    name: jepsen source precheck (clojure reader + watchdog filter)
+    # CI 不加载 jepsen 命名空间（jepsen 0.3.14-SNAPSHOT 不在 Maven Central），所以
+    # `jepsen/**/*.clj` 的 reader 级语法错误以前只能在本地起跑时暴露（#322：
+    # `1_000` 一度让 `jepsen/src/jepsen/coord.clj` 直接读不了）。语法检查只需要
+    # reader，不需要 jepsen 依赖。
+    # 步骤顺序：自检（负控制）→ 真检查 → watchdog 过滤面自检；二者都必须真判。
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned Clojure reader jars
+        id: clojure
+        run: echo "classpath=$(bash scripts/ci-install-clojure.sh 2>/dev/null)" >> "$GITHUB_OUTPUT"
+      - name: Reader selftest (injected `1_000` must be rejected)
+        run: java -cp "${{ steps.clojure.outputs.classpath }}" clojure.main jepsen/scripts/check-clj-syntax.clj --selftest
+      - name: Clojure source syntax precheck
+        run: java -cp "${{ steps.clojure.outputs.classpath }}" clojure.main jepsen/scripts/check-clj-syntax.clj
+      - name: Shell syntax precheck (jepsen scripts)
+        run: bash -n jepsen/scripts/soak-watchdog.sh jepsen/scripts/coord-soak.sh
+      - name: Watchdog checkpoint filter selftest
+        run: WATCHDOG_FILTER_SELFTEST=1 bash jepsen/scripts/soak-watchdog.sh
+
   java-sdk:
     name: java sdk (maven verify)
     # Java SDK + example 必须有 CI：20+ 个 Java 测试文件依赖本 job 执行。
