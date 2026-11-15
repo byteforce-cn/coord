@@ -185,8 +185,13 @@ auth:
     `InvalidTransition → FAILED_PRECONDITION`。能力与错误码事实源见
     `coord-core/src/grpc_auth.rs` 与 `consumer-contract.md` §0.2 / §7。
 - **DSL**：定义里用原生 `approve` 节点声明席位与策略（camelCase 键：`approvers / pool / readers /
-  roles / mode / veto / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
+  roles / mode / veto / reject / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
   非法 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed；语法逐字见 ADR-0013 D2。
+- **定义不可变**：同一 `(namespace, name, version)` 的内容由 `definition_hash` 判定——
+  同内容重复 `Deploy` 幂等（返回既有 definition id，不覆盖）；不同内容返回
+  `ALREADY_EXISTS`（要变更请提升 version 或先 `RollbackDefinition`）。`Deploy` 接受
+  JSON 或 YAML（JSON 是 YAML 子集）；`GetDefinition` 可按 `workflow_id` 或
+  `(namespace, name, version)` 直取，并返回 `definition_hash` / `definition_json`。
 - **动态席位（ADR-0014 D1）**：四个席位来源的单个条目可写 `${ ... }` 表达式，在节点开启时
   按实例上下文求值（`$input` / `$context` 同值；返回字符串或字符串数组）。空结果 / 非字符串
   元素 / 空主体 fail-closed 并点名来源键；`roles` 的表达式结果再经 `ApproverResolver` 展开：

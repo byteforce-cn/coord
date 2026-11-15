@@ -2043,6 +2043,7 @@ use crate::services::workflow::phase4::{DeployError, WorkflowEngineError, Workfl
 fn map_deploy_error(e: DeployError) -> Status {
     match e {
         DeployError::Validation(msg) => Status::invalid_argument(format!("deploy error: {msg}")),
+        DeployError::Conflict(msg) => Status::already_exists(msg),
         DeployError::Store(msg) => sanitized_internal(msg),
     }
 }

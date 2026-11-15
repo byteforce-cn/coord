@@ -401,6 +401,45 @@ impl KvWorkflowStore {
 
 #[async_trait]
 impl WorkflowStore for KvWorkflowStore {
+    /// 原子 create-if-absent（`VERSION == 0`）：同版本并发部署恰一个创建者。
+    async fn create_definition(&self, def: &WorkflowDefinition) -> Result<bool, StoreError> {
+        let key = Self::def_key(
+            &def.document.namespace,
+            &def.document.name,
+            &def.document.version,
+        );
+        let value =
+            serde_json::to_vec(def).map_err(|e| StoreError::SerializationError(e.to_string()))?;
+        let compare = Compare {
+            result: CompareResult::Equal as i32,
+            target: Target::Version as i32,
+            key: key.clone(),
+            target_value: Some(TargetValue::Version(0)),
+        };
+        let put = RequestOp {
+            op: Some(Op::RequestPut(PutRequest {
+                key,
+                value,
+                lease_id: 0,
+                prev_kv: false,
+                request_id: vec![],
+            })),
+        };
+        let resp = self
+            .inner
+            .client
+            .txn()
+            .txn(vec![compare], vec![put], vec![])
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+        if resp.succeeded {
+            self.cache.save_definition(def).await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
         let namespace = &def.document.namespace;
         let name = &def.document.name;

@@ -403,6 +403,27 @@ pub trait WorkflowStore: Send + Sync {
     /// 保存工作流定义
     async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError>;
 
+    /// 仅当 `(namespace, name, version)` 不存在时写入定义（create-if-absent）。
+    ///
+    /// 返回 `true` = 本次创建成功；`false` = 同版本定义已存在（调用方负责比较内容哈希：
+    /// 同内容 = 幂等成功，不同内容 = 冲突）。默认实现为读后写；KV 实现覆写为
+    /// `VERSION == 0` 的 CAS。
+    async fn create_definition(&self, def: &WorkflowDefinition) -> Result<bool, StoreError> {
+        if self
+            .load_definition(
+                &def.document.namespace,
+                &def.document.name,
+                &def.document.version,
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        self.save_definition(def).await?;
+        Ok(true)
+    }
+
     /// 原子保存工作流定义（对齐 policy `PutBundle` 的原子覆盖语义）
     ///
     /// 用于定义部署：同一 `(namespace, name, version)` 并发覆盖时防止丢更新
@@ -903,6 +924,10 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
 
     async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
         self.as_ref().save_definition(def).await
+    }
+
+    async fn create_definition(&self, def: &WorkflowDefinition) -> Result<bool, StoreError> {
+        self.as_ref().create_definition(def).await
     }
 
     async fn load_definition(

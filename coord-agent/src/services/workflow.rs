@@ -2300,6 +2300,8 @@ pub mod phase4 {
     pub enum DeployError {
         /// 输入解析 / DSL 校验失败（gRPC → InvalidArgument）
         Validation(String),
+        /// 同 `(namespace, name, version)` 已存在且内容不同（gRPC → AlreadyExists）
+        Conflict(String),
         /// 存储 / 基础设施失败（gRPC → Internal）
         Store(String),
     }
@@ -2308,6 +2310,7 @@ pub mod phase4 {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 DeployError::Validation(msg) => write!(f, "validation error: {msg}"),
+                DeployError::Conflict(msg) => write!(f, "conflict: {msg}"),
                 DeployError::Store(msg) => write!(f, "store error: {msg}"),
             }
         }
@@ -3199,13 +3202,54 @@ pub mod phase4 {
             );
             def.id = Some(id.clone());
 
-            // 原子覆盖（Txn CAS，对齐 policy PutBundle），防并发同键部署丢更新
-            self.store
-                .save_definition_atomic(&def)
+            // 同 (namespace, name, version) 的不可变语义：同内容幂等（返回既有 id），
+            // 不同内容冲突（不覆盖）。create-if-absent 让并发部署恰一个创建者；
+            // 输家重读后按同一规则判定。
+            let namespace = def.document.namespace.clone();
+            let name = def.document.name.clone();
+            let version = def.document.version.clone();
+            let same_content = |existing: &WorkflowDefinition| {
+                coord_core::workflow::model::definition_hash(existing)
+                    == coord_core::workflow::model::definition_hash(&def)
+            };
+            if let Some(existing) = self
+                .store
+                .load_definition(&namespace, &name, &version)
+                .await
+                .map_err(|e| DeployError::Store(format!("store error: {e}")))?
+            {
+                if same_content(&existing) {
+                    return Ok(existing.id.unwrap_or_default());
+                }
+                return Err(DeployError::Conflict(format!(
+                    "definition {namespace}/{name}@{version} already exists with different content"
+                )));
+            }
+            let created = self
+                .store
+                .create_definition(&def)
                 .await
                 .map_err(|e| DeployError::Store(format!("store error: {e}")))?;
-
-            Ok(id)
+            if created {
+                return Ok(id);
+            }
+            let existing = self
+                .store
+                .load_definition(&namespace, &name, &version)
+                .await
+                .map_err(|e| DeployError::Store(format!("store error: {e}")))?
+                .ok_or_else(|| {
+                    DeployError::Store(format!(
+                        "definition {namespace}/{name}@{version} vanished after create conflict"
+                    ))
+                })?;
+            if same_content(&existing) {
+                Ok(existing.id.unwrap_or_default())
+            } else {
+                Err(DeployError::Conflict(format!(
+                    "definition {namespace}/{name}@{version} already exists with different content"
+                )))
+            }
         }
 
         /// 列出某 `(namespace, name)` 定义的全部版本（回滚目标发现，对齐 policy `ListBundleVersions`）
@@ -4439,6 +4483,47 @@ do:
         assert_eq!(def.document.name, "linear-wf");
         assert_eq!(def.document.namespace, "test");
         assert_eq!(def.do_tasks.len(), 2);
+    }
+
+    /// 同 (ns,name,version)：同内容幂等（返回既有 id），不同内容冲突（不覆盖）。
+    #[tokio::test]
+    async fn deploy_same_version_same_content_is_idempotent_and_diff_conflicts() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = sample_linear_yaml();
+        let first = svc.deploy_definition("test", &yaml).await.unwrap();
+        let replay = svc.deploy_definition("test", &yaml).await.unwrap();
+        assert_eq!(first, replay, "同内容重复部署必须返回同一 definition id");
+
+        let changed = yaml.replace("localhost/step2", "localhost/step2-v2");
+        let err = svc
+            .deploy_definition("test", &changed)
+            .await
+            .expect_err("different content at the same version must conflict");
+        assert!(matches!(err, DeployError::Conflict(_)), "{err:?}");
+        let loaded = svc
+            .get_definition_by_version("test", "linear-wf", "1.0")
+            .await
+            .unwrap()
+            .expect("original definition kept");
+        assert_eq!(loaded.id.as_deref(), Some(first.as_str()));
+    }
+
+    /// 结构化定义：JSON 是 YAML 的子集，可直接经 `Deploy` 提交（无需 YAML 文本）。
+    #[tokio::test]
+    async fn deploy_accepts_structured_json_definition() {
+        let svc = WorkflowEngineService::new_for_test();
+        let json = r#"{
+            "document": {"dsl": "1.0.0", "namespace": "test", "name": "json-wf", "version": "1.0"},
+            "do": [{"step": {"set": {"variable": "x", "value": "1"}}}]
+        }"#;
+        let def_id = svc.deploy_definition("test", json).await.unwrap();
+        let def = svc
+            .get_definition(&def_id)
+            .await
+            .unwrap()
+            .expect("structured definition loaded");
+        assert_eq!(def.document.name, "json-wf");
+        assert_eq!(def.do_tasks.len(), 1);
     }
 
     #[tokio::test]
