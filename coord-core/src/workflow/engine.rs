@@ -461,6 +461,7 @@ mod tests {
                 roles: vec![],
                 mode: crate::workflow::approval::model::JoinPolicy::All,
                 veto: true,
+                reject: None,
                 deadline: None,
                 on_pass: None,
                 on_reject: None,

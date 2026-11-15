@@ -1,3 +1,27 @@
+## [contracts/v1.16.0] — 2026-11-15（Minor：Workflow 驳回即回退与判定原因，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 追加字段：`WorkflowRejectRequest.target_node = 6`、
+`ApprovalRound.reject_reason = 8`；不改既有字段号/类型、不删 RPC；`buf breaking` 基线不变）。
+
+- `WorkflowRejectRequest` 增加 `target_node`：非空时在**同一条命令**内完成否决投票、关闭
+  轮次/分支、重开目标节点（目标须在已进入节点白名单，校验先于投票 ⇒ 错误路径零副作用）。
+  `recordAndContinue` 策略下若剩余未投席位仍可满足通过条件，只记录否决票、不回退
+  （响应仍为 `RUNNING`，不产生 `instance.returned`）。
+- `ApprovalRound` 增加 `reject_reason`：`any_reject` / `reject_threshold_reached` /
+  `sign_completion_unsatisfiable` / `on_exhausted`；同一原因同时写入
+  `approval.round.rejected` / `instance.returned` 事件 `data.reason`，回退事件另带
+  `reject_task_ids`。
+- `approve` 节点新增可选 `reject`（`anyReject` / `onExhausted` / `atLeastRejects:<n>` /
+  `recordAndContinue`），与显式 `veto` 互斥；比例票签与死锁提前判定统一按向上取整口径。
+- SDK：Java `WorkflowClient.rejectToNode` / `rejectToNodeOnBehalfOf`；Rust
+  `Client::reject_to_node`。
+
+**影响范围**：旧客户端不受影响（新字段为追加，缺省为空串/空）。需要「驳回即回退」的
+调用方改用 `target_node`；未填时保持既往否决语义。
+
+**回滚预案**：回滚本分支即回到无回退字段版本；已写入的审批聚合按 `serde(default)`
+解码（`reject_reason` 缺省为空），已产生的回退事件仍可被消费者按 `data.reason` 读取。
+
 ## [contracts/v1.15.0] — 2026-11-15（新增字段：MQ v2 DLQ 归因，wire 向前兼容）
 
 **发布口径**：**Minor**（只在既有 message 上追加字段，不改字段号/类型、不删 RPC；

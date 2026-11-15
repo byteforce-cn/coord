@@ -75,6 +75,9 @@ pub enum CommandOutcome {
         response: Value,
         node_outcome: Option<NodeOutcome>,
         terminal: Option<ApprovalOutcome>,
+        /// 非空表示命令已把实例重新驱动到该节点（驳回至节点 / 驳回即回退），
+        /// 调用方须据此 resume，而不是按 `node_outcome` 路由。
+        resume_node: Option<String>,
     },
     /// 幂等键命中：命令此前已成功提交，原样返回首次的响应，引擎未被触碰。
     Duplicate(Value),
@@ -132,6 +135,13 @@ pub enum ApprovalCommand<'a> {
         branch_id: &'a str,
         target_node: &'a str,
         comment: Option<&'a str>,
+    },
+    /// 否决并回退：记录否决票、关闭轮次/分支、重开 `target_node` 在同一条命令内完成。
+    /// `RecordAndContinue` 下若通过条件仍可满足则只记录否决（`resume_node = None`）。
+    RejectToNode {
+        task_id: &'a str,
+        comment: Option<&'a str>,
+        target_node: &'a str,
     },
     Transfer {
         task_id: &'a str,
@@ -377,6 +387,23 @@ impl ApprovalBridge {
             let applied = self.apply_command(&mut engine, actor, cmd.clone(), now);
             engine.set_acting_service(None);
             let effects = applied?;
+            // 回退是否真的发生只能看提交前的聚合：`RecordAndContinue` 允许否决后继续投票。
+            let resume_node = match &cmd {
+                ApprovalCommand::ReturnToNode { target_node, .. } => {
+                    Some((*target_node).to_string())
+                }
+                ApprovalCommand::RejectToNode {
+                    task_id,
+                    target_node,
+                    ..
+                } => engine
+                    .tasks
+                    .get(*task_id)
+                    .and_then(|t| engine.branches.get(&t.branch_id))
+                    .filter(|b| b.status == BranchStatus::Rejected)
+                    .map(|_| (*target_node).to_string()),
+                _ => None,
+            };
             let response = response_for(&engine);
             let node_outcome = branch_id
                 .as_deref()
@@ -399,6 +426,7 @@ impl ApprovalBridge {
                     response,
                     node_outcome,
                     terminal,
+                    resume_node,
                 });
             }
             if attempt >= MAX_COMMIT_ATTEMPTS {
@@ -786,6 +814,25 @@ impl ApprovalBridge {
                 effects.extend(open_effects);
                 Ok(effects)
             }
+            ApprovalCommand::RejectToNode {
+                task_id,
+                comment,
+                target_node,
+            } => {
+                self.guard_self_approve(engine, actor, task_id)?;
+                // 席位必须在回退前取：回退会把目标节点的最近一次 attempt 作废并新建
+                // 空分支，回退后再取只会拿到空席位集。
+                let seats = prior_seats(engine, target_node)?;
+                let (new_branch, mut effects) =
+                    engine.reject_to_node(expected, task_id, actor, comment, target_node, now)?;
+                if let Some(branch) = new_branch {
+                    let rev = engine.instance.revision;
+                    let (_, _, open_effects) =
+                        engine.open_approval(rev, &branch, seats, None, now)?;
+                    effects.extend(open_effects);
+                }
+                Ok(effects)
+            }
             ApprovalCommand::Withdraw => engine.withdraw(expected, actor, now),
             ApprovalCommand::Terminate { reason } => {
                 self.guard_terminate(engine, actor)?;
@@ -899,6 +946,7 @@ impl ApprovalBridge {
         match cmd {
             ApprovalCommand::Approve { task_id, .. }
             | ApprovalCommand::Reject { task_id, .. }
+            | ApprovalCommand::RejectToNode { task_id, .. }
             | ApprovalCommand::Acknowledge { task_id }
             | ApprovalCommand::Transfer { task_id, .. }
             | ApprovalCommand::Delegate { task_id, .. } => {
@@ -1081,6 +1129,7 @@ mod tests {
             roles: vec![],
             mode: JoinPolicy::All,
             veto: true,
+            reject: None,
             deadline: None,
             on_pass: None,
             on_reject: None,
@@ -1676,6 +1725,146 @@ mod tests {
             }
             other => panic!("expected Applied, got {other:?}"),
         }
+    }
+
+    /// 驳回即回退：同一条命令完成否决票、关闭轮次、重开目标节点并复用其席位。
+    #[tokio::test]
+    async fn reject_to_node_rolls_back_and_reopens_target_seats() {
+        let (bridge, store) = build(None);
+        bridge
+            .ensure_node_open(&wf(), "apply", &approve_task(&["alice"]))
+            .await
+            .unwrap();
+        let apply_task = task_id_for(&store, "alice").await;
+        bridge
+            .command(
+                ID,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &apply_task,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        bridge
+            .ensure_node_open(&wf(), "review", &approve_task(&["bob", "carol"]))
+            .await
+            .unwrap();
+        let review_task = task_id_for(&store, "bob").await;
+        let outcome = bridge
+            .command(
+                ID,
+                "bob",
+                ApprovalCommand::RejectToNode {
+                    task_id: &review_task,
+                    comment: Some("资料不全"),
+                    target_node: "apply",
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        match outcome {
+            CommandOutcome::Applied {
+                resume_node,
+                terminal,
+                node_outcome,
+                ..
+            } => {
+                assert_eq!(resume_node.as_deref(), Some("apply"));
+                assert_eq!(terminal, None, "回退不产生实例终态");
+                assert_eq!(node_outcome, Some(NodeOutcome::Rejected));
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(engine.instance.status, ApprovalStatus::Running);
+        assert_eq!(engine.instance.returns.len(), 1);
+        assert_eq!(engine.instance.returns[0].to_node, "apply");
+        let review = engine
+            .branches
+            .values()
+            .find(|b| b.node == "review")
+            .unwrap();
+        assert_eq!(review.status, BranchStatus::Rejected);
+        let reopened = engine
+            .branches
+            .values()
+            .find(|b| b.node == "apply" && b.status == BranchStatus::Open)
+            .expect("apply must be reopened");
+        assert_eq!(reopened.attempt, 2);
+        assert!(
+            engine
+                .tasks
+                .values()
+                .any(|t| t.branch_id == reopened.id && t.assignee.as_deref() == Some("alice")),
+            "重开节点必须复用原席位"
+        );
+        let round = engine
+            .rounds
+            .values()
+            .find(|r| r.branch_id == review.id)
+            .unwrap();
+        assert_eq!(round.status, RoundStatus::Rejected);
+        assert_eq!(round.reject_reason.as_deref(), Some("any_reject"));
+    }
+
+    /// `RecordAndContinue` 且通过条件仍可满足：只记录否决，不回退、不产生恢复目标。
+    #[tokio::test]
+    async fn reject_to_node_keeps_running_when_policy_continues() {
+        let (bridge, store) = build(None);
+        bridge
+            .ensure_node_open(&wf(), "apply", &approve_task(&["alice"]))
+            .await
+            .unwrap();
+        let apply_task = task_id_for(&store, "alice").await;
+        bridge
+            .command(
+                ID,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &apply_task,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut task = approve_task(&["a", "b", "c", "d"]);
+        task.mode = JoinPolicy::Ratio { num: 2, den: 3 };
+        task.reject = Some(RejectPolicy::RecordAndContinue);
+        bridge.ensure_node_open(&wf(), "vote", &task).await.unwrap();
+
+        let seat = task_id_for(&store, "a").await;
+        let outcome = bridge
+            .command(
+                ID,
+                "a",
+                ApprovalCommand::RejectToNode {
+                    task_id: &seat,
+                    comment: None,
+                    target_node: "apply",
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        match outcome {
+            CommandOutcome::Applied { resume_node, .. } => assert!(resume_node.is_none()),
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(engine.instance.status, ApprovalStatus::Running);
+        assert_eq!(engine.instance.returns.len(), 0);
+        assert!(engine
+            .branches
+            .values()
+            .any(|b| b.node == "vote" && b.status == BranchStatus::Open));
     }
 
     /// 过期把「1 票通过 + 1 席过期」的混合轮次收敛为通过 ⇒ 上报 `Some(Passed)`。

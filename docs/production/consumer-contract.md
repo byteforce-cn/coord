@@ -448,6 +448,9 @@ trigger:
   用户（席位归属判定不变）。`GetInstanceDetail` 的 votes/audit 同时给出 `actor`/`by`
   与 `acting_service`，可区分「谁批的」与「哪个服务代执行」。
   席位来源支持 `${ ... }` 运行时表达式（`$input`/`$context`），空结果 fail-closed。
+  `Reject` 可带 `target_node`：投票、关闭轮次、回退目标节点在同一条命令内完成；
+  `recordAndContinue` 下若剩余席位仍可满足通过条件则只记录否决、不回退。判不通过原因见
+  `ApprovalRound.reject_reason` 与事件 `data.reason`。
   审批事件写 `com.china-workflow.*` 命名空间、带 `.v1` 后缀：实例级 `instance.returned|
   cancelled|terminated|completed|rejected.v1`、轮次级
   `approval.round.passed|rejected.v1`；**消费者按 `(instance_id, sequence)` 去重**，每个类型

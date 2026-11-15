@@ -2519,15 +2519,24 @@ impl Workflow for WorkflowEngineService {
         let identity = gateway_identity(&request);
         let req = request.into_inner();
         let (actor, acting) = approval_target(self, &identity, &req.on_behalf_of)?;
+        let target = non_empty(&req.target_node);
+        let cmd = match target {
+            Some(target_node) => ApprovalCommand::RejectToNode {
+                task_id: &req.task_id,
+                comment: non_empty(&req.comment),
+                target_node,
+            },
+            None => ApprovalCommand::Reject {
+                task_id: &req.task_id,
+                comment: non_empty(&req.comment),
+            },
+        };
         let (instance_id, status) = self
             .approval_command_with(
                 &req.workflow_id,
                 &actor,
                 acting.as_deref(),
-                ApprovalCommand::Reject {
-                    task_id: &req.task_id,
-                    comment: non_empty(&req.comment),
-                },
+                cmd,
                 non_empty(&req.idempotency_key),
             )
             .await
@@ -2891,6 +2900,7 @@ impl Workflow for WorkflowEngineService {
                     total_count: r.total_count as i32,
                     completed_count: r.completed_count as i32,
                     rejected_count: r.rejected_count as i32,
+                    reject_reason: r.reject_reason.clone().unwrap_or_default(),
                 })
                 .collect(),
             audit: detail

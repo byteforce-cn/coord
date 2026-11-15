@@ -68,6 +68,7 @@ mod tests {
             roles: vec![],
             mode: JoinPolicy::All,
             veto: true,
+            reject: None,
             deadline: None,
             on_pass: None,
             on_reject: None,

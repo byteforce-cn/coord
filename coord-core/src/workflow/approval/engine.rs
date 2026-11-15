@@ -59,6 +59,10 @@ pub struct Engine {
     /// 直接调用引擎命令（测试/内部路径）时恒为 `None`。
     #[serde(skip)]
     acting_service: Option<Principal>,
+    /// 单次命令内的临时抑制：驳回回退在同一命令里先把分支判为 `Rejected`，再由回退
+    /// 逻辑重开目标节点；抑制期间不得把根分支的否决升级为实例终态。
+    #[serde(skip)]
+    defer_instance_rejection: bool,
 }
 
 impl Engine {
@@ -110,6 +114,7 @@ impl Engine {
             node_attempts: BTreeMap::new(),
             seq: 0,
             acting_service: None,
+            defer_instance_rejection: false,
         })
     }
 
@@ -218,6 +223,7 @@ impl Engine {
                 total_count: 0,
                 completed_count: 0,
                 rejected_count: 0,
+                reject_reason: None,
                 opened_at: now,
                 closed_at: None,
             },
@@ -650,16 +656,62 @@ impl Engine {
             )));
         }
         let mut out = Vec::new();
+        let new_id = self.rollback_to_node(
+            &branch.id,
+            target_node,
+            by,
+            comment,
+            "return_to_node",
+            None,
+            now,
+            &mut out,
+        )?;
+        Ok((new_id, out))
+    }
+
+    /// 关闭当前分支并重开目标节点（驳回至节点 / 驳回即回退共用）。
+    ///
+    /// 已是 `Rejected` 的分支保留判定状态（可在同一命令里先投票再回退）；仅 `Open`
+    /// 分支改写为 `Returned`。目标节点旧尝试作废，新分支沿用其 join/reject/policy。
+    #[allow(clippy::too_many_arguments)]
+    fn rollback_to_node(
+        &mut self,
+        branch_id: &str,
+        target_node: &str,
+        by: &str,
+        comment: Option<&str>,
+        reason: &str,
+        reject_task: Option<&str>,
+        now: i64,
+        out: &mut Vec<Effect>,
+    ) -> Result<Id, ApprovalError> {
+        let branch = self
+            .branches
+            .get(branch_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(branch_id.into()))?;
+        if !self.node_attempts.contains_key(target_node) {
+            return Err(ApprovalError::InvalidArgument(format!(
+                "target node {target_node} is not in the reached-node whitelist"
+            )));
+        }
+        if self.instance.jump_count >= MAX_JUMPS {
+            return Err(ApprovalError::InvalidArgument(format!(
+                "jump limit {MAX_JUMPS} reached"
+            )));
+        }
         let open_round = self
             .rounds
             .values()
             .find(|r| r.branch_id == branch.id && r.status == RoundStatus::Open)
             .map(|r| r.id.clone());
         if let Some(rid) = &open_round {
-            self.cancel_pending_tasks(rid, now, &mut out);
+            self.cancel_pending_tasks(rid, now, out);
         }
-        self.close_rounds_of_branch(&branch.id, RoundStatus::Superseded, now, &mut out);
-        self.set_branch_status(&branch.id, BranchStatus::Returned, now, &mut out);
+        self.close_rounds_of_branch(&branch.id, RoundStatus::Superseded, now, out);
+        if branch.status == BranchStatus::Open {
+            self.set_branch_status(&branch.id, BranchStatus::Returned, now, out);
+        }
 
         let target_latest = self
             .branches
@@ -676,7 +728,7 @@ impl Engine {
                 ApprovalPolicy::default(),
             ));
         if let Some(tb) = &target_latest {
-            self.set_branch_status(&tb.id, BranchStatus::Superseded, now, &mut out);
+            self.set_branch_status(&tb.id, BranchStatus::Superseded, now, out);
         }
         let new_id = self.create_branch(
             target_node,
@@ -687,7 +739,7 @@ impl Engine {
             reject,
             policy,
             now,
-            &mut out,
+            out,
         );
         self.instance.jump_count += 1;
         self.instance.returns.push(ReturnRecord {
@@ -702,22 +754,100 @@ impl Engine {
             action: "return_to_node".into(),
             branch: Some(branch.id.clone()),
             by: by.into(),
-            detail: format!("{} -> {}", branch.node, target_node),
+            detail: format!("{} -> {} ({reason})", branch.node, target_node),
             acting_service: self.acting_service.clone(),
         });
         let jump_count = self.instance.jump_count;
-        self.emit(
-            &mut out,
-            "com.china-workflow.instance.returned.v1",
-            json!({
-                "instance_id": self.instance.id,
-                "from_node": branch.node,
-                "to_node": target_node,
-                "jump_count": jump_count,
-            }),
-        );
+        let mut data = json!({
+            "instance_id": self.instance.id,
+            "from_node": branch.node,
+            "to_node": target_node,
+            "jump_count": jump_count,
+            "reason": reason,
+        });
+        if let Some(task_id) = reject_task {
+            data["reject_task_ids"] = json!([task_id]);
+        }
+        self.emit(out, "com.china-workflow.instance.returned.v1", data);
         self.touch(now);
-        Ok((new_id, out))
+        Ok(new_id)
+    }
+
+    /// 驳回至节点：先记录否决票，再在**同一条命令**内关闭当前轮次/分支并重开
+    /// `target_node`。
+    ///
+    /// 返回 `Some(new_branch)` 表示已回退（调用方须在同批提交里开席），`None` 表示
+    /// 当前策略仍允许继续投票（`RecordAndContinue` 且通过条件仍可满足）。
+    pub fn reject_to_node(
+        &mut self,
+        expected: u64,
+        task_id: &str,
+        actor: &str,
+        comment: Option<&str>,
+        target_node: &str,
+        now: i64,
+    ) -> Result<(Option<Id>, Vec<Effect>), ApprovalError> {
+        self.guard(expected)?;
+        let task = self
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
+        // 目标与跳转上限在投票前校验：错误路径必须零副作用（不记录否决票）。
+        if !self.node_attempts.contains_key(target_node) {
+            return Err(ApprovalError::InvalidArgument(format!(
+                "target node {target_node} is not in the reached-node whitelist"
+            )));
+        }
+        if self.instance.jump_count >= MAX_JUMPS {
+            return Err(ApprovalError::InvalidArgument(format!(
+                "jump limit {MAX_JUMPS} reached"
+            )));
+        }
+        let branch = self
+            .branches
+            .get(&task.branch_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task.branch_id.clone()))?;
+        if branch.status != BranchStatus::Open {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "branch {} is {:?}",
+                branch.id, branch.status
+            )));
+        }
+        // 否决先把分支判为 `Rejected`；若就地回退，「根分支否决 = 实例终态」必须延后，
+        // 否则回退后实例会停在错误的终态。
+        self.defer_instance_rejection = true;
+        let voted = self.vote(expected, task_id, actor, Decision::Reject, comment, now);
+        self.defer_instance_rejection = false;
+        let mut effects = voted?;
+        let branch = self
+            .branches
+            .get(&task.branch_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task.branch_id.clone()))?;
+        if branch.status != BranchStatus::Rejected {
+            // `RecordAndContinue`：否决已记录，但剩余席位仍可能满足通过条件。
+            return Ok((None, effects));
+        }
+        let reason = self
+            .rounds
+            .values()
+            .filter(|r| r.branch_id == branch.id)
+            .max_by_key(|r| r.number)
+            .and_then(|r| r.reject_reason.clone())
+            .unwrap_or_else(|| "rejected".into());
+        let new_branch = self.rollback_to_node(
+            &branch.id,
+            target_node,
+            actor,
+            comment,
+            &reason,
+            Some(task_id),
+            now,
+            &mut effects,
+        )?;
+        Ok((Some(new_branch), effects))
     }
 
     /// 撤回（仅发起人）：级联取消全部 open 分支 / 轮次 / 未决席位，实例置 `Cancelled`。
@@ -1201,27 +1331,44 @@ impl Engine {
         });
 
         let mut verdict: Option<RoundStatus> = None;
-        if branch.reject == RejectPolicy::AnyReject && rejected > 0 {
-            verdict = Some(RoundStatus::Rejected);
-        } else if approvals.is_empty() {
+        let mut reject_reason: Option<&str> = None;
+        let open_count = approvals.iter().filter(|t| t.status.is_open()).count() as u32;
+        let required = required_approvals(branch.join, total);
+        let passed = match branch.join {
+            JoinPolicy::All => total > 0 && completed >= total,
+            JoinPolicy::Any => completed >= 1,
+            JoinPolicy::Quorum(n) => completed >= n,
+            JoinPolicy::Ratio { .. } => completed >= required,
+        };
+        if approvals.is_empty() {
             // 从未创建可计票席位的轮次（如仅有阅签席）立即通过。反之 `total == 0`（全员过期
             // 或被减签）绝不自动通过——超时与减签耗尽保持 `Open`，处置由人决定（Q4 无自动判定）。
             verdict = Some(RoundStatus::Passed);
-        } else if total > 0 && completed >= total {
+        } else if branch.reject == RejectPolicy::AnyReject && rejected > 0 {
+            verdict = Some(RoundStatus::Rejected);
+            reject_reason = Some("any_reject");
+        } else if matches!(branch.reject, RejectPolicy::AtLeastRejects(n) if rejected >= n)
+            && rejected > 0
+        {
+            verdict = Some(RoundStatus::Rejected);
+            reject_reason = Some("reject_threshold_reached");
+        } else if passed {
             verdict = Some(RoundStatus::Passed);
         } else if total > 0 {
-            let pass = match branch.join {
-                JoinPolicy::All => false,
-                JoinPolicy::Any => completed >= 1,
-                JoinPolicy::Quorum(n) => completed >= n,
-                JoinPolicy::Ratio { num, den } => {
-                    completed as u64 * den as u64 >= total as u64 * num as u64
-                }
-            };
-            if pass {
-                verdict = Some(RoundStatus::Passed);
-            } else if completed + rejected >= total {
+            // `RecordAndContinue` 在每次否决后重算：剩余未投席位全部通过也无法满足
+            // 通过条件时立即判不通过，不等所有人投完（死锁兜底）。`OnExhausted`
+            // 保持「全部投完才判」的既有语义。
+            let exhausted = completed + rejected >= total;
+            let unsatisfiable = branch.reject == RejectPolicy::RecordAndContinue
+                && rejected > 0
+                && completed + open_count < required;
+            if exhausted || unsatisfiable {
                 verdict = Some(RoundStatus::Rejected);
+                reject_reason = Some(if branch.reject == RejectPolicy::RecordAndContinue {
+                    "sign_completion_unsatisfiable"
+                } else {
+                    "on_exhausted"
+                });
             }
         }
 
@@ -1249,6 +1396,7 @@ impl Engine {
             }
             Some(RoundStatus::Rejected) => {
                 r.status = RoundStatus::Rejected;
+                r.reject_reason = reject_reason.map(str::to_string);
                 r.closed_at = Some(now);
                 self.rounds.insert(r.id.clone(), r.clone());
                 out.push(Effect::RoundStatus {
@@ -1265,6 +1413,7 @@ impl Engine {
                     "total": total,
                     "completed": completed,
                     "rejected": rejected,
+                    "reason": reject_reason,
                 });
                 self.emit(out, "com.china-workflow.approval.round.rejected.v1", data);
             }
@@ -1291,7 +1440,10 @@ impl Engine {
         });
         // 分支通过不自动收口实例：状态机内部无法得知定义是否还有后继节点，由驱动方在定义
         // 走到末端时调用 `finish`。分支否决是终局，直接收口实例。
-        if b.parent_branch_id.is_none() && to == BranchStatus::Rejected {
+        if !self.defer_instance_rejection
+            && b.parent_branch_id.is_none()
+            && to == BranchStatus::Rejected
+        {
             let before = self.instance.status;
             if before != InstanceStatus::Rejected {
                 self.instance.status = InstanceStatus::Rejected;
@@ -1408,6 +1560,22 @@ impl Engine {
             self.cancel_tasks(&task_ids, now, out);
             self.close_rounds_of_branch(bid, RoundStatus::Cancelled, now, out);
             self.set_branch_status(bid, branch_status, now, out);
+        }
+    }
+}
+
+/// 通过判定所需的通过票数：比例策略向上取整（4 席 × 2/3 ⇒ 需要 3 票）。
+fn required_approvals(join: JoinPolicy, total: u32) -> u32 {
+    match join {
+        JoinPolicy::All => total,
+        JoinPolicy::Any => 1,
+        JoinPolicy::Quorum(n) => n,
+        JoinPolicy::Ratio { num, den } => {
+            if den == 0 {
+                total
+            } else {
+                (total as u64 * num as u64).div_ceil(den as u64) as u32
+            }
         }
     }
 }

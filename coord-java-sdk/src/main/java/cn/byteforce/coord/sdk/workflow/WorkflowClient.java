@@ -253,6 +253,25 @@ public interface WorkflowClient {
     String reject(String workflowId, String taskId, String comment, String idempotencyKey);
 
     /**
+     * Reject the current seat and roll the instance back to {@code targetNode} in the same
+     * command (the target must be a node the instance has already reached).
+     *
+     * <p>Under a {@code recordAndContinue} reject policy the reject is only recorded while the
+     * remaining seats can still satisfy the pass rule; the instance stays {@code RUNNING} and no
+     * rollback event is produced.
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param targetNode     node to return to (must be in the reached-node whitelist)
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the decision twice
+     * @return the instance status after the command (uppercase); {@code RUNNING} when no rollback
+     * @throws CoordException on communication or guard violation
+     */
+    String rejectToNode(String workflowId, String taskId, String targetNode, String comment,
+                        String idempotencyKey);
+
+    /**
      * Acknowledge (read receipt) an approval task, advancing it without a decision.
      *
      * @param workflowId     the workflow instance ID
@@ -377,6 +396,10 @@ public interface WorkflowClient {
     /** Reject as a service acting on behalf of an end user (see {@link #approveOnBehalfOf}). */
     String rejectOnBehalfOf(String workflowId, String taskId, String comment,
                             String idempotencyKey, String onBehalfOf);
+
+    /** Reject and roll back to {@code targetNode} as a service acting on behalf of an end user. */
+    String rejectToNodeOnBehalfOf(String workflowId, String taskId, String targetNode,
+                                  String comment, String idempotencyKey, String onBehalfOf);
 
     /** Acknowledge as a service acting on behalf of an end user. */
     String acknowledgeOnBehalfOf(String workflowId, String taskId,

@@ -454,12 +454,30 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     @Override
     public String rejectOnBehalfOf(String workflowId, String taskId, String comment,
                                    String idempotencyKey, String onBehalfOf) {
+        return doReject(workflowId, taskId, null, comment, idempotencyKey, onBehalfOf);
+    }
+
+    @Override
+    public String rejectToNode(String workflowId, String taskId, String targetNode,
+                               String comment, String idempotencyKey) {
+        return rejectToNodeOnBehalfOf(workflowId, taskId, targetNode, comment, idempotencyKey, null);
+    }
+
+    @Override
+    public String rejectToNodeOnBehalfOf(String workflowId, String taskId, String targetNode,
+                                         String comment, String idempotencyKey, String onBehalfOf) {
+        return doReject(workflowId, taskId, targetNode, comment, idempotencyKey, onBehalfOf);
+    }
+
+    private String doReject(String workflowId, String taskId, String targetNode, String comment,
+                            String idempotencyKey, String onBehalfOf) {
         WorkflowRejectRequest.Builder req = WorkflowRejectRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setTaskId(taskId);
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
         setOptional(req::setOnBehalfOf, onBehalfOf);
+        setOptional(req::setTargetNode, targetNode);
 
         WorkflowRejectResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
