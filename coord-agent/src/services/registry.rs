@@ -345,21 +345,19 @@ impl RegistryService {
         let value = serde_json::to_vec(&instance)
             .map_err(|e| format!("failed to serialize instance: {e}"))?;
 
-        // 通过 KV 写入（若绑定 Lease，使用 Lease-bound Put）
+        // 通过 KV 写入（若绑定 Lease，使用 Lease-bound Put）。
+        //
+        // 保留 `coord_core::error::Error` 的具体类型（不要 `format!` 成字符串）：
+        // gRPC 出口靠它 downcast 出 `x-coord-error-code`，否则 `SAFE_TS_LAG` /
+        // `UNAVAILABLE` 这类可重试瞬态会被压成 `INTERNAL`（#385）。
         if instance.lease_id > 0 {
             self.inner
                 .client
                 .kv()
                 .put_lease(&key, &value, instance.lease_id)
-                .await
-                .map_err(|e| format!("failed to register instance: {e}"))?;
+                .await?;
         } else {
-            self.inner
-                .client
-                .kv()
-                .put(&key, &value)
-                .await
-                .map_err(|e| format!("failed to register instance: {e}"))?;
+            self.inner.client.kv().put(&key, &value).await?;
         }
 
         // 更新本地缓存
@@ -871,7 +869,7 @@ impl Registry for RegistryService {
                 .lease()
                 .grant(req.ttl_seconds as i64)
                 .await
-                .map_err(|e| tonic::Status::internal(format!("lease grant failed: {e}")))?
+                .map_err(crate::proxy::map_core_error)?
         } else {
             0
         };
@@ -885,7 +883,7 @@ impl Registry for RegistryService {
 
         self.register(instance)
             .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            .map_err(|e| crate::service::service_error_status("failed to register instance", e))?;
 
         Ok(tonic::Response::new(RegisterResponse { lease_id }))
     }
@@ -897,7 +895,9 @@ impl Registry for RegistryService {
         let req = request.into_inner();
         self.deregister(&req.service_name, &req.instance_id)
             .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            .map_err(|e| {
+                crate::service::service_error_status("failed to deregister instance", e)
+            })?;
         Ok(tonic::Response::new(DeregisterResponse {}))
     }
 
@@ -912,7 +912,9 @@ impl Registry for RegistryService {
             .lease()
             .keep_alive(req.lease_id)
             .await
-            .map_err(|e| tonic::Status::internal(format!("lease keep-alive failed: {e}")))?;
+            .map_err(|e| {
+                crate::service::service_error_status("lease keep-alive failed", Box::new(e))
+            })?;
         Ok(tonic::Response::new(HeartbeatResponse { ttl }))
     }
 

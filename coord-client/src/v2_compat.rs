@@ -76,7 +76,7 @@ pub(crate) async fn kv_range(
         .await
     {
         Ok(value) => value,
-        Err(err) if is_retryable_read_error(&err) => {
+        Err(err) if is_retryable_transient(&err) => {
             // `read_floor` 是 read-your-writes 下限；它刚越过某个节点的 `safe_ts`
             // （fence 尚未 apply）时服务端返回 `SAFE_TS_LAG`。这是可重试的瞬态，
             // 不能把一次读放大成 v1 形状调用方的致命 IO 错误。
@@ -92,7 +92,7 @@ pub(crate) async fn kv_range(
                     .await
                 {
                     Ok(value) => break value,
-                    Err(next) if is_retryable_read_error(&next) => continue,
+                    Err(next) if is_retryable_transient(&next) => continue,
                     Err(next) => return Err(next),
                 }
             }
@@ -104,8 +104,11 @@ pub(crate) async fn kv_range(
     Ok((kvs, count, read_ts))
 }
 
-/// 读路径可重试的瞬态错误：safe_ts 追赶、连接级不可用、请求超时。
-fn is_retryable_read_error(err: &Error) -> bool {
+/// 可重试的瞬态错误：safe_ts 追赶、Region epoch 迁移、连接级不可用、请求超时。
+///
+/// 读、写、事务三条路径共用同一集合——它们是「现在重试就会过去」的错误，
+/// 一旦被当成永久错误冒泡到服务层，调用方（和 SDK 的重试矩阵）就再也不会重试。
+fn is_retryable_transient(err: &Error) -> bool {
     matches!(
         err,
         Error::V2 {
@@ -172,6 +175,12 @@ pub(crate) async fn txn(
             Err(TxnAttempt::Conflict) => match retry.next_attempt() {
                 Some(wait) => tokio::time::sleep(wait).await,
                 None => return Err(conflict_exhausted()),
+            },
+            // 瞬态（safe_ts 追赶 / 连接级不可用 / 超时）与冲突同样可重跑：
+            // v1 形状的 compare 在每次尝试里重新求值，重跑不产生部分副作用。
+            Err(TxnAttempt::Fatal(e)) if is_retryable_transient(&e) => match retry.next_attempt() {
+                Some(wait) => tokio::time::sleep(wait).await,
+                None => return Err(e),
             },
             Err(TxnAttempt::Fatal(e)) => return Err(e),
         }
@@ -428,16 +437,43 @@ async fn commit_write(
     mutations: Vec<txn_v2::Mutation>,
     request_id: &[u8],
 ) -> Result<u64> {
-    let session = client.txn_v2().begin(0, 0).await?;
-    match session.commit_in_place(mutations, request_id).await {
-        Ok(TxnCommit::Committed { commit_ts }) => Ok(commit_ts),
-        Ok(TxnCommit::Conflict) => {
-            let _ = session.abort().await;
-            Err(conflict_exhausted())
-        }
-        Err(e) => {
-            let _ = session.abort().await;
-            Err(e)
+    // 启动窗口里 `read_floor`（read-your-writes 下限）可能刚越过某个节点的
+    // `safe_ts`：服务端给 `SAFE_TS_LAG`/`UNAVAILABLE`，这是瞬态。写路径若原样
+    // 返回，agent 服务层会把它包成永久错误（#385：注册/工作流首调偶发 Internal）。
+    // put/delete 是 last-write-wins 幂等，重试只改变"什么时候写成功"，不改变终态。
+    let mut retry = RetryState::new(client.retry_config());
+    loop {
+        let session = match client.txn_v2().begin(0, 0).await {
+            Ok(session) => session,
+            Err(e) if is_retryable_transient(&e) => match retry.next_attempt() {
+                Some(wait) => {
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+                None => return Err(e),
+            },
+            Err(e) => return Err(e),
+        };
+        match session.commit_in_place(mutations.clone(), request_id).await {
+            Ok(TxnCommit::Committed { commit_ts }) => return Ok(commit_ts),
+            Ok(TxnCommit::Conflict) => {
+                let _ = session.abort().await;
+                match retry.next_attempt() {
+                    Some(wait) => tokio::time::sleep(wait).await,
+                    None => return Err(conflict_exhausted()),
+                }
+            }
+            Err(e) if is_retryable_transient(&e) => {
+                let _ = session.abort().await;
+                match retry.next_attempt() {
+                    Some(wait) => tokio::time::sleep(wait).await,
+                    None => return Err(e),
+                }
+            }
+            Err(e) => {
+                let _ = session.abort().await;
+                return Err(e);
+            }
         }
     }
 }
@@ -673,20 +709,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_path_retries_only_transient_safe_ts_errors() {
-        assert!(is_retryable_read_error(&Error::V2 {
+    fn retryable_set_covers_read_write_and_txn_transients() {
+        assert!(is_retryable_transient(&Error::V2 {
             code: CoordErrorCode::SafeTsLag,
             message: "safe_ts catching up".into(),
         }));
-        assert!(is_retryable_read_error(&Error::ClusterUnavailable(
+        assert!(is_retryable_transient(&Error::ClusterUnavailable(
             "no leader found".into()
         )));
-        assert!(is_retryable_read_error(&Error::RequestTimeout));
-        assert!(!is_retryable_read_error(&Error::NotFound {
+        assert!(is_retryable_transient(&Error::RequestTimeout));
+        assert!(!is_retryable_transient(&Error::NotFound {
             resource: "key",
             key: "k".into(),
         }));
-        assert!(!is_retryable_read_error(&Error::PermissionDenied(
+        assert!(!is_retryable_transient(&Error::PermissionDenied(
             "scope".into()
         )));
     }
