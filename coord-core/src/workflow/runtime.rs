@@ -709,8 +709,15 @@ where
                 }
                 // 嵌套 try-catch：同一份上下文，try 失败按子句路由。
                 Task::TryCatch(tc) => {
-                    match Box::pin(self.run_try_catch(definition, inst, ctx, &tc.r#try, &tc.catch))
-                        .await
+                    match Box::pin(self.run_try_catch(
+                        definition,
+                        inst,
+                        ctx,
+                        &tc.r#try,
+                        &tc.catch,
+                        step_suffix,
+                    ))
+                    .await
                     {
                         SubTasksOutcome::Done { goto: inner } => {
                             if inner.is_some() {
@@ -851,10 +858,11 @@ where
         ctx: &mut Value,
         try_tasks: &[NamedTask],
         catch_clauses: &[CatchClause],
+        step_suffix: &str,
     ) -> SubTasksOutcome {
         let mut try_ctx = ctx.clone();
         let failure = match self
-            .drive_sub_tasks(definition, inst, &mut try_ctx, try_tasks, "")
+            .drive_sub_tasks(definition, inst, &mut try_ctx, try_tasks, step_suffix)
             .await
         {
             SubTasksOutcome::Done { goto } => {
@@ -873,9 +881,19 @@ where
             if !matches {
                 continue;
             }
+            // catch 侧的 step token 加 `__catch` 后缀：同一 try/catch 里 try 体与
+            // catch 体出现同名 `call` 时不得共用同一个幂等键。嵌套块沿用父级后缀，
+            // 避免内层 try 体与外层 try 体撞键。
+            let catch_suffix = format!("{step_suffix}__catch");
             let mut catch_ctx = try_ctx.clone();
             return match self
-                .drive_sub_tasks(definition, inst, &mut catch_ctx, &clause.tasks, "__catch")
+                .drive_sub_tasks(
+                    definition,
+                    inst,
+                    &mut catch_ctx,
+                    &clause.tasks,
+                    &catch_suffix,
+                )
                 .await
             {
                 SubTasksOutcome::Done { goto } => {
@@ -3682,7 +3700,14 @@ where
                         // "已完成"就是静默丢副作用）。
                         let mut ctx = inst.context.clone();
                         let outcome = self
-                            .run_try_catch(&definition, &inst, &mut ctx, &try_tasks, &catch_clauses)
+                            .run_try_catch(
+                                &definition,
+                                &inst,
+                                &mut ctx,
+                                &try_tasks,
+                                &catch_clauses,
+                                "",
+                            )
                             .await;
 
                         let mut completed_frame = frame;
