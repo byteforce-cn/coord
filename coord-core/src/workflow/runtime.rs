@@ -29,8 +29,9 @@ use super::approval::bridge::{ApprovalBridge, BridgeError, NodeOutcome, SYSTEM_A
 use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
-    ApproveTask, EventFilter, InstanceStatus, StepResult, SuspendReason, SuspensionMeta, Task,
-    TaskFrame, TaskStatus, WorkflowDefinition, WorkflowFault, WorkflowInstance,
+    ApproveTask, CatchClause, EventFilter, InstanceStatus, NamedTask, StepResult, SuspendReason,
+    SuspensionMeta, Task, TaskFrame, TaskStatus, WorkflowDefinition, WorkflowFault,
+    WorkflowInstance,
 };
 use super::ports::{
     Clock, DispatchResult, EventProvider, ExpressionEval, InstanceLease, LeaseGuard,
@@ -620,6 +621,271 @@ where
         };
         let sid = step_id(task_index, task_name);
         let _ = steps.mark_done(instance_id, &sid).await;
+    }
+
+    /// 把 `call` 任务的 `Suspend(ExternalCall)` 折叠成一次真实派发。
+    ///
+    /// `call` 的执行器不做 I/O：它返回 `Suspend`，由 Runtime 去 `dispatch`。try 体、
+    /// catch 体以及任何子任务驱动必须走同一条路径——漏掉这一步就是"调用成功但
+    /// 副作用从未发生"。
+    ///
+    /// `step_name` 是 step token 的稳定组成部分（崩溃重放后必须得到同一个幂等键）；
+    /// catch 侧传入带后缀的名字，避免与 try 体内同名 `call` 撞同一个 token。
+    async fn dispatch_external_call(
+        &self,
+        instance_id: &str,
+        task_index: usize,
+        step_name: &str,
+        service: &str,
+        with: Option<&Value>,
+        input: &Value,
+    ) -> Result<Value, WorkflowFault> {
+        let result = match self.register_step(instance_id, task_index, step_name).await {
+            Ok(key) => {
+                self.dispatcher
+                    .dispatch(service, with, input, key.as_deref())
+                    .await
+            }
+            Err(error) => DispatchResult::Failure {
+                error,
+                retryable: true,
+            },
+        };
+        match result {
+            DispatchResult::Success { data } => {
+                self.mark_step_done(instance_id, task_index, step_name)
+                    .await;
+                Ok(data)
+            }
+            // 有意**不使用**折叠出的 `retryable`：块内路由由 catch 子句的 `errors`
+            // 匹配决定（catch-all 会接住），与 try 体原有口径一致。
+            DispatchResult::Failure { error, .. } => Err(WorkflowFault::communication(
+                format!("call to '{service}' failed: {error}"),
+                error,
+            )),
+        }
+    }
+
+    /// 驱动一段子任务列表（`try` / `catch` / 嵌套 `do`）。
+    ///
+    /// 为什么必须由 Runtime 递归驱动：`do`/`try` 的子任务不会自己执行——`Task::Do`
+    /// 的 `execute_step` 只返回一个带 `pending_branches` 的 `NextTask`，真正的推进
+    /// 在主循环里。旧实现把子任务逐个 `execute_step` 后把 `NextTask` 当"已完成"：
+    /// 于是 `catch: [{ do: [{ call: … }] }]` 的补偿**一次都不会发**、`try` 里的
+    /// `set` 也不会写进上下文——静默丢副作用，而实例看起来正常完成。
+    ///
+    /// 块内只驱动同步语义的构造（call / set / switch / raise / emit / do / 嵌套
+    /// try-catch）。跨挂起、并行、迭代构造在这里没有执行面，返回 `Failed`
+    /// （fail-closed；解析期已先拒绝一次），绝不当作"已完成"跳过。
+    async fn drive_sub_tasks(
+        &self,
+        definition: &WorkflowDefinition,
+        inst: &WorkflowInstance,
+        ctx: &mut Value,
+        tasks: &[NamedTask],
+        step_suffix: &str,
+    ) -> SubTasksOutcome {
+        let mut goto: Option<String> = None;
+        for task in tasks {
+            match &task.task {
+                // `do` 只是顺序容器：递归驱动，别把它的 `NextTask` 当"已完成"。
+                Task::Do(do_task) => {
+                    match Box::pin(self.drive_sub_tasks(
+                        definition,
+                        inst,
+                        ctx,
+                        &do_task.tasks,
+                        step_suffix,
+                    ))
+                    .await
+                    {
+                        SubTasksOutcome::Done { goto: inner } => {
+                            if inner.is_some() {
+                                goto = inner;
+                            }
+                        }
+                        failed => return failed,
+                    }
+                }
+                // 嵌套 try-catch：同一份上下文，try 失败按子句路由。
+                Task::TryCatch(tc) => {
+                    match Box::pin(self.run_try_catch(definition, inst, ctx, &tc.r#try, &tc.catch))
+                        .await
+                    {
+                        SubTasksOutcome::Done { goto: inner } => {
+                            if inner.is_some() {
+                                goto = inner;
+                            }
+                        }
+                        failed => return failed,
+                    }
+                }
+                // 需要主循环的构造（解析期已拒绝；这里兼底老定义）。
+                Task::Wait(_)
+                | Task::Listen(_)
+                | Task::Approve(_)
+                | Task::Run(_)
+                | Task::Fork(_)
+                | Task::ForEach(_) => {
+                    // 只用于错误文案；不靠“这些分支不可能到达”的断言（panic-path gate）。
+                    let kind = match &task.task {
+                        Task::Wait(_) => "wait",
+                        Task::Listen(_) => "listen",
+                        Task::Approve(_) => "approve",
+                        Task::Run(_) => "run",
+                        Task::Fork(_) => "fork",
+                        _ => "for",
+                    };
+                    return SubTasksOutcome::Failed(WorkflowFault::internal(
+                        "unsupported construct inside try/catch",
+                        format!(
+                            "task '{}' ('{kind}') cannot be driven inside a try/catch block",
+                            task.name
+                        ),
+                    ));
+                }
+                _ => {
+                    // 单任务视图：执行器按索引 0 取任务；上下文是本块累积的 `ctx`，
+                    // 这样同一块内后面的任务能看到前面的 `set`。
+                    let step_result = self.executor.execute_step(
+                        &WorkflowInstance {
+                            context: ctx.clone(),
+                            current_task_index: 0,
+                            ..inst.clone()
+                        },
+                        &WorkflowDefinition {
+                            do_tasks: vec![task.clone()],
+                            ..definition.clone()
+                        },
+                    );
+                    match step_result {
+                        StepResult::NextTask(frame) => {
+                            // emit 是 fire-and-forget：漏掉就是"事件从未发布"，
+                            // 与丢副作用同类，故与主循环同口径发出。
+                            if frame.task_type == "emit" {
+                                if let Some(ref output) = frame.output {
+                                    let event_type =
+                                        output["event_type"].as_str().unwrap_or("unknown");
+                                    let source = output["source"].as_str();
+                                    let data = output.get("data").unwrap_or(&Value::Null);
+                                    self.event_provider.emit(event_type, source, data).await;
+                                }
+                            }
+                        }
+                        // `set` 的语义就是写上下文（与主循环 `SetVariable` 分支同口径）。
+                        StepResult::SetVariable {
+                            variable, value, ..
+                        } => {
+                            if let Some(obj) = ctx.as_object_mut() {
+                                obj.insert(variable, value);
+                            }
+                        }
+                        StepResult::Goto { target, .. } => goto = Some(target),
+                        StepResult::Completed { .. } => {}
+                        StepResult::Failed { fault } => return SubTasksOutcome::Failed(fault),
+                        StepResult::Suspend {
+                            reason:
+                                SuspendReason::ExternalCall {
+                                    service,
+                                    with,
+                                    input,
+                                },
+                            frame,
+                        } => {
+                            let step_name = format!("{}{}", frame.task_name, step_suffix);
+                            match self
+                                .dispatch_external_call(
+                                    &inst.id,
+                                    inst.current_task_index,
+                                    &step_name,
+                                    &service,
+                                    with.as_ref(),
+                                    &input,
+                                )
+                                .await
+                            {
+                                Ok(_) => {}
+                                Err(fault) => return SubTasksOutcome::Failed(fault),
+                            }
+                        }
+                        StepResult::Suspend { reason, .. } => {
+                            return SubTasksOutcome::Failed(WorkflowFault::internal(
+                                "unsupported suspension inside try/catch",
+                                format!(
+                                    "task '{}' suspends for '{}', which the try/catch driver \
+                                     cannot resume",
+                                    task.name,
+                                    reason.to_meta().reason
+                                ),
+                            ));
+                        }
+                        StepResult::Fork { .. }
+                        | StepResult::ForEach { .. }
+                        | StepResult::TryBlock { .. } => {
+                            return SubTasksOutcome::Failed(WorkflowFault::internal(
+                                "unsupported construct inside try/catch",
+                                format!(
+                                    "task '{}' produced a nested block the driver cannot schedule",
+                                    task.name
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        SubTasksOutcome::Done { goto }
+    }
+
+    /// try → catch 的单次决策（嵌套 try/catch 复用）。
+    ///
+    /// - try 全成：把 try 推进后的上下文写回 `ctx`，透传块内 goto；
+    /// - try 失败且子句命中：catch 在**同一份上下文**上执行（补偿要看到 try 已发生
+    ///   的 `set`），成功才写回 `ctx`；catch 自己失败必须向上上抛——旧实现把 catch
+    ///   的失败当"已补偿"继续前进，是同一类静默；
+    /// - try 失败且无子句命中：把原始 fault 上抛。
+    async fn run_try_catch(
+        &self,
+        definition: &WorkflowDefinition,
+        inst: &WorkflowInstance,
+        ctx: &mut Value,
+        try_tasks: &[NamedTask],
+        catch_clauses: &[CatchClause],
+    ) -> SubTasksOutcome {
+        let mut try_ctx = ctx.clone();
+        let failure = match self
+            .drive_sub_tasks(definition, inst, &mut try_ctx, try_tasks, "")
+            .await
+        {
+            SubTasksOutcome::Done { goto } => {
+                *ctx = try_ctx;
+                return SubTasksOutcome::Done { goto };
+            }
+            SubTasksOutcome::Failed(fault) => fault,
+        };
+
+        let fault_type = failure.r#type.as_str();
+        for clause in catch_clauses {
+            let matches = match &clause.errors {
+                Some(errors) => errors.iter().any(|e| e == fault_type),
+                None => true, // catch-all
+            };
+            if !matches {
+                continue;
+            }
+            let mut catch_ctx = try_ctx.clone();
+            return match self
+                .drive_sub_tasks(definition, inst, &mut catch_ctx, &clause.tasks, "__catch")
+                .await
+            {
+                SubTasksOutcome::Done { goto } => {
+                    *ctx = catch_ctx;
+                    SubTasksOutcome::Done { goto }
+                }
+                failed => failed,
+            };
+        }
+        SubTasksOutcome::Failed(failure)
     }
 
     /// 建立（或重启后重建）一个 listen 挂起实例的事件等待。
@@ -3411,189 +3677,74 @@ where
                         catch_clauses,
                         frame,
                     } => {
-                        let mut try_failed = false;
-                        let mut try_fault: Option<WorkflowFault> = None;
-                        let mut try_ctx = inst.context.clone();
+                        // try / catch 子任务由 `drive_sub_tasks` 递归驱动（见该方法的
+                        // 注释：`do`/`try` 的子任务不会自己执行，把 `NextTask` 当
+                        // "已完成"就是静默丢副作用）。
+                        let mut ctx = inst.context.clone();
+                        let outcome = self
+                            .run_try_catch(&definition, &inst, &mut ctx, &try_tasks, &catch_clauses)
+                            .await;
 
-                        // 执行 try 块
-                        //
-                        // ⚠️ `Suspend` **必须**在这里处理。
-                        // `call` 任务的执行器是不做同步 I/O 的：它返回
-                        // `Suspend { ExternalCall }`，由 Runtime 去 `dispatch`。
-                        // match 只有 `NextTask | Completed | Failed | _` 时，
-                        // `Suspend` 会落进 `_ => {}` **被静默丢弃**：
-                        //   ⇒ 被 `compensatedBy` / `onErrors` 包裹的状态，其动作
-                        //     **一次都不会发出去**（既不成功也不失败），
-                        //     而工作流继续沿正常路径前进 —— 调用方以为副作用执行了。
-                        // 这是"最坏的一类"：静默丢副作用。故此处与主循环
-                        // （见 `SuspendReason::ExternalCall` 分支）同口径派发。
-                        //
-                        // ⚠️ 内层 `execute_step` 的 `current_task_index` **必须归零**：
-                        // 它按索引在单任务视图（`do_tasks: vec![task]`）里取任务，
-                        // 而 `..inst.clone()` 带的是**外层包装器的索引**——索引越界时
-                        // 执行器静默不做事，同样造成"try 体被跳过但实例继续前进"。
-                        for task in &try_tasks {
-                            let step_result = self.executor.execute_step(
-                                &WorkflowInstance {
-                                    context: try_ctx.clone(),
-                                    current_task_index: 0,
-                                    ..inst.clone()
-                                },
-                                &WorkflowDefinition {
-                                    do_tasks: vec![task.clone()],
-                                    ..definition.clone()
-                                },
-                            );
-                            match step_result {
-                                StepResult::NextTask(tf) => {
-                                    try_ctx = apply_frame_output(try_ctx, &tf);
-                                }
-                                StepResult::Completed { .. } => {
-                                    // completed successfully
-                                }
-                                StepResult::Failed { fault } => {
-                                    try_failed = true;
-                                    try_fault = Some(fault);
-                                    break;
-                                }
-                                // `call` 任务：派发 I/O，把结果折叠成"成功"或"失败"
-                                StepResult::Suspend {
-                                    reason:
-                                        SuspendReason::ExternalCall {
-                                            service,
-                                            with,
-                                            input,
-                                        },
-                                    frame: call_frame,
-                                } => {
-                                    let task_index = inst.current_task_index;
-                                    let task_name = call_frame.task_name.clone();
-                                    let result = match self
-                                        .register_step(&inst.id, task_index, &task_name)
-                                        .await
-                                    {
-                                        Ok(key) => {
-                                            self.dispatcher
-                                                .dispatch(
-                                                    &service,
-                                                    with.as_ref(),
-                                                    &input,
-                                                    key.as_deref(),
-                                                )
-                                                .await
-                                        }
-                                        Err(error) => DispatchResult::Failure {
-                                            error,
-                                            retryable: true,
-                                        },
-                                    };
-                                    match result {
-                                        DispatchResult::Success { data } => {
-                                            self.mark_step_done(&inst.id, task_index, &task_name)
-                                                .await;
-                                            let mut done = call_frame;
-                                            done.status = TaskStatus::Completed;
-                                            done.output = Some(data);
-                                            done.ended_at = Some(self.clock.now_ms());
-                                            try_ctx = apply_frame_output(try_ctx, &done);
-                                        }
-                                        DispatchResult::Failure { error, .. } => {
-                                            // 有意**不使用**折叠出的 `retryable`：try 体内的路由
-                                            // 由 catch 子句的 `errors` 匹配决定（catch-all 会接住）；
-                                            // 这里统一建模为 communication fault 再交 catch 路由。
-                                            try_failed = true;
-                                            try_fault = Some(
-                                                crate::workflow::errors::WorkflowFault::communication(
-                                                    format!("call to '{service}' failed: {error}"),
-                                                    error,
+                        let mut completed_frame = frame;
+                        completed_frame.ended_at = Some(self.clock.now_ms());
+
+                        match outcome {
+                            SubTasksOutcome::Failed(fault) => {
+                                // 未捕获的 try 失败、以及 catch 自身的失败，都收口为实例
+                                // FAULTED。catch 失败**不得**被当成"已补偿"继续前进。
+                                completed_frame.status = TaskStatus::Failed;
+                                inst.task_stack.push(completed_frame);
+                                self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                    .await;
+                                break;
+                            }
+                            SubTasksOutcome::Done { goto } => {
+                                // 块内 `set` 推进的变量必须落回实例上下文，否则对后续任务
+                                // 不可见（旧实现算了 `try_ctx` 却从不写回）。
+                                inst.context = ctx;
+                                completed_frame.status = TaskStatus::Completed;
+                                inst.task_stack.push(completed_frame);
+
+                                match goto {
+                                    // catch 里的 switch 显式指定了转场目标。
+                                    Some(target) => {
+                                        if let Some(idx) =
+                                            find_task_index(&definition.do_tasks, &target)
+                                        {
+                                            inst.current_task_index = idx;
+                                        } else if target == "__end" {
+                                            inst.current_task_index = definition.do_tasks.len();
+                                        } else {
+                                            // 找不到目标时把索引留在原地 = 重跑同一个
+                                            // try/catch（#323 的自旋形态），fail-closed。
+                                            self.fail_instance(
+                                                &mut inst,
+                                                &store,
+                                                &mut rev,
+                                                guard,
+                                                WorkflowFault::internal(
+                                                    "try/catch goto target not found",
+                                                    format!(
+                                                        "try/catch goto target '{target}' does not \
+                                                         exist in the definition"
+                                                    ),
                                                 ),
-                                            );
+                                            )
+                                            .await;
                                             break;
                                         }
                                     }
+                                    // 没有显式转场：catch 已消费掉这次失败，顺延到下一
+                                    // 个任务。失败路径也必须前进，否则同一 try/catch 会被
+                                    // 反复取出重跑，帧数无上限增长（#323）。
+                                    None => inst.current_task_index += 1,
                                 }
-                                // 其它挂起形态（等待事件 / 延时 / 信号）在 try 块内
-                                // 不做特殊处理：乐观推进，语义与修前一致。
-                                _ => {}
-                            }
-                        }
-
-                        let mut completed_frame = frame;
-
-                        if try_failed {
-                            // 匹配 catch 子句
-                            let fault_type =
-                                try_fault.as_ref().map(|f| f.r#type.as_str()).unwrap_or("");
-                            let mut caught = false;
-                            let mut goto_target: Option<String> = None;
-
-                            for clause in &catch_clauses {
-                                let matches = match &clause.errors {
-                                    Some(errors) => errors.iter().any(|e| e == fault_type),
-                                    None => true, // catch-all
-                                };
-                                if matches {
-                                    // 执行 catch 任务（onErrors 转场：Goto → 路由到目标状态）
-                                    // 同样：单任务视图必须用索引 0（见 try 块的同名说明）。
-                                    for task in &clause.tasks {
-                                        let step_result = self.executor.execute_step(
-                                            &WorkflowInstance {
-                                                context: inst.context.clone(),
-                                                current_task_index: 0,
-                                                ..inst.clone()
-                                            },
-                                            &WorkflowDefinition {
-                                                do_tasks: vec![task.clone()],
-                                                ..definition.clone()
-                                            },
-                                        );
-                                        match step_result {
-                                            StepResult::NextTask(_)
-                                            | StepResult::Completed { .. } => {}
-                                            StepResult::Goto { target, .. } => {
-                                                goto_target = Some(target);
-                                            }
-                                            StepResult::Failed { .. } => {}
-                                            _ => {}
-                                        }
-                                    }
-                                    caught = true;
-                                    break;
-                                }
-                            }
-
-                            if !caught {
-                                // 未捕获的错误向上传播
-                                inst.task_stack.push(completed_frame);
-                                inst.status = InstanceStatus::Failed;
-                                inst.fault = try_fault;
                                 inst.updated_at = self.clock.now_ms();
                                 let _ = self
                                     .commit_instance(&store, &inst, &mut rev, guard, &[])
                                     .await;
-                                break;
-                            }
-
-                            // 已捕获：若 catch 指定了转场目标，路由到该状态
-                            if let Some(target) = goto_target {
-                                if let Some(idx) = find_task_index(&definition.do_tasks, &target) {
-                                    inst.current_task_index = idx;
-                                } else if target == "__end" {
-                                    inst.current_task_index = definition.do_tasks.len();
-                                }
                             }
                         }
-
-                        completed_frame.status = TaskStatus::Completed;
-                        completed_frame.ended_at = Some(self.clock.now_ms());
-                        inst.task_stack.push(completed_frame);
-                        if !try_failed {
-                            inst.current_task_index += 1;
-                        }
-                        inst.updated_at = self.clock.now_ms();
-                        let _ = self
-                            .commit_instance(&store, &inst, &mut rev, guard, &[])
-                            .await;
                     }
 
                     StepResult::Completed { output } => {
@@ -3662,6 +3813,17 @@ where
 }
 
 // ─── 辅助函数 ───
+
+/// 子任务列表（`try` / `catch` / 嵌套 `do`）的驱动结果。
+///
+/// `Done.goto` 是块内 `switch` 命中的转场目标：块内**继续执行剩余子任务**，
+/// 完成后才路由（与旧 try 体口径一致，见 `drive_sub_tasks`）。
+enum SubTasksOutcome {
+    /// 全部子任务完成；`goto` 为 `None` 表示顺延到外层下一任务。
+    Done { goto: Option<String> },
+    /// 子任务失败，或遇到块内无法驱动的构造（fail-closed）。
+    Failed(WorkflowFault),
+}
 
 /// 在 NamedTask 列表中查找指定名称的任务索引
 fn find_task_index(tasks: &[super::model::NamedTask], name: &str) -> Option<usize> {
