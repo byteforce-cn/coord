@@ -70,6 +70,25 @@ public interface PkiClient {
     PkiCertInfo issueCert(String commonName, long ttlSeconds);
 
     /**
+     * Issue a certificate with an explicit SAN set (contract fields
+     * {@code dns_names} / {@code ip_addresses}).
+     * <p>
+     * <b>Get-or-create</b> per CN, same as the shorter overloads. Both lists
+     * empty ⇒ the server derives a DNS SAN from {@code commonName} and rejects
+     * a CN that is not a legal DNS name ({@code INVALID_ARGUMENT}); it never
+     * falls back to a SAN-less certificate silently.
+     *
+     * @param commonName    the Common Name (CN) for the certificate
+     * @param ttlSeconds    TTL for the certificate in seconds (0 for default 24h)
+     * @param dnsNames      DNS SANs; empty ⇒ derived from {@code commonName}
+     * @param ipAddresses   IP SANs; empty ⇒ no IP SAN
+     * @return issued certificate information (PEM-encoded)
+     * @throws CoordException if the CA is not initialized or issuance fails
+     */
+    PkiCertInfo issueCert(String commonName, long ttlSeconds, List<String> dnsNames,
+                          List<String> ipAddresses);
+
+    /**
      * Renew an existing certificate by serial number, issuing a new certificate
      * with a fresh key pair under the <b>original CN</b> (looked up by serial).
      * The old certificate stays valid until {@code notAfter}.
@@ -101,6 +120,24 @@ public interface PkiClient {
      * @throws CoordException on rotation failure
      */
     PkiCertInfo rotateCert(String commonName, long ttlSeconds);
+
+    /**
+     * Explicitly rotate the active certificate of a CN with a custom TTL and an
+     * explicit SAN set (contract fields {@code dns_names} / {@code ip_addresses}).
+     * <p>
+     * Both lists empty ⇒ the server inherits the SANs of the current active
+     * certificate (deriving from the CN only when no certificate record exists),
+     * so a rotation never drops the SANs by accident.
+     *
+     * @param commonName    the Common Name (CN) to rotate
+     * @param ttlSeconds    TTL for the certificate in seconds (0 for default 24h)
+     * @param dnsNames      DNS SANs; empty ⇒ inherited from the current active cert
+     * @param ipAddresses   IP SANs; empty ⇒ inherited from the current active cert
+     * @return the new active certificate information
+     * @throws CoordException on rotation failure
+     */
+    PkiCertInfo rotateCert(String commonName, long ttlSeconds, List<String> dnsNames,
+                           List<String> ipAddresses);
 
     /**
      * List the current (active) and not-yet-expired retired certificates of a CN.

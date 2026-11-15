@@ -89,6 +89,39 @@ class PkiClientTest {
     }
 
     @Test
+    void issueCertSendsExplicitSans() {
+        pki.issueCert("svc-a.local", 3600, List.of("svc-a.local", "alt.example"),
+                List.of("10.0.0.7", "::1"));
+
+        assertThat(fake.lastIssue.getDnsNamesList()).containsExactly("svc-a.local", "alt.example");
+        assertThat(fake.lastIssue.getIpAddressesList()).containsExactly("10.0.0.7", "::1");
+    }
+
+    @Test
+    void issueCertWithoutSansLeavesThemForTheServerToDerive() {
+        pki.issueCert("svc-a.local", 3600);
+
+        assertThat(fake.lastIssue.getDnsNamesList()).isEmpty();
+        assertThat(fake.lastIssue.getIpAddressesList()).isEmpty();
+    }
+
+    @Test
+    void rotateCertSendsExplicitSans() {
+        pki.rotateCert("svc-a.local", 3600, List.of("svc-a.local"), List.of("10.0.0.7"));
+
+        assertThat(fake.lastRotate.getDnsNamesList()).containsExactly("svc-a.local");
+        assertThat(fake.lastRotate.getIpAddressesList()).containsExactly("10.0.0.7");
+    }
+
+    @Test
+    void rotateCertWithoutSansLeavesThemForTheServerToInherit() {
+        pki.rotateCert("svc-a.local", 3600);
+
+        assertThat(fake.lastRotate.getDnsNamesList()).isEmpty();
+        assertThat(fake.lastRotate.getIpAddressesList()).isEmpty();
+    }
+
+    @Test
     void rotateCertReturnsNewSerialWithParentChain() {
         PkiCertInfo rotated = pki.rotateCert("svc-a.local", 3600);
         assertThat(rotated.serial()).isEqualTo("0x2");
@@ -122,6 +155,8 @@ class PkiClientTest {
     private static final class FakePkiService extends PkiGrpc.PkiImplBase {
         int issueCalls;
         int rotateCalls;
+        PkiIssueCertRequest lastIssue;
+        PkiRotateCertRequest lastRotate;
 
         @Override
         public void initCa(PkiInitCaRequest request, StreamObserver<PkiInitCaResponse> observer) {
@@ -132,6 +167,7 @@ class PkiClientTest {
         @Override
         public void issueCert(PkiIssueCertRequest request, StreamObserver<PkiIssueCertResponse> observer) {
             issueCalls++;
+            lastIssue = request;
             observer.onNext(PkiIssueCertResponse.newBuilder()
                     .setCommonName(request.getCommonName())
                     .setCertPem("-----BEGIN CERTIFICATE-----\n" + request.getCommonName() + "\n-----END CERTIFICATE-----")
@@ -160,6 +196,7 @@ class PkiClientTest {
         @Override
         public void rotateCert(PkiRotateCertRequest request, StreamObserver<PkiRotateCertResponse> observer) {
             rotateCalls++;
+            lastRotate = request;
             observer.onNext(PkiRotateCertResponse.newBuilder()
                     .setCommonName(request.getCommonName())
                     .setCertPem("-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----")
