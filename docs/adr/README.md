@@ -39,3 +39,4 @@
 | [ADR-0015](0015-kv-t.md) | KV-T：全局时间戳、serializable 跨 Region 事务与严格透明 Watch | accepted |
 | [ADR-0016](0016-mq-v2.md) | MQ v2：分区日志、消费组与工作流触发 | accepted |
 | [ADR-0017](0017-kv-t-default-on.md) | KV-T GA 后默认启用：`[kv_t].enabled` 改为三态 | accepted |
+| [ADR-0018](0018-data-plane-convergence.md) | 数据面收敛：单一数据面（v2）、`coord dev` 跑 v2 与 v1 退场 | accepted |

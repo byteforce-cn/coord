@@ -100,6 +100,15 @@ Server gRPC 监听 `127.0.0.1:50051`，Agent 监听 `127.0.0.1:19527`。
 
 开发模式启用全部内建 agent 服务（`replication` 除外：dev 是单 Agent 拓扑）；`transit` 使用 **dev 专用默认 KEK**（固定值、无保密性，启动 WARN）。生产口径不变：缺注入材料仍拒绝启动（见 [ADR-0009](docs/adr/0009-dev-mode-builtin-services.md)）。
 
+dev 跑 **v2 数据面**（`[kv_t]` + 单节点 Multi-Raft + 内嵌 PD + `[mq_v2]`）：`coord.tso.v2` /
+`coord.kv.v2` / `coord.txn.v2` / `coord.mq.v2` 开箱可用，调用方只需面对一个数据面
+（见 [ADR-0018](docs/adr/0018-data-plane-convergence.md)）。两点后果需知道：
+
+- 旧版本（v1 / 单 Raft）创建的 dev 数据目录会被**拒绝**（不就地迁移）——用 `--fresh` 重建，
+  或换 `--data-dir`；
+- v1 数据面服务（`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch`）在该拓扑下返回
+  `FAILED_PRECONDITION`；v1 `Mq` 插件不挂载，消息面是 `coord.mq.v2`。
+
 **或在容器中运行**（Docker，仅限本地开发：鉴权关闭，`root`/`root`）：
 
 ```bash

@@ -4826,7 +4826,28 @@ async fn run_dev(
             .join("coord-dev-data"),
     };
 
-    // 1.5. --fresh: 启动前清空数据目录
+    // 1.5. ADR-0018 D6：dev 只产出 v2 数据面，v1 数据面（单 Raft）的目录布局不就地迁移。
+    //      静默把旧目录当空库启动，会让「数据还在磁盘上但服务看不见」变成一次无法察觉的丢数据，
+    //      所以在这里 fail-closed，要求显式 `--fresh`（或换 `--data-dir`）。
+    //
+    //      判据是 `regions/` 目录：v2 装配（Region 运行时）才会创建它；`store.db` / `raft-log/`
+    //      在 v2 拓扑下同样存在（region 0 system raft 与快照仍用它们），不能拿来区分平面。
+    if !fresh {
+        let legacy_state =
+            dev_data_dir.join("store.db").exists() || dev_data_dir.join("raft-log").exists();
+        let v2_state = dev_data_dir.join("regions").exists();
+        if legacy_state && !v2_state {
+            return Err(format!(
+                "dev data dir {} holds a v1 (single-Raft) data plane; `coord dev` now runs the \
+                 v2 data plane and does not migrate in place (ADR-0018). Re-run with --fresh \
+                 (recreates the dev cluster) or point --data-dir elsewhere",
+                dev_data_dir.display()
+            )
+            .into());
+        }
+    }
+
+    // 1.6. --fresh: 启动前清空数据目录
     if fresh && dev_data_dir.exists() {
         tracing::info!(
             "--fresh: removing existing data directory {}",
@@ -4848,6 +4869,32 @@ async fn run_dev(
     // dev 模式强制关闭鉴权（root/root 默认凭据），反射开启便于调试
     server_cfg.security.auth_enabled = false;
     server_cfg.security.reflection_enabled = true;
+
+    // 数据面：dev 跑 v2（ADR-0018 D2）—— 单节点多 Region + 内嵌 PD + `[kv_t]`。
+    // 单 Raft（v1）不再作为 dev 拓扑：v1 没有 TSO / OCC，调用方就得按部署切换数据面
+    // 语义与方法名，SDK 面会退化成两套（这正是 ADR-0018 要收掉的那道缝）。
+    server_cfg.cluster.initial_nodes = vec![config::ClusterNode {
+        id: 1,
+        grpc: server_addr.clone(),
+        raft: raft_addr.clone(),
+    }];
+    server_cfg.multi_raft.enabled = true;
+    // 单 Region 平铺整个 keyspace；对象存储 / MQ v2 的固定区间由
+    // `derive_region_seeds` 在启动期切分（ADR-0015 D6/D11.9、ADR-0016 D2）。
+    server_cfg.multi_raft.initial_regions = vec![config::InitialRegionConfig {
+        id: 1,
+        start_key: String::new(),
+        end_key: String::new(),
+    }];
+    server_cfg.multi_raft.pd.enabled = true;
+    server_cfg.multi_raft.pd.target_replicas = 1;
+    server_cfg.kv_t.enabled = Some(true);
+    // durable 工作流（ADR-0014 D3 的 dev 预设）把事件 topic 建在 `coord.mq.v2` 上，
+    // 而 mq v2 的前置正是本集群的 `[kv_t]` —— dev 不开它就是「插件隔离、审批面缺席」，
+    // 属于静默降级，所以这里必须开。分片取 1：单节点 dev 不需要并行度，只是多几个 raft 组。
+    server_cfg.mq_v2.enabled = true;
+    server_cfg.mq_v2.log_shards = 1;
+    server_cfg.mq_v2.group_shards = 1;
 
     // BFF HTTP 端口（与 run_server 保持一致：grpc_port + 10）
     let bff_http_port = grpc_port + 10;
@@ -4947,6 +4994,9 @@ async fn run_dev(
         http_addr: format!("{}:{}", bind_addr, http_port),
         data_dir: dev_data_dir.join("agent").to_string_lossy().to_string(),
         static_peers: vec![server_addr_for_agent],
+        // 与 Server 的 v2 数据面对齐（ADR-0018 D2）：v1 数据面在 v2 集群被冻结，
+        // agent 若仍走 v1 形状就会在首个数据面 RPC 上失败。
+        data_plane: coord_agent::AgentDataPlane::V2,
         services: coord_agent::ServiceConfig::dev_mode(),
         ..Default::default()
     };

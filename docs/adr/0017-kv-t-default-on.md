@@ -1,6 +1,6 @@
 # ADR-0017: KV-T GA 后默认启用：`[kv_t].enabled` 改为三态
 
-- 状态：accepted
+- 状态：accepted（部分修订：ADR-0018 把 `coord dev` 拓扑改为 v2 数据面）
 - 日期：2026-11-11
 - 决策者：维护团队（KV-T G6 签字见 `docs/production/ops/kv-t-ga-gate.md` §4）
 
