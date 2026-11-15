@@ -43,6 +43,11 @@ jobs:
           fetch-depth: 0 # buf breaking 需要完整 git 历史
 
       - uses: bufbuild/buf-setup-action@v1
+        with:
+          # 无 token 时 setup action 走匿名 REST，共享 runner IP 容易命中 rate limit
+          # （2026-11-15 PR #402 的 contract job 即因此假红）。CI 已有 contents: read，
+          # 传内置 GITHUB_TOKEN 只用于下载 buf 二进制，不扩大权限。
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # 不需要 buf/protoc 先跑的一道校验：纯文本断言，最快给出反馈。
       - name: sdk-sync（契约命名空间 ↔ Java SDK）
