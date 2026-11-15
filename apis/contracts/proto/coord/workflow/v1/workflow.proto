@@ -65,6 +65,8 @@ service Workflow {
   rpc Urge(WorkflowUrgeRequest) returns (WorkflowUrgeResponse);
   rpc Cc(WorkflowCcRequest) returns (WorkflowCcResponse);
   rpc WithdrawTask(WorkflowWithdrawTaskRequest) returns (WorkflowWithdrawTaskResponse);
+  // 等待态恢复（`approve.timeoutPolicy: waiting` 超时后）：按上一轮席位重建任务并写新截止。
+  rpc ResumeWorkflow(WorkflowResumeWorkflowRequest) returns (WorkflowResumeWorkflowResponse);
 
   // 人工审批 v2 查询。能力门禁 `coord:workflow:read`。
   rpc ListPendingTasks(WorkflowListPendingTasksRequest) returns (WorkflowListPendingTasksResponse);
@@ -109,7 +111,7 @@ message WorkflowGetStatusRequest {
 
 message WorkflowGetStatusResponse {
   string workflow_id = 1;
-  string status = 2; // PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+  string status = 2; // PENDING, RUNNING, WAITING, SUSPENDED, COMPLETED, FAULTED, CANCELLED
   bytes output = 3;
   string error_message = 4;
   string definition_name = 5; // 工作流定义名称
@@ -257,7 +259,7 @@ message WorkflowListInstancesRequest {
   string namespace = 2;
   int32 page_size = 3;
   string page_token = 4;
-  string status_filter = 5; // 可选，按状态过滤（RUNNING/SUSPENDED/COMPLETED/FAILED/CANCELLED）
+  string status_filter = 5; // 可选，按状态过滤（PENDING/RUNNING/WAITING/SUSPENDED/COMPLETED/FAILED/CANCELLED）
   // 可选：按定义过滤。取值可以为定义名（name）或定义 ID；与 `workflow_id` 同义
   // （历史字段名保留）。
   string definition = 6;
@@ -353,6 +355,15 @@ message WorkflowAcknowledgeResponse {
   string status = 2;
 }
 
+// 加签位置。CURRENT = 向指定分支的当前轮次追加席位（既有语义）；BEFORE / AFTER =
+// 以 `task_id` 为锚派生任务（前加签挂起原轮次，后加签在原轮次通过后执行）。
+enum AddAssigneePosition {
+  ADD_ASSIGNEE_POSITION_UNSPECIFIED = 0;
+  ADD_ASSIGNEE_POSITION_CURRENT = 1;
+  ADD_ASSIGNEE_POSITION_BEFORE = 2;
+  ADD_ASSIGNEE_POSITION_AFTER = 3;
+}
+
 message WorkflowAddSignRequest {
   string workflow_id = 1;
   string branch_id = 2;
@@ -362,11 +373,22 @@ message WorkflowAddSignRequest {
   string comment = 6;
   string idempotency_key = 7;
   string on_behalf_of = 8; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
+  // 可选：加签位置；缺省 CURRENT。BEFORE / AFTER 必须同时给 `task_id`，否则
+  // INVALID_ARGUMENT（不静默退化为当前轮次加席位）。
+  AddAssigneePosition position = 9;
+  // 可选：锚定席位 id（BEFORE / AFTER 必填）。任务级加签归属判定按锚定席位所在
+  // 分支的 `sign_admins`。
+  string task_id = 10;
+  // 可选：客户端 action id；写入派生任务的 `spawned_by_action_id`，供 seedj
+  // `spawnedByActionId` 映射。空 = 派生任务不携带 action id。
+  string action_id = 11;
 }
 
 message WorkflowAddSignResponse {
   string instance_id = 1;
   string status = 2;
+  // 派生任务 id（CURRENT 时为本批新增席位；BEFORE / AFTER 时为前/后加签任务）。
+  repeated string derived_task_ids = 3;
 }
 
 message WorkflowRemoveSignRequest {
@@ -376,11 +398,19 @@ message WorkflowRemoveSignRequest {
   string comment = 4;
   string idempotency_key = 5;
   string on_behalf_of = 6; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
+  // 按 assignee 减签（seedj `RemoveAssigneeAction`）：非空时与 `task_ids` 互斥。
+  // `task_id` 为锚定席位，仅用于定位轮次；实际移除该轮次中 assignee 匹配的未决席位。
+  repeated string assignees = 7;
+  string task_id = 8;
 }
 
 message WorkflowRemoveSignResponse {
   string instance_id = 1;
   string status = 2;
+  // 实际被取消的席位 id（已表态/已终态的席位跳过）。
+  repeated string removed_task_ids = 3;
+  // 重算后的轮次计数与判定；按 assignee 减签时返回。
+  ApprovalRound round = 4;
 }
 
 message WorkflowReturnToNodeRequest {
@@ -418,11 +448,16 @@ message WorkflowDelegateRequest {
   string comment = 4;
   string idempotency_key = 5;
   string on_behalf_of = 6; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
+  // 可选：委派时长（毫秒）；0 = 不自动到期。到期由审批 deadline 定时器驱动恢复
+  // （撤销代理权，原审批人继续可批），到期事件在 History 投影为 DELEGATION_EXPIRED。
+  int64 delegate_for_ms = 7;
 }
 
 message WorkflowDelegateResponse {
   string instance_id = 1;
   string status = 2;
+  // 委派到期时间（Unix ms）；0 = 不自动到期。
+  int64 delegate_expires_at_ms = 3;
 }
 
 message WorkflowWithdrawRequest {
@@ -479,6 +514,22 @@ message WorkflowWithdrawTaskResponse {
   string status = 2;
 }
 
+message WorkflowResumeWorkflowRequest {
+  string workflow_id = 1;
+  // 新的相对截止（毫秒，必须 > 0）；重建任务时换算为绝对 deadline。
+  int64 new_due_in_ms = 2;
+  string reason = 3;
+  string idempotency_key = 4;
+  string on_behalf_of = 5; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
+}
+
+message WorkflowResumeWorkflowResponse {
+  string instance_id = 1;
+  string status = 2;
+  int64 deadline_ms = 3; // 新截止（Unix ms）
+  repeated string task_ids = 4; // 重建的席位 id
+}
+
 message WorkflowTerminateRequest {
   string workflow_id = 1;
   string reason = 2;
@@ -525,7 +576,7 @@ message WorkflowListTasksRequest {
   string completed_by = 5; // 投过票的 actor（含代批的 actor）
   string candidate_group = 6; // 候选池包含该主体/组
   string node = 7; // 节点（步骤）名
-  // 席位状态：created|claimed|completed|rejected|cancelled|expired；
+  // 席位状态：created|claimed|suspended|scheduled|completed|rejected|cancelled|expired；
   // 空 = 全部。未知取值返回 INVALID_ARGUMENT。
   string status = 8;
   int64 due_before_ms = 9; // 仅返回 deadline <= 该值（Unix ms）；0 = 不过滤
@@ -548,6 +599,11 @@ message ApprovalTaskSummary {
   repeated string candidates = 9;
   int64 deadline_ms = 10;
   int64 created_at_ms = 11;
+  string origin = 12;
+  string predecessor_task_id = 13;
+  string successor_task_id = 14;
+  string spawned_by_action_id = 15;
+  repeated ApprovalAssignment assignments = 16;
 }
 
 message WorkflowGetTaskRequest {
@@ -570,12 +626,15 @@ message WorkflowHistoryResponse {
 
 // 历史事件（读模型投影）。`event_type` 为稳定的 UPPER_SNAKE 标签：
 //   STEP_ENTERED / TASK_CREATED / TASK_COMPLETED / TASK_REJECTED /
-//   TASK_ACKNOWLEDGED / TASK_EXPIRED / TASK_CANCELLED /
+//   TASK_ACKNOWLEDGED / TASK_EXPIRED / TASK_CANCELLED / TASK_URGED / TASK_CC /
+//   TASK_WITHDRAWN / TASK_ASSIGNEE_REMOVED / TASK_ASSIGNMENT_SUSPENDED /
+//   TASK_ASSIGNMENT_RESUMED / TASK_ADD_ASSIGNEE_BEFORE / TASK_ADD_ASSIGNEE_AFTER /
+//   TASK_AFTER_SPAWN_DISCARDED / DELEGATION_EXPIRED /
 //   ROUND_OPENED / ROUND_PASSED / ROUND_REJECTED / ROUND_SUPERSEDED / ROUND_CANCELLED /
 //   INSTANCE_STARTED / INSTANCE_ROLLED_BACK / INSTANCE_COMPLETED / INSTANCE_REJECTED /
-//   INSTANCE_CANCELLED / INSTANCE_TERMINATED / INSTANCE_FAULTED。
-// `task / assignment` 级事件按 coord 的席位模型投影；`TASK_ASSIGNMENT_*` 与
-// `TASK_CC` 等 seedj 细分事件在对应能力落地前不会出现。
+//   INSTANCE_CANCELLED / INSTANCE_TERMINATED / INSTANCE_FAULTED / INSTANCE_FAILED /
+//   INSTANCE_WAITING / INSTANCE_RESUMED。
+// `task / assignment` 级事件按 coord 的席位模型投影（audit 记录驱动）。
 message WorkflowHistoryEvent {
   string event_id = 1; // 确定性 id（同状态重复读取稳定）
   string event_type = 2;
@@ -624,6 +683,25 @@ message ApprovalTask {
   repeated string candidates = 7;
   int64 deadline_ms = 8; // 超时阈值（Unix ms）；0 = 无超时
   repeated ApprovalVote votes = 9; // 投票记录（含 actor / on_behalf_of / acting_service）
+  // 席位来源：original|before_added|after_added（seedj HumanTask.kind）。
+  string origin = 10;
+  // 前/后加签派生任务的前驱席位（触发加签的原席位）。
+  string predecessor_task_id = 11;
+  // 原席位的首个后加签派生席位。
+  string successor_task_id = 12;
+  // 触发派生任务的客户端 action id（对应 `WorkflowAddSignRequest.action_id`）。
+  string spawned_by_action_id = 13;
+  // assignment 级读面（原责任人 / 代理人 / 转办来源）。
+  repeated ApprovalAssignment assignments = 14;
+}
+
+// assignment 读面：coord 的席位 + 委派/转办展开成 seedj 的 TaskAssignment。
+message ApprovalAssignment {
+  string principal = 1;
+  // pending|scheduled|suspended|transferred|delegated|completed|rejected|cancelled|expired
+  string status = 2;
+  string resolved_reason = 3; // 终态原因（RULE_SATISFIED / DELEGATION_EXPIRED / ...）
+  ApprovalVote record = 4; // 该主体的投票记录（若有）
 }
 
 // 投票记录：`actor` 是被代表用户（直接操作时即调用方）；`acting_service` 是代其执行的

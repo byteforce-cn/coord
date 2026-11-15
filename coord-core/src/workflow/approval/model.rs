@@ -33,6 +33,9 @@ pub enum InstanceStatus {
     Pending,
     /// 已进入首个节点（存在 open 分支）。
     Running,
+    /// 超时策略 `waiting`：席位超时后实例停在等待态，等待 `ResumeWorkflow` 重建任务。
+    /// 非终态；未决命令在该状态下因「无 open 席位」自然拒绝，管理终止/撤回仍可收口。
+    Waiting,
     /// 由 `finish` 显式收口；分支通过**不**自动收口实例。
     Completed,
     /// 审批否决即终局（一票否决 / 耗尽不通过）。
@@ -181,6 +184,12 @@ pub struct ApprovalPolicy {
     /// 是否允许任务级抄送（`Cc`）。缺省 `false`：只有定义显式开启才放行。
     #[serde(default)]
     pub allow_cc: bool,
+    /// 超时处置策略；缺省 `None`（B-WF-5：到期无自动处置）。
+    #[serde(default)]
+    pub timeout_policy: TimeoutPolicy,
+    /// 步骤审批时长（毫秒）；`None` = 无期限。用于 `ResumeWorkflow` 的时间预算校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<i64>,
 }
 
 /// 分支：一个节点的一次运行实例。
@@ -230,6 +239,10 @@ pub enum TaskKind {
 pub enum TaskStatus {
     Created,
     Claimed,
+    /// 前加签挂起：席位对外仍属原任务，但不可见、不可投票，直到前加签完成。
+    Suspended,
+    /// 后加签已创建但尚未生效：等前驱轮次通过后再激活。
+    Scheduled,
     Completed,
     Rejected,
     Cancelled,
@@ -241,6 +254,60 @@ impl TaskStatus {
     pub fn is_open(self) -> bool {
         matches!(self, TaskStatus::Created | TaskStatus::Claimed)
     }
+
+    /// 终态判定：终态席位不再参与计票、不可被催办/抄送/委派。
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Completed
+                | TaskStatus::Rejected
+                | TaskStatus::Cancelled
+                | TaskStatus::Expired
+        )
+    }
+
+    /// 仍可能恢复的席位：未决 + 挂起 + 待激活。
+    pub fn is_live(self) -> bool {
+        self.is_open() || matches!(self, TaskStatus::Suspended | TaskStatus::Scheduled)
+    }
+}
+
+/// 席位来源：原始席位 / 前加签派生 / 后加签派生。
+///
+/// 与 [`TaskKind`] 正交：派生席位仍是计票席位，`kind` 保持 `approval`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOrigin {
+    #[default]
+    Original,
+    BeforeAdded,
+    AfterAdded,
+}
+
+/// 加签位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AddAssigneePosition {
+    /// 向当前轮次追加席位（既有 `AddSign` 语义）。
+    #[default]
+    Current,
+    /// 派生前加签任务，挂起原席位，等其完成后恢复。
+    Before,
+    /// 派生后加签任务，原轮次通过后、下一业务节点前执行。
+    After,
+}
+
+/// 超时处置策略。
+///
+/// 缺省 `None` 保持 B-WF-5：到期只置过期、绝不自动处置。`Fail` / `Waiting` 必须由
+/// 定义显式开启（`approve.timeoutPolicy`），不在默认行为里扩大承诺。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutPolicy {
+    #[default]
+    None,
+    Fail,
+    Waiting,
 }
 
 /// 委派凭据：被委派人与原审批人均可批（原审批人权限保留）。
@@ -249,6 +316,22 @@ pub struct Delegation {
     pub from: Principal,
     pub to: Principal,
     pub granted_at: i64,
+    /// 委派到期时间（Unix ms）；`None` = 不自动到期。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// 撤销时间（到期 / 终态取消）；撤销后代理人不再可操作。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<i64>,
+    /// 撤销原因（`DELEGATION_EXPIRED` / `RULE_SATISFIED` / `TASK_CANCELLED` 等）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke_reason: Option<String>,
+}
+
+impl Delegation {
+    /// 委派是否仍生效：未撤销且未到期。
+    pub fn is_active(&self, now: i64) -> bool {
+        self.revoked_at.is_none() && self.expires_at.is_none_or(|at| at > now)
+    }
 }
 
 /// 票型（无弃权票）。
@@ -294,6 +377,21 @@ pub struct Task {
     pub candidates: Vec<Principal>,
     /// 超时阈值；过期由外部调用 `expire` 驱动（无进程内定时器）。
     pub deadline: Option<i64>,
+    /// 席位来源（原始 / 前加签 / 后加签）。
+    #[serde(default)]
+    pub origin: TaskOrigin,
+    /// 派生任务的前驱席位（前/后加签均指向触发加签的原席位）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor: Option<Id>,
+    /// 原席位的后加签派生任务（首个）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<Id>,
+    /// 触发派生任务的客户端 action id（coord 取 `idempotency_key`；空 = 未提供）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<String>,
+    /// 挂起前的席位状态；恢复时原样还原（`Suspended` 专用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_from: Option<TaskStatus>,
     /// 委派：原审批人保留权限，代办人可代批。
     pub delegation: Option<Delegation>,
     /// 转办来源链（审计）；转办后原审批人不再具备审批权（见 ADR-0013 D2）。
@@ -305,12 +403,127 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// 席位级 assignment 状态（seedj `TaskAssignment.status` 的 coord 投影）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentStatus {
+    Pending,
+    Scheduled,
+    Suspended,
+    Transferred,
+    Delegated,
+    Completed,
+    Rejected,
+    Cancelled,
+    Expired,
+}
+
+/// 一个席位的 assignment 读模型。
+///
+/// coord 的 Task = seedj 的 participant 级 assignment；同一 Task 上的转办/委派会展开成
+/// 多条 assignment（原责任人 + 代理人），供 seedj 适配器直接映射 `TaskAssignment`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignmentView {
+    pub principal: Principal,
+    pub status: AssignmentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_reason: Option<String>,
+}
+
+impl Task {
+    /// 展开席位的 assignment 视图（`now` 用于判定委派是否到期）。
+    pub fn assignments(&self, now: i64) -> Vec<AssignmentView> {
+        let mut out = Vec::new();
+        if let Some(d) = &self.delegation {
+            let active = d.is_active(now);
+            let reason = d.revoke_reason.clone();
+            out.push(AssignmentView {
+                principal: d.from.clone(),
+                status: if active {
+                    AssignmentStatus::Delegated
+                } else {
+                    AssignmentStatus::Cancelled
+                },
+                resolved_reason: if active {
+                    None
+                } else {
+                    reason.clone().or_else(|| Some("DELEGATION_REVOKED".into()))
+                },
+            });
+            out.push(AssignmentView {
+                principal: d.to.clone(),
+                status: if active {
+                    match self.status {
+                        TaskStatus::Created | TaskStatus::Claimed => AssignmentStatus::Pending,
+                        TaskStatus::Suspended => AssignmentStatus::Suspended,
+                        TaskStatus::Scheduled => AssignmentStatus::Scheduled,
+                        TaskStatus::Completed => AssignmentStatus::Completed,
+                        TaskStatus::Rejected => AssignmentStatus::Rejected,
+                        TaskStatus::Cancelled => AssignmentStatus::Cancelled,
+                        TaskStatus::Expired => AssignmentStatus::Expired,
+                    }
+                } else {
+                    AssignmentStatus::Cancelled
+                },
+                resolved_reason: if active { None } else { reason },
+            });
+        }
+        for from in &self.transferred_from {
+            out.push(AssignmentView {
+                principal: from.clone(),
+                status: AssignmentStatus::Transferred,
+                resolved_reason: None,
+            });
+        }
+        let base = |principal: Principal| AssignmentView {
+            principal,
+            status: match self.status {
+                TaskStatus::Created | TaskStatus::Claimed => AssignmentStatus::Pending,
+                TaskStatus::Suspended => AssignmentStatus::Suspended,
+                TaskStatus::Scheduled => AssignmentStatus::Scheduled,
+                TaskStatus::Completed => AssignmentStatus::Completed,
+                TaskStatus::Rejected => AssignmentStatus::Rejected,
+                TaskStatus::Cancelled => AssignmentStatus::Cancelled,
+                TaskStatus::Expired => AssignmentStatus::Expired,
+            },
+            resolved_reason: match self.status {
+                TaskStatus::Completed => Some("RULE_SATISFIED".into()),
+                TaskStatus::Rejected => Some("REJECTED".into()),
+                TaskStatus::Cancelled => Some("TASK_CANCELLED".into()),
+                TaskStatus::Expired => Some("TASK_EXPIRED".into()),
+                _ => None,
+            },
+        };
+        // 委派已展开 from/to 两条 assignment；当前 `assignee` 仍是原责任人，不能再追加
+        // 一条重复的 Pending（否则 seedj 适配器会看到同一 principal 两条 assignment）。
+        if self.delegation.is_none() {
+            if let Some(assignee) = &self.assignee {
+                out.push(base(assignee.clone()));
+            } else {
+                for candidate in &self.candidates {
+                    out.push(base(candidate.clone()));
+                }
+            }
+        }
+        out
+    }
+}
+
 /// `open_approval` / `add_sign` 的席位描述。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeatSpec {
     pub assignee: Option<Principal>,
     pub candidates: Vec<Principal>,
     pub kind: TaskKind,
+    /// 派生任务来源；既有 `AddSign` / `open_approval` 恒为 `Original`。
+    #[serde(default)]
+    pub origin: TaskOrigin,
+    /// 派生任务的前驱席位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor: Option<Id>,
+    /// 触发派生任务的 action id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<String>,
 }
 
 impl SeatSpec {
@@ -320,6 +533,9 @@ impl SeatSpec {
             assignee: Some(p.into()),
             candidates: vec![],
             kind: TaskKind::Approval,
+            origin: TaskOrigin::Original,
+            predecessor: None,
+            spawned_by: None,
         }
     }
 
@@ -329,6 +545,9 @@ impl SeatSpec {
             assignee: Some(p.into()),
             candidates: vec![],
             kind: TaskKind::ReadAck,
+            origin: TaskOrigin::Original,
+            predecessor: None,
+            spawned_by: None,
         }
     }
 
@@ -338,6 +557,26 @@ impl SeatSpec {
             assignee: None,
             candidates,
             kind: TaskKind::Approval,
+            origin: TaskOrigin::Original,
+            predecessor: None,
+            spawned_by: None,
+        }
+    }
+
+    /// 派生席位（前/后加签）：来源与链路由触发命令注入。
+    pub fn derived(
+        assignee: Principal,
+        origin: TaskOrigin,
+        predecessor: Id,
+        spawned_by: Option<String>,
+    ) -> Self {
+        Self {
+            assignee: Some(assignee),
+            candidates: vec![],
+            kind: TaskKind::Approval,
+            origin,
+            predecessor: Some(predecessor),
+            spawned_by,
         }
     }
 }
@@ -349,6 +588,10 @@ impl SeatSpec {
 #[serde(rename_all = "snake_case")]
 pub enum RoundStatus {
     Open,
+    /// 前加签挂起：原轮次保留席位，等前加签轮次通过后恢复。
+    Suspended,
+    /// 后加签已创建、等前驱轮次通过后激活。
+    Scheduled,
     Passed,
     Rejected,
     /// 驳回重开而作废。
@@ -371,6 +614,12 @@ pub struct Round {
     /// 分支内轮次序号，从 1 起。
     pub number: u32,
     pub status: RoundStatus,
+    /// 本轮通过策略覆盖（后加签默认 `Any`）；`None` = 沿用分支策略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<JoinPolicy>,
+    /// 本轮否决策略覆盖；`None` = 沿用分支策略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject: Option<RejectPolicy>,
     /// 可计票审批席位数（不含阅签；不含已取消/过期的席位）。
     pub total_count: u32,
     pub completed_count: u32,
@@ -560,6 +809,8 @@ mod tests {
                 allow_self_approve: true,
                 allow_cc: false,
                 sign_admins: vec!["u-admin".into()],
+                timeout_policy: TimeoutPolicy::None,
+                timeout_ms: None,
             },
             scope: BTreeMap::from([("level".to_string(), json!("l2"))]),
             round_ids: vec!["inst-1:r0002".into()],
@@ -578,10 +829,18 @@ mod tests {
             assignee: Some("u-approver".into()),
             candidates: vec!["u-a".into(), "u-b".into()],
             deadline: Some(300),
+            origin: TaskOrigin::Original,
+            predecessor: None,
+            successor: None,
+            spawned_by: None,
+            suspended_from: None,
             delegation: Some(Delegation {
                 from: "u-approver".into(),
                 to: "u-proxy".into(),
                 granted_at: 150,
+                expires_at: None,
+                revoked_at: None,
+                revoke_reason: None,
             }),
             transferred_from: vec!["u-original".into()],
             votes: vec![VoteRecord {
@@ -605,6 +864,8 @@ mod tests {
             branch_id: "inst-1:b0001".into(),
             number: 2,
             status: RoundStatus::Superseded,
+            join: None,
+            reject: None,
             total_count: 3,
             completed_count: 1,
             rejected_count: 1,
@@ -667,6 +928,7 @@ mod tests {
         for status in [
             InstanceStatus::Pending,
             InstanceStatus::Running,
+            InstanceStatus::Waiting,
             InstanceStatus::Completed,
             InstanceStatus::Rejected,
             InstanceStatus::Terminated,
@@ -689,6 +951,8 @@ mod tests {
         for status in [
             TaskStatus::Created,
             TaskStatus::Claimed,
+            TaskStatus::Suspended,
+            TaskStatus::Scheduled,
             TaskStatus::Completed,
             TaskStatus::Rejected,
             TaskStatus::Cancelled,
@@ -698,6 +962,8 @@ mod tests {
         }
         for status in [
             RoundStatus::Open,
+            RoundStatus::Suspended,
+            RoundStatus::Scheduled,
             RoundStatus::Passed,
             RoundStatus::Rejected,
             RoundStatus::Superseded,

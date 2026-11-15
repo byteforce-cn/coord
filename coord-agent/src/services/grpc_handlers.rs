@@ -91,23 +91,26 @@ use coord_proto::agent::{
 
 // 审批 v2（ADR-0013 D7）请求/响应类型。
 use coord_proto::agent::{
-    ApprovalAudit, ApprovalBranch, ApprovalRound, ApprovalTask, ApprovalTaskSummary, ApprovalVote,
-    PendingApprovalTask, WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse,
-    WorkflowAddSignRequest, WorkflowAddSignResponse, WorkflowApproveRequest,
-    WorkflowApproveResponse, WorkflowCcRequest, WorkflowCcResponse, WorkflowDelegateRequest,
-    WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse,
-    WorkflowGetTaskRequest, WorkflowGetTaskResponse, WorkflowHistoryEvent, WorkflowHistoryRequest,
-    WorkflowHistoryResponse, WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse,
-    WorkflowListTasksRequest, WorkflowListTasksResponse, WorkflowRejectRequest,
-    WorkflowRejectResponse, WorkflowRemoveSignRequest, WorkflowRemoveSignResponse,
-    WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse, WorkflowTerminateRequest,
-    WorkflowTerminateResponse, WorkflowTransferRequest, WorkflowTransferResponse,
-    WorkflowUrgeRequest, WorkflowUrgeResponse, WorkflowWithdrawRequest, WorkflowWithdrawResponse,
-    WorkflowWithdrawTaskRequest, WorkflowWithdrawTaskResponse,
+    AddAssigneePosition, ApprovalAssignment, ApprovalAudit, ApprovalBranch, ApprovalRound,
+    ApprovalTask, ApprovalTaskSummary, ApprovalVote, PendingApprovalTask,
+    WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse, WorkflowAddSignRequest,
+    WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse, WorkflowCcRequest,
+    WorkflowCcResponse, WorkflowDelegateRequest, WorkflowDelegateResponse,
+    WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest,
+    WorkflowGetTaskResponse, WorkflowHistoryEvent, WorkflowHistoryRequest, WorkflowHistoryResponse,
+    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowListTasksRequest,
+    WorkflowListTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
+    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowResumeWorkflowRequest,
+    WorkflowResumeWorkflowResponse, WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse,
+    WorkflowTerminateRequest, WorkflowTerminateResponse, WorkflowTransferRequest,
+    WorkflowTransferResponse, WorkflowUrgeRequest, WorkflowUrgeResponse, WorkflowWithdrawRequest,
+    WorkflowWithdrawResponse, WorkflowWithdrawTaskRequest, WorkflowWithdrawTaskResponse,
 };
 
 use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError, SYSTEM_ACTOR};
-use coord_core::workflow::approval::model::{JoinPolicy, SeatSpec};
+use coord_core::workflow::approval::model::{
+    AddAssigneePosition as ModelAddAssigneePosition, JoinPolicy, SeatSpec, VoteRecord,
+};
 
 use crate::plugin::GatewayIdentity;
 use crate::services::workflow::phase4::json_label;
@@ -2015,6 +2018,15 @@ impl Workflow for WorkflowService {
         ))
     }
 
+    async fn resume_workflow(
+        &self,
+        _request: Request<WorkflowResumeWorkflowRequest>,
+    ) -> Result<Response<WorkflowResumeWorkflowResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
     async fn list_pending_tasks(
         &self,
         _request: Request<WorkflowListPendingTasksRequest>,
@@ -2179,7 +2191,10 @@ fn join_label(join: &JoinPolicy) -> String {
 }
 
 /// 任务查询投影 → wire 摘要。
-fn task_summary(view: &crate::services::workflow::phase4::ApprovalTaskView) -> ApprovalTaskSummary {
+fn task_summary(
+    view: &crate::services::workflow::phase4::ApprovalTaskView,
+    now: i64,
+) -> ApprovalTaskSummary {
     ApprovalTaskSummary {
         instance_id: view.instance_id.clone(),
         task_id: view.task.id.clone(),
@@ -2192,23 +2207,102 @@ fn task_summary(view: &crate::services::workflow::phase4::ApprovalTaskView) -> A
         candidates: view.task.candidates.clone(),
         deadline_ms: view.task.deadline.unwrap_or(0),
         created_at_ms: view.task.created_at,
+        origin: json_label(&view.task.origin),
+        predecessor_task_id: view.task.predecessor.clone().unwrap_or_default(),
+        successor_task_id: view.task.successor.clone().unwrap_or_default(),
+        spawned_by_action_id: view.task.spawned_by.clone().unwrap_or_default(),
+        assignments: map_assignments(&view.task.assignments(now), &view.task.votes),
+    }
+}
+
+fn map_assignments(
+    assignments: &[coord_core::workflow::approval::model::AssignmentView],
+    votes: &[VoteRecord],
+) -> Vec<ApprovalAssignment> {
+    assignments
+        .iter()
+        .map(|a| ApprovalAssignment {
+            principal: a.principal.clone(),
+            status: json_label(&a.status),
+            resolved_reason: a.resolved_reason.clone().unwrap_or_default(),
+            record: votes
+                .iter()
+                .find(|v| v.actor == a.principal || v.on_behalf_of.as_deref() == Some(&a.principal))
+                .map(map_vote),
+        })
+        .collect()
+}
+
+fn json_string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn round_from_json(value: &serde_json::Value) -> ApprovalRound {
+    ApprovalRound {
+        id: value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        branch_id: value
+            .get("branch_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        number: value
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as i32,
+        status: value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        total_count: value
+            .get("total_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as i32,
+        completed_count: value
+            .get("completed_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as i32,
+        rejected_count: value
+            .get("rejected_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as i32,
+        reject_reason: value
+            .get("reject_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+fn map_vote(v: &VoteRecord) -> ApprovalVote {
+    ApprovalVote {
+        round_id: v.round_id.clone(),
+        decision: json_label(&v.decision),
+        actor: v.actor.clone(),
+        on_behalf_of: v.on_behalf_of.clone().unwrap_or_default(),
+        comment: v.comment.clone().unwrap_or_default(),
+        at_ms: v.at,
+        acting_service: v.acting_service.clone().unwrap_or_default(),
     }
 }
 
 /// 投票记录 → wire 形态（`GetInstanceDetail` / `GetTask` 共用）。
-fn map_votes(votes: &[coord_core::workflow::approval::model::VoteRecord]) -> Vec<ApprovalVote> {
-    votes
-        .iter()
-        .map(|v| ApprovalVote {
-            round_id: v.round_id.clone(),
-            decision: json_label(&v.decision),
-            actor: v.actor.clone(),
-            on_behalf_of: v.on_behalf_of.clone().unwrap_or_default(),
-            comment: v.comment.clone().unwrap_or_default(),
-            at_ms: v.at,
-            acting_service: v.acting_service.clone().unwrap_or_default(),
-        })
-        .collect()
+fn map_votes(votes: &[VoteRecord]) -> Vec<ApprovalVote> {
+    votes.iter().map(map_vote).collect()
 }
 
 #[tonic::async_trait]
@@ -2626,8 +2720,9 @@ impl Workflow for WorkflowEngineService {
             .list_tasks(&filter, page_size, non_empty(&req.page_token))
             .await
             .map_err(map_approval_error)?;
+        let now = self.now_ms();
         Ok(Response::new(WorkflowListTasksResponse {
-            tasks: tasks.iter().map(task_summary).collect(),
+            tasks: tasks.iter().map(|view| task_summary(view, now)).collect(),
             next_page_token: next.unwrap_or_default(),
         }))
     }
@@ -2645,8 +2740,9 @@ impl Workflow for WorkflowEngineService {
             .get_task(&req.task_id)
             .await
             .map_err(map_approval_error)?;
+        let now = self.now_ms();
         Ok(Response::new(WorkflowGetTaskResponse {
-            task: Some(task_summary(&view)),
+            task: Some(task_summary(&view, now)),
             votes: map_votes(&view.task.votes),
             instance_status: view.instance_status,
         }))
@@ -2814,6 +2910,30 @@ impl Workflow for WorkflowEngineService {
                 "add_sign principals must be non-empty",
             ));
         }
+        let position = match AddAssigneePosition::try_from(req.position) {
+            Ok(AddAssigneePosition::Unspecified) | Ok(AddAssigneePosition::Current) => {
+                ModelAddAssigneePosition::Current
+            }
+            Ok(AddAssigneePosition::Before) => ModelAddAssigneePosition::Before,
+            Ok(AddAssigneePosition::After) => ModelAddAssigneePosition::After,
+            Err(_) => {
+                return Err(Status::invalid_argument(
+                    "add_sign position is not a known AddAssigneePosition",
+                ))
+            }
+        };
+        if position != ModelAddAssigneePosition::Current {
+            if req.task_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "add_sign BEFORE/AFTER requires task_id",
+                ));
+            }
+            if !req.pool.is_empty() || !req.readers.is_empty() {
+                return Err(Status::invalid_argument(
+                    "add_sign BEFORE/AFTER only accepts approvers",
+                ));
+            }
+        }
         let mut seats: Vec<SeatSpec> = req
             .approvers
             .iter()
@@ -2823,14 +2943,17 @@ impl Workflow for WorkflowEngineService {
             seats.push(SeatSpec::pool(req.pool.clone()));
         }
         seats.extend(req.readers.iter().map(|r| SeatSpec::reader(r)));
-        let (instance_id, status) = self
-            .approval_command_with(
+        let (instance_id, status, receipt) = self
+            .approval_command_with_receipt(
                 &req.workflow_id,
                 &actor,
                 acting.as_deref(),
                 ApprovalCommand::AddSign {
                     branch_id: &req.branch_id,
+                    task_id: non_empty(&req.task_id),
                     seats,
+                    position,
+                    spawned_by: non_empty(&req.action_id),
                     comment: non_empty(&req.comment),
                 },
                 non_empty(&req.idempotency_key),
@@ -2840,6 +2963,7 @@ impl Workflow for WorkflowEngineService {
         Ok(Response::new(WorkflowAddSignResponse {
             instance_id,
             status,
+            derived_task_ids: json_string_list(&receipt, "derived_task_ids"),
         }))
     }
 
@@ -2850,14 +2974,42 @@ impl Workflow for WorkflowEngineService {
         let identity = gateway_identity(&request);
         let req = request.into_inner();
         let (actor, acting) = approval_target(self, &identity, &req.on_behalf_of)?;
-        // 空批次语义未定义：无目标不得静默当成 no-op，先于命令拒绝。
-        if req.task_ids.is_empty() {
+        if !req.assignees.is_empty() && !req.task_ids.is_empty() {
             return Err(Status::invalid_argument(
-                "remove_sign requires at least one task_id",
+                "remove_sign accepts either task_ids or assignees, not both",
             ));
         }
-        let (instance_id, status) = self
-            .approval_command_with(
+        if req.assignees.is_empty() && req.task_ids.is_empty() {
+            return Err(Status::invalid_argument(
+                "remove_sign requires task_ids or assignees",
+            ));
+        }
+        let (instance_id, status, receipt) = if !req.assignees.is_empty() {
+            if req.task_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "remove_sign by assignee requires task_id",
+                ));
+            }
+            if req.assignees.iter().any(|a| a.is_empty()) {
+                return Err(Status::invalid_argument(
+                    "remove_sign assignees must be non-empty",
+                ));
+            }
+            self.approval_command_with_receipt(
+                &req.workflow_id,
+                &actor,
+                acting.as_deref(),
+                ApprovalCommand::RemoveAssignee {
+                    task_id: &req.task_id,
+                    assignees: req.assignees.clone(),
+                    comment: non_empty(&req.comment),
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?
+        } else {
+            self.approval_command_with_receipt(
                 &req.workflow_id,
                 &actor,
                 acting.as_deref(),
@@ -2867,10 +3019,13 @@ impl Workflow for WorkflowEngineService {
                 non_empty(&req.idempotency_key),
             )
             .await
-            .map_err(map_approval_error)?;
+            .map_err(map_approval_error)?
+        };
         Ok(Response::new(WorkflowRemoveSignResponse {
             instance_id,
             status,
+            removed_task_ids: json_string_list(&receipt, "removed_task_ids"),
+            round: receipt.get("round").map(round_from_json),
         }))
     }
 
@@ -2946,14 +3101,15 @@ impl Workflow for WorkflowEngineService {
                 "delegate target must be non-empty",
             ));
         }
-        let (instance_id, status) = self
-            .approval_command_with(
+        let (instance_id, status, receipt) = self
+            .approval_command_with_receipt(
                 &req.workflow_id,
                 &actor,
                 acting.as_deref(),
                 ApprovalCommand::Delegate {
                     task_id: &req.task_id,
                     to: &req.to,
+                    delegate_for_ms: req.delegate_for_ms,
                 },
                 non_empty(&req.idempotency_key),
             )
@@ -2962,6 +3118,45 @@ impl Workflow for WorkflowEngineService {
         Ok(Response::new(WorkflowDelegateResponse {
             instance_id,
             status,
+            delegate_expires_at_ms: receipt
+                .get("delegate_expires_at_ms")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+        }))
+    }
+
+    async fn resume_workflow(
+        &self,
+        request: Request<WorkflowResumeWorkflowRequest>,
+    ) -> Result<Response<WorkflowResumeWorkflowResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        if req.new_due_in_ms <= 0 {
+            return Err(Status::invalid_argument("new_due_in_ms must be > 0"));
+        }
+        let (actor, acting) = approval_target(self, &identity, &req.on_behalf_of)?;
+        let response = self
+            .resume_workflow(
+                &req.workflow_id,
+                &actor,
+                acting.as_deref(),
+                req.new_due_in_ms,
+                &req.reason,
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        let (instance_id, status) =
+            crate::services::workflow::phase4::approval_response_status(&response)
+                .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(WorkflowResumeWorkflowResponse {
+            instance_id,
+            status,
+            deadline_ms: response
+                .get("deadline_ms")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            task_ids: json_string_list(&response, "task_ids"),
         }))
     }
 
@@ -3153,6 +3348,7 @@ impl Workflow for WorkflowEngineService {
             .get_instance_detail(&req.workflow_id)
             .await
             .map_err(map_approval_error)?;
+        let now = self.now_ms();
         Ok(Response::new(WorkflowGetInstanceDetailResponse {
             instance_id: detail.instance_id,
             status: detail.status,
@@ -3185,6 +3381,11 @@ impl Workflow for WorkflowEngineService {
                     candidates: t.candidates.clone(),
                     deadline_ms: t.deadline.unwrap_or(0),
                     votes: map_votes(&t.votes),
+                    origin: json_label(&t.origin),
+                    predecessor_task_id: t.predecessor.clone().unwrap_or_default(),
+                    successor_task_id: t.successor.clone().unwrap_or_default(),
+                    spawned_by_action_id: t.spawned_by.clone().unwrap_or_default(),
+                    assignments: map_assignments(&t.assignments(now), &t.votes),
                 })
                 .collect(),
             rounds: detail
@@ -3718,6 +3919,7 @@ mod tests {
     use super::*;
 
     use coord_core::workflow::approval::bridge::{ApprovalBridge, MapApproverResolver};
+    use coord_core::workflow::approval::model::{TaskOrigin, TaskStatus};
     use coord_core::workflow::approval::store::{ApprovalStore, MemoryApprovalStore};
     use coord_core::workflow::ports::{Clock, SystemClock};
 
@@ -4395,6 +4597,8 @@ do:
             comment: String::new(),
             idempotency_key: String::new(),
             on_behalf_of: String::new(),
+            assignees: vec![],
+            task_id: String::new(),
         });
         let err = Workflow::remove_sign(&svc, req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -4412,6 +4616,9 @@ do:
             comment: String::new(),
             idempotency_key: String::new(),
             on_behalf_of: String::new(),
+            position: 0,
+            task_id: String::new(),
+            action_id: String::new(),
         });
         let err = Workflow::add_sign(&svc, req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -4444,6 +4651,7 @@ do:
             comment: String::new(),
             idempotency_key: String::new(),
             on_behalf_of: String::new(),
+            delegate_for_ms: 0,
         });
         let err = Workflow::delegate(&svc, req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -4461,6 +4669,9 @@ do:
             comment: String::new(),
             idempotency_key: String::new(),
             on_behalf_of: String::new(),
+            position: 0,
+            task_id: String::new(),
+            action_id: String::new(),
         });
         let err = Workflow::add_sign(&svc, req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -4529,6 +4740,294 @@ do:
         .unwrap()
         .into_inner();
         assert_eq!(quorum_detail.branches[0].join, "quorum:2");
+    }
+
+    fn with_identity<T>(mut request: Request<T>, subject: &str) -> Request<T> {
+        request.extensions_mut().insert(GatewayIdentity {
+            subject: subject.into(),
+            roles: vec![],
+        });
+        request
+    }
+
+    /// AddSign BEFORE/AFTER：RPC 返回派生任务 id，History 投影挂起/恢复/前后加签事件。
+    #[tokio::test]
+    async fn add_sign_before_and_after_project_derived_ids_and_history() {
+        let (svc, store) = handler_approve_service();
+        let def_id = svc
+            .deploy_definition("test", &approve_yaml("add-assignee-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        let alice = await_seat(&store, &inst.id, "alice").await;
+
+        let resp = Workflow::add_sign(
+            &svc,
+            with_identity(
+                Request::new(WorkflowAddSignRequest {
+                    workflow_id: inst.id.clone(),
+                    branch_id: String::new(),
+                    approvers: vec!["bob".into()],
+                    pool: vec![],
+                    readers: vec![],
+                    comment: "pre".into(),
+                    idempotency_key: String::new(),
+                    on_behalf_of: String::new(),
+                    position: AddAssigneePosition::Before as i32,
+                    task_id: alice.clone(),
+                    action_id: "action-before".into(),
+                }),
+                "zhangsan",
+            ),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.derived_task_ids.len(), 1);
+        let (engine, _) = store.load(&inst.id).await.unwrap().unwrap();
+        assert_eq!(engine.tasks[&alice].status, TaskStatus::Suspended);
+        assert_eq!(
+            engine.tasks[&resp.derived_task_ids[0]].origin,
+            TaskOrigin::BeforeAdded
+        );
+        let history = svc.history(&inst.id).await.unwrap();
+        assert!(history
+            .iter()
+            .any(|e| e.event_type == "TASK_ADD_ASSIGNEE_BEFORE"));
+        assert!(history
+            .iter()
+            .any(|e| e.event_type == "TASK_ASSIGNMENT_SUSPENDED"));
+
+        Workflow::approve(
+            &svc,
+            with_identity(
+                Request::new(WorkflowApproveRequest {
+                    workflow_id: inst.id.clone(),
+                    task_id: resp.derived_task_ids[0].clone(),
+                    comment: String::new(),
+                    idempotency_key: String::new(),
+                    on_behalf_of: String::new(),
+                }),
+                "bob",
+            ),
+        )
+        .await
+        .unwrap();
+        let history = svc.history(&inst.id).await.unwrap();
+        assert!(history
+            .iter()
+            .any(|e| e.event_type == "TASK_ASSIGNMENT_RESUMED"));
+        let (engine, _) = store.load(&inst.id).await.unwrap().unwrap();
+        assert_eq!(engine.tasks[&alice].status, TaskStatus::Created);
+
+        let after = Workflow::add_sign(
+            &svc,
+            with_identity(
+                Request::new(WorkflowAddSignRequest {
+                    workflow_id: inst.id.clone(),
+                    branch_id: String::new(),
+                    approvers: vec!["carol".into()],
+                    pool: vec![],
+                    readers: vec![],
+                    comment: String::new(),
+                    idempotency_key: String::new(),
+                    on_behalf_of: String::new(),
+                    position: AddAssigneePosition::After as i32,
+                    task_id: alice.clone(),
+                    action_id: String::new(),
+                }),
+                "zhangsan",
+            ),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(after.derived_task_ids.len(), 1);
+        Workflow::approve(
+            &svc,
+            with_identity(
+                Request::new(WorkflowApproveRequest {
+                    workflow_id: inst.id.clone(),
+                    task_id: alice,
+                    comment: String::new(),
+                    idempotency_key: String::new(),
+                    on_behalf_of: String::new(),
+                }),
+                "alice",
+            ),
+        )
+        .await
+        .unwrap();
+        let (engine, _) = store.load(&inst.id).await.unwrap().unwrap();
+        assert_eq!(
+            engine.tasks[&after.derived_task_ids[0]].status,
+            TaskStatus::Created
+        );
+        assert!(svc
+            .history(&inst.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.event_type == "TASK_ADD_ASSIGNEE_AFTER"));
+    }
+
+    /// RemoveSign 按 assignee：返回被取消的席位与重算后的轮次。
+    #[tokio::test]
+    async fn remove_sign_by_assignee_returns_recounted_round() {
+        let (svc, store) = handler_approve_service();
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: remove-assignee-wf
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice", "bob"]
+"#;
+        let def_id = svc.deploy_definition("test", yaml).await.unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        let alice = await_seat(&store, &inst.id, "alice").await;
+        let bob = await_seat(&store, &inst.id, "bob").await;
+
+        let resp = Workflow::remove_sign(
+            &svc,
+            with_identity(
+                Request::new(WorkflowRemoveSignRequest {
+                    workflow_id: inst.id.clone(),
+                    branch_id: String::new(),
+                    task_ids: vec![],
+                    comment: "left".into(),
+                    idempotency_key: String::new(),
+                    on_behalf_of: String::new(),
+                    assignees: vec!["bob".into()],
+                    task_id: alice,
+                }),
+                "zhangsan",
+            ),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.removed_task_ids, vec![bob.clone()]);
+        assert_eq!(resp.round.as_ref().unwrap().total_count, 1);
+        let (engine, _) = store.load(&inst.id).await.unwrap().unwrap();
+        assert_eq!(engine.tasks[&bob].status, TaskStatus::Cancelled);
+        assert!(svc
+            .history(&inst.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.event_type == "TASK_ASSIGNEE_REMOVED"));
+    }
+
+    /// Delegate 的 delegateFor 映射为到期时间，并在 detail 的 assignment 读面可见。
+    #[tokio::test]
+    async fn delegate_for_projects_expiry_and_assignment_status() {
+        let (svc, store) = handler_approve_service();
+        let def_id = svc
+            .deploy_definition("test", &approve_yaml("delegate-for-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        let alice = await_seat(&store, &inst.id, "alice").await;
+
+        let resp = Workflow::delegate(
+            &svc,
+            with_identity(
+                Request::new(WorkflowDelegateRequest {
+                    workflow_id: inst.id.clone(),
+                    task_id: alice.clone(),
+                    to: "bob".into(),
+                    comment: String::new(),
+                    idempotency_key: String::new(),
+                    on_behalf_of: String::new(),
+                    delegate_for_ms: 60_000,
+                }),
+                "alice",
+            ),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert!(resp.delegate_expires_at_ms > 0);
+        let detail = Workflow::get_instance_detail(
+            &svc,
+            Request::new(WorkflowGetInstanceDetailRequest {
+                workflow_id: inst.id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        let task = detail.tasks.iter().find(|t| t.id == alice).unwrap();
+        assert!(task
+            .assignments
+            .iter()
+            .any(|a| a.principal == "alice" && a.status == "delegated"));
+        assert!(task
+            .assignments
+            .iter()
+            .any(|a| a.principal == "bob" && a.status == "pending"));
+    }
+
+    /// ResumeWorkflow 仅 Waiting 有效；非法截止在 RPC 边界拒绝。
+    #[tokio::test]
+    async fn resume_workflow_requires_waiting_instance() {
+        let (svc, store) = handler_approve_service();
+        let def_id = svc
+            .deploy_definition("test", &approve_yaml("resume-guard-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        await_seat(&store, &inst.id, "alice").await;
+
+        let err = Workflow::resume_workflow(
+            &svc,
+            with_identity(
+                Request::new(WorkflowResumeWorkflowRequest {
+                    workflow_id: inst.id.clone(),
+                    new_due_in_ms: 0,
+                    reason: String::new(),
+                    idempotency_key: String::new(),
+                    on_behalf_of: String::new(),
+                }),
+                "zhangsan",
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = Workflow::resume_workflow(
+            &svc,
+            with_identity(
+                Request::new(WorkflowResumeWorkflowRequest {
+                    workflow_id: inst.id,
+                    new_due_in_ms: 1_000,
+                    reason: "not waiting".into(),
+                    idempotency_key: String::new(),
+                    on_behalf_of: String::new(),
+                }),
+                "zhangsan",
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 }
 

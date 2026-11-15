@@ -1863,6 +1863,7 @@ mod tests {
             "/coord.workflow.v1.Workflow/Urge",
             "/coord.workflow.v1.Workflow/Cc",
             "/coord.workflow.v1.Workflow/WithdrawTask",
+            "/coord.workflow.v1.Workflow/ResumeWorkflow",
             "/coord.workflow.v1.Workflow/ListPendingTasks",
             "/coord.workflow.v1.Workflow/GetInstanceDetail",
             "/coord.workflow.v1.Workflow/ListTasks",

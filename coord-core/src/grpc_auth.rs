@@ -277,6 +277,7 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.workflow.v1.Workflow/Urge" => Some("coord:workflow:execute"),
         "/coord.workflow.v1.Workflow/Cc" => Some("coord:workflow:execute"),
         "/coord.workflow.v1.Workflow/WithdrawTask" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/ResumeWorkflow" => Some("coord:workflow:execute"),
         "/coord.workflow.v1.Workflow/ListPendingTasks" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/GetInstanceDetail" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/ListTasks" => Some("coord:workflow:read"),
@@ -818,6 +819,7 @@ mod tests {
             "/coord.workflow.v1.Workflow/Urge",
             "/coord.workflow.v1.Workflow/Cc",
             "/coord.workflow.v1.Workflow/WithdrawTask",
+            "/coord.workflow.v1.Workflow/ResumeWorkflow",
         ] {
             assert_eq!(
                 rpc_capability(method),

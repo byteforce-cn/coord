@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::workflow::approval::model::{JoinPolicy, RejectPolicy, SeatSpec};
+use crate::workflow::approval::model::{JoinPolicy, RejectPolicy, SeatSpec, TimeoutPolicy};
 use crate::workflow::trigger::TriggerConfig;
 
 // ─── Document 元信息 ───
@@ -680,6 +680,9 @@ pub struct ApproveTask {
     /// 是否允许任务级抄送（`Cc`）；缺省 `false`，定义必须显式开启。
     #[serde(default)]
     pub allow_cc: bool,
+    /// 超时处置策略；缺省 `none`（B-WF-5：到期只置过期，不自动收口）。
+    #[serde(default)]
+    pub timeout_policy: TimeoutPolicy,
 }
 
 /// approve 默认通过策略：会签。
@@ -723,12 +726,15 @@ impl ApproveTask {
     ///
     /// 解析失败返回 `None`：调用方必须 fail-closed，不得把无期限当作默认（不 panic）。
     pub fn deadline_ms(&self, now_ms: i64) -> Option<i64> {
-        let duration = self.deadline.as_deref()?;
-        Some(
-            now_ms.saturating_add(crate::workflow::engine::parse_iso8601_duration_ms(
-                duration,
-            )?),
-        )
+        let duration = self.deadline_duration_ms()?;
+        Some(now_ms.saturating_add(duration))
+    }
+
+    /// 审批时长（毫秒）；`None` = 无期限或不可换算（解析期已 fail-closed）。
+    pub fn deadline_duration_ms(&self) -> Option<i64> {
+        self.deadline
+            .as_deref()
+            .and_then(crate::workflow::engine::parse_iso8601_duration_ms)
     }
 }
 
@@ -1301,6 +1307,7 @@ mod tests {
             sign_admins: vec!["admin".into()],
             allow_self_approve: true,
             allow_cc: false,
+            timeout_policy: crate::workflow::approval::model::TimeoutPolicy::None,
         };
         let value = serde_json::to_value(&task).unwrap();
         // DSL/持久化契约是 camelCase 键；下划线拼写会静默丢字段。
@@ -1598,6 +1605,7 @@ mod tests {
             sign_admins: vec![],
             allow_self_approve: false,
             allow_cc: false,
+            timeout_policy: crate::workflow::approval::model::TimeoutPolicy::None,
         };
         assert_eq!(
             task.to_seats(),
@@ -1625,6 +1633,7 @@ mod tests {
             sign_admins: vec![],
             allow_self_approve: false,
             allow_cc: false,
+            timeout_policy: crate::workflow::approval::model::TimeoutPolicy::None,
         };
         assert_eq!(task.deadline_ms(i64::MAX), Some(i64::MAX));
         assert_eq!(task.deadline_ms(1_000), Some(1_000 + 1_000));

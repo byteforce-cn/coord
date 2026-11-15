@@ -468,6 +468,7 @@ mod tests {
                 sign_admins: vec![],
                 allow_self_approve: false,
                 allow_cc: false,
+                timeout_policy: crate::workflow::approval::model::TimeoutPolicy::None,
             }),
         }])
     }

@@ -25,7 +25,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::approval::bridge::{ApprovalBridge, BridgeError, NodeOutcome, SYSTEM_ACTOR};
+use super::approval::bridge::{
+    ApprovalBridge, BridgeError, NodeOutcome, TimeoutDisposition, SYSTEM_ACTOR,
+};
 use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
@@ -1100,6 +1102,25 @@ where
                     Err(_) => return,
                 };
                 let _ = durable.timers.remove(&rec.id).await;
+                // 显式超时策略（`approve.timeoutPolicy`）：失败收口或进入 WAITING。
+                // 默认 `none` 保持 B-WF-5：过期只剔除计票分母，不自动处置。
+                match outcome.timed_out {
+                    Some(TimeoutDisposition::Failed) => {
+                        let _ = self
+                            .fail_approval(
+                                &rec.instance_id,
+                                "TASK_OVERDUE",
+                                "approval task exceeded its deadline",
+                            )
+                            .await;
+                        return;
+                    }
+                    Some(TimeoutDisposition::Waiting) => {
+                        let _ = self.mark_approval_waiting(&rec.instance_id).await;
+                        return;
+                    }
+                    None => {}
+                }
                 // 过期不判终态（Q4 无自动判定）；但过期可能把「已有票 + 过期席」的混合轮次
                 // 收敛为通过/否决 ⇒ 按节点结论恢复/路由/故障，否则保持挂起并重排下一截止。
                 if let Some(node_outcome) = outcome.node_outcome {
@@ -2604,6 +2625,140 @@ where
         // 后台 drive（受监督：见 [`Self::spawn_drive`]）
         self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
 
+        Ok(inst)
+    }
+
+    /// 按审批聚合当前的最近截止（席位 deadline / 委派到期）重排持久化定时器。
+    ///
+    /// `Delegate` 带 `delegate_for_ms` 时，委派到期可能早于席位 deadline；命令路径
+    /// 必须补一条定时器，否则到期事件只能等下一次读/命令懒生效。
+    pub async fn reschedule_approval_deadline(&self, instance_id: &str) {
+        let Some(bridge) = self.approval.as_ref() else {
+            return;
+        };
+        if let Ok(Some(d)) = bridge.next_open_deadline(instance_id).await {
+            self.schedule_approval_deadline(instance_id.to_string(), d);
+        }
+    }
+
+    /// 等待 `resume_approval` 的后台驱动离开 `Running`（重新挂起或终态）。
+    ///
+    /// `ReturnToNode` / `RejectToNode` / `WithdrawTask` 的桥命令会同步重开目标席位，但
+    /// 工作流恢复由后台 drive 完成。若命令在 drive 重新挂起前返回，调用方紧接着审批新
+    /// 席位会看到「工作流未挂起在审批上」的假冲突。本方法把该窗口收敛到命令返回之前；
+    /// 目标节点是带席位重开的审批节点，正常情况下毫秒级收敛。
+    pub async fn await_resume_settled(
+        &self,
+        instance_id: &str,
+        max_wait_ms: u64,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(max_wait_ms);
+        loop {
+            let inst = self
+                .store
+                .load_instance(instance_id)
+                .await
+                .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+                .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
+            if inst.status != InstanceStatus::Running {
+                return Ok(inst);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(RuntimeError::StoreError(format!(
+                    "approval resume did not settle within {max_wait_ms}ms: {instance_id}"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// 审批超时进入 `WAITING`：保留审批挂起元信息（同一 approval 实例、同一节点），
+    /// 清掉截止时间并写 `workflow.waiting`；等待 `ResumeWorkflow` 重建任务。
+    pub async fn mark_approval_waiting(
+        &self,
+        instance_id: &str,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        let outcome = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::WORKFLOW_WAITING],
+                |inst| {
+                    if inst.status != InstanceStatus::Suspended {
+                        return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+                    }
+                    let on_approval = inst
+                        .suspension_meta
+                        .as_ref()
+                        .is_some_and(|m| m.reason == "approval");
+                    if !on_approval {
+                        return Err(RuntimeError::InvalidSignal(format!(
+                            "instance '{instance_id}' is not suspended on an approval"
+                        )));
+                    }
+                    if let Some(meta) = inst.suspension_meta.as_mut() {
+                        meta.until_ms = None;
+                    }
+                    inst.status = InstanceStatus::Waiting;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+        match outcome {
+            ControlPlaneOutcome::Committed(inst) => Ok(*inst),
+            ControlPlaneOutcome::Skipped => {
+                Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
+            }
+        }
+    }
+
+    /// `ResumeWorkflow` 后重新挂起同一审批节点：写新 deadline 并由持久化定时器驱动。
+    ///
+    /// 不推进任务栈、不清挂起（否则会跳过重建的审批席位）；只更新
+    /// `suspension_meta.until_ms` 并把 `WAITING → SUSPENDED`。
+    pub async fn renew_approval_deadline(
+        &self,
+        instance_id: &str,
+        deadline_ms: i64,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        let outcome = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    if !matches!(
+                        inst.status,
+                        InstanceStatus::Suspended | InstanceStatus::Waiting
+                    ) {
+                        return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+                    }
+                    let on_approval = inst
+                        .suspension_meta
+                        .as_ref()
+                        .is_some_and(|m| m.reason == "approval");
+                    if !on_approval {
+                        return Err(RuntimeError::InvalidSignal(format!(
+                            "instance '{instance_id}' is not suspended on an approval"
+                        )));
+                    }
+                    if let Some(meta) = inst.suspension_meta.as_mut() {
+                        meta.until_ms = Some(deadline_ms);
+                    }
+                    inst.status = InstanceStatus::Suspended;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+        let inst = match outcome {
+            ControlPlaneOutcome::Committed(inst) => *inst,
+            ControlPlaneOutcome::Skipped => {
+                return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
+            }
+        };
+        self.schedule_approval_deadline(inst.id.clone(), deadline_ms);
         Ok(inst)
     }
 
@@ -6352,6 +6507,7 @@ mod tests {
             sign_admins: vec![],
             allow_self_approve: false,
             allow_cc: false,
+            timeout_policy: crate::workflow::approval::model::TimeoutPolicy::None,
         }
     }
 
@@ -7444,6 +7600,122 @@ mod tests {
             timers.list_all().await.unwrap().is_empty(),
             "已触发的截止定时器必须移除"
         );
+    }
+
+    /// `timeoutPolicy: fail`：到期由运行时收口为 FAILED（TASK_OVERDUE），不是仅过期席位。
+    #[tokio::test]
+    async fn timeout_policy_fail_faults_workflow_with_task_overdue() {
+        use crate::workflow::approval::model::TimeoutPolicy;
+        let (rt, _bridge, approval_store, timers) = approval_deadline_runtime();
+        let mut def =
+            approve_deadline_definition("approve-timeout-fail-wf", Some("PT60S"), &["alice"]);
+        if let Task::Approve(task) = &mut def.do_tasks[0].task {
+            task.timeout_policy = TimeoutPolicy::Fail;
+        }
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let failed = await_status(store_of(&rt), &started.id, InstanceStatus::Failed).await;
+        assert_eq!(failed.fault.as_ref().unwrap().title, "TASK_OVERDUE");
+        let (engine, _) = approval_store.load(&started.id).await.unwrap().unwrap();
+        assert_eq!(
+            engine.instance.status,
+            crate::workflow::approval::model::InstanceStatus::Terminated,
+            "审批聚合由超时策略收口"
+        );
+    }
+
+    /// `timeoutPolicy: waiting`：到期进入 WAITING；Resume 重建任务后重新挂起。
+    #[tokio::test]
+    async fn timeout_policy_waiting_then_resume_rebuilds_tasks() {
+        use crate::workflow::approval::model::TimeoutPolicy;
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let mut def =
+            approve_deadline_definition("approve-timeout-wait-wf", Some("PT60S"), &["alice"]);
+        if let Task::Approve(task) = &mut def.do_tasks[0].task {
+            task.timeout_policy = TimeoutPolicy::Waiting;
+        }
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+        await_status(store_of(&rt), &started.id, InstanceStatus::Waiting).await;
+
+        let outcome = bridge
+            .resume_workflow(&started.id, "anonymous", None, 30_000, "extended", None)
+            .await
+            .unwrap();
+        let deadline = outcome.response["deadline_ms"].as_i64().unwrap();
+        rt.renew_approval_deadline(&started.id, deadline)
+            .await
+            .unwrap();
+        let resumed = await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        assert_eq!(
+            resumed.suspension_meta.as_ref().unwrap().until_ms,
+            Some(deadline)
+        );
+        let (engine, _) = approval_store.load(&started.id).await.unwrap().unwrap();
+        assert_eq!(
+            engine.instance.status,
+            crate::workflow::approval::model::InstanceStatus::Running
+        );
+        assert_eq!(
+            engine.tasks.values().filter(|t| t.status.is_open()).count(),
+            1,
+            "恢复必须重建可处理席位"
+        );
+    }
+
+    /// 委派到期：命令引入新截止后由 `reschedule_approval_deadline` 补排定时器。
+    #[tokio::test]
+    async fn reschedule_approval_deadline_tracks_delegation_expiry() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_definition("approve-delegation-expiry-wf", None, &["alice"]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let (engine, _) = approval_store.load(&started.id).await.unwrap().unwrap();
+        let task_id = engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some("alice"))
+            .unwrap()
+            .id
+            .clone();
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                crate::workflow::approval::bridge::ApprovalCommand::Delegate {
+                    task_id: &task_id,
+                    to: "bob",
+                    delegate_for_ms: 500,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        rt.reschedule_approval_deadline(&started.id).await;
+        let _ = await_approval_deadline_timer(&timers, 1_500).await;
+
+        rt.clock.advance(500);
+        rt.fire_due_timers().await;
+        let (engine, _) = approval_store.load(&started.id).await.unwrap().unwrap();
+        let delegation = engine.tasks[&task_id].delegation.as_ref().unwrap();
+        assert_eq!(
+            delegation.revoke_reason.as_deref(),
+            Some("DELEGATION_EXPIRED")
+        );
+        assert!(engine.open_tasks_for_at("bob", 1_500).is_empty());
     }
 
     /// 陈旧截止定时器：审批已恢复（挂起元数据清空）后不得驱动过期。

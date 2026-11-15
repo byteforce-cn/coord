@@ -428,7 +428,7 @@ trigger:
 | `Workflow/Start` / `Signal` / `Cancel` | `coord:workflow:execute` |
 | `Workflow/GetStatus` / `ListDefinitions` / `GetDefinition` / `ListDefinitionVersions` / `ListInstances` | `coord:workflow:read` |
 | `Workflow/Deploy` / `RollbackDefinition` | `coord:workflow:define` |
-| `Workflow/Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` / `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate` / `Urge` / `Cc` / `WithdrawTask` | `coord:workflow:execute` |
+| `Workflow/Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` / `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate` / `Urge` / `Cc` / `WithdrawTask` / `ResumeWorkflow` | `coord:workflow:execute` |
 | `Workflow/ListPendingTasks` / `GetInstanceDetail` / `ListTasks` / `GetTask` / `History` | `coord:workflow:read` |
 
 - 调度：认领式（`ClaimJob` 带租约，`Heartbeat` 续约），worker 崩溃由租约过期
@@ -445,18 +445,26 @@ trigger:
 - 工作流：**保留策略已落地（G-WF-1）**——`DeleteInstance`（仅终态）/`DeleteDefinition`（无实例引用才可删）；删除**不可回滚**、**无自动 TTL/归档**（`boundaries.md` B-WF-1；完整语义见 `workflow-semantics.md`）；子流程恢复为周期扫描（B-WF-2/B-WF-3）。
 - **人工审批 v2（原生 `approve` 节点，ADR-0013 / ADR-0014）**：走到该节点的工作流实例进入
   `SUSPENDED`（`expected_signal = "approval.completed"`，审批实例 id = workflow 实例 id）；
-  外部经 13 个命令 RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/
-  Delegate/Withdraw/Terminate/Urge/Cc/WithdrawTask`）操作席位、经 5 个查询 RPC（`ListPendingTasks`/
-  `GetInstanceDetail`/`ListTasks`/`GetTask`/`History`）读待办、任务、实例详情与历史事件流。命令携带 `idempotency_key`，重放返回首次响应
+  外部经 14 个命令 RPC（`Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/Transfer/
+  Delegate/Withdraw/Terminate/Urge/Cc/WithdrawTask/ResumeWorkflow`）操作席位、经 5 个查询
+  RPC（`ListPendingTasks`/`GetInstanceDetail`/`ListTasks`/`GetTask`/`History`）读待办、任务、
+  实例详情与历史事件流。命令携带 `idempotency_key`，重放返回首次响应
   （不重复执行）；默认主体身份取自 CCT（请求体无 actor）。
   业务服务代终端用户时：命令填 `on_behalf_of`、`ListPendingTasks` 填 `assignee`；调用方
   服务须在 agent 配置 `services.workflow_on_behalf_services` 白名单内，生效主体是被代表
   用户（席位归属判定不变）。`GetInstanceDetail` 的 votes/audit 同时给出 `actor`/`by`
   与 `acting_service`，可区分「谁批的」与「哪个服务代执行」。
-  席位来源支持 `${ ... }` 运行时表达式（`$input`/`$context`），空结果 fail-closed。
+  席位来源支持 `${ ... }` 运行时表达式（`$input`/`$context`），空结果 fail-closed；
+  `AddSign` 支持 `position=CURRENT|BEFORE|AFTER`（前后加签派生前/后任务，原席位挂起/恢复，
+  后加签在原轮次否决时丢弃）；`RemoveSign` 支持按 `assignees` 减签；`Delegate` 支持
+  `delegate_for_ms` 到期恢复。`GetTask`/`GetInstanceDetail` 的 `assignments` 给出
+  assignment 级状态（pending/scheduled/suspended/transferred/delegated/completed/
+  rejected/cancelled/expired）。
   `Reject` 可带 `target_node`：投票、关闭轮次、回退目标节点在同一条命令内完成；
   `recordAndContinue` 下若剩余席位仍可满足通过条件则只记录否决、不回退。判不通过原因见
   `ApprovalRound.reject_reason` 与事件 `data.reason`。
+  `approve.timeoutPolicy` 缺省 `none`（B-WF-5：只过期、不自动收口）；显式 `fail` 超时置
+  `FAULTED`（`TASK_OVERDUE`），`waiting` 置 `WAITING` 并可用 `ResumeWorkflow` 重建任务。
   审批事件写 `com.china-workflow.*` 命名空间、带 `.v1` 后缀：实例级 `instance.returned|
   cancelled|terminated|completed|rejected.v1`、轮次级
   `approval.round.passed|rejected.v1`；**消费者按 `(instance_id, sequence)` 去重**，每个类型
@@ -596,7 +604,7 @@ trigger:
 |:--|:--|:--|
 | B-WF-1 | 工作流有显式保留 API（`DeleteInstance` 仅终态 / `DeleteDefinition` 无实例引用才可删），但**无自动 TTL/归档/删除审计** | 保留节奏由调用方显式管理；删除不可回滚（无归档副本） |
 | B-WF-2 / B-WF-3 | 子流程恢复为周期轮询；父定义暂读不到时暂停接管 | 恢复有秒级延迟，不是事件驱动 |
-| B-WF-5 | 审批 deadline 到期只置席位置过期，**不自动通过/驳回**；全员过期/被减签保持 `Open` | 超时处置由人（`AddSign` 补席 / `Terminate` 终止） |
+| B-WF-5 | 审批 deadline 到期**默认**只置席位置过期，**不自动通过/驳回**；显式 `timeoutPolicy: fail|waiting` 时才自动失败/等待恢复（ADR-0013 D13）；全员过期/被减签保持 `Open` | 默认需人工处置（`AddSign` 补席 / `Terminate` 终止）；显式策略下按 `ResumeWorkflow` 恢复 |
 | B-WF-6 | `ListPendingTasks` 为全 v4 实例前缀扫描 + 分页（无按 actor/年龄的索引） | 待办查询随实例规模线性增长；自行分页 |
 | B-WF-8 | 无 UI 审批面、无 REST facade（`coord-ui` 仅影响评估） | 审批面仅 gRPC；Web 接入需另行立项建 facade |
 | B-WF-9 | `ReturnToNode` 重开席位不设 deadline | 重开后无自动提醒；靠 `AddSign`/`Terminate` 兜底 |

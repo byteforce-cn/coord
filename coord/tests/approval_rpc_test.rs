@@ -512,7 +512,10 @@ async fn add_sign_and_return_to_node_paths() {
             "origin",
             ApprovalCommand::AddSign {
                 branch_id: &branch_id,
+                task_id: None,
                 seats: vec![SeatSpec::approver("u3")],
+                position: coord_core::workflow::approval::model::AddAssigneePosition::Current,
+                spawned_by: None,
                 comment: Some("add"),
             },
             None,

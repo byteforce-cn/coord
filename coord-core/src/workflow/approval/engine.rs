@@ -221,6 +221,8 @@ impl Engine {
                 branch_id: branch.id.clone(),
                 number,
                 status: RoundStatus::Open,
+                join: None,
+                reject: None,
                 total_count: 0,
                 completed_count: 0,
                 rejected_count: 0,
@@ -287,6 +289,278 @@ impl Engine {
         });
         self.touch(now);
         Ok((ids, out))
+    }
+
+    /// 加签位置：`BEFORE` 生成前加签轮次并挂起当前轮次；`AFTER` 生成待激活的后加签轮次；
+    /// `CURRENT` 与 [`Engine::add_sign`] 同义。
+    ///
+    /// 派生席位记录 `origin` / `predecessor` / `spawned_by`，供 assignment 读面与历史投影
+    /// 还原 seedj 的 `HumanTask.kind` / `predecessorTaskId` / `successorTaskId`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_assignee(
+        &mut self,
+        expected: u64,
+        task_id: &str,
+        assignees: &[Principal],
+        position: AddAssigneePosition,
+        spawned_by: Option<&str>,
+        by: &str,
+        comment: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<Id>, Vec<Effect>), ApprovalError> {
+        self.guard(expected)?;
+        if assignees.is_empty() || assignees.iter().any(|p| p.is_empty()) {
+            return Err(ApprovalError::InvalidArgument("assignees".into()));
+        }
+        let mut unique = assignees.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.len() != assignees.len() {
+            return Err(ApprovalError::InvalidArgument("assignees".into()));
+        }
+        let anchor = self
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
+        let branch = self
+            .branches
+            .get(&anchor.branch_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(anchor.branch_id.clone()))?;
+        if branch.status != BranchStatus::Open {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "branch {} is {:?}",
+                branch.id, branch.status
+            )));
+        }
+        if !anchor.status.is_live() || anchor.status == TaskStatus::Scheduled {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "task {} is {:?}",
+                anchor.id, anchor.status
+            )));
+        }
+
+        let mut out = Vec::new();
+        let current_round = self
+            .rounds
+            .values()
+            .find(|r| r.branch_id == branch.id && r.status == RoundStatus::Open)
+            .map(|r| r.id.clone())
+            .ok_or_else(|| ApprovalError::InvalidTransition("no open round to add seats".into()))?;
+        let spawned_by = spawned_by.map(str::to_string);
+
+        let ids = match position {
+            AddAssigneePosition::Current => {
+                if anchor.round_id != current_round {
+                    return Err(ApprovalError::InvalidTransition(format!(
+                        "task {} is not in the open round",
+                        anchor.id
+                    )));
+                }
+                let seats = assignees.iter().map(|p| SeatSpec::approver(p)).collect();
+                let ids = self.add_seats(&branch.id, &current_round, seats, None, now, &mut out);
+                self.recount(&current_round, now, &mut out);
+                ids
+            }
+            AddAssigneePosition::Before => {
+                self.suspend_round(&current_round, now, &mut out);
+                let number = self.next_round_number(&branch.id);
+                let rid = self.create_round(
+                    &branch.id,
+                    number,
+                    RoundStatus::Open,
+                    None,
+                    None,
+                    now,
+                    &mut out,
+                );
+                let seats = assignees
+                    .iter()
+                    .map(|p| {
+                        SeatSpec::derived(
+                            p.clone(),
+                            TaskOrigin::BeforeAdded,
+                            anchor.id.clone(),
+                            spawned_by.clone(),
+                        )
+                    })
+                    .collect();
+                let ids = self.add_seats(&branch.id, &rid, seats, None, now, &mut out);
+                self.instance.audit.push(AuditEntry {
+                    at: now,
+                    action: "add_assignee_before".into(),
+                    branch: Some(branch.id.clone()),
+                    task: Some(anchor.id.clone()),
+                    by: by.into(),
+                    detail: json!({
+                        "assignees": assignees,
+                        "spawned_task_ids": ids,
+                        "position": "BEFORE",
+                        "comment": comment.unwrap_or(""),
+                    })
+                    .to_string(),
+                    acting_service: self.acting_service.clone(),
+                });
+                ids
+            }
+            AddAssigneePosition::After => {
+                let number = self.next_round_number(&branch.id);
+                let rid = self.create_round(
+                    &branch.id,
+                    number,
+                    RoundStatus::Scheduled,
+                    Some(JoinPolicy::Any),
+                    None,
+                    now,
+                    &mut out,
+                );
+                let seats = assignees
+                    .iter()
+                    .map(|p| {
+                        SeatSpec::derived(
+                            p.clone(),
+                            TaskOrigin::AfterAdded,
+                            anchor.id.clone(),
+                            spawned_by.clone(),
+                        )
+                    })
+                    .collect();
+                let ids = self.add_seats(&branch.id, &rid, seats, None, now, &mut out);
+                if let Some(first) = ids.first() {
+                    if let Some(t) = self.tasks.get_mut(&anchor.id) {
+                        t.successor = Some(first.clone());
+                        t.updated_at = now;
+                    }
+                }
+                self.instance.audit.push(AuditEntry {
+                    at: now,
+                    action: "add_assignee_after".into(),
+                    branch: Some(branch.id.clone()),
+                    task: Some(anchor.id.clone()),
+                    by: by.into(),
+                    detail: json!({
+                        "assignees": assignees,
+                        "spawned_task_ids": ids,
+                        "position": "AFTER",
+                        "comment": comment.unwrap_or(""),
+                    })
+                    .to_string(),
+                    acting_service: self.acting_service.clone(),
+                });
+                ids
+            }
+        };
+        self.touch(now);
+        Ok((ids, out))
+    }
+
+    /// 减签（按 assignee）：取消当前轮次里指定责任人的未决席位，并返回重算后的轮次。
+    ///
+    /// 只移除 `PENDING` assignment（`Created` / `Claimed`）；挂起/待激活/已表态席位不动。
+    pub fn remove_assignee(
+        &mut self,
+        expected: u64,
+        task_id: &str,
+        assignees: &[Principal],
+        by: &str,
+        now: i64,
+    ) -> Result<(Vec<Id>, Round, Vec<Effect>), ApprovalError> {
+        self.guard(expected)?;
+        if assignees.is_empty() || assignees.iter().any(|p| p.is_empty()) {
+            return Err(ApprovalError::InvalidArgument("assignees".into()));
+        }
+        let anchor = self
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
+        let branch = self
+            .branches
+            .get(&anchor.branch_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(anchor.branch_id.clone()))?;
+        if branch.status != BranchStatus::Open {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "branch {} is {:?}",
+                branch.id, branch.status
+            )));
+        }
+        let round = self
+            .rounds
+            .get(&anchor.round_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(anchor.round_id.clone()))?;
+        if round.status != RoundStatus::Open {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "round {} is {:?}",
+                round.id, round.status
+            )));
+        }
+        let mut targets: Vec<Id> = Vec::new();
+        let mut pruned: Vec<Id> = Vec::new();
+        for t in self
+            .tasks
+            .values()
+            .filter(|t| t.round_id == round.id && t.status.is_open())
+        {
+            if t.assignee
+                .as_ref()
+                .is_some_and(|a| assignees.iter().any(|p| p == a))
+            {
+                targets.push(t.id.clone());
+            } else if t.assignee.is_none()
+                && t.candidates
+                    .iter()
+                    .any(|c| assignees.iter().any(|p| p == c))
+            {
+                // 候选池席位：移除候选人不等于取消整个席位；池清空时才取消。
+                let remaining: Vec<Principal> = t
+                    .candidates
+                    .iter()
+                    .filter(|c| !assignees.iter().any(|p| p == *c))
+                    .cloned()
+                    .collect();
+                if remaining.is_empty() {
+                    targets.push(t.id.clone());
+                } else {
+                    pruned.push(t.id.clone());
+                }
+            }
+        }
+        if targets.is_empty() && pruned.is_empty() {
+            return Err(ApprovalError::InvalidArgument("assignees".into()));
+        }
+        let mut out = Vec::new();
+        for tid in &pruned {
+            if let Some(t) = self.tasks.get_mut(tid) {
+                t.candidates.retain(|c| !assignees.iter().any(|p| p == c));
+                t.updated_at = now;
+            }
+        }
+        self.cancel_tasks(&targets, now, &mut out);
+        self.recount(&round.id, now, &mut out);
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "remove_assignee".into(),
+            branch: Some(branch.id.clone()),
+            task: Some(anchor.id.clone()),
+            by: by.into(),
+            detail: json!({
+                "assignees": assignees,
+                "removed_task_ids": targets.iter().chain(pruned.iter()).collect::<Vec<_>>(),
+            })
+            .to_string(),
+            acting_service: self.acting_service.clone(),
+        });
+        self.touch(now);
+        let round = self
+            .rounds
+            .get(&round.id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(round.id.clone()))?;
+        targets.extend(pruned);
+        Ok((targets, round, out))
     }
 
     /// 减签：取消当前 Open 轮次中的未决席位（已表态的席位跳过；重复目标 id 整批拒绝）；
@@ -487,13 +761,14 @@ impl Engine {
                 t.id, t.status
             )));
         }
-        self.actor_can_act(&t, actor)?;
+        self.actor_can_act(&t, actor, now)?;
         if t.assignee.is_none() {
             t.assignee = Some(actor.into());
         }
         let from = t.status;
         t.status = TaskStatus::Completed;
         t.updated_at = now;
+        Self::revoke_delegation(&mut t, "RULE_SATISFIED", now);
         let id = t.id.clone();
         self.tasks.insert(id.clone(), t);
         self.touch(now);
@@ -552,6 +827,7 @@ impl Engine {
         };
         t.transferred_from.push(from_principal);
         t.assignee = Some(to.into());
+        // 转办是责任人的整体让位：原委派凭据随之失效（不保留代理 assignment）。
         t.delegation = None;
         let mut out = Vec::new();
         if t.status == TaskStatus::Created {
@@ -582,10 +858,17 @@ impl Engine {
         expected: u64,
         task_id: &str,
         to: &str,
+        expires_at: Option<i64>,
         by: &str,
         now: i64,
     ) -> Result<Vec<Effect>, ApprovalError> {
         self.guard(expected)?;
+        if to.is_empty() {
+            return Err(ApprovalError::InvalidArgument("to".into()));
+        }
+        if expires_at.is_some_and(|at| at <= now) {
+            return Err(ApprovalError::InvalidArgument("delegate_for".into()));
+        }
         let mut t = self
             .tasks
             .get(task_id)
@@ -610,6 +893,9 @@ impl Engine {
             from: by.into(),
             to: to.into(),
             granted_at: now,
+            expires_at,
+            revoked_at: None,
+            revoke_reason: None,
         });
         t.updated_at = now;
         let id = t.id.clone();
@@ -639,7 +925,8 @@ impl Engine {
             .get(task_id)
             .cloned()
             .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
-        if !task.status.is_open() {
+        // 催办允许挂起中的前加签原席位（seedj 口径）；终态席位拒绝。
+        if !task.status.is_live() {
             return Err(ApprovalError::InvalidTransition(format!(
                 "task {} is {:?}",
                 task.id, task.status
@@ -649,14 +936,22 @@ impl Engine {
             .branches
             .get(&task.branch_id)
             .ok_or_else(|| ApprovalError::NotFound(task.branch_id.clone()))?;
-        self.ensure_participant(branch, Some(&task), by)?;
+        self.ensure_participant(branch, Some(&task), by, now)?;
         self.instance.audit.push(AuditEntry {
             at: now,
             action: "urge".into(),
             branch: Some(task.branch_id.clone()),
             task: Some(task.id.clone()),
             by: by.into(),
-            detail: message.to_string(),
+            detail: json!({
+                "message": message,
+                "targetStatus": match task.status {
+                    TaskStatus::Suspended => "SUSPENDED",
+                    TaskStatus::Scheduled => "SCHEDULED",
+                    _ => "PENDING",
+                },
+            })
+            .to_string(),
             acting_service: self.acting_service.clone(),
         });
         self.touch(now);
@@ -687,7 +982,7 @@ impl Engine {
                     .get(tid)
                     .cloned()
                     .ok_or_else(|| ApprovalError::NotFound(tid.into()))?;
-                if !task.status.is_open() {
+                if !task.status.is_live() {
                     return Err(ApprovalError::InvalidTransition(format!(
                         "task {} is {:?}",
                         task.id, task.status
@@ -704,7 +999,7 @@ impl Engine {
                         branch.node
                     )));
                 }
-                self.ensure_participant(&branch, Some(&task), by)?;
+                self.ensure_participant(&branch, Some(&task), by, now)?;
                 (Some(branch.id), Some(task.id))
             }
             None => {
@@ -822,6 +1117,7 @@ impl Engine {
         branch: &Branch,
         task: Option<&Task>,
         by: &str,
+        now: i64,
     ) -> Result<(), ApprovalError> {
         if self.instance.initiator == by || branch.policy.sign_admins.iter().any(|a| a == by) {
             return Ok(());
@@ -829,7 +1125,9 @@ impl Engine {
         if task.is_some_and(|t| {
             t.assignee.as_deref() == Some(by)
                 || t.candidates.iter().any(|c| c == by)
-                || t.delegation.as_ref().map(|d| d.to == by).unwrap_or(false)
+                || t.delegation
+                    .as_ref()
+                    .is_some_and(|d| d.to == by && d.is_active(now))
         }) {
             return Ok(());
         }
@@ -920,14 +1218,9 @@ impl Engine {
                 "jump limit {MAX_JUMPS} reached"
             )));
         }
-        let open_round = self
-            .rounds
-            .values()
-            .find(|r| r.branch_id == branch.id && r.status == RoundStatus::Open)
-            .map(|r| r.id.clone());
-        if let Some(rid) = &open_round {
-            self.cancel_pending_tasks(rid, now, out);
-        }
+        // 上游回退：丢弃全部待激活的后加签派生任务，并取消挂起/未决席位。
+        self.discard_scheduled_after(&branch.id, "UPSTREAM_ROLLBACK", now, out);
+        self.cancel_live_tasks_of_branch(&branch.id, now, out);
         self.close_rounds_of_branch(&branch.id, RoundStatus::Superseded, now, out);
         if branch.status == BranchStatus::Open {
             self.set_branch_status(&branch.id, BranchStatus::Returned, now, out);
@@ -948,6 +1241,9 @@ impl Engine {
                 ApprovalPolicy::default(),
             ));
         if let Some(tb) = &target_latest {
+            self.discard_scheduled_after(&tb.id, "UPSTREAM_ROLLBACK", now, out);
+            self.cancel_live_tasks_of_branch(&tb.id, now, out);
+            self.close_rounds_of_branch(&tb.id, RoundStatus::Superseded, now, out);
             self.set_branch_status(&tb.id, BranchStatus::Superseded, now, out);
         }
         let new_id = self.create_branch(
@@ -1233,6 +1529,7 @@ impl Engine {
                 .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
             expired.status = TaskStatus::Expired;
             expired.updated_at = now;
+            Self::revoke_delegation(expired, "TASK_EXPIRED", now);
         }
         let mut out = vec![Effect::TaskStatus {
             id: task_id.to_string(),
@@ -1244,6 +1541,232 @@ impl Engine {
         }
         self.touch(now);
         Ok(out)
+    }
+
+    /// 过期仍生效的委派（到期自动恢复原责任人）：只撤销代理权并写审计，不改席位状态。
+    ///
+    /// 由审批桥的截止路径驱动；同一批到期席位的 `DELEGATION_EXPIRED` 在 `History` 投影。
+    pub fn expire_delegations(
+        &mut self,
+        expected: u64,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        let expired: Vec<(Id, Id)> = self
+            .tasks
+            .values()
+            .filter(|t| {
+                t.delegation.as_ref().is_some_and(|d| {
+                    d.revoked_at.is_none() && d.expires_at.is_some_and(|at| at <= now)
+                })
+            })
+            .map(|t| (t.id.clone(), t.branch_id.clone()))
+            .collect();
+        if expired.is_empty() {
+            return Ok(Vec::new());
+        }
+        for (tid, bid) in &expired {
+            if let Some(t) = self.tasks.get_mut(tid) {
+                if let Some(d) = t.delegation.as_mut() {
+                    d.revoked_at = Some(now);
+                    d.revoke_reason = Some("DELEGATION_EXPIRED".into());
+                }
+                t.updated_at = now;
+            }
+            self.instance.audit.push(AuditEntry {
+                at: now,
+                action: "delegation_expired".into(),
+                branch: Some(bid.clone()),
+                task: Some(tid.clone()),
+                by: "engine".into(),
+                detail: json!({"reason": "DELEGATION_EXPIRED"}).to_string(),
+                acting_service: None,
+            });
+        }
+        self.touch(now);
+        Ok(Vec::new())
+    }
+
+    /// 超时策略 `fail`：取消全部活跃席位并把实例收口为 `Terminated`（超时失败）。
+    ///
+    /// 审批桥把该结果映射为工作流 `FAULTED` + `TASK_OVERDUE`；不在命令路径产生
+    /// `Faulted`（B-WF-10 仅约束命令路径）。
+    pub fn timeout_fail(
+        &mut self,
+        expected: u64,
+        reason: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        let mut out = Vec::new();
+        self.cancel_open_branches(BranchStatus::Terminated, &mut out, now);
+        let from = self.instance.status;
+        self.instance.status = InstanceStatus::Terminated;
+        out.push(Effect::InstanceStatus {
+            from,
+            to: InstanceStatus::Terminated,
+        });
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "timeout_fail".into(),
+            branch: None,
+            task: None,
+            by: "engine".into(),
+            detail: reason.into(),
+            acting_service: None,
+        });
+        self.emit(
+            &mut out,
+            "com.china-workflow.instance.terminated.v1",
+            json!({"instance_id": self.instance.id, "reason": reason}),
+        );
+        self.touch(now);
+        Ok(out)
+    }
+
+    /// 超时策略 `waiting`：取消当前轮次的未决席位，实例停在 `Waiting`，等待 Resume 重建。
+    ///
+    /// 不丢弃后加签待激活轮次（恢复后仍应在原轮次完成后执行）；挂起轮次也保留，恢复的
+    /// 派生轮次通过后仍需恢复它们。
+    pub fn timeout_wait(
+        &mut self,
+        expected: u64,
+        reason: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        let mut out = Vec::new();
+        let round_ids: Vec<Id> = self
+            .rounds
+            .values()
+            .filter(|r| r.status == RoundStatus::Open)
+            .map(|r| r.id.clone())
+            .collect();
+        for rid in round_ids {
+            self.cancel_pending_tasks(&rid, now, &mut out);
+            if let Some(r) = self.rounds.get_mut(&rid) {
+                let from = r.status;
+                r.status = RoundStatus::Cancelled;
+                r.closed_at = Some(now);
+                out.push(Effect::RoundStatus {
+                    id: rid,
+                    from,
+                    to: RoundStatus::Cancelled,
+                });
+            }
+        }
+        let from = self.instance.status;
+        self.instance.status = InstanceStatus::Waiting;
+        out.push(Effect::InstanceStatus {
+            from,
+            to: InstanceStatus::Waiting,
+        });
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "timeout_wait".into(),
+            branch: None,
+            task: None,
+            by: "engine".into(),
+            detail: reason.into(),
+            acting_service: None,
+        });
+        self.touch(now);
+        Ok(out)
+    }
+
+    /// 等待态恢复：按上一轮席位重建任务并给新的相对截止，实例回到 `Running`。
+    pub fn resume_waiting(
+        &mut self,
+        expected: u64,
+        new_due_ms: i64,
+        by: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<(Vec<Id>, Vec<Effect>), ApprovalError> {
+        self.guard_waiting(expected)?;
+        if new_due_ms <= 0 {
+            return Err(ApprovalError::InvalidArgument("new_due_in_ms".into()));
+        }
+        let branch = self
+            .branches
+            .values()
+            .find(|b| b.status == BranchStatus::Open)
+            .cloned()
+            .ok_or_else(|| ApprovalError::InvalidTransition("no open branch to resume".into()))?;
+        // 取最近一 **被取消** 的轮次（超时前的活跃轮次），不能取排队的后加签轮次：
+        // 后加签要等恢复后的原轮次通过才激活。
+        let last = self
+            .rounds
+            .values()
+            .filter(|r| r.branch_id == branch.id && r.status == RoundStatus::Cancelled)
+            .max_by_key(|r| r.number)
+            .or_else(|| {
+                self.rounds
+                    .values()
+                    .filter(|r| r.branch_id == branch.id && r.status != RoundStatus::Scheduled)
+                    .max_by_key(|r| r.number)
+            })
+            .cloned()
+            .ok_or_else(|| ApprovalError::InvalidTransition("no round to resume".into()))?;
+        let seats: Vec<SeatSpec> = self
+            .tasks
+            .values()
+            .filter(|t| t.round_id == last.id)
+            .map(|t| SeatSpec {
+                assignee: t.assignee.clone(),
+                candidates: t.candidates.clone(),
+                kind: t.kind,
+                origin: t.origin,
+                predecessor: t.predecessor.clone(),
+                spawned_by: t.spawned_by.clone(),
+            })
+            .collect();
+        if seats.is_empty() {
+            return Err(ApprovalError::InvalidTransition(
+                "previous round has no seats to resume".into(),
+            ));
+        }
+        let number = self.next_round_number(&branch.id);
+        let mut out = Vec::new();
+        let rid = self.create_round(
+            &branch.id,
+            number,
+            RoundStatus::Open,
+            last.join,
+            last.reject,
+            now,
+            &mut out,
+        );
+        let ids = self.add_seats(
+            &branch.id,
+            &rid,
+            seats,
+            Some(now + new_due_ms),
+            now,
+            &mut out,
+        );
+        let from = self.instance.status;
+        self.instance.status = InstanceStatus::Running;
+        out.push(Effect::InstanceStatus {
+            from,
+            to: InstanceStatus::Running,
+        });
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "resume_workflow".into(),
+            branch: Some(branch.id),
+            task: None,
+            by: by.into(),
+            detail: json!({
+                "new_due_in_ms": new_due_ms,
+                "reason": reason,
+                "round_id": rid,
+            })
+            .to_string(),
+            acting_service: self.acting_service.clone(),
+        });
+        self.touch(now);
+        Ok((ids, out))
     }
 
     // -------------------------------------------------------------- 查询
@@ -1270,7 +1793,22 @@ impl Engine {
                 t.status.is_open()
                     && (t.assignee.as_deref() == Some(principal)
                         || (t.assignee.is_none() && t.candidates.iter().any(|c| c == principal))
-                        || t.delegation.as_ref().map(|d| d.to.as_str()) == Some(principal))
+                        || t.delegation.as_ref().is_some_and(|d| d.to == principal))
+            })
+            .collect()
+    }
+
+    /// 待办查询（带时钟）：已到期/已撤销的委派不再把席位暴露给代理人。
+    pub fn open_tasks_for_at(&self, principal: &str, now: i64) -> Vec<&Task> {
+        self.tasks
+            .values()
+            .filter(|t| {
+                t.status.is_open()
+                    && (t.assignee.as_deref() == Some(principal)
+                        || (t.assignee.is_none() && t.candidates.iter().any(|c| c == principal))
+                        || t.delegation
+                            .as_ref()
+                            .is_some_and(|d| d.to == principal && d.is_active(now)))
             })
             .collect()
     }
@@ -1314,6 +1852,23 @@ impl Engine {
         if self.instance.status.is_terminal() {
             return Err(ApprovalError::InvalidTransition(format!(
                 "instance is {:?}",
+                self.instance.status
+            )));
+        }
+        Ok(())
+    }
+
+    /// 等待态命令的守卫：只校验修订号与非终态。
+    fn guard_waiting(&self, expected: u64) -> Result<(), ApprovalError> {
+        if self.instance.revision != expected {
+            return Err(ApprovalError::StaleRevision {
+                expected,
+                actual: self.instance.revision,
+            });
+        }
+        if self.instance.status != InstanceStatus::Waiting {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "instance is {:?}, not Waiting",
                 self.instance.status
             )));
         }
@@ -1392,10 +1947,19 @@ impl Engine {
                     branch_id: branch_id.into(),
                     round_id: round_id.into(),
                     kind: s.kind,
-                    status: TaskStatus::Created,
+                    status: if s.origin == TaskOrigin::AfterAdded {
+                        TaskStatus::Scheduled
+                    } else {
+                        TaskStatus::Created
+                    },
                     assignee: s.assignee.clone(),
                     candidates: s.candidates.clone(),
                     deadline,
+                    origin: s.origin,
+                    predecessor: s.predecessor.clone(),
+                    successor: None,
+                    spawned_by: s.spawned_by.clone(),
+                    suspended_from: None,
                     delegation: None,
                     transferred_from: Vec::new(),
                     votes: Vec::new(),
@@ -1417,10 +1981,297 @@ impl Engine {
         ids
     }
 
+    /// 创建轮次（不动席位）：供前后加签派生轮次使用。
+    #[allow(clippy::too_many_arguments)]
+    fn create_round(
+        &mut self,
+        branch_id: &str,
+        number: u32,
+        status: RoundStatus,
+        join: Option<JoinPolicy>,
+        reject: Option<RejectPolicy>,
+        now: i64,
+        out: &mut Vec<Effect>,
+    ) -> Id {
+        let rid = self.gen("round");
+        self.rounds.insert(
+            rid.clone(),
+            Round {
+                id: rid.clone(),
+                branch_id: branch_id.into(),
+                number,
+                status,
+                join,
+                reject,
+                total_count: 0,
+                completed_count: 0,
+                rejected_count: 0,
+                reject_reason: None,
+                opened_at: now,
+                closed_at: None,
+            },
+        );
+        if let Some(branch) = self.branches.get_mut(branch_id) {
+            branch.round_ids.push(rid.clone());
+        }
+        if status == RoundStatus::Open {
+            out.push(Effect::RoundOpened {
+                id: rid.clone(),
+                branch: branch_id.into(),
+                number,
+            });
+        }
+        rid
+    }
+
+    fn next_round_number(&self, branch_id: &str) -> u32 {
+        self.rounds
+            .values()
+            .filter(|r| r.branch_id == branch_id)
+            .map(|r| r.number)
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    /// 前加签完成：恢复最近一个被挂起且序号更小的轮次。
+    fn resume_suspended_round_below(
+        &mut self,
+        branch_id: &str,
+        number: u32,
+        now: i64,
+        out: &mut Vec<Effect>,
+    ) -> bool {
+        let next = self
+            .rounds
+            .values()
+            .filter(|r| {
+                r.branch_id == branch_id && r.status == RoundStatus::Suspended && r.number < number
+            })
+            .max_by_key(|r| r.number)
+            .map(|r| r.id.clone());
+        match next {
+            Some(rid) => {
+                self.resume_round(&rid, now, out);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 前驱轮次通过：激活本分支最早的后加签轮次（原轮次与后加签之间的业务节点不入栈）。
+    ///
+    /// 不按 `number > 前驱` 过滤：超时恢复会新建一轮，其序号大于已排队的后加签轮次，
+    /// 但语义上后加签仍应在原轮次（恢复后的新轮次）通过后执行。
+    fn activate_scheduled_after(
+        &mut self,
+        branch_id: &str,
+        _number: u32,
+        now: i64,
+        out: &mut Vec<Effect>,
+    ) -> bool {
+        let next = self
+            .rounds
+            .values()
+            .filter(|r| r.branch_id == branch_id && r.status == RoundStatus::Scheduled)
+            .min_by_key(|r| r.number)
+            .map(|r| r.id.clone());
+        match next {
+            Some(rid) => {
+                self.activate_scheduled_round(&rid, now, out);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 挂起轮次：未决席位置 `Suspended`（对外仍属原任务，但不可见/不可投票）。
+    fn suspend_round(&mut self, round_id: &str, now: i64, out: &mut Vec<Effect>) {
+        let task_ids: Vec<Id> = self
+            .tasks
+            .values()
+            .filter(|t| t.round_id == round_id && t.status.is_open())
+            .map(|t| t.id.clone())
+            .collect();
+        for tid in task_ids {
+            if let Some(t) = self.tasks.get_mut(&tid) {
+                let from = t.status;
+                t.suspended_from = Some(from);
+                t.status = TaskStatus::Suspended;
+                t.updated_at = now;
+                out.push(Effect::TaskStatus {
+                    id: tid.clone(),
+                    from,
+                    to: TaskStatus::Suspended,
+                });
+                self.instance.audit.push(AuditEntry {
+                    at: now,
+                    action: "task_suspended".into(),
+                    branch: Some(t.branch_id.clone()),
+                    task: Some(tid.clone()),
+                    by: "engine".into(),
+                    detail: json!({"reason": "BEFORE_ADDED"}).to_string(),
+                    acting_service: None,
+                });
+            }
+        }
+        if let Some(r) = self.rounds.get_mut(round_id) {
+            let from = r.status;
+            r.status = RoundStatus::Suspended;
+            out.push(Effect::RoundStatus {
+                id: round_id.into(),
+                from,
+                to: RoundStatus::Suspended,
+            });
+        }
+    }
+
+    /// 恢复被前加签挂起的轮次：席位状态回填到挂起前，轮次重新 Open。
+    fn resume_round(&mut self, round_id: &str, now: i64, out: &mut Vec<Effect>) {
+        if let Some(r) = self.rounds.get_mut(round_id) {
+            let from = r.status;
+            if from != RoundStatus::Suspended {
+                return;
+            }
+            r.status = RoundStatus::Open;
+            out.push(Effect::RoundStatus {
+                id: round_id.into(),
+                from,
+                to: RoundStatus::Open,
+            });
+        }
+        let task_ids: Vec<Id> = self
+            .tasks
+            .values()
+            .filter(|t| t.round_id == round_id && t.status == TaskStatus::Suspended)
+            .map(|t| t.id.clone())
+            .collect();
+        for tid in task_ids {
+            if let Some(t) = self.tasks.get_mut(&tid) {
+                let to = t.suspended_from.take().unwrap_or(TaskStatus::Created);
+                let from = t.status;
+                t.status = to;
+                t.updated_at = now;
+                out.push(Effect::TaskStatus {
+                    id: tid.clone(),
+                    from,
+                    to,
+                });
+                self.instance.audit.push(AuditEntry {
+                    at: now,
+                    action: "task_resumed".into(),
+                    branch: Some(t.branch_id.clone()),
+                    task: Some(tid.clone()),
+                    by: "engine".into(),
+                    detail: json!({"reason": "BEFORE_ADDED"}).to_string(),
+                    acting_service: None,
+                });
+            }
+        }
+    }
+
+    /// 激活后加签轮次：待激活席位转为未决。
+    fn activate_scheduled_round(&mut self, round_id: &str, now: i64, out: &mut Vec<Effect>) {
+        let task_ids: Vec<Id> = self
+            .tasks
+            .values()
+            .filter(|t| t.round_id == round_id && t.status == TaskStatus::Scheduled)
+            .map(|t| t.id.clone())
+            .collect();
+        for tid in task_ids {
+            if let Some(t) = self.tasks.get_mut(&tid) {
+                t.status = TaskStatus::Created;
+                t.updated_at = now;
+                out.push(Effect::TaskStatus {
+                    id: tid.clone(),
+                    from: TaskStatus::Scheduled,
+                    to: TaskStatus::Created,
+                });
+            }
+        }
+        if let Some(r) = self.rounds.get_mut(round_id) {
+            let from = r.status;
+            r.status = RoundStatus::Open;
+            out.push(Effect::RoundStatus {
+                id: round_id.into(),
+                from,
+                to: RoundStatus::Open,
+            });
+        }
+    }
+
+    /// 丢弃后加签派生任务（原任务否决 / 上游回退）：写审计并取消待激活席位。
+    fn discard_scheduled_after(
+        &mut self,
+        branch_id: &str,
+        reason: &str,
+        now: i64,
+        out: &mut Vec<Effect>,
+    ) {
+        let round_ids: Vec<Id> = self
+            .rounds
+            .values()
+            .filter(|r| r.branch_id == branch_id && r.status == RoundStatus::Scheduled)
+            .map(|r| r.id.clone())
+            .collect();
+        for rid in round_ids {
+            let task_ids: Vec<Id> = self
+                .tasks
+                .values()
+                .filter(|t| t.round_id == rid)
+                .map(|t| t.id.clone())
+                .collect();
+            for tid in &task_ids {
+                let mut discarded = false;
+                let mut branch = branch_id.to_string();
+                if let Some(t) = self.tasks.get_mut(tid) {
+                    branch = t.branch_id.clone();
+                    if t.status == TaskStatus::Scheduled {
+                        t.status = TaskStatus::Cancelled;
+                        t.updated_at = now;
+                        discarded = true;
+                        out.push(Effect::TaskStatus {
+                            id: tid.clone(),
+                            from: TaskStatus::Scheduled,
+                            to: TaskStatus::Cancelled,
+                        });
+                    }
+                }
+                if discarded {
+                    self.instance.audit.push(AuditEntry {
+                        at: now,
+                        action: "after_spawn_discarded".into(),
+                        branch: Some(branch),
+                        task: Some(tid.clone()),
+                        by: "engine".into(),
+                        detail: json!({"reason": reason}).to_string(),
+                        acting_service: None,
+                    });
+                }
+            }
+            if let Some(r) = self.rounds.get_mut(&rid) {
+                let from = r.status;
+                r.status = RoundStatus::Cancelled;
+                r.closed_at = Some(now);
+                out.push(Effect::RoundStatus {
+                    id: rid,
+                    from,
+                    to: RoundStatus::Cancelled,
+                });
+            }
+        }
+    }
+
     /// 资格判定：直接责任人、候选池成员与被委派人都可操作；委派场景返回被代表人。
-    fn actor_can_act(&self, t: &Task, actor: &str) -> Result<Option<Principal>, ApprovalError> {
+    /// 已到期/已撤销的委派不再授予代理权限。
+    fn actor_can_act(
+        &self,
+        t: &Task,
+        actor: &str,
+        now: i64,
+    ) -> Result<Option<Principal>, ApprovalError> {
         if let Some(d) = &t.delegation {
-            if d.to == actor {
+            if d.to == actor && d.is_active(now) {
                 return Ok(Some(d.from.clone()));
             }
         }
@@ -1439,6 +2290,16 @@ impl Engine {
                         t.id
                     )))
                 }
+            }
+        }
+    }
+
+    /// 终态/转办时撤销委派：保留记录并把原因写进 assignment 读面（不再授予代理权）。
+    fn revoke_delegation(t: &mut Task, reason: &str, now: i64) {
+        if let Some(d) = t.delegation.as_mut() {
+            if d.revoked_at.is_none() {
+                d.revoked_at = Some(now);
+                d.revoke_reason = Some(reason.to_string());
             }
         }
     }
@@ -1470,7 +2331,7 @@ impl Engine {
                 t.id, t.status
             )));
         }
-        let on_behalf_of = self.actor_can_act(&t, actor)?;
+        let on_behalf_of = self.actor_can_act(&t, actor, now)?;
         let implicit_claim = t.assignee.is_none();
         if implicit_claim {
             t.assignee = Some(actor.into());
@@ -1491,6 +2352,14 @@ impl Engine {
         });
         t.status = to;
         t.updated_at = now;
+        Self::revoke_delegation(
+            &mut t,
+            match decision {
+                Decision::Approve => "RULE_SATISFIED",
+                Decision::Reject => "TASK_REJECTED",
+            },
+            now,
+        );
         let rid = t.round_id.clone();
         let id = t.id.clone();
         self.tasks.insert(id.clone(), t);
@@ -1531,7 +2400,15 @@ impl Engine {
             .collect();
         let total = approvals
             .iter()
-            .filter(|t| !matches!(t.status, TaskStatus::Cancelled | TaskStatus::Expired))
+            .filter(|t| {
+                !matches!(
+                    t.status,
+                    TaskStatus::Cancelled
+                        | TaskStatus::Expired
+                        | TaskStatus::Suspended
+                        | TaskStatus::Scheduled
+                )
+            })
             .count() as u32;
         let completed = approvals
             .iter()
@@ -1556,22 +2433,31 @@ impl Engine {
         let mut verdict: Option<RoundStatus> = None;
         let mut reject_reason: Option<&str> = None;
         let open_count = approvals.iter().filter(|t| t.status.is_open()).count() as u32;
-        let required = required_approvals(branch.join, total);
-        let passed = match branch.join {
+        let join = round.join.unwrap_or(branch.join);
+        let reject = round.reject.unwrap_or(branch.reject);
+        let required = required_approvals(join, total);
+        let passed = match join {
             JoinPolicy::All => total > 0 && completed >= total,
             JoinPolicy::Any => completed >= 1,
             JoinPolicy::Quorum(n) => completed >= n,
             JoinPolicy::Ratio { .. } => completed >= required,
         };
-        if approvals.is_empty() {
+        // 派生轮次（前/后加签）被整批移除：门禁已经不存在，按「空前加签通过」恢复下游，
+        // 不能留下 `total == 0` 的 Open 轮次把原轮次永久挂起。原始轮次的 `total == 0`
+        // 仍保持 Open（B-WF-5：全员过期/被减签无自动判定）。
+        let derived_gate_empty = !approvals.is_empty()
+            && approvals.iter().all(|t| {
+                matches!(t.origin, TaskOrigin::BeforeAdded | TaskOrigin::AfterAdded)
+                    && t.status == TaskStatus::Cancelled
+            });
+        if approvals.is_empty() || derived_gate_empty {
             // 从未创建可计票席位的轮次（如仅有阅签席）立即通过。反之 `total == 0`（全员过期
             // 或被减签）绝不自动通过——超时与减签耗尽保持 `Open`，处置由人决定（Q4 无自动判定）。
             verdict = Some(RoundStatus::Passed);
-        } else if branch.reject == RejectPolicy::AnyReject && rejected > 0 {
+        } else if reject == RejectPolicy::AnyReject && rejected > 0 {
             verdict = Some(RoundStatus::Rejected);
             reject_reason = Some("any_reject");
-        } else if matches!(branch.reject, RejectPolicy::AtLeastRejects(n) if rejected >= n)
-            && rejected > 0
+        } else if matches!(reject, RejectPolicy::AtLeastRejects(n) if rejected >= n) && rejected > 0
         {
             verdict = Some(RoundStatus::Rejected);
             reject_reason = Some("reject_threshold_reached");
@@ -1582,12 +2468,12 @@ impl Engine {
             // 通过条件时立即判不通过，不等所有人投完（死锁兜底）。`OnExhausted`
             // 保持「全部投完才判」的既有语义。
             let exhausted = completed + rejected >= total;
-            let unsatisfiable = branch.reject == RejectPolicy::RecordAndContinue
+            let unsatisfiable = reject == RejectPolicy::RecordAndContinue
                 && rejected > 0
                 && completed + open_count < required;
             if exhausted || unsatisfiable {
                 verdict = Some(RoundStatus::Rejected);
-                reject_reason = Some(if branch.reject == RejectPolicy::RecordAndContinue {
+                reject_reason = Some(if reject == RejectPolicy::RecordAndContinue {
                     "sign_completion_unsatisfiable"
                 } else {
                     "on_exhausted"
@@ -1606,7 +2492,15 @@ impl Engine {
                     to: RoundStatus::Passed,
                 });
                 self.cancel_pending_tasks(round_id, now, out);
-                self.close_branch(&r.branch_id, BranchStatus::Completed, now, out);
+                // 前加签完成：先恢复被挂起的原轮次；否则前驱轮次通过后再激活后加签；
+                // 两者都没有才关闭分支（走下一业务节点）。
+                let resumed = self.resume_suspended_round_below(&r.branch_id, r.number, now, out);
+                if !resumed {
+                    let activated = self.activate_scheduled_after(&r.branch_id, r.number, now, out);
+                    if !activated {
+                        self.close_branch(&r.branch_id, BranchStatus::Completed, now, out);
+                    }
+                }
                 let data = json!({
                     "instance_id": self.instance.id,
                     "branch_id": r.branch_id,
@@ -1628,6 +2522,19 @@ impl Engine {
                     to: RoundStatus::Rejected,
                 });
                 self.cancel_pending_tasks(round_id, now, out);
+                // 前加签被否决 = 上游回退；原轮次仍在挂起，必须一并取消，不能留下
+                // 「分支已 Rejected、原席位仍可恢复」的僵尸轮次。
+                let discard_reason = if approvals
+                    .iter()
+                    .any(|t| t.origin == TaskOrigin::BeforeAdded)
+                {
+                    "UPSTREAM_ROLLBACK"
+                } else {
+                    "REJECTED"
+                };
+                self.discard_scheduled_after(&r.branch_id, discard_reason, now, out);
+                self.cancel_live_tasks_of_branch(&r.branch_id, now, out);
+                self.close_rounds_of_branch(&r.branch_id, RoundStatus::Cancelled, now, out);
                 self.close_branch(&r.branch_id, BranchStatus::Rejected, now, out);
                 let data = json!({
                     "instance_id": self.instance.id,
@@ -1718,7 +2625,13 @@ impl Engine {
         let ids: Vec<Id> = self
             .rounds
             .values()
-            .filter(|r| r.branch_id == branch_id && r.status == RoundStatus::Open)
+            .filter(|r| {
+                r.branch_id == branch_id
+                    && matches!(
+                        r.status,
+                        RoundStatus::Open | RoundStatus::Suspended | RoundStatus::Scheduled
+                    )
+            })
             .map(|r| r.id.clone())
             .collect();
         for id in ids {
@@ -1729,6 +2642,17 @@ impl Engine {
                 out.push(Effect::RoundStatus { id, from, to });
             }
         }
+    }
+
+    /// 取消分支内全部仍可能恢复的席位（未决 / 挂起 / 待激活），用于回退/终止。
+    fn cancel_live_tasks_of_branch(&mut self, branch_id: &str, now: i64, out: &mut Vec<Effect>) {
+        let ids: Vec<Id> = self
+            .tasks
+            .values()
+            .filter(|t| t.branch_id == branch_id && t.status.is_live())
+            .map(|t| t.id.clone())
+            .collect();
+        self.cancel_tasks(&ids, now, out);
     }
 
     /// 取消一轮的全部未决席位：审批席与阅签席一并收口，轮次关闭后不残留 open 席位。
@@ -1745,10 +2669,11 @@ impl Engine {
     fn cancel_tasks(&mut self, ids: &[Id], now: i64, out: &mut Vec<Effect>) {
         for id in ids {
             if let Some(t) = self.tasks.get_mut(id) {
-                if t.status.is_open() {
+                if t.status.is_live() {
                     let from = t.status;
                     t.status = TaskStatus::Cancelled;
                     t.updated_at = now;
+                    Self::revoke_delegation(t, "TASK_CANCELLED", now);
                     out.push(Effect::TaskStatus {
                         id: id.clone(),
                         from,
@@ -1774,13 +2699,8 @@ impl Engine {
             .map(|b| b.id.clone())
             .collect();
         for bid in &branch_ids {
-            let task_ids: Vec<Id> = self
-                .tasks
-                .values()
-                .filter(|t| t.branch_id == *bid && t.status.is_open())
-                .map(|t| t.id.clone())
-                .collect();
-            self.cancel_tasks(&task_ids, now, out);
+            self.discard_scheduled_after(bid, "UPSTREAM_ROLLBACK", now, out);
+            self.cancel_live_tasks_of_branch(bid, now, out);
             self.close_rounds_of_branch(bid, RoundStatus::Cancelled, now, out);
             self.set_branch_status(bid, branch_status, now, out);
         }

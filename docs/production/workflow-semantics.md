@@ -175,11 +175,12 @@ auth:
 `docs/adr/0013-workflow-approval-v2.md`（D2/D7/D8/D9/D11），本页不复述定案，只给
 接入所需的可消费面。
 
-- **RPC（12 个，`coord.workflow.v1`）**：
-  - 命令 10 个——`Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` /
-    `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate`，能力
-    `coord:workflow:execute`；
-  - 查询 2 个——`ListPendingTasks` / `GetInstanceDetail`，能力 `coord:workflow:read`。
+- **RPC（19 个，`coord.workflow.v1`）**：
+  - 命令 14 个——`Approve` / `Reject` / `Acknowledge` / `AddSign` / `RemoveSign` /
+    `ReturnToNode` / `Transfer` / `Delegate` / `Withdraw` / `Terminate` / `Urge` / `Cc` /
+    `WithdrawTask` / `ResumeWorkflow`，能力 `coord:workflow:execute`；
+  - 查询 5 个——`ListPendingTasks` / `GetInstanceDetail` / `ListTasks` / `GetTask` /
+    `History`，能力 `coord:workflow:read`。
   - 命令请求末字段 `idempotency_key`；主体身份取自认证上下文（CCT），请求体不携带 actor。
     错误码映射：`StaleRevision → ABORTED`、`NotAuthorized → PERMISSION_DENIED`、
     `InvalidTransition → FAILED_PRECONDITION`。能力与错误码事实源见
@@ -188,7 +189,7 @@ auth:
   `seedj-workflow-provider-mapping.md`；**未列出的字段一律不支持**，适配器必须 fail-closed。
 - **DSL**：定义里用原生 `approve` 节点声明席位与策略（camelCase 键：`approvers / pool / readers /
   roles / mode / veto / reject / deadline / onPass / onReject / signAdmins / allowSelfApprove /
-  allowCc`），未知键、
+  allowCc / timeoutPolicy`），未知键、
   非法 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed；语法逐字见 ADR-0013 D2。
 - **定义不可变**：同一 `(namespace, name, version)` 的内容由 `definition_hash` 判定——
   同内容重复 `Deploy` 幂等（返回既有 definition id，不覆盖）；不同内容返回
@@ -223,10 +224,31 @@ auth:
   `acting_service` 记执行服务（经 `GetInstanceDetail` 的 votes/audit 可见）。
   保留主体 `system` 两侧都拒绝；未授权代操作在任何副作用前 `PERMISSION_DENIED`。
 - **任务级动作（`Urge` / `Cc` / `WithdrawTask`）**：催办与抄送只写审计/通知，不改审批
-  计数与工作流状态（催办不写历史；抄送投影为 `TASK_CC`）。任务级抄送要求该节点定义
-  `allowCc: true`；实例级抄送仅限发起人或 `sign_admins`。任务级撤回仅原审批人可发起、
-  保留通过记录（带否决票的席位拒绝撤回），在同一条命令内回退到目标节点并重新驱动
-  工作流；回退事件带 `reason=task_withdrawn`，历史额外投影 `TASK_WITHDRAWN`。
+  计数与工作流状态（催办投影 `TASK_URGED`；抄送投影 `TASK_CC`）。任务级抄送要求该节点
+  定义 `allowCc: true`；实例级抄送仅限发起人或 `sign_admins`。任务级撤回仅原审批人可
+  发起、保留通过记录（带否决票的席位拒绝撤回），在同一条命令内回退到目标节点并重新
+  驱动工作流；回退事件带 `reason=task_withdrawn`，历史额外投影 `TASK_WITHDRAWN`。
+- **加签位置 / assignment 读面（ADR-0013 D13）**：`AddSign` 的 `position` 为
+  `CURRENT`（缺省，向当前轮次加席位）/ `BEFORE`（派生前置轮次并挂起原轮次）/
+  `AFTER`（原轮次通过后、下一业务节点前执行；默认或签；原轮次否决/回退时丢弃）。
+  `BEFORE`/`AFTER` 必须给锚定 `task_id`；响应返回 `derived_task_ids`。`GetTask` /
+  `GetInstanceDetail` 的 `ApprovalTask` 暴露 `origin`、`predecessor_task_id`、
+  `successor_task_id`、`spawned_by_action_id` 与 `assignments`（pending/scheduled/
+  suspended/transferred/delegated/completed/rejected/cancelled/expired）。
+  `RemoveSign` 可用 `assignees`（按 assignee）替代 `task_ids`，响应返回
+  `removed_task_ids` 与重算后的 `round`。
+- **业务表单（`formData`）**：ADR-0013 D9 的非目标——coord 只存审批记录（`comment` /
+  `on_behalf_of` / 审计），**不接受也不存储**业务表单数据；seedj 侧存储并在读视图合并。
+- **委派到期（ADR-0013 D13）**：`Delegate` 可带 `delegate_for_ms`；到期由审批 deadline
+  定时器撤销代理权（`DELEGATION_EXPIRED`），原审批人继续可批；终态席位撤销代理
+  assignment。到期时间由 `delegate_expires_at_ms` 返回，读面见 `assignments`。
+- **超时策略 / `ResumeWorkflow`（ADR-0013 D13）**：`approve.timeoutPolicy` 缺省
+  `none`（B-WF-5：只过期、不自动收口）；`fail` 到期置工作流 `FAULTED`
+  （`TASK_OVERDUE`）；`waiting` 到期置 `WAITING`，由
+  `ResumeWorkflow(workflow_id, new_due_in_ms, reason)` 按上一轮席位重建任务并重新挂起
+  （步骤 `timeout` 预算校验，超出 `INVALID_ARGUMENT` 且零副作用）。恢复后审批聚合回到
+  `RUNNING` 并重建席位；工作流实例仍为 `SUSPENDED`（审批挂起是 coord 的人工等待语义，
+  seedj 适配器按 `RUNNING` 映射）。
 - **驳回判定（`reject` / `target_node`）**：`approve.reject` 声明 `anyReject`（缺省，等价
   `veto: true`）/ `onExhausted`（等价 `veto: false`）/ `atLeastRejects:<n>` /
   `recordAndContinue`；`veto` 与 `reject` 同时显式给出解析期 fail-closed。`Reject` 请求带
