@@ -210,6 +210,16 @@ auth:
   席位归属判定不变。`VoteRecord.actor` / `AuditEntry.by` 记被代表用户，新增
   `acting_service` 记执行服务（经 `GetInstanceDetail` 的 votes/audit 可见）。
   保留主体 `system` 两侧都拒绝；未授权代操作在任何副作用前 `PERMISSION_DENIED`。
+- **驳回判定（`reject` / `target_node`）**：`approve.reject` 声明 `anyReject`（缺省，等价
+  `veto: true`）/ `onExhausted`（等价 `veto: false`）/ `atLeastRejects:<n>` /
+  `recordAndContinue`；`veto` 与 `reject` 同时显式给出解析期 fail-closed。`Reject` 请求带
+  `target_node` 时，投票、关闭轮次/分支、重开目标节点在**同一条命令**内完成（目标须在已
+  进入节点白名单，校验先于投票 ⇒ 错误路径零副作用）；`recordAndContinue` 在剩余席位仍可
+  满足通过条件时只记录否决、不回退（响应 `RUNNING`，不产生 `instance.returned`）。
+  比例票签按向上取整所需通过数判定，死锁提前判定复用同一口径。判不通过原因写入
+  `ApprovalRound.reject_reason` 与 `round.rejected` / `instance.returned` 事件的
+  `data.reason`（`any_reject` / `reject_threshold_reached` /
+  `sign_completion_unsatisfiable` / `on_exhausted`），回退事件另带 `reject_task_ids`。
 - **幂等**：命令按 `idempotency_key` 去重，记录键
   `/_workflow/v4/idempotency/{instance}/{key}`，与状态、本批事件**同一次 CAS 提交**写入；
   命中即原样返回首次响应，不重复执行（重放/重启后仍成立）。
@@ -246,8 +256,8 @@ auth:
   KV Txn 提交。布局与谓词见 ADR-0013 D3/D8。
 - **查询与分页**：`ListPendingTasks` 默认查调用方自己；服务代查时填 `assignee`（须在白名单内），
   按实例 id 字典序跨实例扫描 + 分页（`page_size` 0 ⇒ 默认 50；`page_token` = 上一页最后实例
-  id；硬上限 200）；`GetInstanceDetail` 返回实例快照（branches / tasks(含 votes) / rounds /
-  audit + `revision`，`revision` 为 CAS 守卫值）。
+  id；硬上限 200）；`GetInstanceDetail` 返回实例快照（branches / tasks(含 votes) / rounds（含
+  `reject_reason`）/ audit + `revision`，`revision` 为 CAS 守卫值）。
 
 **已知未落地（当前口径）**：
 

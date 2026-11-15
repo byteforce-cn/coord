@@ -1202,6 +1202,183 @@ async fn return_to_earlier_node_does_not_skip_intervening_approval() {
     assert_eq!(inst.context["done"], json!("yes"));
 }
 
+// ───────────────────────────── 判据 I2：驳回即回退在同一条命令内完成
+
+/// `second` 席位驳回并回退至 `first`：投票、关闭轮次、重开前序节点在同一命令内完成，
+/// 工作流重新挂起在 `first` attempt 2；通过后必须重新经过 `second` attempt 2 才收口。
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_to_node_rolls_back_and_redrives_target() {
+    let env = setup().await;
+    let wf_id = env
+        .deploy_start("acceptance-return", RETURN_YAML, "origin")
+        .await;
+    env.await_status(&wf_id, InstanceStatus::Suspended).await;
+
+    let first = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    let first_task = task_id_for(&first, "u1");
+    env.svc
+        .approval_command(
+            &wf_id,
+            "u1",
+            ApprovalCommand::Approve {
+                task_id: &first_task,
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .expect("first pass");
+    common::wait_until(
+        || async {
+            env.svc
+                .get_instance_detail(&wf_id)
+                .await
+                .map(|d| {
+                    d.branches
+                        .iter()
+                        .any(|b| b.node == "second" && b.status == BranchStatus::Open)
+                })
+                .unwrap_or(false)
+        },
+        Duration::from_secs(20),
+        "second approve node opens",
+    )
+    .await;
+
+    let second = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    let second_task = task_id_for(&second, "u2");
+    let (_, status) = env
+        .svc
+        .approval_command(
+            &wf_id,
+            "u2",
+            ApprovalCommand::RejectToNode {
+                task_id: &second_task,
+                comment: Some("资料不全"),
+                target_node: "first",
+            },
+            None,
+        )
+        .await
+        .expect("reject to first");
+    assert_eq!(status, "RUNNING", "回退不产生审批实例终态");
+
+    // 工作流重新挂起在 first attempt 2，且不得跳过 second。
+    common::wait_until(
+        || async {
+            let suspended = matches!(
+                env.svc.get_instance(&wf_id).await,
+                Ok(Some(i)) if i.status == InstanceStatus::Suspended
+            );
+            let reopened = env
+                .svc
+                .get_instance_detail(&wf_id)
+                .await
+                .map(|d| {
+                    d.branches.iter().any(|b| {
+                        b.node == "first" && b.attempt == 2 && b.status == BranchStatus::Open
+                    })
+                })
+                .unwrap_or(false);
+            suspended && reopened
+        },
+        Duration::from_secs(20),
+        "workflow re-suspends on reopened first node",
+    )
+    .await;
+
+    // 事件面：回退事件带原因与驳回席位。
+    let events = OutboxStore::list_all(&*env.outbox).await.expect("outbox");
+    let returned = events
+        .iter()
+        .find(|r| {
+            r.aggregate_id == wf_id && r.event_type == "com.china-workflow.instance.returned.v1"
+        })
+        .expect("returned event");
+    assert_eq!(returned.data["reason"], json!("any_reject"));
+    assert_eq!(returned.data["to_node"], json!("first"));
+    assert_eq!(returned.data["reject_task_ids"], json!([second_task]));
+
+    let detail = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    let round = detail
+        .rounds
+        .iter()
+        .find(|r| r.reject_reason.as_deref() == Some("any_reject"))
+        .expect("round carries reject reason");
+    assert_eq!(
+        round.status,
+        coord_core::workflow::approval::model::RoundStatus::Rejected
+    );
+
+    // 通过重开的 first → 必须重新挂起在 second attempt 2。
+    let first2 = detail
+        .branches
+        .iter()
+        .find(|b| b.node == "first" && b.attempt == 2)
+        .expect("first attempt 2")
+        .id
+        .clone();
+    let first2_task = task_id_for_branch(&detail, &first2, "u1");
+    env.svc
+        .approval_command(
+            &wf_id,
+            "u1",
+            ApprovalCommand::Approve {
+                task_id: &first2_task,
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .expect("approve reopened first");
+    common::wait_until(
+        || async {
+            env.svc
+                .get_instance_detail(&wf_id)
+                .await
+                .map(|d| {
+                    d.branches.iter().any(|b| {
+                        b.node == "second" && b.attempt == 2 && b.status == BranchStatus::Open
+                    })
+                })
+                .unwrap_or(false)
+        },
+        Duration::from_secs(20),
+        "workflow re-suspends on second attempt 2",
+    )
+    .await;
+
+    let detail = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    let second2 = detail
+        .branches
+        .iter()
+        .find(|b| b.node == "second" && b.attempt == 2)
+        .expect("second attempt 2")
+        .id
+        .clone();
+    let second2_task = task_id_for_branch(&detail, &second2, "u2");
+    env.svc
+        .approval_command(
+            &wf_id,
+            "u2",
+            ApprovalCommand::Approve {
+                task_id: &second2_task,
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .expect("approve second attempt 2");
+    env.await_status(&wf_id, InstanceStatus::Completed).await;
+    let inst = env
+        .svc
+        .get_instance(&wf_id)
+        .await
+        .unwrap()
+        .expect("instance");
+    assert_eq!(inst.context["done"], json!("yes"));
+}
+
 // ───────────────────────────── 判据 I3：工作流终态时收口审批聚合
 
 /// 审批节点通过、工作流在下游 `wait` 挂起（审批聚合仍 `RUNNING`）时取消：取消必须收口

@@ -22,7 +22,7 @@ use super::model::{
     UseComponents, ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition, WorkflowRef,
 };
 
-use crate::workflow::approval::model::JoinPolicy;
+use crate::workflow::approval::model::{JoinPolicy, RejectPolicy};
 
 use super::parser::{
     RawFunctionDef, RawNamedTask, RawRetryPolicy, RawTimeoutConfig, RawUseComponents,
@@ -81,6 +81,20 @@ fn parse_join_policy(s: &str) -> Option<JoinPolicy> {
             } else {
                 None
             }
+        }
+    }
+}
+
+/// 审批否决策略字符串：`anyReject` / `onExhausted` / `atLeastRejects:<n>` /
+/// `recordAndContinue`。阈值必须 > 0（0 会让轮次在无否决票时即关闭）。
+fn parse_reject_policy(s: &str) -> Option<RejectPolicy> {
+    match s {
+        "anyReject" => Some(RejectPolicy::AnyReject),
+        "onExhausted" => Some(RejectPolicy::OnExhausted),
+        "recordAndContinue" => Some(RejectPolicy::RecordAndContinue),
+        _ => {
+            let n = s.strip_prefix("atLeastRejects:")?.parse::<u32>().ok()?;
+            (n > 0).then_some(RejectPolicy::AtLeastRejects(n))
         }
     }
 }
@@ -1683,7 +1697,7 @@ impl Validator {
 
     /// approve 任务 —— 原生审批节点。
     ///
-    /// 键集合恰为 camelCase 字段名（approvers/pool/readers/roles/mode/veto/deadline/
+    /// 键集合恰为 camelCase 字段名（approvers/pool/readers/roles/mode/veto/reject/deadline/
     /// onPass/onReject/signAdmins/allowSelfApprove）；未知键 fail-closed 点名 `approve.<key>`，
     /// 不静默丢弃（拼错的 `allowSelfApprove` 会静默改变审批权）。
     fn parse_approve(
@@ -1710,6 +1724,7 @@ impl Validator {
             "roles",
             "mode",
             "veto",
+            "reject",
             "deadline",
             "onPass",
             "onReject",
@@ -1793,6 +1808,43 @@ impl Validator {
             }
         };
 
+        let reject = match body.get("reject") {
+            None => None,
+            Some(Value::String(s)) => match parse_reject_policy(s) {
+                Some(policy) => Some(policy),
+                None => {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(
+                            "approve.reject".to_string(),
+                        ),
+                        message: format!(
+                            "unimplemented construct 'approve.reject': expected \
+                             anyReject|onExhausted|atLeastRejects:<n>|recordAndContinue, got '{s}'"
+                        ),
+                    });
+                    return None;
+                }
+            },
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct("approve.reject".to_string()),
+                    message: "approve.reject must be a string".to_string(),
+                });
+                return None;
+            }
+        };
+        // 两个键同时显式出现即语义歧义：不猜优先级，解析期 fail-closed。
+        if reject.is_some() && body.contains_key("veto") {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("approve.reject".to_string()),
+                message: "approve.reject conflicts with approve.veto; use only one".to_string(),
+            });
+            return None;
+        }
+
         let allow_self_approve = match body.get("allowSelfApprove") {
             None => false,
             Some(Value::Bool(b)) => *b,
@@ -1862,6 +1914,7 @@ impl Validator {
             roles,
             mode,
             veto,
+            reject,
             deadline,
             on_pass,
             on_reject,
@@ -5464,6 +5517,83 @@ do:
 "#;
         let errs = parse_and_validate_yaml(yaml).expect_err("unknown approve.mode must reject");
         assert!(error_kind_naming(&errs, "approve.mode"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn parse_approve_reject_policy_variants() {
+        for (raw, want) in [
+            ("anyReject", RejectPolicy::AnyReject),
+            ("onExhausted", RejectPolicy::OnExhausted),
+            ("recordAndContinue", RejectPolicy::RecordAndContinue),
+            ("atLeastRejects:2", RejectPolicy::AtLeastRejects(2)),
+        ] {
+            let yaml = format!(
+                r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-reject
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        reject: "{raw}"
+"#
+            );
+            let def = parse_and_validate_yaml(&yaml).expect("reject policy must parse");
+            match &def.do_tasks[0].task {
+                Task::Approve(a) => assert_eq!(a.to_reject(), want, "reject {raw}"),
+                other => panic!("expected Approve task, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_approve_rejects_unknown_reject_policy() {
+        for raw in ["majority", "atLeastRejects:0", "atLeastRejects:x", ""] {
+            let yaml = format!(
+                r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-reject-bad
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        reject: "{raw}"
+"#
+            );
+            let errs = parse_and_validate_yaml(&yaml).expect_err("invalid reject must reject");
+            assert!(
+                error_kind_naming(&errs, "approve.reject"),
+                "reject {raw:?} must reject as approve.reject: {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_approve_rejects_veto_and_reject_conflict() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-reject-conflict
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        veto: false
+        reject: "onExhausted"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("veto + reject must reject");
+        assert!(
+            error_kind_naming(&errs, "approve.reject"),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]

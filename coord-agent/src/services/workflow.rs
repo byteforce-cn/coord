@@ -3353,16 +3353,10 @@ pub mod phase4 {
             idempotency_key: Option<&str>,
         ) -> Result<(String, String), BridgeError> {
             let bridge = self.approval_bridge()?;
-            // `ReturnToNode` 的恢复目标须在命令被桥消费前取出：桥只重开**目标节点**的
-            // 分支，工作流仍挂在**返回节点**上。若不把实例重新驱动到目标节点，目标分支
-            // 通过时 `apply_approval_node_outcome` 会用返回节点的 `onPass` 恢复，跳过
-            // 二者之间的所有审批节点。
-            let return_target = match &cmd {
-                ApprovalCommand::ReturnToNode { target_node, .. } => {
-                    Some((*target_node).to_string())
-                }
-                _ => None,
-            };
+            // `ReturnToNode` / `RejectToNode` 的恢复目标由桥的回执给出（桥只重开**目标
+            // 节点**的分支，工作流仍挂在**返回节点**上）。若不把实例重新驱动到目标节点，
+            // 目标分支通过时 `apply_approval_node_outcome` 会用返回节点的 `onPass` 恢复，
+            // 跳过二者之间的所有审批节点。`RecordAndContinue` 未回退时 `resume_node = None`。
             let outcome = match acting_service {
                 Some(service) => {
                     bridge
@@ -3381,8 +3375,9 @@ pub mod phase4 {
                     response,
                     node_outcome,
                     terminal,
+                    resume_node,
                 } => {
-                    match return_target {
+                    match resume_node {
                         Some(target) => {
                             // 重新驱动到目标节点：其重开分支已是 `Open`，`ensure_node_open`
                             // 复用并重新挂起（attempt 已递增）。恢复失败即命令失败——绝不

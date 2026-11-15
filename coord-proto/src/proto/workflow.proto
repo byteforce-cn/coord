@@ -287,6 +287,13 @@ message WorkflowRejectRequest {
   string comment = 3;
   string idempotency_key = 4;
   string on_behalf_of = 5; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
+  // 可选：驳回即回退目标节点。非空时在**同一命令**内完成投票、关闭轮次/分支、重开
+  // 目标节点（目标须在已进入节点白名单内）。空 = 仅记录否决票（既往语义：一票否决
+  // 关闭轮次并终局否决实例，或按 `OnExhausted` 等待全员投完）。
+  //
+  // `RecordAndContinue` 策略下，若剩余未投席位仍能满足通过条件，则只记录否决票、
+  // **不**回退（响应仍为 RUNNING，事件 `instance.returned` 不产生）。
+  string target_node = 6;
 }
 
 message WorkflowRejectResponse {
@@ -496,6 +503,9 @@ message ApprovalRound {
   int32 total_count = 5;
   int32 completed_count = 6;
   int32 rejected_count = 7;
+  // 判不通过原因：`any_reject` / `reject_threshold_reached` /
+  // `sign_completion_unsatisfiable` / `on_exhausted`；未判不通过为空。
+  string reject_reason = 8;
 }
 
 // ============================================================

@@ -1724,3 +1724,392 @@ fn round_close_cancels_open_read_ack_seats() {
     assert_eq!(e2.rounds[&r3].status, RoundStatus::Passed);
     assert_eq!(e2.tasks[&seats2[1]].status, TaskStatus::Cancelled);
 }
+
+// ------------------------------------------------- 驳回判定（#382）
+
+/// 驳回即回退：一次命令内完成否决投票、关闭轮次/分支、重开目标节点。
+#[test]
+fn reject_to_node_votes_and_rolls_back_atomically() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (apply, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, apply_seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &apply,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(
+        e.instance.revision,
+        &apply_seats[0],
+        "alice",
+        None,
+        tick(&mut t),
+    )
+    .unwrap();
+    assert_eq!(e.branches[&apply].status, BranchStatus::Completed);
+
+    let (review, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (round, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &review,
+            vec![SeatSpec::approver("bob"), SeatSpec::approver("carol")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    let (rollback_branch, out) = e
+        .reject_to_node(
+            e.instance.revision,
+            &seats[0],
+            "bob",
+            Some("资料不全"),
+            "apply",
+            tick(&mut t),
+        )
+        .unwrap();
+    let new_branch = rollback_branch.expect("reject must roll back");
+    assert_ne!(new_branch, apply);
+    assert_eq!(e.branches[&new_branch].node, "apply");
+    assert_eq!(e.branches[&new_branch].attempt, 2);
+    assert_eq!(e.branches[&new_branch].status, BranchStatus::Open);
+    assert_eq!(e.branches[&review].status, BranchStatus::Rejected);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Rejected);
+    assert_eq!(e.tasks[&seats[0]].votes.len(), 1, "回退不得撤销否决记录");
+    assert_eq!(e.tasks[&seats[0]].votes[0].decision, Decision::Reject);
+    assert_eq!(e.tasks[&seats[1]].status, TaskStatus::Cancelled);
+    assert_eq!(e.rounds[&round].status, RoundStatus::Rejected);
+    assert_eq!(
+        e.rounds[&round].reject_reason.as_deref(),
+        Some("any_reject")
+    );
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+    assert_eq!(e.instance.returns.len(), 1);
+    assert!(has_event(&out, "com.china-workflow.instance.returned.v1"));
+    let returned = out
+        .iter()
+        .find_map(|x| match x {
+            Effect::Event { name, data } if name == "com.china-workflow.instance.returned.v1" => {
+                Some(data.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(returned["reason"], "any_reject");
+    assert_eq!(returned["to_node"], "apply");
+}
+
+/// `AtLeastRejects(n)`：否决票数达到阈值前保持轮次 Open。
+#[test]
+fn at_least_rejects_threshold_closes_round() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AtLeastRejects(2),
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![
+                SeatSpec::approver("a"),
+                SeatSpec::approver("b"),
+                SeatSpec::approver("c"),
+            ],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    e.reject(e.instance.revision, &seats[0], "a", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+    assert_eq!(e.rounds[&r].rejected_count, 1);
+
+    e.reject(e.instance.revision, &seats[1], "b", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Rejected);
+    assert_eq!(
+        e.rounds[&r].reject_reason.as_deref(),
+        Some("reject_threshold_reached")
+    );
+}
+
+/// `RecordAndContinue`：剩余席位已不可能满足会签条件时立即回退。
+#[test]
+fn record_and_continue_deadlock_detects_unsatisfiable_all() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::RecordAndContinue,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![
+                SeatSpec::approver("a"),
+                SeatSpec::approver("b"),
+                SeatSpec::approver("c"),
+            ],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    e.reject(e.instance.revision, &seats[0], "a", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Rejected);
+    assert_eq!(
+        e.rounds[&r].reject_reason.as_deref(),
+        Some("sign_completion_unsatisfiable")
+    );
+}
+
+/// `RecordAndContinue`：剩余席位仍可满足通过条件时保留轮次。
+#[test]
+fn record_and_continue_keeps_open_when_still_satisfiable() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::Any,
+            RejectPolicy::RecordAndContinue,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![
+                SeatSpec::approver("a"),
+                SeatSpec::approver("b"),
+                SeatSpec::approver("c"),
+            ],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    e.reject(e.instance.revision, &seats[0], "a", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+    assert!(e.rounds[&r].reject_reason.is_none());
+
+    e.approve(e.instance.revision, &seats[1], "b", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Passed);
+}
+
+/// 比例票签按「向上取整所需通过数」判定：4 席 × 2/3 ⇒ 需要 3 票。
+#[test]
+fn ratio_rounds_up_required_approvals() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "vote",
+            None,
+            JoinPolicy::Ratio { num: 2, den: 3 },
+            RejectPolicy::RecordAndContinue,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![
+                SeatSpec::approver("a"),
+                SeatSpec::approver("b"),
+                SeatSpec::approver("c"),
+                SeatSpec::approver("d"),
+            ],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    e.approve(e.instance.revision, &seats[0], "a", None, tick(&mut t))
+        .unwrap();
+    e.approve(e.instance.revision, &seats[1], "b", None, tick(&mut t))
+        .unwrap();
+    e.reject(e.instance.revision, &seats[2], "c", None, tick(&mut t))
+        .unwrap();
+    // 已通过 2 + 未投 1 = 3 ⇒ 仍可能达到向上取整后的 3 票。
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+
+    e.reject(e.instance.revision, &seats[3], "d", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Rejected);
+    assert_eq!(
+        e.rounds[&r].reject_reason.as_deref(),
+        Some("sign_completion_unsatisfiable")
+    );
+}
+
+/// 带回退目标的 `RecordAndContinue`：仍可满足时不回退，仅记录否决。
+#[test]
+fn reject_to_node_keeps_running_when_policy_continues() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (apply, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, apply_seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &apply,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(
+        e.instance.revision,
+        &apply_seats[0],
+        "alice",
+        None,
+        tick(&mut t),
+    )
+    .unwrap();
+
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "vote",
+            None,
+            JoinPolicy::Ratio { num: 2, den: 3 },
+            RejectPolicy::RecordAndContinue,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![
+                SeatSpec::approver("a"),
+                SeatSpec::approver("b"),
+                SeatSpec::approver("c"),
+                SeatSpec::approver("d"),
+            ],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    let (rolled_back, _) = e
+        .reject_to_node(
+            e.instance.revision,
+            &seats[0],
+            "a",
+            Some("有异议"),
+            "apply",
+            tick(&mut t),
+        )
+        .unwrap();
+    assert!(rolled_back.is_none());
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+    assert_eq!(e.branches[&b].status, BranchStatus::Open);
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+}
+
+/// 非白名单目标在投票前拒绝：零副作用。
+#[test]
+fn reject_to_node_rejects_non_whitelisted_target_without_side_effects() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("a")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let rev = e.instance.revision;
+    let err = e
+        .reject_to_node(
+            e.instance.revision,
+            &seats[0],
+            "a",
+            None,
+            "nope",
+            tick(&mut t),
+        )
+        .unwrap_err();
+    assert!(matches!(err, ApprovalError::InvalidArgument(_)));
+    assert_eq!(e.instance.revision, rev);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Created);
+    assert_eq!(e.rounds.values().next().unwrap().status, RoundStatus::Open);
+}

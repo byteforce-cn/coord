@@ -326,6 +326,26 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   过期），兜底出口是 `signAdmins` 的 `Terminate`/`AddSign`；目标节点无既有席位可复用 ⇒
   **fail-closed**（拒绝，绝不留下「Open 但零席位」的不可恢复分支）。重开必须与开轮**同批**提交。
 
+### D12 驳回判定：回退原子化与死锁兜底（已固化）
+
+- **策略面**：`approve` 节点新增可选 `reject`：`anyReject`（一票否决，等价 `veto: true`）/
+  `onExhausted`（全员投完仍未达通过条件，等价 `veto: false`）/ `atLeastRejects:<n>`（否决票
+  达阈值）/ `recordAndContinue`（记录否决但继续，若剩余席位已不可能满足通过条件则立即判
+  不通过）。`reject` 与显式 `veto` 同时出现即语义歧义，解析期 fail-closed。
+- **驳回即回退**：`Reject` 请求可带 `target_node`；投票、关闭轮次/分支、重开目标节点在
+  **同一条 CAS 提交**内完成（目标须在已进入节点白名单；跳转上限沿用 `MAX_JUMPS`）。目标
+  校验在投票前完成，错误路径零副作用。`recordAndContinue` 下若通过条件仍可满足，则只
+  记录否决票、不回退，响应仍为 `RUNNING`。
+- **判定口径**：比例票签按**向上取整**所需通过数（`completed * den >= total * num` 等价于
+  `completed >= ceil(total*num/den)`）；死锁判定复用同一 `required_approvals`，避免
+  「提前回退」与「耗尽判定」两套舍入口径。
+- **可观测**：判不通过原因写入 `ApprovalRound.reject_reason` 与
+  `approval.round.rejected` / `instance.returned` 事件 `data.reason`；回退事件额外带
+  `reject_task_ids`。原因取值 `any_reject` / `reject_threshold_reached` /
+  `sign_completion_unsatisfiable` / `on_exhausted`。
+- **不撤销否决记录**：否决票是已发生事实，后续回退/重开不得删除或改写（任务级撤回
+  落地时同样受此约束）。
+
 ## 后果
 
 - 收益：审批语义原生、单一口径；复用 KV/Txn/Watch/Lease/Event/MQ，不重造持久层；

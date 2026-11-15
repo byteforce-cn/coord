@@ -157,6 +157,10 @@ pub enum RejectPolicy {
     AnyReject,
     /// 全部投完仍未达通过条件才判不通过。
     OnExhausted,
+    /// 否决票数达到 n 立即判不通过。
+    AtLeastRejects(u32),
+    /// 记录否决但继续投票；剩余未投席位已不可能满足通过条件时立即判不通过。
+    RecordAndContinue,
 }
 
 /// 节点的授权策略（Q6 授权落地，见 ADR-0013 D7）。
@@ -365,6 +369,10 @@ pub struct Round {
     pub total_count: u32,
     pub completed_count: u32,
     pub rejected_count: u32,
+    /// 判不通过的原因（`any_reject` / `reject_threshold_reached` /
+    /// `sign_completion_unsatisfiable` / `on_exhausted`）；未判不通过为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_reason: Option<String>,
     pub opened_at: i64,
     pub closed_at: Option<i64>,
 }
@@ -592,6 +600,7 @@ mod tests {
             total_count: 3,
             completed_count: 1,
             rejected_count: 1,
+            reject_reason: Some("on_exhausted".into()),
             opened_at: 130,
             closed_at: Some(210),
         }
@@ -696,7 +705,12 @@ mod tests {
         ] {
             assert_eq!(roundtrip(join), join);
         }
-        for reject in [RejectPolicy::AnyReject, RejectPolicy::OnExhausted] {
+        for reject in [
+            RejectPolicy::AnyReject,
+            RejectPolicy::OnExhausted,
+            RejectPolicy::AtLeastRejects(2),
+            RejectPolicy::RecordAndContinue,
+        ] {
             assert_eq!(roundtrip(reject), reject);
         }
         for kind in [TaskKind::Approval, TaskKind::ReadAck] {
@@ -723,6 +737,14 @@ mod tests {
             json!({"ratio": {"num": 2, "den": 3}})
         );
         assert_eq!(json!(RejectPolicy::AnyReject), json!("any_reject"));
+        assert_eq!(
+            json!(RejectPolicy::AtLeastRejects(2)),
+            json!({"at_least_rejects": 2})
+        );
+        assert_eq!(
+            json!(RejectPolicy::RecordAndContinue),
+            json!("record_and_continue")
+        );
         assert_eq!(json!(TaskKind::ReadAck), json!("read_ack"));
         assert_eq!(
             json!(Effect::TaskAssigned {

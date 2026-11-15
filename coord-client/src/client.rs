@@ -1718,7 +1718,27 @@ impl ApprovalClient {
         comment: &str,
         idempotency_key: Option<&str>,
     ) -> Result<WorkflowRejectResponse> {
-        let request = reject_request(workflow_id, task_id, comment, idempotency_key);
+        let request = reject_request(workflow_id, task_id, comment, idempotency_key, "");
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.reject(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 驳回并回退到 `target_node`：投票、关闭轮次、重开目标节点在同一条命令内完成
+    /// （目标须在已进入节点白名单内）。
+    pub async fn reject_to_node(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        target_node: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowRejectResponse> {
+        let request = reject_request(workflow_id, task_id, comment, idempotency_key, target_node);
         self.client
             .execute_write_with_retry(move |channel| {
                 let mut stub = WorkflowStub::new(channel);
@@ -1957,6 +1977,7 @@ fn reject_request(
     task_id: &str,
     comment: &str,
     idempotency_key: Option<&str>,
+    target_node: &str,
 ) -> WorkflowRejectRequest {
     WorkflowRejectRequest {
         workflow_id: workflow_id.to_string(),
@@ -1964,6 +1985,7 @@ fn reject_request(
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
         on_behalf_of: String::new(),
+        target_node: target_node.to_string(),
     }
 }
 

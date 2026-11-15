@@ -656,8 +656,13 @@ pub struct ApproveTask {
     #[serde(default = "default_join_all")]
     pub mode: JoinPolicy,
     /// `true` = 一票否决；`false` = 全部投完仍未达通过条件才判不通过。
+    /// 与 `reject` 同时显式给出时解析期 fail-closed。
     #[serde(default = "default_true")]
     pub veto: bool,
+    /// 否决判定策略（`anyReject` / `onExhausted` / `atLeastRejects:<n>` /
+    /// `recordAndContinue`）；`Some` 时优先于 `veto`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject: Option<RejectPolicy>,
     /// 审批截止时长（ISO8601 / 规范化 duration 串）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
@@ -702,13 +707,13 @@ impl ApproveTask {
         seats
     }
 
-    /// 不通过判定策略：`veto` = 一票否决，否则全部投完仍未达通过条件才判不通过。
+    /// 不通过判定策略：显式 `reject` 优先，否则 `veto` = 一票否决、`!veto` = 耗尽判定。
     pub fn to_reject(&self) -> RejectPolicy {
-        if self.veto {
+        self.reject.unwrap_or(if self.veto {
             RejectPolicy::AnyReject
         } else {
             RejectPolicy::OnExhausted
-        }
+        })
     }
 
     /// 审批截止（Unix ms）：`deadline` duration 相对 `now_ms` 换算。
@@ -1286,6 +1291,7 @@ mod tests {
             roles: vec!["manager".into()],
             mode: JoinPolicy::Ratio { num: 2, den: 3 },
             veto: false,
+            reject: None,
             deadline: Some("PT1H".into()),
             on_pass: Some("next".into()),
             on_reject: Some("rejected".into()),
@@ -1581,6 +1587,7 @@ mod tests {
             roles: vec!["manager".into()],
             mode: JoinPolicy::All,
             veto: true,
+            reject: None,
             deadline: None,
             on_pass: None,
             on_reject: None,
@@ -1606,6 +1613,7 @@ mod tests {
             roles: vec![],
             mode: JoinPolicy::All,
             veto: true,
+            reject: None,
             deadline: Some("PT1S".into()),
             on_pass: None,
             on_reject: None,
