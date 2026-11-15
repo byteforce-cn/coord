@@ -261,7 +261,12 @@ auth:
 - **查询与分页**：`ListPendingTasks` 默认查调用方自己；服务代查时填 `assignee`（须在白名单内），
   按实例 id 字典序跨实例扫描 + 分页（`page_size` 0 ⇒ 默认 50；`page_token` = 上一页最后实例
   id；硬上限 200）；`GetInstanceDetail` 返回实例快照（branches / tasks(含 votes) / rounds（含
-  `reject_reason`）/ audit + `revision`，`revision` 为 CAS 守卫值）。
+  `reject_reason`）/ audit + `revision`，`revision` 为 CAS 守卫值）。`ListTasks` 是查询超集：
+  按 `instance_id` / `assignee` / `completed_by` / `candidate_group` / `node` / `status` /
+  `due_before_ms` 过滤（未知 `status` fail-closed），分页口径与待办一致；`GetTask(task_id)`
+  直取席位（含投票与实例状态）。`ListInstances` 支持 `definition`（定义名或 ID）、
+  `status_filter` 与 `started_after_ms` / `started_before_ms` 时间窗；过滤在服务端完成，
+  `page_size` 是扫描批次而非严格返回上限（不跳过未消费实例）。
 
 **已知未落地（当前口径）**：
 

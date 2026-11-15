@@ -1,3 +1,28 @@
+## [contracts/v1.18.0] — 2026-11-15（Minor：Workflow 任务查询面与实例过滤，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 追加 2 个查询 RPC 与
+`WorkflowListInstancesRequest` 的 3 个可选字段；不改既有字段号/类型、不删 RPC；
+`buf breaking` 基线不变）。
+
+- 新增 `ListTasks` / `GetTask`：按 `instance_id` / `assignee`（可处理主体）/
+  `completed_by` / `candidate_group` / `node` / `status` / `due_before_ms` 过滤；
+  `GetTask` 返回席位投影（含 `candidates` / `deadline_ms` / `instance_status`）与 votes。
+  未知 `status` 返回 `INVALID_ARGUMENT`（不静默当作不过滤）。
+- `WorkflowListInstancesRequest` 追加 `definition`(6)（定义名或 ID，`workflow_id` 保留为
+  历史别名）、`started_after_ms`(7) / `started_before_ms`(8) 启动时间窗；
+  `status_filter` 由服务端生效（此前被忽略）。
+- 分页：`ListTasks` 沿用 `ListPendingTasks` 的实例窗口口径（`page_token` = 上一页最后扫描
+  到的实例 id）；过滤后的返回条数可能大于 `page_size`，但**不跳过**未消费实例。
+- 能力登记：`ListTasks` / `GetTask` → `coord:workflow:read`。
+- SDK：Rust `Client::list_tasks` / `get_task`；Java 任务查询面随后续 SDK 版本补齐
+  （不影响 wire 使用）。
+
+**影响范围**：旧客户端不受影响（新 RPC / 新字段为增量）。需要按实例/状态/时间搜索的
+调用方改用新字段；`status_filter` 此前被实现忽略，本次起真正生效（行为修正）。
+
+**回滚预案**：回滚本分支即回到无任务查询面的版本；新增字段缺省为空/0，旧快照与旧客户端
+无需迁移。
+
 ## [contracts/v1.17.0] — 2026-11-15（Minor：Workflow Start 可选调用方实例 id，wire 向前兼容）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 的 `WorkflowStartRequest` 追加可选字段

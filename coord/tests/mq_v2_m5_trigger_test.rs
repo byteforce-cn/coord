@@ -203,6 +203,9 @@ async fn list_instances(
             page_size: 100,
             page_token: String::new(),
             status_filter: String::new(),
+            definition: String::new(),
+            started_after_ms: 0,
+            started_before_ms: 0,
         })
         .await
         .expect("Workflow.ListInstances")

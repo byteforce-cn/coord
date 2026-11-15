@@ -1355,7 +1355,7 @@ pub mod phase4 {
 
     use coord_core::workflow::{
         expression::ExpressionEvaluator,
-        model::{WorkflowDefinition, WorkflowInstance},
+        model::{InstanceStatus, WorkflowDefinition, WorkflowInstance},
         parser,
         ports::{
             Clock, DispatchResult, EventProvider, MemoryEventProvider, MemoryWorkflowStore,
@@ -1369,8 +1369,10 @@ pub mod phase4 {
         ApprovalBridge, ApprovalCommand, ApprovalOutcome, BridgeError, CommandOutcome,
         MapApproverResolver, NodeOutcome,
     };
+    use coord_core::workflow::approval::engine::Engine as ApprovalEngine;
     use coord_core::workflow::approval::model::{
         Branch as ApprovalBranch, Round as ApprovalRound, Task as ApprovalTask,
+        TaskStatus as ApprovalTaskStatus,
     };
     use coord_core::workflow::approval::store::ApprovalStore;
 
@@ -2513,6 +2515,37 @@ pub mod phase4 {
         pub created_at_ms: i64,
     }
 
+    /// 任务查询投影：席位 + 所属实例/节点/实例状态。
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ApprovalTaskView {
+        pub instance_id: String,
+        pub instance_status: String,
+        pub node: String,
+        pub task: coord_core::workflow::approval::model::Task,
+    }
+
+    /// `ListInstances` 的状态 / 定义 / 启动时间窗过滤（空/0 = 不过滤）。
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct InstanceQuery<'a> {
+        pub namespace: Option<&'a str>,
+        pub definition: Option<&'a str>,
+        pub status: Option<&'a str>,
+        pub started_after_ms: i64,
+        pub started_before_ms: i64,
+    }
+
+    /// `ListTasks` 的过滤条件（空/0 = 不过滤）。
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct TaskQuery<'a> {
+        pub instance_id: Option<&'a str>,
+        pub assignee: Option<&'a str>,
+        pub completed_by: Option<&'a str>,
+        pub candidate_group: Option<&'a str>,
+        pub node: Option<&'a str>,
+        pub status: Option<&'a str>,
+        pub due_before_ms: i64,
+    }
+
     /// 审批实例详情（`GetInstanceDetail` 查询投影）。
     ///
     /// `status` 为大写实例状态；`branches`/`tasks`/`rounds` 为引擎快照的原始实体。
@@ -2528,6 +2561,102 @@ pub mod phase4 {
         pub rounds: Vec<ApprovalRound>,
         /// 管理动作审计（加签 / 减签 / 驳回 / 撤回 / 终止，含 acting_service）。
         pub audit: Vec<coord_core::workflow::approval::model::AuditEntry>,
+    }
+
+    /// 席位状态过滤串 → 模型枚举；未知取值 fail-closed（不静默当作「不过滤」）。
+    fn parse_task_status(raw: &str) -> Result<ApprovalTaskStatus, String> {
+        match raw.to_ascii_lowercase().as_str() {
+            "created" => Ok(ApprovalTaskStatus::Created),
+            "claimed" => Ok(ApprovalTaskStatus::Claimed),
+            "completed" => Ok(ApprovalTaskStatus::Completed),
+            "rejected" => Ok(ApprovalTaskStatus::Rejected),
+            "cancelled" => Ok(ApprovalTaskStatus::Cancelled),
+            "expired" => Ok(ApprovalTaskStatus::Expired),
+            other => Err(format!(
+                "unknown task status '{other}'; expected \
+                 created|claimed|completed|rejected|cancelled|expired"
+            )),
+        }
+    }
+
+    /// 过滤并投影单个实例的席位（`ListTasks` 的实例内集合）。
+    fn collect_matching_tasks(
+        engine: &ApprovalEngine,
+        filter: &TaskQuery<'_>,
+        status: Option<ApprovalTaskStatus>,
+        out: &mut Vec<ApprovalTaskView>,
+    ) {
+        for task in engine.tasks.values() {
+            if status.is_some_and(|want| task.status != want) {
+                continue;
+            }
+            let node = engine
+                .branches
+                .get(&task.branch_id)
+                .map(|b| b.node.as_str())
+                .unwrap_or("");
+            if filter.node.is_some_and(|want| node != want) {
+                continue;
+            }
+            if filter.assignee.is_some_and(|who| {
+                task.assignee.as_deref() != Some(who)
+                    && !(task.assignee.is_none() && task.candidates.iter().any(|c| c == who))
+                    && task.delegation.as_ref().map(|d| d.to.as_str()) != Some(who)
+            }) {
+                continue;
+            }
+            if filter
+                .completed_by
+                .is_some_and(|who| !task.votes.iter().any(|v| v.actor == who))
+            {
+                continue;
+            }
+            if filter
+                .candidate_group
+                .is_some_and(|group| !task.candidates.iter().any(|c| c == group))
+            {
+                continue;
+            }
+            if filter.due_before_ms > 0
+                && !task
+                    .deadline
+                    .is_some_and(|deadline| deadline <= filter.due_before_ms)
+            {
+                continue;
+            }
+            out.push(task_view(engine, task));
+        }
+    }
+
+    /// 席位 → 查询投影（节点名取所属分支；实例状态为大写标签）。
+    fn task_view(engine: &ApprovalEngine, task: &ApprovalTask) -> ApprovalTaskView {
+        ApprovalTaskView {
+            instance_id: engine.instance.id.clone(),
+            instance_status: json_label(&engine.instance.status).to_uppercase(),
+            node: engine
+                .branches
+                .get(&task.branch_id)
+                .map(|b| b.node.clone())
+                .unwrap_or_default(),
+            task: task.clone(),
+        }
+    }
+
+    /// 实例状态过滤串（大写 wire 标签，大小写不敏感）→ 模型枚举。
+    pub(crate) fn parse_instance_status(raw: &str) -> Result<InstanceStatus, String> {
+        match raw.to_ascii_uppercase().as_str() {
+            "PENDING" => Ok(InstanceStatus::Pending),
+            "RUNNING" => Ok(InstanceStatus::Running),
+            "WAITING" => Ok(InstanceStatus::Waiting),
+            "SUSPENDED" => Ok(InstanceStatus::Suspended),
+            "COMPLETED" => Ok(InstanceStatus::Completed),
+            "FAILED" | "FAULTED" => Ok(InstanceStatus::Failed),
+            "CANCELLED" => Ok(InstanceStatus::Cancelled),
+            other => Err(format!(
+                "unknown instance status '{other}'; expected \
+                 RUNNING|SUSPENDED|WAITING|COMPLETED|FAILED|CANCELLED"
+            )),
+        }
     }
 
     /// 审批实体枚举的 JSON 标签（serde snake_case，与模型持久化口径一致）。
@@ -3557,6 +3686,103 @@ pub mod phase4 {
             Ok((tasks, next))
         }
 
+        /// 任务查询（`ListTasks`）：跨实例扫描 v4 前缀，按过滤条件投影。
+        ///
+        /// 分页沿用 `ListPendingTasks` 的口径：`page_token` = 上一页最后扫描到的**实例**
+        /// id；一页内返回该实例窗口内全部匹配席位（可能多于 `page_size`）。指定
+        /// `instance_id` 时只读该实例、不分页。
+        pub async fn list_tasks(
+            &self,
+            filter: &TaskQuery<'_>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<ApprovalTaskView>, Option<String>), BridgeError> {
+            let bridge = self.approval_bridge()?;
+            let requested = if page_size == 0 {
+                coord_core::workflow::ports::DEFAULT_LIST_PAGE_SIZE
+            } else {
+                page_size
+            };
+            let limit = coord_core::workflow::approval::store::clamp_scan_limit(requested);
+            let status = filter
+                .status
+                .map(parse_task_status)
+                .transpose()
+                .map_err(BridgeError::InvalidArgument)?;
+
+            let mut views = Vec::new();
+            if let Some(instance_id) = filter.instance_id {
+                let engine = bridge
+                    .store()
+                    .load(instance_id)
+                    .await
+                    .map_err(BridgeError::from)?
+                    .map(|(engine, _rev)| engine)
+                    .ok_or_else(|| BridgeError::NotFound(instance_id.to_string()))?;
+                collect_matching_tasks(&engine, filter, status, &mut views);
+                return Ok((views, None));
+            }
+
+            let entries = bridge
+                .store()
+                .scan(page_token, limit)
+                .await
+                .map_err(BridgeError::from)?;
+            let scanned = entries.len();
+            for entry in &entries {
+                collect_matching_tasks(&entry.engine, filter, status, &mut views);
+            }
+            let next = if scanned < limit {
+                None
+            } else {
+                entries.last().map(|e| e.id.clone())
+            };
+            Ok((views, next))
+        }
+
+        /// 按 task id 直取任务（`GetTask`）。
+        ///
+        /// 快路径从 task id 的 `{instance_id}:` 前缀直接读实例；前缀不是实例 id 时回退
+        /// 到 v4 前缀扫描（边界同 `ListTasks`）。
+        pub async fn get_task(&self, task_id: &str) -> Result<ApprovalTaskView, BridgeError> {
+            let bridge = self.approval_bridge()?;
+            if let Some((prefix, _)) = task_id.split_once(':') {
+                if let Some((engine, _rev)) = bridge
+                    .store()
+                    .load(prefix)
+                    .await
+                    .map_err(BridgeError::from)?
+                {
+                    if let Some(task) = engine.tasks.get(task_id) {
+                        return Ok(task_view(&engine, task));
+                    }
+                }
+            }
+
+            let limit = coord_core::workflow::approval::store::clamp_scan_limit(
+                coord_core::workflow::ports::DEFAULT_LIST_PAGE_SIZE,
+            );
+            let mut token: Option<String> = None;
+            loop {
+                let entries = bridge
+                    .store()
+                    .scan(token.as_deref(), limit)
+                    .await
+                    .map_err(BridgeError::from)?;
+                let scanned = entries.len();
+                for entry in &entries {
+                    if let Some(task) = entry.engine.tasks.get(task_id) {
+                        return Ok(task_view(&entry.engine, task));
+                    }
+                }
+                if scanned < limit {
+                    break;
+                }
+                token = entries.last().map(|e| e.id.clone());
+            }
+            Err(BridgeError::NotFound(task_id.to_string()))
+        }
+
         /// 审批实例详情（引擎快照投影）。
         pub async fn get_instance_detail(
             &self,
@@ -3607,6 +3833,50 @@ pub mod phase4 {
                 .list_instances(namespace, definition_name, page_size, page_token)
                 .await
                 .map_err(|e| format!("store error: {e}"))
+        }
+
+        /// 带状态 / 启动时间窗过滤的实例查询（`ListInstances` 契约面）。
+        ///
+        /// `page_size` 是**底层扫描批次**大小，不是严格返回上限：为不跳过未消费的实例，
+        /// 一页内匹配到的实例全部返回（与 `ListPendingTasks` 的实例窗口口径一致），
+        /// `next_page_token` 指向已消费批次之后。未知状态串返回 `Err`（fail-closed）。
+        pub async fn list_instances_filtered(
+            &self,
+            query: &InstanceQuery<'_>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<WorkflowInstance>, Option<String>), String> {
+            let batch = if page_size == 0 {
+                coord_core::workflow::ports::DEFAULT_LIST_PAGE_SIZE
+            } else {
+                page_size
+            };
+            let status = query.status.map(parse_instance_status).transpose()?;
+            let mut matched = Vec::new();
+            let mut token = page_token.map(str::to_string);
+            loop {
+                let (page, next) = self
+                    .store
+                    .list_instances(query.namespace, query.definition, batch, token.as_deref())
+                    .await
+                    .map_err(|e| format!("store error: {e}"))?;
+                for inst in page {
+                    if status.is_some_and(|want| inst.status != want) {
+                        continue;
+                    }
+                    if query.started_after_ms > 0 && inst.created_at < query.started_after_ms {
+                        continue;
+                    }
+                    if query.started_before_ms > 0 && inst.created_at > query.started_before_ms {
+                        continue;
+                    }
+                    matched.push(inst);
+                }
+                match next {
+                    Some(next) if matched.len() < batch => token = Some(next),
+                    next => return Ok((matched, next)),
+                }
+            }
         }
 
         /// 测试辅助：暴露 store 以构造确定性状态（仅测试构建可见）。
@@ -6652,6 +6922,168 @@ do:
         seen.sort();
         ids.sort();
         assert_eq!(seen, ids, "分页必须覆盖全部 3 个实例，不重叠不遗漏");
+    }
+
+    /// 任务查询面：ListTasks 过滤 + GetTask 直取（节点/实例状态/投票）。
+    #[tokio::test]
+    async fn list_tasks_filters_and_get_task_projects_views() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("tasks-wf"))
+            .await
+            .unwrap();
+        let a = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        let b = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        let task_a = await_open_seat(&store, &a.id, "alice").await;
+        let task_b = await_open_seat(&store, &b.id, "alice").await;
+
+        // 默认：跨实例返回全部席位。
+        let (all, _) = svc
+            .list_tasks(&TaskQuery::default(), 10, None)
+            .await
+            .unwrap();
+        assert!(all.iter().any(|v| v.task.id == task_a));
+        assert!(all.iter().any(|v| v.task.id == task_b));
+
+        // 按实例：只返回该实例的席位，且不跨实例分页。
+        let filter = TaskQuery {
+            instance_id: Some(&a.id),
+            ..Default::default()
+        };
+        let (only_a, next) = svc.list_tasks(&filter, 10, None).await.unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].task.id, task_a);
+        assert!(next.is_none());
+
+        // 按可处理主体 + 状态。
+        let filter = TaskQuery {
+            assignee: Some("alice"),
+            status: Some("created"),
+            ..Default::default()
+        };
+        let (pending, _) = svc.list_tasks(&filter, 10, None).await.unwrap();
+        assert_eq!(pending.len(), 2, "两个实例各一席");
+        assert!(pending.iter().all(|v| v.node == "review"));
+
+        let filter = TaskQuery {
+            assignee: Some("mallory"),
+            ..Default::default()
+        };
+        let (none, _) = svc.list_tasks(&filter, 10, None).await.unwrap();
+        assert!(none.is_empty());
+
+        // 批掉任务后按投票人/完成状态过滤。
+        svc.approval_command(
+            &a.id,
+            "alice",
+            ApprovalCommand::Approve {
+                task_id: &task_a,
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let filter = TaskQuery {
+            completed_by: Some("alice"),
+            status: Some("completed"),
+            instance_id: Some(&a.id),
+            ..Default::default()
+        };
+        let (done, _) = svc.list_tasks(&filter, 10, None).await.unwrap();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].task.id, task_a);
+
+        // GetTask：任务 + 节点 + 实例状态 + 投票。
+        let view = svc.get_task(&task_a).await.unwrap();
+        assert_eq!(view.instance_id, a.id);
+        assert_eq!(view.node, "review");
+        assert_eq!(view.instance_status, "RUNNING");
+        assert_eq!(view.task.votes.len(), 1);
+        assert!(svc.get_task("no-such-task").await.is_err());
+
+        // 未知状态串 fail-closed（不静默当作不过滤）。
+        let filter = TaskQuery {
+            status: Some("bogus"),
+            ..Default::default()
+        };
+        assert!(svc.list_tasks(&filter, 10, None).await.is_err());
+    }
+
+    /// `ListInstances` 状态 / 定义 / 启动时间窗过滤。
+    #[tokio::test]
+    async fn list_instances_filtered_by_status_definition_and_start_window() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc
+            .deploy_definition("test", sample_instant_sw())
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), None)
+            .await
+            .unwrap();
+        // 等实例跑到终态（instant SW 很快）。
+        for _ in 0..200 {
+            let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            if loaded.status == InstanceStatus::Completed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let by_def_query = InstanceQuery {
+            definition: Some("instant"),
+            ..Default::default()
+        };
+        let (by_def, _) = svc
+            .list_instances_filtered(&by_def_query, 10, None)
+            .await
+            .unwrap();
+        assert!(by_def.iter().any(|i| i.id == inst.id));
+
+        let by_status_query = InstanceQuery {
+            status: Some("COMPLETED"),
+            ..Default::default()
+        };
+        let (by_status, _) = svc
+            .list_instances_filtered(&by_status_query, 10, None)
+            .await
+            .unwrap();
+        assert!(by_status.iter().any(|i| i.id == inst.id));
+
+        let too_late_query = InstanceQuery {
+            started_after_ms: inst.created_at + 1,
+            ..Default::default()
+        };
+        let (too_late, _) = svc
+            .list_instances_filtered(&too_late_query, 10, None)
+            .await
+            .unwrap();
+        assert!(
+            !too_late.iter().any(|i| i.id == inst.id),
+            "started_after 必须排除更早实例"
+        );
+
+        let bounded_query = InstanceQuery {
+            started_before_ms: inst.created_at,
+            ..Default::default()
+        };
+        let (bounded, _) = svc
+            .list_instances_filtered(&bounded_query, 10, None)
+            .await
+            .unwrap();
+        assert!(bounded.iter().any(|i| i.id == inst.id));
+        let bogus = InstanceQuery {
+            status: Some("bogus"),
+            ..Default::default()
+        };
+        assert!(svc.list_instances_filtered(&bogus, 10, None).await.is_err());
     }
 
     /// 实例详情：返回快照字段（大写状态、发起人、修订号、分支/席位/轮次）。

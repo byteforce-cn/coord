@@ -41,8 +41,9 @@ use coord_proto::workflow::v1::{
     WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse, WorkflowAddSignRequest,
     WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse,
     WorkflowDelegateRequest, WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest,
-    WorkflowGetInstanceDetailResponse, WorkflowListPendingTasksRequest,
-    WorkflowListPendingTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
+    WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest, WorkflowGetTaskResponse,
+    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowListTasksRequest,
+    WorkflowListTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
     WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
     WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
     WorkflowTransferRequest, WorkflowTransferResponse, WorkflowWithdrawRequest,
@@ -1923,6 +1924,38 @@ impl ApprovalClient {
         let mut stub = WorkflowStub::new(channel.clone());
         let request = list_pending_tasks_request(page_size, page_token);
         match stub.list_pending_tasks(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp.into_inner())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// 任务查询（过滤 + 分页）。过滤字段为空 = 不过滤；`page_token` 不透明回传。
+    pub async fn list_tasks(
+        &self,
+        request: WorkflowListTasksRequest,
+    ) -> Result<WorkflowListTasksResponse> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = WorkflowStub::new(channel.clone());
+        match stub.list_tasks(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp.into_inner())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// 按 task id 直取席位（含投票记录与实例状态）。
+    pub async fn get_task(&self, task_id: &str) -> Result<WorkflowGetTaskResponse> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = WorkflowStub::new(channel.clone());
+        let request = WorkflowGetTaskRequest {
+            task_id: task_id.to_string(),
+        };
+        match stub.get_task(request).await {
             Ok(resp) => {
                 self.client.return_channel(&endpoint, channel);
                 Ok(resp.into_inner())

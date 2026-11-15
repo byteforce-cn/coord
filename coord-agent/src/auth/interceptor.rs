@@ -1862,6 +1862,8 @@ mod tests {
             "/coord.workflow.v1.Workflow/Terminate",
             "/coord.workflow.v1.Workflow/ListPendingTasks",
             "/coord.workflow.v1.Workflow/GetInstanceDetail",
+            "/coord.workflow.v1.Workflow/ListTasks",
+            "/coord.workflow.v1.Workflow/GetTask",
         ] {
             let result = interceptor.validate_request(rpc, Some(&auth_header), None);
             assert!(
