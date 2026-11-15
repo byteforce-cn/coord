@@ -184,6 +184,8 @@ auth:
     错误码映射：`StaleRevision → ABORTED`、`NotAuthorized → PERMISSION_DENIED`、
     `InvalidTransition → FAILED_PRECONDITION`。能力与错误码事实源见
     `coord-core/src/grpc_auth.rs` 与 `consumer-contract.md` §0.2 / §7。
+- **seedj 适配映射**：`WorkflowProvider` 字段/动作到 coord DSL/命令的逐项映射见
+  `seedj-workflow-provider-mapping.md`；**未列出的字段一律不支持**，适配器必须 fail-closed。
 - **DSL**：定义里用原生 `approve` 节点声明席位与策略（camelCase 键：`approvers / pool / readers /
   roles / mode / veto / reject / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
   非法 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed；语法逐字见 ADR-0013 D2。
