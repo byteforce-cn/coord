@@ -44,6 +44,8 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowRejectRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowRejectResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowRemoveSignRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowRemoveSignResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowResumeWorkflowRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowResumeWorkflowResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowReturnToNodeRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowReturnToNodeResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowRollbackDefinitionRequest;
@@ -65,6 +67,7 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawTaskRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawTaskResponse;
 import cn.byteforce.coord.contracts.workflow.v1.TaskFrame;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
+import cn.byteforce.coord.sdk.workflow.AddAssigneePosition;
 import cn.byteforce.coord.sdk.workflow.ApprovalAssignment;
 import cn.byteforce.coord.sdk.workflow.ApprovalAudit;
 import cn.byteforce.coord.sdk.workflow.ApprovalBranch;
@@ -73,6 +76,7 @@ import cn.byteforce.coord.sdk.workflow.ApprovalInstanceDetail;
 import cn.byteforce.coord.sdk.workflow.ApprovalRound;
 import cn.byteforce.coord.sdk.workflow.ApprovalTask;
 import cn.byteforce.coord.sdk.workflow.ApprovalVote;
+import cn.byteforce.coord.sdk.workflow.InstancePage;
 import cn.byteforce.coord.sdk.workflow.PendingApprovalTask;
 import cn.byteforce.coord.sdk.workflow.Suspension;
 import cn.byteforce.coord.sdk.workflow.TaskDetail;
@@ -327,6 +331,29 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         log.debug("Workflow getDefinition: id={}, name={}, hasYaml={}",
                 response.getWorkflowId(), response.getName(),
                 !response.getDefinitionYaml().isEmpty());
+        return toWorkflowDefinition(response);
+    }
+
+    @Override
+    public WorkflowDefinition getDefinition(String namespace, String name, String version) {
+        WorkflowGetDefinitionRequest request = WorkflowGetDefinitionRequest.newBuilder()
+                .setNamespace(namespace == null ? "" : namespace)
+                .setName(name == null ? "" : name)
+                .setVersion(version == null ? "" : version)
+                .build();
+
+        WorkflowGetDefinitionResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .getDefinition((WorkflowGetDefinitionRequest) r),
+                request, "workflow.getDefinition");
+
+        log.debug("Workflow getDefinition: ns={}, name={}, version={}, id={}",
+                namespace, name, version, response.getWorkflowId());
+        return toWorkflowDefinition(response);
+    }
+
+    private static WorkflowDefinition toWorkflowDefinition(WorkflowGetDefinitionResponse response) {
         return new WorkflowDefinition(
                 response.getWorkflowId(), response.getName(), response.getDefinitionYaml(),
                 response.getVersion(), response.getStatus(), response.getCreatedAt());
@@ -441,18 +468,55 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
         List<WorkflowInstanceSummary> result = new ArrayList<>();
         for (cn.byteforce.coord.contracts.workflow.v1.WorkflowInstanceSummary s : response.getInstancesList()) {
-            byte[] outputJson = s.getOutputJson().toByteArray();
-            byte[] contextJson = s.getContextJson().toByteArray();
-            result.add(new WorkflowInstanceSummary(
-                    s.getInstanceId(), s.getWorkflowId(), s.getState(),
-                    s.getStartedAt(), s.getUpdatedAt(), s.getDefinitionName(),
-                    s.getNamespace(),
-                    outputJson.length > 0 ? outputJson : null,
-                    contextJson.length > 0 ? contextJson : null));
+            result.add(toInstanceSummary(s));
         }
         log.debug("Workflow listInstances: namespace={}, workflowId={}, statusFilter={}, count={}",
                 namespace, workflowId, statusFilter, result.size());
         return result;
+    }
+
+    @Override
+    public InstancePage listInstances(String namespace, String definition, String status,
+                                      long startedAfterMs, long startedBeforeMs,
+                                      int pageSize, String pageToken) {
+        WorkflowListInstancesRequest.Builder req = WorkflowListInstancesRequest.newBuilder()
+                .setPageSize(Math.max(1, Math.min(pageSize, 200)));
+        setOptional(req::setNamespace, namespace);
+        setOptional(req::setDefinition, definition);
+        setOptional(req::setStatusFilter, status);
+        if (startedAfterMs > 0) {
+            req.setStartedAfterMs(startedAfterMs);
+        }
+        if (startedBeforeMs > 0) {
+            req.setStartedBeforeMs(startedBeforeMs);
+        }
+        setOptional(req::setPageToken, pageToken);
+
+        WorkflowListInstancesResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .listInstances((WorkflowListInstancesRequest) r),
+                req.build(), "workflow.listInstances");
+
+        List<WorkflowInstanceSummary> instances = new ArrayList<>();
+        for (cn.byteforce.coord.contracts.workflow.v1.WorkflowInstanceSummary s : response.getInstancesList()) {
+            instances.add(toInstanceSummary(s));
+        }
+        log.debug("Workflow listInstances: namespace={}, definition={}, status={}, window=[{}, {}], count={}",
+                namespace, definition, status, startedAfterMs, startedBeforeMs, instances.size());
+        return new InstancePage(instances, response.getNextPageToken());
+    }
+
+    private static WorkflowInstanceSummary toInstanceSummary(
+            cn.byteforce.coord.contracts.workflow.v1.WorkflowInstanceSummary s) {
+        byte[] outputJson = s.getOutputJson().toByteArray();
+        byte[] contextJson = s.getContextJson().toByteArray();
+        return new WorkflowInstanceSummary(
+                s.getInstanceId(), s.getWorkflowId(), s.getState(),
+                s.getStartedAt(), s.getUpdatedAt(), s.getDefinitionName(),
+                s.getNamespace(),
+                outputJson.length > 0 ? outputJson : null,
+                contextJson.length > 0 ? contextJson : null);
     }
 
     // ──── 人工审批 v2（ADR-0013 D7）────
@@ -561,9 +625,27 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     }
 
     @Override
+    public String addSign(String workflowId, String branchId, List<String> approvers,
+                          List<String> pool, List<String> readers, String comment,
+                          String idempotencyKey, AddAssigneePosition position,
+                          String taskId, String actionId) {
+        return addSignOnBehalfOf(workflowId, branchId, approvers, pool, readers, comment,
+                idempotencyKey, null, position, taskId, actionId);
+    }
+
+    @Override
     public String addSignOnBehalfOf(String workflowId, String branchId, List<String> approvers,
                                     List<String> pool, List<String> readers, String comment,
                                     String idempotencyKey, String onBehalfOf) {
+        return addSignOnBehalfOf(workflowId, branchId, approvers, pool, readers, comment,
+                idempotencyKey, onBehalfOf, null, null, null);
+    }
+
+    @Override
+    public String addSignOnBehalfOf(String workflowId, String branchId, List<String> approvers,
+                                    List<String> pool, List<String> readers, String comment,
+                                    String idempotencyKey, String onBehalfOf,
+                                    AddAssigneePosition position, String taskId, String actionId) {
         WorkflowAddSignRequest.Builder req = WorkflowAddSignRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setBranchId(branchId);
@@ -579,6 +661,11 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
         setOptional(req::setOnBehalfOf, onBehalfOf);
+        if (position != null) {
+            req.setPosition(toWirePosition(position));
+        }
+        setOptional(req::setTaskId, taskId);
+        setOptional(req::setActionId, actionId);
 
         WorkflowAddSignResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -586,9 +673,21 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                         .addSign((WorkflowAddSignRequest) r),
                 req.build(), "workflow.addSign");
 
-        log.debug("Workflow addSign: id={}, branchId={}, status={}",
-                workflowId, branchId, response.getStatus());
+        log.debug("Workflow addSign: id={}, branchId={}, position={}, status={}",
+                workflowId, branchId, position, response.getStatus());
         return response.getStatus();
+    }
+
+    private static cn.byteforce.coord.contracts.workflow.v1.AddAssigneePosition toWirePosition(
+            AddAssigneePosition position) {
+        return switch (position) {
+            case CURRENT -> cn.byteforce.coord.contracts.workflow.v1.AddAssigneePosition
+                    .ADD_ASSIGNEE_POSITION_CURRENT;
+            case BEFORE -> cn.byteforce.coord.contracts.workflow.v1.AddAssigneePosition
+                    .ADD_ASSIGNEE_POSITION_BEFORE;
+            case AFTER -> cn.byteforce.coord.contracts.workflow.v1.AddAssigneePosition
+                    .ADD_ASSIGNEE_POSITION_AFTER;
+        };
     }
 
     @Override
@@ -598,17 +697,37 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     }
 
     @Override
+    public String removeSign(String workflowId, String branchId, List<String> taskIds,
+                             String comment, String idempotencyKey, List<String> assignees,
+                             String taskId) {
+        return removeSignOnBehalfOf(workflowId, branchId, taskIds, comment, idempotencyKey, null,
+                assignees, taskId);
+    }
+
+    @Override
     public String removeSignOnBehalfOf(String workflowId, String branchId, List<String> taskIds,
                                        String comment, String idempotencyKey, String onBehalfOf) {
+        return removeSignOnBehalfOf(workflowId, branchId, taskIds, comment, idempotencyKey,
+                onBehalfOf, null, null);
+    }
+
+    @Override
+    public String removeSignOnBehalfOf(String workflowId, String branchId, List<String> taskIds,
+                                       String comment, String idempotencyKey, String onBehalfOf,
+                                       List<String> assignees, String taskId) {
         WorkflowRemoveSignRequest.Builder req = WorkflowRemoveSignRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setBranchId(branchId);
         if (taskIds != null) {
             req.addAllTaskIds(taskIds);
         }
+        if (assignees != null) {
+            req.addAllAssignees(assignees);
+        }
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
         setOptional(req::setOnBehalfOf, onBehalfOf);
+        setOptional(req::setTaskId, taskId);
 
         WorkflowRemoveSignResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -616,8 +735,8 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                         .removeSign((WorkflowRemoveSignRequest) r),
                 req.build(), "workflow.removeSign");
 
-        log.debug("Workflow removeSign: id={}, branchId={}, status={}",
-                workflowId, branchId, response.getStatus());
+        log.debug("Workflow removeSign: id={}, branchId={}, assignees={}, status={}",
+                workflowId, branchId, assignees, response.getStatus());
         return response.getStatus();
     }
 
@@ -685,8 +804,23 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     }
 
     @Override
+    public String delegate(String workflowId, String taskId, String to, String comment,
+                           Long delegateForMs, String idempotencyKey) {
+        return delegateOnBehalfOf(workflowId, taskId, to, comment, delegateForMs, idempotencyKey,
+                null);
+    }
+
+    @Override
     public String delegateOnBehalfOf(String workflowId, String taskId, String to, String comment,
                                      String idempotencyKey, String onBehalfOf) {
+        return delegateOnBehalfOf(workflowId, taskId, to, comment, null, idempotencyKey,
+                onBehalfOf);
+    }
+
+    @Override
+    public String delegateOnBehalfOf(String workflowId, String taskId, String to, String comment,
+                                     Long delegateForMs, String idempotencyKey,
+                                     String onBehalfOf) {
         WorkflowDelegateRequest.Builder req = WorkflowDelegateRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setTaskId(taskId)
@@ -694,6 +828,9 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
         setOptional(req::setOnBehalfOf, onBehalfOf);
+        if (delegateForMs != null && delegateForMs > 0) {
+            req.setDelegateForMs(delegateForMs);
+        }
 
         WorkflowDelegateResponse response = callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
@@ -701,8 +838,8 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                         .delegate((WorkflowDelegateRequest) r),
                 req.build(), "workflow.delegate");
 
-        log.debug("Workflow delegate: id={}, taskId={}, to={}, status={}",
-                workflowId, taskId, to, response.getStatus());
+        log.debug("Workflow delegate: id={}, taskId={}, to={}, expiresAtMs={}, status={}",
+                workflowId, taskId, to, response.getDelegateExpiresAtMs(), response.getStatus());
         return response.getStatus();
     }
 
@@ -727,6 +864,34 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 req.build(), "workflow.withdraw");
 
         log.debug("Workflow withdraw: id={}, status={}", workflowId, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String resumeWorkflow(String workflowId, long newDueInMs, String reason,
+                                 String idempotencyKey) {
+        return resumeWorkflowOnBehalfOf(workflowId, newDueInMs, reason, idempotencyKey, null);
+    }
+
+    @Override
+    public String resumeWorkflowOnBehalfOf(String workflowId, long newDueInMs, String reason,
+                                           String idempotencyKey, String onBehalfOf) {
+        WorkflowResumeWorkflowRequest.Builder req = WorkflowResumeWorkflowRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setNewDueInMs(newDueInMs);
+        setOptional(req::setReason, reason);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
+
+        WorkflowResumeWorkflowResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .resumeWorkflow((WorkflowResumeWorkflowRequest) r),
+                req.build(), "workflow.resumeWorkflow");
+
+        log.debug("Workflow resumeWorkflow: id={}, newDueInMs={}, deadlineMs={}, tasks={}, status={}",
+                workflowId, newDueInMs, response.getDeadlineMs(), response.getTaskIdsCount(),
+                response.getStatus());
         return response.getStatus();
     }
 

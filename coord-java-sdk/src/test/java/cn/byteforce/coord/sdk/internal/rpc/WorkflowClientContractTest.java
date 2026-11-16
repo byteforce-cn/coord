@@ -9,8 +9,20 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowApproveRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowApproveResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowCcRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowCcResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowAddSignRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowAddSignResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowDelegateRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowDelegateResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetDefinitionRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetDefinitionResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetInstanceDetailRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetInstanceDetailResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListInstancesRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListInstancesResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowRemoveSignRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowRemoveSignResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowResumeWorkflowRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowResumeWorkflowResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetTaskRequest;
@@ -31,14 +43,18 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawTaskResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawResponse;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
+import cn.byteforce.coord.sdk.workflow.AddAssigneePosition;
 import cn.byteforce.coord.sdk.workflow.ApprovalHistoryEvent;
 import cn.byteforce.coord.sdk.workflow.ApprovalInstanceDetail;
 import cn.byteforce.coord.sdk.workflow.ApprovalTask;
+import cn.byteforce.coord.sdk.workflow.InstancePage;
 import cn.byteforce.coord.sdk.workflow.PendingApprovalTask;
 import cn.byteforce.coord.sdk.workflow.TaskDetail;
 import cn.byteforce.coord.sdk.workflow.TaskPage;
 import cn.byteforce.coord.sdk.workflow.TaskQueryFilter;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
+import cn.byteforce.coord.sdk.workflow.WorkflowDefinition;
+import cn.byteforce.coord.sdk.workflow.WorkflowInstanceSummary;
 import cn.byteforce.coord.sdk.workflow.WorkflowStatus;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -588,6 +604,156 @@ class WorkflowClientContractTest {
         assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.INVALID_ARGUMENT);
     }
 
+    @Test
+    @DisplayName("resumeWorkflow 发送 new_due_in_ms/reason/idempotency_key（含 onBehalfOf 变体）")
+    void resumeWorkflowSendsDueReasonAndKey() {
+        fake.nextResumeStatus = "RUNNING";
+
+        String status = wf.resumeWorkflow("inst-1", 3_600_000L, "延期一天", "idem-rs");
+
+        assertThat(status).isEqualTo("RUNNING");
+        assertThat(fake.lastResumeWorkflow.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastResumeWorkflow.getNewDueInMs()).isEqualTo(3_600_000L);
+        assertThat(fake.lastResumeWorkflow.getReason()).isEqualTo("延期一天");
+        assertThat(fake.lastResumeWorkflow.getIdempotencyKey()).isEqualTo("idem-rs");
+        assertThat(fake.lastResumeWorkflow.getOnBehalfOf()).isEmpty();
+
+        wf.resumeWorkflowOnBehalfOf("inst-1", 1_000L, null, "idem-rs2", "alice");
+        assertThat(fake.lastResumeWorkflow.getNewDueInMs()).isEqualTo(1_000L);
+        assertThat(fake.lastResumeWorkflow.getReason()).isEmpty();
+        assertThat(fake.lastResumeWorkflow.getOnBehalfOf()).isEqualTo("alice");
+    }
+
+    @Test
+    @DisplayName("delegate 重载发送 delegate_for_ms；旧 5 参不发送（保持不自动到期）")
+    void delegateSendsOptionalExpiry() {
+        fake.nextDelegateStatus = "RUNNING";
+
+        String status = wf.delegate("inst-1", "task-9", "bob", "代理", 7_200_000L, "idem-dg");
+
+        assertThat(status).isEqualTo("RUNNING");
+        assertThat(fake.lastDelegate.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastDelegate.getTaskId()).isEqualTo("task-9");
+        assertThat(fake.lastDelegate.getTo()).isEqualTo("bob");
+        assertThat(fake.lastDelegate.getDelegateForMs()).isEqualTo(7_200_000L);
+        assertThat(fake.lastDelegate.getIdempotencyKey()).isEqualTo("idem-dg");
+        assertThat(fake.lastDelegate.getOnBehalfOf()).isEmpty();
+
+        wf.delegate("inst-1", "task-9", "bob", null, "idem-dg2");
+        assertThat(fake.lastDelegate.getDelegateForMs()).isZero();
+
+        wf.delegateOnBehalfOf("inst-1", "task-9", "bob", null, 1_000L, "idem-dg3", "alice");
+        assertThat(fake.lastDelegate.getDelegateForMs()).isEqualTo(1_000L);
+        assertThat(fake.lastDelegate.getOnBehalfOf()).isEqualTo("alice");
+    }
+
+    @Test
+    @DisplayName("addSign 重载发送 position/task_id/action_id（CURRENT 不发送 task_id）")
+    void addSignSendsPositionAnchorAndActionId() {
+        wf.addSign("inst-1", "br-1", List.of("bob"), null, null, "加签", "idem-as",
+                AddAssigneePosition.BEFORE, "task-9", "act-7");
+
+        assertThat(fake.lastAddSign.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastAddSign.getBranchId()).isEqualTo("br-1");
+        assertThat(fake.lastAddSign.getApproversList()).containsExactly("bob");
+        assertThat(fake.lastAddSign.getPosition())
+                .isEqualTo(cn.byteforce.coord.contracts.workflow.v1.AddAssigneePosition
+                        .ADD_ASSIGNEE_POSITION_BEFORE);
+        assertThat(fake.lastAddSign.getTaskId()).isEqualTo("task-9");
+        assertThat(fake.lastAddSign.getActionId()).isEqualTo("act-7");
+        assertThat(fake.lastAddSign.getOnBehalfOf()).isEmpty();
+
+        wf.addSignOnBehalfOf("inst-1", "br-1", List.of("bob"), null, null, null, "idem-as2",
+                "alice", AddAssigneePosition.CURRENT, null, null);
+        assertThat(fake.lastAddSign.getPosition()).isEqualTo(
+                cn.byteforce.coord.contracts.workflow.v1.AddAssigneePosition
+                        .ADD_ASSIGNEE_POSITION_CURRENT);
+        assertThat(fake.lastAddSign.getTaskId()).isEmpty();
+        assertThat(fake.lastAddSign.getActionId()).isEmpty();
+        assertThat(fake.lastAddSign.getOnBehalfOf()).isEqualTo("alice");
+    }
+
+    @Test
+    @DisplayName("removeSign 重载发送 assignees/task_id（按人减签）")
+    void removeSignSendsAssigneesAndAnchor() {
+        wf.removeSign("inst-1", "br-1", null, "减签", "idem-rsg",
+                List.of("bob", "carol"), "task-9");
+
+        assertThat(fake.lastRemoveSign.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastRemoveSign.getBranchId()).isEqualTo("br-1");
+        assertThat(fake.lastRemoveSign.getTaskIdsList()).isEmpty();
+        assertThat(fake.lastRemoveSign.getAssigneesList()).containsExactly("bob", "carol");
+        assertThat(fake.lastRemoveSign.getTaskId()).isEqualTo("task-9");
+        assertThat(fake.lastRemoveSign.getIdempotencyKey()).isEqualTo("idem-rsg");
+
+        wf.removeSignOnBehalfOf("inst-1", "br-1", List.of("task-1"), null, null, "alice",
+                null, null);
+        assertThat(fake.lastRemoveSign.getTaskIdsList()).containsExactly("task-1");
+        assertThat(fake.lastRemoveSign.getAssigneesList()).isEmpty();
+        assertThat(fake.lastRemoveSign.getTaskId()).isEmpty();
+        assertThat(fake.lastRemoveSign.getOnBehalfOf()).isEqualTo("alice");
+    }
+
+    @Test
+    @DisplayName("listInstances 重载发送时间窗/定义过滤并回传 next_page_token")
+    void listInstancesWithWindowAndToken() {
+        fake.nextInstances = WorkflowListInstancesResponse.newBuilder()
+                .addInstances(cn.byteforce.coord.contracts.workflow.v1.WorkflowInstanceSummary
+                        .newBuilder()
+                        .setInstanceId("inst-1")
+                        .setWorkflowId("inst-1")
+                        .setState("RUNNING")
+                        .setStartedAt(1_755_000_000_000L)
+                        .setUpdatedAt(1_755_000_100_000L)
+                        .setDefinitionName("order-approval")
+                        .setNamespace("icps")
+                        .build())
+                .setNextPageToken("next-2")
+                .build();
+
+        InstancePage page = wf.listInstances("icps", "order-approval", "RUNNING",
+                1_754_000_000_000L, 1_756_000_000_000L, 500, "page-1");
+
+        assertThat(fake.lastListInstances.getNamespace()).isEqualTo("icps");
+        assertThat(fake.lastListInstances.getDefinition()).isEqualTo("order-approval");
+        assertThat(fake.lastListInstances.getStatusFilter()).isEqualTo("RUNNING");
+        assertThat(fake.lastListInstances.getStartedAfterMs()).isEqualTo(1_754_000_000_000L);
+        assertThat(fake.lastListInstances.getStartedBeforeMs()).isEqualTo(1_756_000_000_000L);
+        assertThat(fake.lastListInstances.getPageSize()).isEqualTo(200);
+        assertThat(fake.lastListInstances.getPageToken()).isEqualTo("page-1");
+        assertThat(page.nextPageToken()).isEqualTo("next-2");
+        assertThat(page.instances()).hasSize(1);
+        WorkflowInstanceSummary s = page.instances().get(0);
+        assertThat(s.instanceId()).isEqualTo("inst-1");
+        assertThat(s.state()).isEqualTo("RUNNING");
+        assertThat(s.definitionName()).isEqualTo("order-approval");
+        assertThat(s.namespace()).isEqualTo("icps");
+        assertThat(s.startedAt()).isEqualTo(1_755_000_000_000L);
+    }
+
+    @Test
+    @DisplayName("getDefinition 重载发送 (namespace, name, version) 三元组")
+    void getDefinitionSendsTriple() {
+        fake.nextDefinition = WorkflowGetDefinitionResponse.newBuilder()
+                .setWorkflowId("def-7")
+                .setName("order-approval")
+                .setVersion("1.2")
+                .setStatus("ACTIVE")
+                .setDefinitionYaml("id: order-approval")
+                .setCreatedAt(1_755_000_000_000L)
+                .build();
+
+        WorkflowDefinition def = wf.getDefinition("icps", "order-approval", "1.2");
+
+        assertThat(fake.lastGetDefinition.getNamespace()).isEqualTo("icps");
+        assertThat(fake.lastGetDefinition.getName()).isEqualTo("order-approval");
+        assertThat(fake.lastGetDefinition.getVersion()).isEqualTo("1.2");
+        assertThat(fake.lastGetDefinition.getWorkflowId()).isEmpty();
+        assertThat(def.workflowId()).isEqualTo("def-7");
+        assertThat(def.version()).isEqualTo("1.2");
+        assertThat(def.definitionYaml()).isEqualTo("id: order-approval");
+    }
+
     /** In-process fake Workflow service —— 仅实现被测 RPC，其余走 gRPC 默认 UNIMPLEMENTED。 */
     static class FakeWorkflowService extends WorkflowGrpc.WorkflowImplBase {
 
@@ -625,6 +791,26 @@ class WorkflowClientContractTest {
 
         WorkflowHistoryRequest lastHistory;
         WorkflowHistoryResponse nextHistory = WorkflowHistoryResponse.newBuilder().build();
+
+        WorkflowResumeWorkflowRequest lastResumeWorkflow;
+        String nextResumeStatus = "RUNNING";
+
+        WorkflowDelegateRequest lastDelegate;
+        String nextDelegateStatus = "RUNNING";
+
+        WorkflowAddSignRequest lastAddSign;
+        String nextAddSignStatus = "RUNNING";
+
+        WorkflowRemoveSignRequest lastRemoveSign;
+        String nextRemoveSignStatus = "RUNNING";
+
+        WorkflowListInstancesRequest lastListInstances;
+        WorkflowListInstancesResponse nextInstances =
+                WorkflowListInstancesResponse.newBuilder().build();
+
+        WorkflowGetDefinitionRequest lastGetDefinition;
+        WorkflowGetDefinitionResponse nextDefinition =
+                WorkflowGetDefinitionResponse.newBuilder().build();
 
         @Override
         public void start(WorkflowStartRequest request,
@@ -740,6 +926,66 @@ class WorkflowClientContractTest {
                             StreamObserver<WorkflowHistoryResponse> responseObserver) {
             lastHistory = request;
             responseObserver.onNext(nextHistory);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void resumeWorkflow(WorkflowResumeWorkflowRequest request,
+                                   StreamObserver<WorkflowResumeWorkflowResponse> responseObserver) {
+            lastResumeWorkflow = request;
+            responseObserver.onNext(WorkflowResumeWorkflowResponse.newBuilder()
+                    .setInstanceId(request.getWorkflowId())
+                    .setStatus(nextResumeStatus)
+                    .build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void delegate(WorkflowDelegateRequest request,
+                            StreamObserver<WorkflowDelegateResponse> responseObserver) {
+            lastDelegate = request;
+            responseObserver.onNext(WorkflowDelegateResponse.newBuilder()
+                    .setInstanceId(request.getWorkflowId())
+                    .setStatus(nextDelegateStatus)
+                    .build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void addSign(WorkflowAddSignRequest request,
+                           StreamObserver<WorkflowAddSignResponse> responseObserver) {
+            lastAddSign = request;
+            responseObserver.onNext(WorkflowAddSignResponse.newBuilder()
+                    .setInstanceId(request.getWorkflowId())
+                    .setStatus(nextAddSignStatus)
+                    .build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void removeSign(WorkflowRemoveSignRequest request,
+                              StreamObserver<WorkflowRemoveSignResponse> responseObserver) {
+            lastRemoveSign = request;
+            responseObserver.onNext(WorkflowRemoveSignResponse.newBuilder()
+                    .setInstanceId(request.getWorkflowId())
+                    .setStatus(nextRemoveSignStatus)
+                    .build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void listInstances(WorkflowListInstancesRequest request,
+                                  StreamObserver<WorkflowListInstancesResponse> responseObserver) {
+            lastListInstances = request;
+            responseObserver.onNext(nextInstances);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void getDefinition(WorkflowGetDefinitionRequest request,
+                                  StreamObserver<WorkflowGetDefinitionResponse> responseObserver) {
+            lastGetDefinition = request;
+            responseObserver.onNext(nextDefinition);
             responseObserver.onCompleted();
         }
     }
