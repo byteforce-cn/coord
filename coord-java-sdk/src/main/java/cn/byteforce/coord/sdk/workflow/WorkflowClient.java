@@ -391,6 +391,57 @@ public interface WorkflowClient {
     String terminate(String workflowId, String reason, String idempotencyKey);
 
     /**
+     * Urge (催办) the current handlers of a seat.
+     *
+     * <p>Writes an audit/notification event; it does not change the seat state.
+     * Replaying with the same idempotency key returns the first response.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the seat ID to urge (empty = instance-level urge)
+     * @param message        optional message to the handlers (may be null)
+     * @param idempotencyKey unique key so retries do not urge twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String urge(String workflowId, String taskId, String message, String idempotencyKey);
+
+    /**
+     * Carbon-copy (抄送) principals on an instance or a seat.
+     *
+     * <p>Seat-level CC requires the node to declare {@code allowCc: true}; instance-level
+     * CC is limited to the initiator / sign admins. The server rejects an empty recipient
+     * list with {@code INVALID_ARGUMENT}.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         seat ID for seat-level CC (null/empty = instance-level CC)
+     * @param recipients     at least one non-empty principal
+     * @param message        optional message (may be null)
+     * @param idempotencyKey unique key so retries do not CC twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String cc(String workflowId, String taskId, List<String> recipients, String message,
+              String idempotencyKey);
+
+    /**
+     * Withdraw a single seat (任务级撤回) and roll the instance back to {@code targetNode}.
+     *
+     * <p>Only the original approver may withdraw; approval records are kept, and seats
+     * carrying a reject vote cannot be withdrawn. The target must be a node the instance
+     * has already reached.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the seat ID to withdraw
+     * @param targetNode     rollback target (must be in the reached-node whitelist)
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not withdraw twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication or guard violation
+     */
+    String withdrawTask(String workflowId, String taskId, String targetNode, String comment,
+                        String idempotencyKey);
+
+    /**
      * Approve as a service acting on behalf of an end user (服务代终端用户).
      *
      * <p>The acting service must be listed in the agent's
@@ -450,8 +501,24 @@ public interface WorkflowClient {
     String terminateOnBehalfOf(String workflowId, String reason, String idempotencyKey,
                                String onBehalfOf);
 
+    /** Urge as a service acting on behalf of the initiator / seat handler. */
+    String urgeOnBehalfOf(String workflowId, String taskId, String message,
+                          String idempotencyKey, String onBehalfOf);
+
+    /** Carbon-copy as a service acting on behalf of the initiator / seat handler. */
+    String ccOnBehalfOf(String workflowId, String taskId, List<String> recipients,
+                        String message, String idempotencyKey, String onBehalfOf);
+
+    /** Withdraw a seat as a service acting on behalf of the seat's approver. */
+    String withdrawTaskOnBehalfOf(String workflowId, String taskId, String targetNode,
+                                  String comment, String idempotencyKey, String onBehalfOf);
+
     /**
      * List pending approval seats (待办) for the current principal.
+     *
+     * <p>For arbitrary filters and a usable next-page token use
+     * {@link #listTasks(TaskQueryFilter, int, String)}; this method keeps its original
+     * "pending for the caller" semantics.</p>
      *
      * @param pageSize  max results per page (1-200; server caps at 200)
      * @param pageToken pagination token from previous response (empty for first page)
@@ -474,6 +541,54 @@ public interface WorkflowClient {
      * @throws CoordException on communication or authorization failure
      */
     List<PendingApprovalTask> listPendingTasksFor(String assignee, int pageSize, String pageToken);
+
+    /**
+     * List approval seats with full filtering (a superset of {@code ListPendingTasks} for
+     * filters, but not for authorization semantics).
+     *
+     * <p><b>Administrative read surface.</b> Gated by {@code coord:workflow:read}, but the
+     * filter is not an authorization scope: with an empty filter the server scans every
+     * instance visible to the agent, and {@code assignee} only selects the seats a
+     * principal can act on. Unlike {@link #listPendingTasksFor}, this method does not
+     * resolve on-behalf-of delegation and does not narrow results to the caller.</p>
+     *
+     * <p>Pagination is by <i>instance</i>: one page may contain more seats than
+     * {@code pageSize}, and when {@code instanceId} is set the whole instance is returned
+     * in one page ({@code nextPageToken} empty).</p>
+     *
+     * @param filter    optional filter ({@code null} = no filter)
+     * @param pageSize  scan budget per page (clamped to 1-200; the server caps it)
+     * @param pageToken opaque token from a previous {@link TaskPage#nextPageToken()}
+     *                  (null/empty for the first page)
+     * @return one page of seats plus the opaque next-page token
+     * @throws CoordException on communication failure or an unknown {@code status}
+     *                        ({@code INVALID_ARGUMENT})
+     */
+    TaskPage listTasks(TaskQueryFilter filter, int pageSize, String pageToken);
+
+    /**
+     * Get one approval seat with its votes, assignments and the owning instance status.
+     *
+     * <p>Seat ids are unique server-wide, so no instance id is required.</p>
+     *
+     * @param taskId the seat ID
+     * @return the seat plus the instance status at read time
+     * @throws CoordException on not found or communication failure
+     */
+    TaskDetail getTask(String taskId);
+
+    /**
+     * Read the approval history event stream of an instance.
+     *
+     * <p>{@link ApprovalHistoryEvent#attributesJson()} is passed through verbatim: the SDK
+     * never parses or re-serializes it, so key order / whitespace stay as the server
+     * produced them.</p>
+     *
+     * @param workflowId the workflow instance ID
+     * @return history events in server order
+     * @throws CoordException on not found or communication failure
+     */
+    List<ApprovalHistoryEvent> history(String workflowId);
 
     /**
      * Get the full approval detail (branches / tasks / rounds) of an instance.

@@ -1,6 +1,6 @@
 # seedj WorkflowProvider → coord workflow v2 映射
 
-Owner: coord workflow ｜ Last verified: 2026-11-15
+Owner: coord workflow ｜ Last verified: 2026-11-16
 
 本文件是 `seedj-workflow-coord` 适配器的字段映射口径。coord 的承诺面以
 `workflow-semantics.md` 与 `coord-proto/src/proto/workflow.proto` 为准；**本文件未列出的
@@ -73,10 +73,17 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | `provider.now()` | 无独立时钟 RPC；响应时间戳均为 Unix ms，使用本地时钟即可 |
 | `capabilities` | 由适配器按本表声明；未实现项必须报 `false`（或回退本地 provider） |
 
+**SDK 门面**：`coord-java-sdk`（main，尚未发版）提供 `listTasks(TaskQueryFilter, pageSize, pageToken)`
+/ `getTask` / `history` 与 `urge` / `cc` / `withdrawTask`（含 `*OnBehalfOf` 变体）。适配器走
+SDK 而不是自行发 gRPC。`listTasks` 是管理面读（`coord:workflow:read`，空过滤跨实例扫描），
+`assignee` 不构成授权收窄；分页必须回传 `TaskPage.nextPageToken`，否则只能读到第一页。
+
 ## 5. 已知缺口（跟踪）
 
-- **无未落地项**：#381 的剩余项（前后加签、assignment 读面、按 assignee 减签、委派到期、
-  `WAITING` + `Resume`）已随 ADR-0013 D13 落地。
+- **引擎/契约面无未落地项**：#381 的剩余项（前后加签、assignment 读面、按 assignee 减签、
+  委派到期、`WAITING` + `Resume`）已随 ADR-0013 D13 落地。
+- **SDK 未发版**：任务读面与任务级命令已在 `main` 落地，但尚未随 `coord-java-sdk` 发布
+  （Maven Central 最新为 `0.4.1`）；发版前适配器不得依赖这些方法。
 - `formData`：按 ADR-0013 D9 **不实现**，由 seedj 侧存储并在读视图合并（见 §2）。
 - `History.actionId` 仍为空；seedj `actionId` 只在加签派生任务上映射为
   `spawned_by_action_id`。

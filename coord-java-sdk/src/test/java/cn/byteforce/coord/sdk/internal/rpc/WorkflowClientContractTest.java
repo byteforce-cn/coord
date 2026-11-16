@@ -1,30 +1,50 @@
 package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.sdk.CoordConfig;
+import cn.byteforce.coord.sdk.CoordException;
+import cn.byteforce.coord.sdk.ErrorCode;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
 import cn.byteforce.coord.contracts.workflow.v1.SuspensionMeta;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowApproveRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowApproveResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowCcRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowCcResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetInstanceDetailRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetInstanceDetailResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetTaskRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetTaskResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGrpc;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowHistoryRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowHistoryResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListPendingTasksRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListPendingTasksResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTasksRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTasksResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowUrgeRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowUrgeResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawTaskRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawTaskResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawResponse;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
+import cn.byteforce.coord.sdk.workflow.ApprovalHistoryEvent;
 import cn.byteforce.coord.sdk.workflow.ApprovalInstanceDetail;
+import cn.byteforce.coord.sdk.workflow.ApprovalTask;
 import cn.byteforce.coord.sdk.workflow.PendingApprovalTask;
+import cn.byteforce.coord.sdk.workflow.TaskDetail;
+import cn.byteforce.coord.sdk.workflow.TaskPage;
+import cn.byteforce.coord.sdk.workflow.TaskQueryFilter;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowStatus;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,6 +55,7 @@ import java.util.List;
 import java.util.concurrent.Executors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -329,6 +350,244 @@ class WorkflowClientContractTest {
         assertThat(d.rounds().get(0).rejectedCount()).isEqualTo(0);
     }
 
+    @Test
+    @DisplayName("urge 发送 task_id/message/idempotency_key 并返回实例状态")
+    void urgeSendsMessageAndKey() {
+        fake.nextUrgeStatus = "RUNNING";
+
+        String status = wf.urge("inst-1", "task-9", "请尽快处理", "idem-urg");
+
+        assertThat(status).isEqualTo("RUNNING");
+        assertThat(fake.lastUrge.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastUrge.getTaskId()).isEqualTo("task-9");
+        assertThat(fake.lastUrge.getMessage()).isEqualTo("请尽快处理");
+        assertThat(fake.lastUrge.getIdempotencyKey()).isEqualTo("idem-urg");
+        assertThat(fake.lastUrge.getOnBehalfOf()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("urge/cc/withdrawTask 的 onBehalfOf 变体发送 on_behalf_of")
+    void taskCommandsOnBehalfOfSendRepresentedUser() {
+        wf.urgeOnBehalfOf("inst-1", "task-9", null, "idem-1", "alice");
+        assertThat(fake.lastUrge.getOnBehalfOf()).isEqualTo("alice");
+
+        wf.ccOnBehalfOf("inst-1", "task-9", List.of("bob"), "知会", "idem-2", "alice");
+        assertThat(fake.lastCc.getOnBehalfOf()).isEqualTo("alice");
+
+        wf.withdrawTaskOnBehalfOf("inst-1", "task-9", "submit", "撤回", "idem-3", "alice");
+        assertThat(fake.lastWithdrawTask.getOnBehalfOf()).isEqualTo("alice");
+    }
+
+    @Test
+    @DisplayName("cc 任务级发送 task_id/recipients；实例级不发送 task_id")
+    void ccSendsRecipientsAndOptionalTask() {
+        wf.cc("inst-1", "task-9", List.of("bob", "carol"), "知会", "idem-cc");
+        assertThat(fake.lastCc.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastCc.getTaskId()).isEqualTo("task-9");
+        assertThat(fake.lastCc.getRecipientsList()).containsExactly("bob", "carol");
+        assertThat(fake.lastCc.getMessage()).isEqualTo("知会");
+        assertThat(fake.lastCc.getIdempotencyKey()).isEqualTo("idem-cc");
+
+        wf.cc("inst-1", null, List.of("bob"), null, null);
+        assertThat(fake.lastCc.getTaskId()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("withdrawTask 发送 task_id/target_node/comment")
+    void withdrawTaskSendsTargetNodeAndComment() {
+        fake.nextWithdrawTaskStatus = "RUNNING";
+
+        String status = wf.withdrawTask("inst-1", "task-9", "submit", "撤回", "idem-wdt");
+
+        assertThat(status).isEqualTo("RUNNING");
+        assertThat(fake.lastWithdrawTask.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastWithdrawTask.getTaskId()).isEqualTo("task-9");
+        assertThat(fake.lastWithdrawTask.getTargetNode()).isEqualTo("submit");
+        assertThat(fake.lastWithdrawTask.getComment()).isEqualTo("撤回");
+        assertThat(fake.lastWithdrawTask.getIdempotencyKey()).isEqualTo("idem-wdt");
+    }
+
+    @Test
+    @DisplayName("listTasks 发送全部过滤条件、钳制 page_size 并回传 next_page_token")
+    void listTasksSendsFiltersAndReturnsPageToken() {
+        fake.nextTasks = WorkflowListTasksResponse.newBuilder()
+                .addTasks(cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary.newBuilder()
+                        .setInstanceId("inst-1")
+                        .setTaskId("task-9")
+                        .setNode("approve")
+                        .setBranchId("br-1")
+                        .setRoundId("rd-1")
+                        .setKind("APPROVAL")
+                        .setStatus("claimed")
+                        .setAssignee("alice")
+                        .addCandidates("alice")
+                        .addCandidates("bob")
+                        .setDeadlineMs(1755000000000L)
+                        .setCreatedAtMs(1754000000000L)
+                        .setOrigin("APPROVAL")
+                        .setPredecessorTaskId("task-1")
+                        .setSuccessorTaskId("task-10")
+                        .setSpawnedByActionId("act-7")
+                        .addAssignments(cn.byteforce.coord.contracts.workflow.v1.ApprovalAssignment
+                                .newBuilder()
+                                .setPrincipal("alice")
+                                .setStatus("pending")
+                                .build())
+                        .build())
+                .setNextPageToken("next-2")
+                .build();
+        TaskQueryFilter filter = new TaskQueryFilter(
+                "inst-1", "alice", "bob", "grp-a", "approve", "claimed", 1756000000000L);
+
+        TaskPage page = wf.listTasks(filter, 500, "page-1");
+
+        assertThat(fake.lastListTasks.getPageSize()).isEqualTo(200);
+        assertThat(fake.lastListTasks.getInstanceId()).isEqualTo("inst-1");
+        assertThat(fake.lastListTasks.getAssignee()).isEqualTo("alice");
+        assertThat(fake.lastListTasks.getCompletedBy()).isEqualTo("bob");
+        assertThat(fake.lastListTasks.getCandidateGroup()).isEqualTo("grp-a");
+        assertThat(fake.lastListTasks.getNode()).isEqualTo("approve");
+        assertThat(fake.lastListTasks.getStatus()).isEqualTo("claimed");
+        assertThat(fake.lastListTasks.getDueBeforeMs()).isEqualTo(1756000000000L);
+        assertThat(fake.lastListTasks.getPageToken()).isEqualTo("page-1");
+        assertThat(page.nextPageToken()).isEqualTo("next-2");
+        assertThat(page.tasks()).hasSize(1);
+        ApprovalTask t = page.tasks().get(0);
+        assertThat(t.instanceId()).isEqualTo("inst-1");
+        assertThat(t.id()).isEqualTo("task-9");
+        assertThat(t.node()).isEqualTo("approve");
+        assertThat(t.status()).isEqualTo("claimed");
+        assertThat(t.assignee()).isEqualTo("alice");
+        assertThat(t.candidates()).containsExactly("alice", "bob");
+        assertThat(t.createdAtMs()).isEqualTo(1754000000000L);
+        assertThat(t.origin()).isEqualTo("APPROVAL");
+        assertThat(t.predecessorTaskId()).isEqualTo("task-1");
+        assertThat(t.successorTaskId()).isEqualTo("task-10");
+        assertThat(t.spawnedByActionId()).isEqualTo("act-7");
+        assertThat(t.assignments()).hasSize(1);
+        assertThat(t.assignments().get(0).principal()).isEqualTo("alice");
+        assertThat(t.assignments().get(0).status()).isEqualTo("pending");
+        assertThat(t.assignments().get(0).vote()).isNull();
+        // 列表投影不带 votes（proto 的 summary 不携带）；需要投票时用 getTask。
+        assertThat(t.votes()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("listTasks 空过滤不上 wire；page_size 下限为 1")
+    void listTasksWithoutFilterSendsNoFilters() {
+        wf.listTasks(null, 0, null);
+
+        assertThat(fake.lastListTasks.getPageSize()).isEqualTo(1);
+        assertThat(fake.lastListTasks.getInstanceId()).isEmpty();
+        assertThat(fake.lastListTasks.getAssignee()).isEmpty();
+        assertThat(fake.lastListTasks.getCompletedBy()).isEmpty();
+        assertThat(fake.lastListTasks.getCandidateGroup()).isEmpty();
+        assertThat(fake.lastListTasks.getNode()).isEmpty();
+        assertThat(fake.lastListTasks.getStatus()).isEmpty();
+        assertThat(fake.lastListTasks.getDueBeforeMs()).isZero();
+        assertThat(fake.lastListTasks.getPageToken()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("getTask 映射席位（含 assignments）+ votes + 实例状态")
+    void getTaskMapsSeatVotesAndInstanceStatus() {
+        fake.nextTask = WorkflowGetTaskResponse.newBuilder()
+                .setTask(cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary.newBuilder()
+                        .setInstanceId("inst-1")
+                        .setTaskId("task-9")
+                        .setNode("approve")
+                        .setBranchId("br-1")
+                        .setRoundId("rd-1")
+                        .setKind("APPROVAL")
+                        .setStatus("completed")
+                        .setAssignee("alice")
+                        .addCandidates("alice")
+                        .setDeadlineMs(1755000000000L)
+                        .setCreatedAtMs(1754000000000L)
+                        .addAssignments(cn.byteforce.coord.contracts.workflow.v1.ApprovalAssignment
+                                .newBuilder()
+                                .setPrincipal("alice")
+                                .setStatus("completed")
+                                .setResolvedReason("voted")
+                                .setRecord(cn.byteforce.coord.contracts.workflow.v1.ApprovalVote
+                                        .newBuilder()
+                                        .setRoundId("rd-1")
+                                        .setDecision("approve")
+                                        .setActor("alice")
+                                        .setComment("ok")
+                                        .setAtMs(1755000000000L)
+                                        .setActingService("svc-bff")
+                                        .build())
+                                .build())
+                        .build())
+                .addVotes(cn.byteforce.coord.contracts.workflow.v1.ApprovalVote.newBuilder()
+                        .setRoundId("rd-1")
+                        .setDecision("approve")
+                        .setActor("alice")
+                        .setComment("ok")
+                        .setAtMs(1755000000000L)
+                        .setActingService("svc-bff")
+                        .build())
+                .setInstanceStatus("COMPLETED")
+                .build();
+
+        TaskDetail detail = wf.getTask("task-9");
+
+        assertThat(fake.lastGetTask.getTaskId()).isEqualTo("task-9");
+        assertThat(detail.instanceStatus()).isEqualTo("COMPLETED");
+        ApprovalTask t = detail.task();
+        assertThat(t.id()).isEqualTo("task-9");
+        assertThat(t.instanceId()).isEqualTo("inst-1");
+        assertThat(t.status()).isEqualTo("completed");
+        assertThat(t.votes()).hasSize(1);
+        assertThat(t.votes().get(0).actingService()).isEqualTo("svc-bff");
+        assertThat(t.assignments()).hasSize(1);
+        assertThat(t.assignments().get(0).resolvedReason()).isEqualTo("voted");
+        assertThat(t.assignments().get(0).vote()).isNotNull();
+        assertThat(t.assignments().get(0).vote().decision()).isEqualTo("approve");
+    }
+
+    @Test
+    @DisplayName("history 原样透传 attributes_json（不解析/不重排）")
+    void historyPassesAttributesJsonVerbatim() {
+        String raw = "{\"b\": 1,   \"a\": [2, 3]}";
+        fake.nextHistory = WorkflowHistoryResponse.newBuilder()
+                .addEvents(cn.byteforce.coord.contracts.workflow.v1.WorkflowHistoryEvent.newBuilder()
+                        .setInstanceId("inst-1")
+                        .setEventId("ev-1")
+                        .setEventType("TASK_URGED")
+                        .setStepName("approve")
+                        .setTaskId("task-9")
+                        .setOccurredAt(1755000000000L)
+                        .setAttributesJson(raw)
+                        .build())
+                .build();
+
+        List<ApprovalHistoryEvent> events = wf.history("inst-1");
+
+        assertThat(fake.lastHistory.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(events).hasSize(1);
+        ApprovalHistoryEvent e = events.get(0);
+        assertThat(e.instanceId()).isEqualTo("inst-1");
+        assertThat(e.eventType()).isEqualTo("TASK_URGED");
+        assertThat(e.node()).isEqualTo("approve");
+        assertThat(e.taskId()).isEqualTo("task-9");
+        assertThat(e.occurredAtMs()).isEqualTo(1755000000000L);
+        assertThat(e.attributesJson()).isEqualTo(raw);
+    }
+
+    @Test
+    @DisplayName("未知 status 由服务端以 INVALID_ARGUMENT 拒绝（既有 ErrorMapper）")
+    void listTasksUnknownStatusSurfacesInvalidArgument() {
+        CoordException ex = catchThrowableOfType(
+                () -> wf.listTasks(new TaskQueryFilter(null, null, null, null, null, "bogus", null),
+                        20, null),
+                CoordException.class);
+
+        assertThat(ex).isNotNull();
+        assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.INVALID_ARGUMENT);
+    }
+
     /** In-process fake Workflow service —— 仅实现被测 RPC，其余走 gRPC 默认 UNIMPLEMENTED。 */
     static class FakeWorkflowService extends WorkflowGrpc.WorkflowImplBase {
 
@@ -348,6 +607,24 @@ class WorkflowClientContractTest {
         WorkflowGetInstanceDetailRequest lastDetail;
         WorkflowGetInstanceDetailResponse nextDetail =
                 WorkflowGetInstanceDetailResponse.newBuilder().build();
+
+        WorkflowUrgeRequest lastUrge;
+        String nextUrgeStatus = "RUNNING";
+
+        WorkflowCcRequest lastCc;
+        String nextCcStatus = "RUNNING";
+
+        WorkflowWithdrawTaskRequest lastWithdrawTask;
+        String nextWithdrawTaskStatus = "RUNNING";
+
+        WorkflowListTasksRequest lastListTasks;
+        WorkflowListTasksResponse nextTasks = WorkflowListTasksResponse.newBuilder().build();
+
+        WorkflowGetTaskRequest lastGetTask;
+        WorkflowGetTaskResponse nextTask = WorkflowGetTaskResponse.newBuilder().build();
+
+        WorkflowHistoryRequest lastHistory;
+        WorkflowHistoryResponse nextHistory = WorkflowHistoryResponse.newBuilder().build();
 
         @Override
         public void start(WorkflowStartRequest request,
@@ -400,6 +677,69 @@ class WorkflowClientContractTest {
                                       StreamObserver<WorkflowGetInstanceDetailResponse> responseObserver) {
             lastDetail = request;
             responseObserver.onNext(nextDetail);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void urge(WorkflowUrgeRequest request,
+                         StreamObserver<WorkflowUrgeResponse> responseObserver) {
+            lastUrge = request;
+            responseObserver.onNext(WorkflowUrgeResponse.newBuilder()
+                    .setInstanceId(request.getWorkflowId())
+                    .setStatus(nextUrgeStatus)
+                    .build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void cc(WorkflowCcRequest request,
+                       StreamObserver<WorkflowCcResponse> responseObserver) {
+            lastCc = request;
+            responseObserver.onNext(WorkflowCcResponse.newBuilder()
+                    .setInstanceId(request.getWorkflowId())
+                    .setStatus(nextCcStatus)
+                    .build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void withdrawTask(WorkflowWithdrawTaskRequest request,
+                                 StreamObserver<WorkflowWithdrawTaskResponse> responseObserver) {
+            lastWithdrawTask = request;
+            responseObserver.onNext(WorkflowWithdrawTaskResponse.newBuilder()
+                    .setInstanceId(request.getWorkflowId())
+                    .setStatus(nextWithdrawTaskStatus)
+                    .build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void listTasks(WorkflowListTasksRequest request,
+                              StreamObserver<WorkflowListTasksResponse> responseObserver) {
+            if ("bogus".equals(request.getStatus())) {
+                responseObserver.onError(Status.INVALID_ARGUMENT
+                        .withDescription("unknown seat status: bogus")
+                        .asRuntimeException());
+                return;
+            }
+            lastListTasks = request;
+            responseObserver.onNext(nextTasks);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void getTask(WorkflowGetTaskRequest request,
+                            StreamObserver<WorkflowGetTaskResponse> responseObserver) {
+            lastGetTask = request;
+            responseObserver.onNext(nextTask);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void history(WorkflowHistoryRequest request,
+                            StreamObserver<WorkflowHistoryResponse> responseObserver) {
+            lastHistory = request;
+            responseObserver.onNext(nextHistory);
             responseObserver.onCompleted();
         }
     }
