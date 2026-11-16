@@ -748,6 +748,24 @@ public interface WorkflowClient {
     TaskDetail getTask(String taskId);
 
     /**
+     * List rounds with all their seats (step-level tasks, seedj {@code HumanTask}).
+     *
+     * <p>The filter is evaluated per seat: a round matches when <b>any</b> of its seats
+     * matches. Every returned group carries <b>all</b> seats of its round, so a multi-seat
+     * countersign task does not need one extra read per instance.</p>
+     *
+     * <p>Pagination is task-level: {@code pageSize} strictly bounds the number of rounds in a
+     * page, and {@code pageToken} is stable (no duplication, no skipping).</p>
+     *
+     * @param filter    optional filter (null = unfiltered)
+     * @param pageSize  max rounds per page (1-200; server caps at 200)
+     * @param pageToken token from the previous page (empty for the first page)
+     * @return this page of round groups plus the next-page token
+     * @throws CoordException on communication failure or an unknown status value
+     */
+    TaskGroupPage listTaskGroups(TaskQueryFilter filter, int pageSize, String pageToken);
+
+    /**
      * Read the approval history event stream of an instance.
      *
      * <p>{@link ApprovalHistoryEvent#attributesJson()} is passed through verbatim: the SDK

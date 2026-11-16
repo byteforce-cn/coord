@@ -2539,15 +2539,31 @@ pub mod phase4 {
     }
 
     /// `ListTasks` 的过滤条件（空/0 = 不过滤）。
-    #[derive(Debug, Clone, Copy, Default)]
+    ///
+    /// `statuses` / `candidate_groups` 是多值（任一命中即算匹配）；未知状态串由
+    /// `list_tasks` / `list_task_groups` fail-closed 拒绝。
+    #[derive(Debug, Clone, Default)]
     pub struct TaskQuery<'a> {
         pub instance_id: Option<&'a str>,
         pub assignee: Option<&'a str>,
         pub completed_by: Option<&'a str>,
-        pub candidate_group: Option<&'a str>,
+        pub candidate_groups: Vec<&'a str>,
         pub node: Option<&'a str>,
-        pub status: Option<&'a str>,
+        pub statuses: Vec<&'a str>,
         pub due_before_ms: i64,
+    }
+
+    /// `ListTaskGroups` 的过滤条件（与 [`TaskQuery`] 同口径，但按**轮次**聚合）。
+    pub type TaskGroupQuery<'a> = TaskQuery<'a>;
+
+    /// 轮次级读面（seedj `HumanTask`）= 一个 round + 同轮全部席位。
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TaskGroupView {
+        pub instance_id: String,
+        pub instance_status: String,
+        pub node: String,
+        pub round: coord_core::workflow::approval::model::Round,
+        pub tasks: Vec<ApprovalTaskView>,
     }
 
     /// 历史事件投影（`History` 读模型）。
@@ -2603,15 +2619,23 @@ pub mod phase4 {
         }
     }
 
+    /// 多值席位状态过滤：空 = 不过滤；任一未知取值 fail-closed。
+    fn parse_task_statuses(raw: &[&str]) -> Result<Vec<ApprovalTaskStatus>, BridgeError> {
+        raw.iter()
+            .map(|value| parse_task_status(value))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(BridgeError::InvalidArgument)
+    }
+
     /// 过滤并投影单个实例的席位（`ListTasks` 的实例内集合）。
     fn collect_matching_tasks(
         engine: &ApprovalEngine,
         filter: &TaskQuery<'_>,
-        status: Option<ApprovalTaskStatus>,
+        statuses: &[ApprovalTaskStatus],
         out: &mut Vec<ApprovalTaskView>,
     ) {
         for task in engine.tasks.values() {
-            if status.is_some_and(|want| task.status != want) {
+            if !statuses.is_empty() && !statuses.contains(&task.status) {
                 continue;
             }
             let node = engine
@@ -2635,9 +2659,11 @@ pub mod phase4 {
             {
                 continue;
             }
-            if filter
-                .candidate_group
-                .is_some_and(|group| !task.candidates.iter().any(|c| c == group))
+            if !filter.candidate_groups.is_empty()
+                && !filter
+                    .candidate_groups
+                    .iter()
+                    .any(|group| task.candidates.iter().any(|c| c == group))
             {
                 continue;
             }
@@ -2653,6 +2679,123 @@ pub mod phase4 {
     }
 
     /// 席位 → 查询投影（节点名取所属分支；实例状态为大写标签）。
+    /// 席位是否命中 `ListTasks` / `ListTaskGroups` 的过滤条件。
+    fn task_matches(
+        task: &ApprovalTask,
+        filter: &TaskQuery<'_>,
+        statuses: &[ApprovalTaskStatus],
+    ) -> bool {
+        if !statuses.is_empty() && !statuses.contains(&task.status) {
+            return false;
+        }
+        if filter.assignee.is_some_and(|who| {
+            task.assignee.as_deref() != Some(who)
+                && !(task.assignee.is_none() && task.candidates.iter().any(|c| c == who))
+                && task.delegation.as_ref().map(|d| d.to.as_str()) != Some(who)
+        }) {
+            return false;
+        }
+        if filter
+            .completed_by
+            .is_some_and(|who| !task.votes.iter().any(|v| v.actor == who))
+        {
+            return false;
+        }
+        if !filter.candidate_groups.is_empty()
+            && !filter
+                .candidate_groups
+                .iter()
+                .any(|group| task.candidates.iter().any(|c| c == group))
+        {
+            return false;
+        }
+        if filter.due_before_ms > 0
+            && !task
+                .deadline
+                .is_some_and(|deadline| deadline <= filter.due_before_ms)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// 同轮全部席位（按 `(created_at, id)` 排序）+ 轮次实体。
+    fn round_tasks<'a>(
+        engine: &'a ApprovalEngine,
+        round_id: &str,
+    ) -> (
+        Vec<&'a ApprovalTask>,
+        Option<coord_core::workflow::approval::model::Round>,
+    ) {
+        let mut tasks: Vec<&ApprovalTask> = engine
+            .tasks
+            .values()
+            .filter(|t| t.round_id == round_id)
+            .collect();
+        tasks.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+        (tasks, engine.rounds.get(round_id).cloned())
+    }
+
+    /// 收集实例内匹配的轮次（`after_round` 之后），按轮次开启顺序追加。
+    fn collect_task_groups(
+        engine: &ApprovalEngine,
+        filter: &TaskQuery<'_>,
+        statuses: &[ApprovalTaskStatus],
+        after_round: Option<&str>,
+        out: &mut Vec<TaskGroupView>,
+    ) {
+        let mut rounds: Vec<&coord_core::workflow::approval::model::Round> =
+            engine.rounds.values().collect();
+        rounds.sort_by(|a, b| (a.opened_at, &a.id).cmp(&(b.opened_at, &b.id)));
+        let mut started = after_round.is_none();
+        for round in rounds {
+            if !started {
+                if after_round == Some(round.id.as_str()) {
+                    started = true;
+                }
+                continue;
+            }
+            let node = engine
+                .branches
+                .get(&round.branch_id)
+                .map(|b| b.node.clone())
+                .unwrap_or_default();
+            if filter.node.is_some_and(|want| node != want) {
+                continue;
+            }
+            let (seats, _) = round_tasks(engine, &round.id);
+            if seats.is_empty() || !seats.iter().any(|t| task_matches(t, filter, statuses)) {
+                continue;
+            }
+            out.push(TaskGroupView {
+                instance_id: engine.instance.id.clone(),
+                instance_status: json_label(&engine.instance.status).to_uppercase(),
+                node,
+                round: round.clone(),
+                tasks: seats
+                    .iter()
+                    .map(|t| task_view(engine, t))
+                    .collect::<Vec<_>>(),
+            });
+        }
+    }
+
+    /// `ListTaskGroups` 分页 token：`{instance_id}\x1f{round_id}`（round 为空 = 该实例已读完）。
+    fn encode_task_group_token(instance_id: &str, round_id: &str) -> String {
+        format!("{instance_id}\u{1f}{round_id}")
+    }
+
+    /// 解析分页 token：返回 `(起始实例（含续读）, 该实例内起始轮次（不含）)`。
+    fn parse_task_group_token(token: &str) -> (Option<&str>, Option<&str>) {
+        match token.split_once('\u{1f}') {
+            Some((instance_id, round_id)) => {
+                (Some(instance_id), Some(round_id).filter(|r| !r.is_empty()))
+            }
+            // 兼容旧口径：裸实例 id = 该实例已读完。
+            None => (Some(token), None),
+        }
+    }
+
     fn task_view(engine: &ApprovalEngine, task: &ApprovalTask) -> ApprovalTaskView {
         ApprovalTaskView {
             instance_id: engine.instance.id.clone(),
@@ -3877,6 +4020,91 @@ pub mod phase4 {
             Ok((tasks, next))
         }
 
+        /// 轮次级任务查询（`ListTaskGroups`）：一个 round = seedj 的一个 `HumanTask`。
+        ///
+        /// 过滤按**席位级**条件判定（任一席位命中即算该轮命中），返回的 `tasks` 是该轮
+        /// **全部**席位（含未命中过滤的兄弟姐妹），因此调用方聚合 `HumanTask` 不需要
+        /// 再按实例 N+1 读详情。
+        ///
+        /// 分页是**任务级**：`page_size` 是本页轮次数上限，`page_token` 定位到
+        /// `(实例 id, 轮次 id)`；指定 `instance_id` 时不分页。
+        pub async fn list_task_groups(
+            &self,
+            filter: &TaskGroupQuery<'_>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<TaskGroupView>, Option<String>), BridgeError> {
+            let bridge = self.approval_bridge()?;
+            let requested = if page_size == 0 {
+                coord_core::workflow::ports::DEFAULT_LIST_PAGE_SIZE
+            } else {
+                page_size
+            };
+            let scan_limit = coord_core::workflow::approval::store::clamp_scan_limit(requested);
+            let statuses = parse_task_statuses(&filter.statuses)?;
+
+            if let Some(instance_id) = filter.instance_id {
+                let engine = bridge
+                    .store()
+                    .load(instance_id)
+                    .await
+                    .map_err(BridgeError::from)?
+                    .map(|(engine, _rev)| engine)
+                    .ok_or_else(|| BridgeError::NotFound(instance_id.to_string()))?;
+                let mut groups = Vec::new();
+                collect_task_groups(&engine, filter, &statuses, None, &mut groups);
+                return Ok((groups, None));
+            }
+
+            let (resume_instance, resume_round) = match page_token {
+                Some(token) => parse_task_group_token(token),
+                None => (None, None),
+            };
+            let mut groups = Vec::new();
+            // 页界可能落在一个实例中间：先读完该实例 token 轮次之后的轮次。
+            if let (Some(instance_id), Some(round_id)) = (resume_instance, resume_round) {
+                if let Some((engine, _rev)) = bridge
+                    .store()
+                    .load(instance_id)
+                    .await
+                    .map_err(BridgeError::from)?
+                {
+                    collect_task_groups(&engine, filter, &statuses, Some(round_id), &mut groups);
+                }
+            }
+
+            let mut after = resume_instance.map(str::to_string);
+            loop {
+                let entries = bridge
+                    .store()
+                    .scan(after.as_deref(), scan_limit)
+                    .await
+                    .map_err(BridgeError::from)?;
+                let scanned = entries.len();
+                for entry in &entries {
+                    collect_task_groups(&entry.engine, filter, &statuses, None, &mut groups);
+                    // 多取一个即可判定「还有下一页」，无需扫完剩余实例。
+                    if groups.len() > requested {
+                        break;
+                    }
+                }
+                if groups.len() > requested || scanned < scan_limit {
+                    break;
+                }
+                after = entries.last().map(|e| e.id.clone());
+            }
+
+            let next = if groups.len() > requested {
+                groups.truncate(requested);
+                groups
+                    .last()
+                    .map(|g| encode_task_group_token(&g.instance_id, &g.round.id))
+            } else {
+                None
+            };
+            Ok((groups, next))
+        }
+
         /// 任务查询（`ListTasks`）：跨实例扫描 v4 前缀，按过滤条件投影。
         ///
         /// 分页沿用 `ListPendingTasks` 的口径：`page_token` = 上一页最后扫描到的**实例**
@@ -3895,11 +4123,7 @@ pub mod phase4 {
                 page_size
             };
             let limit = coord_core::workflow::approval::store::clamp_scan_limit(requested);
-            let status = filter
-                .status
-                .map(parse_task_status)
-                .transpose()
-                .map_err(BridgeError::InvalidArgument)?;
+            let statuses = parse_task_statuses(&filter.statuses)?;
 
             let mut views = Vec::new();
             if let Some(instance_id) = filter.instance_id {
@@ -3910,7 +4134,7 @@ pub mod phase4 {
                     .map_err(BridgeError::from)?
                     .map(|(engine, _rev)| engine)
                     .ok_or_else(|| BridgeError::NotFound(instance_id.to_string()))?;
-                collect_matching_tasks(&engine, filter, status, &mut views);
+                collect_matching_tasks(&engine, filter, &statuses, &mut views);
                 return Ok((views, None));
             }
 
@@ -3921,7 +4145,7 @@ pub mod phase4 {
                 .map_err(BridgeError::from)?;
             let scanned = entries.len();
             for entry in &entries {
-                collect_matching_tasks(&entry.engine, filter, status, &mut views);
+                collect_matching_tasks(&entry.engine, filter, &statuses, &mut views);
             }
             let next = if scanned < limit {
                 None
@@ -3936,6 +4160,33 @@ pub mod phase4 {
         /// 快路径从 task id 的 `{instance_id}:` 前缀直接读实例；前缀不是实例 id 时回退
         /// 到 v4 前缀扫描（边界同 `ListTasks`）。
         pub async fn get_task(&self, task_id: &str) -> Result<ApprovalTaskView, BridgeError> {
+            let (engine, task) = self.locate_task(task_id).await?;
+            Ok(task_view(&engine, &task))
+        }
+
+        /// 同轮席位聚合：返回该席位所属轮次的**全部**席位 + 轮次计数/判定。
+        ///
+        /// 与 [`Self::get_task`] 同一查找路径；seedj 聚合一个 `HumanTask` 只需一次调用。
+        pub async fn get_task_round(
+            &self,
+            task_id: &str,
+        ) -> Result<
+            (
+                Vec<ApprovalTaskView>,
+                Option<coord_core::workflow::approval::model::Round>,
+            ),
+            BridgeError,
+        > {
+            let (engine, task) = self.locate_task(task_id).await?;
+            let (tasks, round) = round_tasks(&engine, &task.round_id);
+            Ok((tasks.iter().map(|t| task_view(&engine, t)).collect(), round))
+        }
+
+        /// 按 task id 定位引擎聚合（快路径 `{instance_id}:` 前缀，回退 v4 前缀扫描）。
+        async fn locate_task(
+            &self,
+            task_id: &str,
+        ) -> Result<(ApprovalEngine, ApprovalTask), BridgeError> {
             let bridge = self.approval_bridge()?;
             if let Some((prefix, _)) = task_id.split_once(':') {
                 if let Some((engine, _rev)) = bridge
@@ -3944,8 +4195,8 @@ pub mod phase4 {
                     .await
                     .map_err(BridgeError::from)?
                 {
-                    if let Some(task) = engine.tasks.get(task_id) {
-                        return Ok(task_view(&engine, task));
+                    if let Some(task) = engine.tasks.get(task_id).cloned() {
+                        return Ok((engine, task));
                     }
                 }
             }
@@ -3961,15 +4212,16 @@ pub mod phase4 {
                     .await
                     .map_err(BridgeError::from)?;
                 let scanned = entries.len();
-                for entry in &entries {
-                    if let Some(task) = entry.engine.tasks.get(task_id) {
-                        return Ok(task_view(&entry.engine, task));
+                let last = entries.last().map(|e| e.id.clone());
+                for entry in entries {
+                    if let Some(task) = entry.engine.tasks.get(task_id).cloned() {
+                        return Ok((entry.engine, task));
                     }
                 }
                 if scanned < limit {
                     break;
                 }
-                token = entries.last().map(|e| e.id.clone());
+                token = last;
             }
             Err(BridgeError::NotFound(task_id.to_string()))
         }
@@ -6994,6 +7246,40 @@ do:
         )
     }
 
+    fn sample_two_seat_yaml(name: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice", "bob"]
+"#
+        )
+    }
+
+    fn sample_pool_deadline_yaml(name: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        pool: ["u-pool"]
+        deadline: "PT1H"
+"#
+        )
+    }
+
     fn sample_approve_role_yaml(name: &str, role: &str) -> String {
         format!(
             r#"
@@ -7515,7 +7801,7 @@ do:
         // 按可处理主体 + 状态。
         let filter = TaskQuery {
             assignee: Some("alice"),
-            status: Some("created"),
+            statuses: vec!["created"],
             ..Default::default()
         };
         let (pending, _) = svc.list_tasks(&filter, 10, None).await.unwrap();
@@ -7543,7 +7829,7 @@ do:
         .unwrap();
         let filter = TaskQuery {
             completed_by: Some("alice"),
-            status: Some("completed"),
+            statuses: vec!["completed"],
             instance_id: Some(&a.id),
             ..Default::default()
         };
@@ -7561,10 +7847,189 @@ do:
 
         // 未知状态串 fail-closed（不静默当作不过滤）。
         let filter = TaskQuery {
-            status: Some("bogus"),
+            statuses: vec!["bogus"],
             ..Default::default()
         };
         assert!(svc.list_tasks(&filter, 10, None).await.is_err());
+    }
+
+    /// #407：轮次级读面——同轮席位聚合、多值过滤、任务级严格分页与 token 稳定续读。
+    #[tokio::test]
+    async fn list_task_groups_aggregates_rounds_and_paginates_strictly() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_two_seat_yaml("groups-wf"))
+            .await
+            .unwrap();
+        let mut instances = Vec::new();
+        for _ in 0..3 {
+            let inst = svc
+                .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+                .await
+                .unwrap();
+            // 同轮两个席位都建出来后再查询
+            await_open_seat(&store, &inst.id, "alice").await;
+            await_open_seat(&store, &inst.id, "bob").await;
+            instances.push(inst.id);
+        }
+
+        // assignee 过滤命中轮次，返回同轮**全部**席位（含未命中的兄弟姐妹）。
+        let filter = TaskQuery {
+            assignee: Some("alice"),
+            statuses: vec!["created"],
+            ..Default::default()
+        };
+        let (all, next) = svc.list_task_groups(&filter, 10, None).await.unwrap();
+        assert_eq!(all.len(), 3, "每个实例一个轮次");
+        assert!(next.is_none());
+        for group in &all {
+            assert_eq!(group.tasks.len(), 2, "同轮两个席位必须一起返回");
+            assert!(group
+                .tasks
+                .iter()
+                .any(|t| t.task.assignee.as_deref() == Some("bob")));
+            assert_eq!(group.round.total_count, 2);
+            assert_eq!(group.node, "review");
+        }
+
+        // 任务级严格分页：page_size 是本页轮次数上限；token 续读不重不漏。
+        let (page1, token) = svc.list_task_groups(&filter, 2, None).await.unwrap();
+        assert_eq!(page1.len(), 2);
+        let token = token.expect("page 2 token");
+        let (page2, token2) = svc
+            .list_task_groups(&filter, 2, Some(&token))
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 1);
+        assert!(token2.is_none());
+
+        let mut seen: Vec<String> = page1
+            .iter()
+            .chain(page2.iter())
+            .map(|g| g.round.id.clone())
+            .collect();
+        let mut expected: Vec<String> = all.iter().map(|g| g.round.id.clone()).collect();
+        seen.sort();
+        expected.sort();
+        assert_eq!(seen, expected, "分页必须覆盖全部轮次且不重复");
+
+        // 多值状态：alice 批掉第一个实例后，两个状态值都要命中，单值只命中完成的那轮。
+        let first_seat = all
+            .iter()
+            .find(|g| g.instance_id == instances[0])
+            .and_then(|g| {
+                g.tasks
+                    .iter()
+                    .find(|t| t.task.assignee.as_deref() == Some("alice"))
+                    .map(|t| t.task.id.clone())
+            })
+            .expect("alice seat");
+        svc.approval_command(
+            &instances[0],
+            "alice",
+            ApprovalCommand::Approve {
+                task_id: &first_seat,
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let both = TaskQuery {
+            assignee: Some("alice"),
+            statuses: vec!["created", "completed"],
+            ..Default::default()
+        };
+        let (both_groups, _) = svc.list_task_groups(&both, 10, None).await.unwrap();
+        assert_eq!(both_groups.len(), 3, "两个状态值都命中");
+        let completed_only = TaskQuery {
+            assignee: Some("alice"),
+            statuses: vec!["completed"],
+            ..Default::default()
+        };
+        let (done_groups, _) = svc
+            .list_task_groups(&completed_only, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(done_groups.len(), 1, "只命中已完成席位所在轮次");
+        assert_eq!(done_groups[0].instance_id, instances[0]);
+
+        // completedBy：只命中投过票的轮次。
+        let by_voter = TaskQuery {
+            completed_by: Some("alice"),
+            statuses: vec!["completed"],
+            ..Default::default()
+        };
+        let (voted_groups, _) = svc.list_task_groups(&by_voter, 10, None).await.unwrap();
+        assert_eq!(voted_groups.len(), 1);
+        assert_eq!(voted_groups[0].instance_id, instances[0]);
+        assert_eq!(
+            voted_groups[0].round.completed_count, 1,
+            "轮次计数随投票更新"
+        );
+
+        // candidateGroups：候选池命中整轮；deadline 过滤按未决席位最早截止。
+        let pool_def = svc
+            .deploy_definition("test", &sample_pool_deadline_yaml("groups-pool-wf"))
+            .await
+            .unwrap();
+        let pool_inst = svc
+            .start_instance_as(&pool_def, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &pool_inst.id, "alice").await;
+        let by_group = TaskQuery {
+            candidate_groups: vec!["u-pool"],
+            ..Default::default()
+        };
+        let (pool_groups, _) = svc.list_task_groups(&by_group, 10, None).await.unwrap();
+        assert_eq!(pool_groups.len(), 1, "候选池命中该轮");
+        assert_eq!(pool_groups[0].instance_id, pool_inst.id);
+        assert!(
+            pool_groups[0]
+                .tasks
+                .iter()
+                .any(|t| t.task.candidates.iter().any(|c| c == "u-pool")),
+            "同轮席位必须包含池席位"
+        );
+        let deadline = pool_groups[0]
+            .tasks
+            .iter()
+            .filter_map(|t| t.task.deadline)
+            .min()
+            .expect("deadline 定义必须换算成绝对截止");
+        let due_filter = TaskQuery {
+            candidate_groups: vec!["u-pool"],
+            due_before_ms: deadline,
+            ..Default::default()
+        };
+        assert_eq!(
+            svc.list_task_groups(&due_filter, 10, None)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        let too_early = TaskQuery {
+            candidate_groups: vec!["u-pool"],
+            due_before_ms: deadline - 1,
+            ..Default::default()
+        };
+        assert!(svc
+            .list_task_groups(&too_early, 10, None)
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+
+        // GetTask 带同轮席位 + 轮次计数。
+        let (siblings, round) = svc.get_task_round(&first_seat).await.unwrap();
+        assert_eq!(siblings.len(), 2);
+        let round = round.expect("round");
+        assert_eq!(round.total_count, 2);
+        assert_eq!(round.completed_count, 1);
     }
 
     /// 历史投影：事件类型/顺序稳定，重复读取逐字一致；否决原因进入 ROUND_REJECTED。

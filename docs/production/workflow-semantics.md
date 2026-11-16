@@ -250,6 +250,12 @@ auth:
   suspended/transferred/delegated/completed/rejected/cancelled/expired）。
   `RemoveSign` 可用 `assignees`（按 assignee）替代 `task_ids`，响应返回
   `removed_task_ids` 与重算后的 `round`。
+- **席位列 vs 轮次（读面口径）**：coord 的 `ApprovalTask` 是**席位级**（一个审批人一个
+  席位），seedj 的 `HumanTask` 是**步骤级**（一个 round）。`ListTaskGroups` 按轮次聚合
+  （`page_size` 严格限制本页轮次数、token 定位到 `(实例, 轮次)`），`GetTask.round_tasks`
+  给出同轮全部席位；`ListTasks` 保持席位级与按实例窗口分页（单页可能多于 `page_size`）。
+  多值过滤 `statuses` / `candidate_groups` 任一命中即匹配；`PENDING` 需展开为
+  `created|claimed|suspended|scheduled`。
 - **业务表单（`formData`）**：ADR-0013 D9 的非目标——coord 只存审批记录（`comment` /
   `on_behalf_of` / 审计），**不接受也不存储**业务表单数据；seedj 侧存储并在读视图合并。
 - **委派到期（ADR-0013 D13）**：`Delegate` 可带 `delegate_for_ms`；到期由审批 deadline

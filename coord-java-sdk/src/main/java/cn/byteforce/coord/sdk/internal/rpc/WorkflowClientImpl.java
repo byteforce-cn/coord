@@ -38,6 +38,8 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowListInstancesRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListInstancesResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListPendingTasksRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListPendingTasksResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTaskGroupsRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTaskGroupsResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTasksRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTasksResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowRejectRequest;
@@ -80,6 +82,8 @@ import cn.byteforce.coord.sdk.workflow.InstancePage;
 import cn.byteforce.coord.sdk.workflow.PendingApprovalTask;
 import cn.byteforce.coord.sdk.workflow.Suspension;
 import cn.byteforce.coord.sdk.workflow.TaskDetail;
+import cn.byteforce.coord.sdk.workflow.TaskGroup;
+import cn.byteforce.coord.sdk.workflow.TaskGroupPage;
 import cn.byteforce.coord.sdk.workflow.TaskPage;
 import cn.byteforce.coord.sdk.workflow.TaskQueryFilter;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
@@ -1122,6 +1126,12 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
             setOptional(req::setCandidateGroup, filter.candidateGroup());
             setOptional(req::setNode, filter.node());
             setOptional(req::setStatus, filter.status());
+            if (filter.statuses() != null && !filter.statuses().isEmpty()) {
+                req.addAllStatuses(filter.statuses());
+            }
+            if (filter.candidateGroups() != null && !filter.candidateGroups().isEmpty()) {
+                req.addAllCandidateGroups(filter.candidateGroups());
+            }
             if (filter.dueBeforeMs() != null && filter.dueBeforeMs() > 0) {
                 req.setDueBeforeMs(filter.dueBeforeMs());
             }
@@ -1156,9 +1166,69 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 request, "workflow.getTask");
 
         ApprovalTask task = toApprovalTask(response.getTask(), mapVotes(response.getVotesList()));
-        log.debug("Workflow getTask: taskId={}, status={}, votes={}, instanceStatus={}",
-                taskId, task.status(), task.votes().size(), response.getInstanceStatus());
-        return new TaskDetail(task, response.getInstanceStatus());
+        List<ApprovalTask> roundTasks = new ArrayList<>();
+        for (cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary s : response.getRoundTasksList()) {
+            roundTasks.add(toApprovalTask(s, List.of()));
+        }
+        ApprovalRound round = null;
+        if (response.hasRound()) {
+            cn.byteforce.coord.contracts.workflow.v1.ApprovalRound r = response.getRound();
+            round = new ApprovalRound(r.getId(), r.getBranchId(), r.getNumber(), r.getStatus(),
+                    r.getTotalCount(), r.getCompletedCount(), r.getRejectedCount(),
+                    r.getRejectReason());
+        }
+        log.debug("Workflow getTask: taskId={}, status={}, votes={}, roundTasks={}, instanceStatus={}",
+                taskId, task.status(), task.votes().size(), roundTasks.size(),
+                response.getInstanceStatus());
+        return new TaskDetail(task, response.getInstanceStatus(), roundTasks, round);
+    }
+
+    @Override
+    public TaskGroupPage listTaskGroups(TaskQueryFilter filter, int pageSize, String pageToken) {
+        WorkflowListTaskGroupsRequest.Builder req = WorkflowListTaskGroupsRequest.newBuilder()
+                .setPageSize(Math.max(1, Math.min(pageSize, 200)));
+        if (filter != null) {
+            setOptional(req::setInstanceId, filter.instanceId());
+            setOptional(req::setAssignee, filter.assignee());
+            setOptional(req::setCompletedBy, filter.completedBy());
+            if (filter.candidateGroups() != null && !filter.candidateGroups().isEmpty()) {
+                req.addAllCandidateGroups(filter.candidateGroups());
+            }
+            setOptional(req::setNode, filter.node());
+            if (filter.statuses() != null && !filter.statuses().isEmpty()) {
+                req.addAllStatuses(filter.statuses());
+            }
+            if (filter.dueBeforeMs() != null && filter.dueBeforeMs() > 0) {
+                req.setDueBeforeMs(filter.dueBeforeMs());
+            }
+        }
+        setOptional(req::setPageToken, pageToken);
+
+        WorkflowListTaskGroupsResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .listTaskGroups((WorkflowListTaskGroupsRequest) r),
+                req.build(), "workflow.listTaskGroups");
+
+        List<TaskGroup> groups = new ArrayList<>();
+        for (cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskGroup g : response.getGroupsList()) {
+            List<ApprovalTask> seats = new ArrayList<>();
+            for (cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary s : g.getTasksList()) {
+                seats.add(toApprovalTask(s, List.of()));
+            }
+            List<ApprovalAssignment> assignments = new ArrayList<>();
+            for (cn.byteforce.coord.contracts.workflow.v1.ApprovalAssignment a : g.getAssignmentsList()) {
+                assignments.add(new ApprovalAssignment(a.getPrincipal(), a.getStatus(),
+                        a.getResolvedReason(),
+                        a.hasRecord() ? toApprovalVote(a.getRecord()) : null));
+            }
+            groups.add(new TaskGroup(g.getId(), g.getInstanceId(), g.getBranchId(), g.getRoundId(),
+                    g.getNode(), g.getStatus(), g.getKind(), seats, assignments,
+                    g.getCreatedAtMs(), g.getDeadlineMs()));
+        }
+        log.debug("Workflow listTaskGroups: filter={}, pageSize={}, groups={}, hasNext={}",
+                filter, pageSize, groups.size(), !response.getNextPageToken().isEmpty());
+        return new TaskGroupPage(groups, response.getNextPageToken());
     }
 
     @Override

@@ -1,5 +1,7 @@
 package cn.byteforce.coord.sdk.workflow;
 
+import java.util.List;
+
 /**
  * Filter for {@link WorkflowClient#listTasks(TaskQueryFilter, int, String)}.
  *
@@ -22,8 +24,26 @@ package cn.byteforce.coord.sdk.workflow;
  *                       {@code cancelled} / {@code expired}; unknown values are rejected
  *                       by the server with {@code INVALID_ARGUMENT}
  * @param dueBeforeMs    only seats whose deadline is {@code <=} this value (Unix ms)
+ * @param statuses       multi-value seat statuses (any match counts); {@code PENDING} is not
+ *                       a seat status — expand it to
+ *                       {@code created/claimed/suspended/scheduled} first
+ * @param candidateGroups multi-value candidate pools (any match counts)
  */
 public record TaskQueryFilter(String instanceId, String assignee, String completedBy,
                               String candidateGroup, String node, String status,
-                              Long dueBeforeMs) {
+                              Long dueBeforeMs, List<String> statuses,
+                              List<String> candidateGroups) {
+
+    public TaskQueryFilter {
+        statuses = statuses == null ? List.of() : List.copyOf(statuses);
+        candidateGroups = candidateGroups == null ? List.of() : List.copyOf(candidateGroups);
+    }
+
+    /** Backward-compatible single-value filter (no multi-value filters). */
+    public TaskQueryFilter(String instanceId, String assignee, String completedBy,
+                           String candidateGroup, String node, String status,
+                           Long dueBeforeMs) {
+        this(instanceId, assignee, completedBy, candidateGroup, node, status, dueBeforeMs,
+                List.of(), List.of());
+    }
 }

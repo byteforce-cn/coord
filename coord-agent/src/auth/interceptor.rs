@@ -1867,6 +1867,7 @@ mod tests {
             "/coord.workflow.v1.Workflow/ListPendingTasks",
             "/coord.workflow.v1.Workflow/GetInstanceDetail",
             "/coord.workflow.v1.Workflow/ListTasks",
+            "/coord.workflow.v1.Workflow/ListTaskGroups",
             "/coord.workflow.v1.Workflow/GetTask",
             "/coord.workflow.v1.Workflow/History",
         ] {

@@ -32,6 +32,8 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowHistoryRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowHistoryResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListPendingTasksRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListPendingTasksResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTaskGroupsRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTaskGroupsResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTasksRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListTasksResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartRequest;
@@ -50,6 +52,8 @@ import cn.byteforce.coord.sdk.workflow.ApprovalTask;
 import cn.byteforce.coord.sdk.workflow.InstancePage;
 import cn.byteforce.coord.sdk.workflow.PendingApprovalTask;
 import cn.byteforce.coord.sdk.workflow.TaskDetail;
+import cn.byteforce.coord.sdk.workflow.TaskGroup;
+import cn.byteforce.coord.sdk.workflow.TaskGroupPage;
 import cn.byteforce.coord.sdk.workflow.TaskPage;
 import cn.byteforce.coord.sdk.workflow.TaskQueryFilter;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
@@ -836,6 +840,139 @@ class WorkflowClientContractTest {
         assertThat(s.definitionVersion()).isEmpty();
     }
 
+    @DisplayName("listTaskGroups 发送多值过滤 + 严格 page_size，并映射同轮席位/assignment/轮次")
+    void listTaskGroupsSendsFiltersAndMapsRound() {
+        fake.nextTaskGroups = WorkflowListTaskGroupsResponse.newBuilder()
+                .addGroups(cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskGroup.newBuilder()
+                        .setId("rd-1")
+                        .setInstanceId("inst-1")
+                        .setBranchId("br-1")
+                        .setRoundId("rd-1")
+                        .setNode("approve")
+                        .setStatus("open")
+                        .setKind("approval")
+                        .setCreatedAtMs(1_755_000_000_000L)
+                        .setDeadlineMs(1_756_000_000_000L)
+                        .addTasks(cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary
+                                .newBuilder()
+                                .setInstanceId("inst-1")
+                                .setTaskId("task-1")
+                                .setRoundId("rd-1")
+                                .setStatus("created")
+                                .setAssignee("alice")
+                                .build())
+                        .addTasks(cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary
+                                .newBuilder()
+                                .setInstanceId("inst-1")
+                                .setTaskId("task-2")
+                                .setRoundId("rd-1")
+                                .setStatus("created")
+                                .setAssignee("bob")
+                                .build())
+                        .addAssignments(cn.byteforce.coord.contracts.workflow.v1.ApprovalAssignment
+                                .newBuilder()
+                                .setPrincipal("alice")
+                                .setStatus("pending")
+                                .build())
+                        .build())
+                .setNextPageToken("page-2")
+                .build();
+
+        TaskGroupPage page = wf.listTaskGroups(new TaskQueryFilter(
+                "inst-1", "alice", null, null, "approve",
+                null, 1_756_000_000_000L,
+                List.of("created", "claimed"), List.of("grp-a", "grp-b")),
+                500, "page-1");
+
+        assertThat(fake.lastListTaskGroups.getPageSize()).isEqualTo(200);
+        assertThat(fake.lastListTaskGroups.getPageToken()).isEqualTo("page-1");
+        assertThat(fake.lastListTaskGroups.getInstanceId()).isEqualTo("inst-1");
+        assertThat(fake.lastListTaskGroups.getAssignee()).isEqualTo("alice");
+        assertThat(fake.lastListTaskGroups.getNode()).isEqualTo("approve");
+        assertThat(fake.lastListTaskGroups.getStatusesList())
+                .containsExactly("created", "claimed");
+        assertThat(fake.lastListTaskGroups.getCandidateGroupsList())
+                .containsExactly("grp-a", "grp-b");
+        assertThat(fake.lastListTaskGroups.getDueBeforeMs()).isEqualTo(1_756_000_000_000L);
+
+        assertThat(page.nextPageToken()).isEqualTo("page-2");
+        assertThat(page.hasNextPage()).isTrue();
+        assertThat(page.groups()).hasSize(1);
+        TaskGroup g = page.groups().get(0);
+        assertThat(g.id()).isEqualTo("rd-1");
+        assertThat(g.instanceId()).isEqualTo("inst-1");
+        assertThat(g.branchId()).isEqualTo("br-1");
+        assertThat(g.node()).isEqualTo("approve");
+        assertThat(g.status()).isEqualTo("open");
+        assertThat(g.kind()).isEqualTo("approval");
+        assertThat(g.createdAtMs()).isEqualTo(1_755_000_000_000L);
+        assertThat(g.deadlineMs()).isEqualTo(1_756_000_000_000L);
+        assertThat(g.tasks()).hasSize(2);
+        assertThat(g.tasks().get(1).assignee()).isEqualTo("bob");
+        assertThat(g.assignments()).hasSize(1);
+        assertThat(g.assignments().get(0).principal()).isEqualTo("alice");
+    }
+
+    @Test
+    @DisplayName("listTasks 发送多值 statuses/candidate_groups")
+    void listTasksSendsMultiValueFilters() {
+        wf.listTasks(new TaskQueryFilter(null, null, null, null, null, null, null,
+                List.of("created", "claimed"), List.of("grp-a")), 10, null);
+
+        assertThat(fake.lastListTasks.getStatusesList()).containsExactly("created", "claimed");
+        assertThat(fake.lastListTasks.getCandidateGroupsList()).containsExactly("grp-a");
+        assertThat(fake.lastListTasks.getStatus()).isEmpty();
+        assertThat(fake.lastListTasks.getCandidateGroup()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("getTask 带回同轮席位与轮次计数")
+    void getTaskMapsRoundTasksAndRound() {
+        fake.nextTask = WorkflowGetTaskResponse.newBuilder()
+                .setTask(cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary.newBuilder()
+                        .setInstanceId("inst-1")
+                        .setTaskId("task-1")
+                        .setRoundId("rd-1")
+                        .setStatus("created")
+                        .setAssignee("alice")
+                        .build())
+                .addRoundTasks(cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary
+                        .newBuilder()
+                        .setInstanceId("inst-1")
+                        .setTaskId("task-1")
+                        .setRoundId("rd-1")
+                        .setStatus("created")
+                        .setAssignee("alice")
+                        .build())
+                .addRoundTasks(cn.byteforce.coord.contracts.workflow.v1.ApprovalTaskSummary
+                        .newBuilder()
+                        .setInstanceId("inst-1")
+                        .setTaskId("task-2")
+                        .setRoundId("rd-1")
+                        .setStatus("created")
+                        .setAssignee("bob")
+                        .build())
+                .setRound(cn.byteforce.coord.contracts.workflow.v1.ApprovalRound.newBuilder()
+                        .setId("rd-1")
+                        .setBranchId("br-1")
+                        .setNumber(1)
+                        .setStatus("open")
+                        .setTotalCount(2)
+                        .setCompletedCount(0)
+                        .setRejectedCount(0)
+                        .build())
+                .setInstanceStatus("RUNNING")
+                .build();
+
+        TaskDetail detail = wf.getTask("task-1");
+
+        assertThat(detail.roundTasks()).hasSize(2);
+        assertThat(detail.roundTasks().get(1).id()).isEqualTo("task-2");
+        assertThat(detail.round()).isNotNull();
+        assertThat(detail.round().id()).isEqualTo("rd-1");
+        assertThat(detail.round().totalCount()).isEqualTo(2);
+    }
+
     /** In-process fake Workflow service —— 仅实现被测 RPC，其余走 gRPC 默认 UNIMPLEMENTED。 */
     static class FakeWorkflowService extends WorkflowGrpc.WorkflowImplBase {
 
@@ -864,6 +1001,10 @@ class WorkflowClientContractTest {
 
         WorkflowWithdrawTaskRequest lastWithdrawTask;
         String nextWithdrawTaskStatus = "RUNNING";
+
+        WorkflowListTaskGroupsRequest lastListTaskGroups;
+        WorkflowListTaskGroupsResponse nextTaskGroups =
+                WorkflowListTaskGroupsResponse.newBuilder().build();
 
         WorkflowListTasksRequest lastListTasks;
         WorkflowListTasksResponse nextTasks = WorkflowListTasksResponse.newBuilder().build();
@@ -992,6 +1133,14 @@ class WorkflowClientContractTest {
             }
             lastListTasks = request;
             responseObserver.onNext(nextTasks);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void listTaskGroups(WorkflowListTaskGroupsRequest request,
+                                   StreamObserver<WorkflowListTaskGroupsResponse> responseObserver) {
+            lastListTaskGroups = request;
+            responseObserver.onNext(nextTaskGroups);
             responseObserver.onCompleted();
         }
 

@@ -92,13 +92,14 @@ use coord_proto::agent::{
 // 审批 v2（ADR-0013 D7）请求/响应类型。
 use coord_proto::agent::{
     AddAssigneePosition, ApprovalAssignment, ApprovalAudit, ApprovalBranch, ApprovalRound,
-    ApprovalTask, ApprovalTaskSummary, ApprovalVote, PendingApprovalTask,
+    ApprovalTask, ApprovalTaskGroup, ApprovalTaskSummary, ApprovalVote, PendingApprovalTask,
     WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse, WorkflowAddSignRequest,
     WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse, WorkflowCcRequest,
     WorkflowCcResponse, WorkflowDelegateRequest, WorkflowDelegateResponse,
     WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse, WorkflowGetTaskRequest,
     WorkflowGetTaskResponse, WorkflowHistoryEvent, WorkflowHistoryRequest, WorkflowHistoryResponse,
-    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowListTasksRequest,
+    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse,
+    WorkflowListTaskGroupsRequest, WorkflowListTaskGroupsResponse, WorkflowListTasksRequest,
     WorkflowListTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
     WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowResumeWorkflowRequest,
     WorkflowResumeWorkflowResponse, WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse,
@@ -2063,6 +2064,15 @@ impl Workflow for WorkflowService {
         ))
     }
 
+    async fn list_task_groups(
+        &self,
+        _request: Request<WorkflowListTaskGroupsRequest>,
+    ) -> Result<Response<WorkflowListTaskGroupsResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow task groups are provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
+        ))
+    }
+
     async fn get_task(
         &self,
         _request: Request<WorkflowGetTaskRequest>,
@@ -2746,13 +2756,22 @@ impl Workflow for WorkflowEngineService {
         request: Request<WorkflowListTasksRequest>,
     ) -> Result<Response<WorkflowListTasksResponse>, Status> {
         let req = request.into_inner();
+        let mut candidate_groups: Vec<&str> =
+            req.candidate_groups.iter().map(String::as_str).collect();
+        if let Some(group) = non_empty(&req.candidate_group) {
+            candidate_groups.push(group);
+        }
+        let mut statuses: Vec<&str> = req.statuses.iter().map(String::as_str).collect();
+        if let Some(status) = non_empty(&req.status) {
+            statuses.push(status);
+        }
         let filter = crate::services::workflow::phase4::TaskQuery {
             instance_id: non_empty(&req.instance_id),
             assignee: non_empty(&req.assignee),
             completed_by: non_empty(&req.completed_by),
-            candidate_group: non_empty(&req.candidate_group),
+            candidate_groups,
             node: non_empty(&req.node),
-            status: non_empty(&req.status),
+            statuses,
             due_before_ms: req.due_before_ms,
         };
         let page_size = req.page_size.max(0) as usize;
@@ -2780,11 +2799,83 @@ impl Workflow for WorkflowEngineService {
             .get_task(&req.task_id)
             .await
             .map_err(map_approval_error)?;
+        let (round_tasks, round) = self
+            .get_task_round(&req.task_id)
+            .await
+            .map_err(map_approval_error)?;
         let now = self.now_ms();
         Ok(Response::new(WorkflowGetTaskResponse {
             task: Some(task_summary(&view, now)),
             votes: map_votes(&view.task.votes),
             instance_status: view.instance_status,
+            round_tasks: round_tasks.iter().map(|v| task_summary(v, now)).collect(),
+            round: round.map(|r| ApprovalRound {
+                id: r.id,
+                branch_id: r.branch_id,
+                number: r.number as i32,
+                status: json_label(&r.status),
+                total_count: r.total_count as i32,
+                completed_count: r.completed_count as i32,
+                rejected_count: r.rejected_count as i32,
+                reject_reason: r.reject_reason.unwrap_or_default(),
+            }),
+        }))
+    }
+
+    async fn list_task_groups(
+        &self,
+        request: Request<WorkflowListTaskGroupsRequest>,
+    ) -> Result<Response<WorkflowListTaskGroupsResponse>, Status> {
+        let req = request.into_inner();
+        let filter = crate::services::workflow::phase4::TaskGroupQuery {
+            instance_id: non_empty(&req.instance_id),
+            assignee: non_empty(&req.assignee),
+            completed_by: non_empty(&req.completed_by),
+            candidate_groups: req.candidate_groups.iter().map(String::as_str).collect(),
+            node: non_empty(&req.node),
+            statuses: req.statuses.iter().map(String::as_str).collect(),
+            due_before_ms: req.due_before_ms,
+        };
+        let page_size = req.page_size.max(0) as usize;
+        let (groups, next) = self
+            .list_task_groups(&filter, page_size, non_empty(&req.page_token))
+            .await
+            .map_err(map_approval_error)?;
+        let now = self.now_ms();
+        Ok(Response::new(WorkflowListTaskGroupsResponse {
+            groups: groups
+                .iter()
+                .map(|g| ApprovalTaskGroup {
+                    id: g.round.id.clone(),
+                    instance_id: g.instance_id.clone(),
+                    branch_id: g.round.branch_id.clone(),
+                    round_id: g.round.id.clone(),
+                    node: g.node.clone(),
+                    status: json_label(&g.round.status),
+                    kind: if g.tasks.iter().any(|t| {
+                        t.task.kind == coord_core::workflow::approval::model::TaskKind::Approval
+                    }) {
+                        "approval".to_string()
+                    } else {
+                        "read_ack".to_string()
+                    },
+                    tasks: g.tasks.iter().map(|t| task_summary(t, now)).collect(),
+                    assignments: g
+                        .tasks
+                        .iter()
+                        .flat_map(|t| map_assignments(&t.task.assignments(now), &t.task.votes))
+                        .collect(),
+                    created_at_ms: g.round.opened_at,
+                    deadline_ms: g
+                        .tasks
+                        .iter()
+                        .filter(|t| t.task.status.is_open())
+                        .filter_map(|t| t.task.deadline)
+                        .min()
+                        .unwrap_or(0),
+                })
+                .collect(),
+            next_page_token: next.unwrap_or_default(),
         }))
     }
 
