@@ -1,3 +1,29 @@
+## [contracts/v1.26.0] — 2026-11-16（Minor：Workflow 轮次级任务读面与多值过滤）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 追加 `ListTaskGroups` RPC 与
+`ApprovalTaskGroup` 消息；`WorkflowListTasksRequest` 追加 `statuses` / `candidate_groups`
+多值过滤；`WorkflowGetTaskResponse` 追加 `round_tasks` / `round`；无字段号/类型变更、不删
+RPC；`buf breaking` 基线不变）。
+
+- `ListTaskGroups`：一个 `ApprovalTaskGroup` = 一个 round = seedj 的一个 `HumanTask`。
+  过滤按**席位级**条件判定（任一席位命中即该轮命中），返回的 `tasks` 是该轮**全部**席位
+  （含未命中过滤的兄弟姐妹）与跨席位展开的 `assignments`，调用方不再需要对每个实例
+  N+1 读详情。
+  - **分页是任务级**：`page_size` 是本页轮次数上限（严格 ≤），`page_token` 定位到
+    `(实例 id, 轮次 id)`，续读不重不漏；`instance_id` 过滤时不分页。
+- `ListTasks` 的 `statuses` / `candidate_groups` 为多值过滤（与单值字段叠加为 AND，任一
+  命中即匹配）。`PENDING` 不是席位状态取值，调用方须展开为
+  `created|claimed|suspended|scheduled`。
+- `GetTask` 返回 `round_tasks`（同轮全部席位，按 `(created_at, id)` 排序）与 `round`
+  （轮次计数/判定 `reject_reason`）。
+- 能力登记：`ListTaskGroups` → `coord:workflow:read`。
+
+**影响范围**：旧客户端不受影响（新增 RPC/字段为增量）；`ListTasks` 的分页口径**不变**
+（仍按实例窗口，单页任务数可能大于 `page_size`）——需要严格任务级分页请用
+`ListTaskGroups`。
+
+**回滚预案**：回滚本分支即回到只有席位级读面的版本，无落盘迁移（读面纯投影）。
+
 ## [contracts/v1.24.0] — 2026-11-16（Minor：Workflow Start 服务代发起，wire 向前兼容）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 向 `WorkflowStartRequest` 追加

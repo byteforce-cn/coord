@@ -53,6 +53,17 @@
   走读面（`getInstanceDetail` / `listTasks` / `history`）。
 - `addSign` 的 `BEFORE` / `AFTER` 必须给 `taskId`；缺锚点由服务端以 `INVALID_ARGUMENT` 拒绝
   （SDK 不做本地校验，保持与服务端口径一致）。
+
+### Added — workflow 轮次级任务读面（issue #407）
+
+- `WorkflowClient.listTaskGroups(TaskQueryFilter, int, String)` → `TaskGroupPage`：一个
+  `TaskGroup` = 一个 round = seedj 的一个 `HumanTask`，带同轮全部席位、跨席位 assignments
+  与轮次计数；`pageSize` 是本页轮次数**严格上限**，`nextPageToken` 稳定续读。
+- `TaskQueryFilter` 增加 `statuses` / `candidateGroups` 多值过滤（7 参构造器保持兼容）；
+  `listTasks` 与 `listTaskGroups` 都会发送这两个字段。
+- `TaskDetail` 增加 `roundTasks()` / `round()`（同轮席位与轮次计数；2 参构造器保持兼容）。
+- `ApprovalRound` 增加 `rejectReason()`（既有 7 参构造器保持兼容）。
+
 ### Added — workflow Start 服务代终端用户（issue #405）
 
 - `WorkflowClient.startByDefinitionOnBehalfOf` / `startByDefinitionWithIdOnBehalfOf`：发送

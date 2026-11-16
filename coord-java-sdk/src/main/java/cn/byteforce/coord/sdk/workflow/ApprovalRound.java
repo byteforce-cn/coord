@@ -14,9 +14,16 @@ public final class ApprovalRound {
     private final int totalCount;
     private final int completedCount;
     private final int rejectedCount;
+    private final String rejectReason;
 
     public ApprovalRound(String id, String branchId, int number, String status,
                          int totalCount, int completedCount, int rejectedCount) {
+        this(id, branchId, number, status, totalCount, completedCount, rejectedCount, "");
+    }
+
+    public ApprovalRound(String id, String branchId, int number, String status,
+                         int totalCount, int completedCount, int rejectedCount,
+                         String rejectReason) {
         this.id = id;
         this.branchId = branchId;
         this.number = number;
@@ -24,6 +31,7 @@ public final class ApprovalRound {
         this.totalCount = totalCount;
         this.completedCount = completedCount;
         this.rejectedCount = rejectedCount;
+        this.rejectReason = rejectReason != null ? rejectReason : "";
     }
 
     public String id() { return id; }
@@ -34,6 +42,9 @@ public final class ApprovalRound {
     public int completedCount() { return completedCount; }
     public int rejectedCount() { return rejectedCount; }
 
+    /** Decision reason when the round was rejected ({@code any_reject} / ...); empty otherwise. */
+    public String rejectReason() { return rejectReason; }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -43,13 +54,14 @@ public final class ApprovalRound {
                 && rejectedCount == that.rejectedCount
                 && Objects.equals(id, that.id)
                 && Objects.equals(branchId, that.branchId)
-                && Objects.equals(status, that.status);
+                && Objects.equals(status, that.status)
+                && Objects.equals(rejectReason, that.rejectReason);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(id, branchId, number, status, totalCount,
-                completedCount, rejectedCount);
+                completedCount, rejectedCount, rejectReason);
     }
 
     @Override

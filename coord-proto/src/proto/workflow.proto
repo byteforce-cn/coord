@@ -76,6 +76,9 @@ service Workflow {
   // `ListPendingTasks` 保持既有语义（未决 + 调用方/代查 assignee）；`ListTasks` 是它的
   // 超集（默认不过滤状态）。
   rpc ListTasks(WorkflowListTasksRequest) returns (WorkflowListTasksResponse);
+  // 轮次级任务查询：一个 `ApprovalTaskGroup` 是 seedj 的一个 `HumanTask`（同轮席位聚合），
+  // `page_size` 是本页**任务（轮次）数**的严格上限，`page_token` 定位到 (实例, 轮次)。
+  rpc ListTaskGroups(WorkflowListTaskGroupsRequest) returns (WorkflowListTaskGroupsResponse);
   rpc GetTask(WorkflowGetTaskRequest) returns (WorkflowGetTaskResponse);
 
   // 实例历史：从审批聚合快照**确定性投影**出的事件流（task / round / step / instance 级）。
@@ -609,6 +612,11 @@ message WorkflowListTasksRequest {
   // 空 = 全部。未知取值返回 INVALID_ARGUMENT。
   string status = 8;
   int64 due_before_ms = 9; // 仅返回 deadline <= 该值（Unix ms）；0 = 不过滤
+  // 多值过滤（与上面的单值字段叠加为 AND；空 = 不过滤）。任一命中即算匹配。
+  // `PENDING` 不是席位状态取值，调用方要按 created|claimed|suspended|scheduled 展开
+  // （轮次级读面的 `statuses` 同样如此）。
+  repeated string statuses = 10;
+  repeated string candidate_groups = 11;
 }
 
 message WorkflowListTasksResponse {
@@ -643,6 +651,45 @@ message WorkflowGetTaskResponse {
   ApprovalTaskSummary task = 1;
   repeated ApprovalVote votes = 2;
   string instance_status = 3; // 大写实例状态（RUNNING/COMPLETED/REJECTED/...）
+  // 同轮全部席位（含请求的席位本身），按 (created_at, id) 排序。调用方聚合
+  // seedj `HumanTask` 时不需要再按实例 N+1 读详情。
+  repeated ApprovalTaskSummary round_tasks = 4;
+  ApprovalRound round = 5; // 所属轮次（计数与判定）
+}
+
+// 轮次级任务查询（seedj `HumanTask` = coord 的一个 round）。
+message WorkflowListTaskGroupsRequest {
+  int32 page_size = 1; // 本页返回的任务（轮次）数上限；一页严格 <= 该值
+  string page_token = 2; // 不透明；定位到 (实例 id, 轮次 id)
+  string instance_id = 3; // 只查该实例（不跨实例扫描，不分页）
+  string assignee = 4; // 该轮任一席位可被该主体处理（责任人 / 候选池 / 被委派人）
+  string completed_by = 5; // 该轮任一席位投过票的 actor
+  repeated string candidate_groups = 6; // 该轮任一席位的候选池含其中任一主体
+  string node = 7; // 节点（步骤）名
+  repeated string statuses = 8; // 席位状态多值（created|claimed|suspended|scheduled|...）
+  int64 due_before_ms = 9; // 该轮任一未决席位的 deadline <= 该值（Unix ms）；0 = 不过滤
+}
+
+message WorkflowListTaskGroupsResponse {
+  repeated ApprovalTaskGroup groups = 1;
+  string next_page_token = 2;
+}
+
+// 同轮聚合视图：一个 `ApprovalTaskGroup` 对应 seedj 的一个 `HumanTask`。
+message ApprovalTaskGroup {
+  string id = 1; // = round_id（稳定；可直接作为 GetTask 的入参定位席位）
+  string instance_id = 2;
+  string branch_id = 3;
+  string round_id = 4;
+  string node = 5;
+  // 轮次状态标签：open / suspended / scheduled / passed / rejected / superseded / cancelled。
+  string status = 6;
+  // 席位类型汇总：轮内任一审批席 ⇒ approval；全为阅签席 ⇒ read_ack。
+  string kind = 7;
+  repeated ApprovalTaskSummary tasks = 8; // 同轮全部席位，按 (created_at, id) 排序
+  repeated ApprovalAssignment assignments = 9; // 跨席位 assignment 展开
+  int64 created_at_ms = 10; // 轮次开启时间（Unix ms）
+  int64 deadline_ms = 11; // 未决席位的最早 deadline（Unix ms）；0 = 无
 }
 
 message WorkflowHistoryRequest {

@@ -281,6 +281,7 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.workflow.v1.Workflow/ListPendingTasks" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/GetInstanceDetail" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/ListTasks" => Some("coord:workflow:read"),
+        "/coord.workflow.v1.Workflow/ListTaskGroups" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/GetTask" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/History" => Some("coord:workflow:read"),
 
@@ -832,6 +833,7 @@ mod tests {
             "/coord.workflow.v1.Workflow/ListPendingTasks",
             "/coord.workflow.v1.Workflow/GetInstanceDetail",
             "/coord.workflow.v1.Workflow/ListTasks",
+            "/coord.workflow.v1.Workflow/ListTaskGroups",
             "/coord.workflow.v1.Workflow/GetTask",
             "/coord.workflow.v1.Workflow/History",
         ] {
