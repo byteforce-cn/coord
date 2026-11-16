@@ -437,8 +437,10 @@ impl ApprovalBridge {
             // 归因只对本次命令有效：引擎是本次加载的局部聚合，提交前清空，
             // 避免随存储实现（如内存 store 直接持有对象）泄漏到下一条命令。
             engine.set_acting_service(acting_service.map(str::to_string));
+            engine.set_action_id(idem_key.map(str::to_string));
             let applied = self.apply_command(&mut engine, actor, cmd.clone(), now);
             engine.set_acting_service(None);
+            engine.set_action_id(None);
             let effects = applied?;
             // 回退是否真的发生只能看提交前的聚合：`RecordAndContinue` 允许否决后继续投票。
             let resume_node = match &cmd {
@@ -844,6 +846,50 @@ impl ApprovalBridge {
             }
             if attempt >= MAX_COMMIT_ATTEMPTS {
                 return Err(BridgeError::Stale(format!("terminate {approval_id}")));
+            }
+        }
+    }
+
+    /// 控制面取消实例：与 `terminate` 同一写路径，但语义是 `Cancelled` 而非
+    /// `Terminated`（读面投影 `INSTANCE_CANCELLED`，与实例撤回 `INSTANCE_WITHDRAWN`
+    /// 区分）。`compensate` 只记录调用方的补偿声明，coord 不执行 Saga 逆序。
+    ///
+    /// 内部生命周期权威 [`SYSTEM_ACTOR`] 恒可调用（工作流控制面取消）；用户 actor 与
+    /// 终止同权限（`sign_admins`）。
+    pub async fn cancel(
+        &self,
+        approval_id: &str,
+        actor: &str,
+        reason: Option<&str>,
+        compensate: bool,
+    ) -> Result<(), BridgeError> {
+        let now = self.clock.now_ms();
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let (mut engine, mod_rev) = self
+                .store
+                .load(approval_id)
+                .await
+                .map_err(BridgeError::from)?
+                .ok_or_else(|| BridgeError::NotFound(approval_id.to_string()))?;
+            if actor != SYSTEM_ACTOR {
+                self.guard_terminate(&engine, actor)?;
+            }
+            let expected = engine.instance.revision;
+            let effects = engine.cancel(expected, actor, reason, compensate, now)?;
+            let rev_after = engine.instance.revision;
+            let events = self.effects_to_records(approval_id, &effects, rev_after, now)?;
+            let committed = self
+                .store
+                .commit(&engine, &events, ExpectedRev::Exact(mod_rev))
+                .await
+                .map_err(BridgeError::from)?;
+            if committed {
+                return Ok(());
+            }
+            if attempt >= MAX_COMMIT_ATTEMPTS {
+                return Err(BridgeError::Stale(format!("cancel {approval_id}")));
             }
         }
     }

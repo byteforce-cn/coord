@@ -54,6 +54,14 @@
 - `addSign` 的 `BEFORE` / `AFTER` 必须给 `taskId`；缺锚点由服务端以 `INVALID_ARGUMENT` 拒绝
   （SDK 不做本地校验，保持与服务端口径一致）。
 
+### Added — workflow 取消补偿声明与审批状态（issue #406）
+
+- `WorkflowClient.cancel(String, String reason, boolean compensate)`：`compensate` 只登记
+  调用方的补偿声明（coord 不执行 Saga 逆序）；`INSTANCE_CANCELLED` 带 `reason`/`compensate`。
+- `WorkflowStatus.approvalStatus()`：审批聚合状态（`TERMINATED` 与运行 fault 可区分）。
+- `ApprovalHistoryEvent.actionId()` 现在非空（命令 `idempotencyKey`）；`TASK_REJECTED` 的
+  `attributesJson` 增加 `reason` 与 `rejectActionIds`。
+
 ### Added — workflow 轮次级任务读面（issue #407）
 
 - `WorkflowClient.listTaskGroups(TaskQueryFilter, int, String)` → `TaskGroupPage`：一个

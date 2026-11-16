@@ -256,6 +256,16 @@ auth:
   给出同轮全部席位；`ListTasks` 保持席位级与按实例窗口分页（单页可能多于 `page_size`）。
   多值过滤 `statuses` / `candidate_groups` 任一命中即匹配；`PENDING` 需展开为
   `created|claimed|suspended|scheduled`。
+- **撤回 / 取消 / 终止**：`Withdraw`（发起人）→ 聚合 `CANCELLED`，History 投影
+  `INSTANCE_WITHDRAWN`；`Cancel`（控制面）→ 聚合 `CANCELLED`，投影 `INSTANCE_CANCELLED`
+  并带 `reason` / `compensate`；`Terminate`（`sign_admins`）→ 聚合 `TERMINATED`。
+  三者都写 `TASK_ASSIGNMENT_AUTO_CANCELLED`（逐 principal）。`compensate=true` 只是
+  调用方的补偿声明——coord 没有业务逆动作模型，**不执行** Saga 逆序。
+  `GetStatus.approval_status` 用于区分同为工作流 `FAULTED` 的「管理终止」
+  （`TERMINATED`）与运行 fault。
+- **History 的 action id**：投票/审计记录持久化命令的 `idempotency_key`，投影为
+  `action_id`；`TASK_REJECTED.attributes.rejectActionIds` 列出该席位全部否决票的
+  action id，`reason` 取轮次判定原因。系统动作（超时、委派到期）没有 action id。
 - **业务表单（`formData`）**：ADR-0013 D9 的非目标——coord 只存审批记录（`comment` /
   `on_behalf_of` / 审计），**不接受也不存储**业务表单数据；seedj 侧存储并在读视图合并。
 - **委派到期（ADR-0013 D13）**：`Delegate` 可带 `delegate_for_ms`；到期由审批 deadline

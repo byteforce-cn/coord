@@ -163,6 +163,26 @@ class WorkflowClientContractTest {
     }
 
     @Test
+    @DisplayName("cancel 重载发送 reason/compensate；getStatus 映射 approval_status")
+    void cancelSendsCompensationAndStatusMapsApprovalStatus() {
+        wf.cancel("inst-1", "用户取消", true);
+        assertThat(fake.lastCancel.getWorkflowId()).isEqualTo("inst-1");
+        assertThat(fake.lastCancel.getReason()).isEqualTo("用户取消");
+        assertThat(fake.lastCancel.getCompensate()).isTrue();
+
+        wf.cancel("inst-1");
+        assertThat(fake.lastCancel.getReason()).isEmpty();
+        assertThat(fake.lastCancel.getCompensate()).isFalse();
+
+        fake.nextStatus = WorkflowGetStatusResponse.newBuilder()
+                .setWorkflowId("inst-1")
+                .setStatus("FAULTED")
+                .setApprovalStatus("TERMINATED")
+                .build();
+        assertThat(wf.getStatus("inst-1").approvalStatus()).isEqualTo("TERMINATED");
+    }
+
+    @Test
     @DisplayName("getStatus 映射 currentStateName + suspension（挂起元信息）")
     void getStatusMapsCurrentStateNameAndSuspension() {
         fake.nextStatus = WorkflowGetStatusResponse.newBuilder()
@@ -982,6 +1002,8 @@ class WorkflowClientContractTest {
         WorkflowApproveRequest lastApprove;
         String nextApproveStatus = "RUNNING";
 
+        cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelRequest lastCancel;
+
         WorkflowWithdrawRequest lastWithdraw;
         String nextWithdrawStatus = "RUNNING";
 
@@ -1059,6 +1081,16 @@ class WorkflowClientContractTest {
                     .setInstanceId(request.getWorkflowId())
                     .setStatus(nextApproveStatus)
                     .build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void cancel(cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelRequest request,
+                           StreamObserver<cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelResponse> responseObserver) {
+            lastCancel = request;
+            responseObserver.onNext(
+                    cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelResponse
+                            .newBuilder().build());
             responseObserver.onCompleted();
         }
 

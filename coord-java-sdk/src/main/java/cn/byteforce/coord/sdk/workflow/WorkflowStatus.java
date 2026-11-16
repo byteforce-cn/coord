@@ -23,6 +23,7 @@ public final class WorkflowStatus {
     private final String definitionNamespace;
     private final String definitionVersion;
     private final WorkflowFault fault;
+    private final String approvalStatus;
 
     /**
      * Full constructor with all fields (当前状态名 + 挂起元信息).
@@ -34,7 +35,25 @@ public final class WorkflowStatus {
                           List<TaskFrame> taskStack,
                           String currentStateName, Suspension suspension) {
         this(workflowId, state, currentStep, output, errorMessage, definitionName, input,
-                createdAt, updatedAt, taskStack, currentStateName, suspension, "", "", null);
+                createdAt, updatedAt, taskStack, currentStateName, suspension, "", "", null, "");
+    }
+
+    /**
+     * Full constructor with the approval aggregate status.
+     *
+     * @param approvalStatus uppercase approval status ({@code RUNNING} / {@code CANCELLED} /
+     *                       {@code TERMINATED} / ...); empty when no approval aggregate exists
+     */
+    public WorkflowStatus(String workflowId, WorkflowState state,
+                          int currentStep, byte[] output, String errorMessage,
+                          String definitionName, byte[] input,
+                          long createdAt, long updatedAt,
+                          List<TaskFrame> taskStack,
+                          String currentStateName, Suspension suspension,
+                          String approvalStatus) {
+        this(workflowId, state, currentStep, output, errorMessage, definitionName, input,
+                createdAt, updatedAt, taskStack, currentStateName, suspension, "", "", null,
+                approvalStatus);
     }
 
     /**
@@ -52,6 +71,22 @@ public final class WorkflowStatus {
                           String currentStateName, Suspension suspension,
                           String definitionNamespace, String definitionVersion,
                           WorkflowFault fault) {
+        this(workflowId, state, currentStep, output, errorMessage, definitionName, input,
+                createdAt, updatedAt, taskStack, currentStateName, suspension,
+                definitionNamespace, definitionVersion, fault, "");
+    }
+
+    /**
+     * Full constructor with every field (definition identity + structured fault + approval status).
+     */
+    public WorkflowStatus(String workflowId, WorkflowState state,
+                          int currentStep, byte[] output, String errorMessage,
+                          String definitionName, byte[] input,
+                          long createdAt, long updatedAt,
+                          List<TaskFrame> taskStack,
+                          String currentStateName, Suspension suspension,
+                          String definitionNamespace, String definitionVersion,
+                          WorkflowFault fault, String approvalStatus) {
         this.workflowId = workflowId;
         this.state = state;
         this.currentStep = currentStep;
@@ -67,6 +102,7 @@ public final class WorkflowStatus {
         this.definitionNamespace = definitionNamespace != null ? definitionNamespace : "";
         this.definitionVersion = definitionVersion != null ? definitionVersion : "";
         this.fault = fault;
+        this.approvalStatus = approvalStatus != null ? approvalStatus : "";
     }
 
     /**
@@ -157,6 +193,15 @@ public final class WorkflowStatus {
      */
     public Suspension suspension() { return suspension; }
 
+    /**
+     * 审批聚合状态（大写：RUNNING / COMPLETED / REJECTED / CANCELLED / TERMINATED / FAULTED）；
+     * 未进入 approve 节点时为空串。
+     *
+     * <p>用于区分工作流状态同为 {@code FAILED/FAULTED} 的「管理终止」
+     * （{@code TERMINATED}）与运行 fault（聚合仍 {@code RUNNING} 或已 {@code CANCELLED}）。</p>
+     */
+    public String approvalStatus() { return approvalStatus; }
+
     @Override
     public String toString() {
         return "WorkflowStatus{workflowId='" + workflowId + "', state=" + state
@@ -167,6 +212,7 @@ public final class WorkflowStatus {
                 + "', createdAt=" + createdAt + ", updatedAt=" + updatedAt
                 + ", taskStackSize=" + taskStack.size()
                 + ", suspension=" + suspension
-                + ", fault=" + fault + "}";
+                + ", fault=" + fault
+                + ", approvalStatus='" + approvalStatus + "'}";
     }
 }

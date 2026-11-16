@@ -1,3 +1,31 @@
+## [contracts/v1.25.0] — 2026-11-16（Minor：Workflow History action id / 撤回与取消区分 / 补偿声明）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 向 `WorkflowCancelRequest` 追加
+`reason` / `compensate`，向 `WorkflowGetStatusResponse` 追加 `approval_status`；`History`
+新增事件类型与属性，`action_id` 不再恒空；无字段号/类型变更、不删 RPC；`buf breaking`
+基线不变）。
+
+- `History` 的 `action_id` 现在来自命令的 `idempotency_key`（投票与审计记录持久化），
+  系统动作（超时/委派到期）为空；`TASK_REJECTED.attributes` 增加
+  `reason`（轮次判定原因）与 `rejectActionIds`（该席位全部否决票的 action id）。
+- `Withdraw` 投影 `INSTANCE_WITHDRAWN`（与 `Cancel` 区分）；两者都在 `TASK_CANCELLED`
+  之外补 assignment 级 `TASK_ASSIGNMENT_AUTO_CANCELLED`（逐 principal）。
+- `Cancel` 的审批聚合收口为 `CANCELLED`（不再是 `TERMINATED`），`WorkflowCancelRequest`
+  追加 `reason` / `compensate`；`INSTANCE_CANCELLED.attributes` 带 `reason` 与
+  `compensate`。**补偿动作不由 coord 执行**：`compensate=true` 只是调用方的声明，
+  Saga 逆序属于调用方业务领域（coord 没有逆动作模型）。
+- `GetStatus.approval_status` 暴露审批聚合状态：工作流状态同为 `FAULTED` 时，
+  管理终止为 `TERMINATED`，运行 fault 的聚合仍 `RUNNING`/`CANCELLED`，调用方据此区分。
+- `INSTANCE_WITHDRAWN` 不带 `reason`：`Withdraw` 的 `comment` 当前不进入审批聚合
+  （`ApprovalCommand::Withdraw` 不携带 comment），撤回语义由事件类型本身表达。
+
+**影响范围**：旧客户端不受影响（新增字段/属性/事件类型为增量）；`Cancel` 的聚合终态从
+`TERMINATED` 变为 `CANCELLED` 是**行为修正**（同一 `GetStatus.status` 仍为 `FAULTED`，
+用 `approval_status` 区分）。历史事件流对同一状态仍确定性可重放。
+
+**回滚预案**：回滚本分支即回到 `action_id` 恒空、`Cancel` 投影为 `INSTANCE_TERMINATED`
+的版本；实例文档新增 `Cancellation` 字段 `serde(default)`，无落盘迁移。
+
 ## [contracts/v1.26.0] — 2026-11-16（Minor：Workflow 轮次级任务读面与多值过滤）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 追加 `ListTaskGroups` RPC 与

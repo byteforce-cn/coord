@@ -142,6 +142,10 @@ message WorkflowGetStatusResponse {
   // 结构化 fault（RFC 7807 投影）。`error_message` 保留兼容（= fault.title）；
   // 未失败时该消息缺省。
   WorkflowFault fault = 14;
+  // 审批聚合状态（大写：RUNNING / COMPLETED / REJECTED / CANCELLED / TERMINATED / FAULTED）；
+  // 无审批聚合（未进入 approve 节点）为空。用于区分工作流状态同为 FAILED 的
+  // 「管理终止」与「运行 fault」。
+  string approval_status = 15;
 }
 
 // 结构化工作流错误（RFC 7807 Problem Details 的 wire 投影）。
@@ -186,6 +190,12 @@ message WorkflowSignalResponse {}
 
 message WorkflowCancelRequest {
   string workflow_id = 1;
+  // 可选：取消原因（写入 `History` 的 `INSTANCE_CANCELLED` 属性与审计）。
+  string reason = 2;
+  // 可选：调用方要求业务补偿（Saga 逆序）。coord 只把该标记持久化并投影到
+  // `INSTANCE_CANCELLED.attributes.compensate`；**不**执行逆操作——补偿动作属于调用方的
+  // 业务领域模型，coord 不猜测逆步骤。
+  bool compensate = 3;
 }
 
 message WorkflowCancelResponse {}
@@ -704,12 +714,13 @@ message WorkflowHistoryResponse {
 //   STEP_ENTERED / TASK_CREATED / TASK_COMPLETED / TASK_REJECTED /
 //   TASK_ACKNOWLEDGED / TASK_EXPIRED / TASK_CANCELLED / TASK_URGED / TASK_CC /
 //   TASK_WITHDRAWN / TASK_ASSIGNEE_REMOVED / TASK_ASSIGNMENT_SUSPENDED /
-//   TASK_ASSIGNMENT_RESUMED / TASK_ADD_ASSIGNEE_BEFORE / TASK_ADD_ASSIGNEE_AFTER /
+//   TASK_ASSIGNMENT_RESUMED / TASK_ASSIGNMENT_AUTO_CANCELLED /
+//   TASK_ADD_ASSIGNEE_BEFORE / TASK_ADD_ASSIGNEE_AFTER /
 //   TASK_AFTER_SPAWN_DISCARDED / DELEGATION_EXPIRED /
 //   ROUND_OPENED / ROUND_PASSED / ROUND_REJECTED / ROUND_SUPERSEDED / ROUND_CANCELLED /
 //   INSTANCE_STARTED / INSTANCE_ROLLED_BACK / INSTANCE_COMPLETED / INSTANCE_REJECTED /
-//   INSTANCE_CANCELLED / INSTANCE_TERMINATED / INSTANCE_FAULTED / INSTANCE_FAILED /
-//   INSTANCE_WAITING / INSTANCE_RESUMED。
+//   INSTANCE_WITHDRAWN / INSTANCE_CANCELLED / INSTANCE_TERMINATED / INSTANCE_FAULTED /
+//   INSTANCE_FAILED / INSTANCE_WAITING / INSTANCE_RESUMED。
 // `task / assignment` 级事件按 coord 的席位模型投影（audit 记录驱动）。
 message WorkflowHistoryEvent {
   string event_id = 1; // 确定性 id（同状态重复读取稳定）
@@ -717,7 +728,10 @@ message WorkflowHistoryEvent {
   string instance_id = 3;
   string step_name = 4; // 节点名；实例级事件为空
   string task_id = 5; // 席位级事件填；其余为空
-  string action_id = 6; // coord 不持久化客户端 action id；保留字段，当前为空
+  // 触发该事件的客户端 action id（命令的 `idempotency_key`）；系统动作（超时/到期）
+  // 与未提供键的命令为空。`TASK_REJECTED.attributes.rejectActionIds` 是该席位全部
+  // 否决票的 action id 列表。
+  string action_id = 6;
   int64 occurred_at = 7; // Unix ms
   string attributes_json = 8; // 事件属性（JSON 对象字符串）
 }

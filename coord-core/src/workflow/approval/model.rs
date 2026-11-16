@@ -62,6 +62,24 @@ impl InstanceStatus {
     }
 }
 
+/// 实例取消的来源与语义标记。
+///
+/// `Withdraw`（发起人撤回）与 `Cancel`（控制面取消）都收敛到 `InstanceStatus::Cancelled`，
+/// 但读面必须能区分：前者投影 `INSTANCE_WITHDRAWN`，后者投影 `INSTANCE_CANCELLED` 并带
+/// `compensate`。`compensate` 只是**声明**调用方要求补偿，coord 不执行 Saga 逆序步骤。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cancellation {
+    /// `withdraw` | `cancel`。
+    pub kind: String,
+    /// 取消原因（可选）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// 调用方要求做业务补偿（`Cancel.compensate`）；coord 只投影该标记。
+    #[serde(default)]
+    pub compensate: bool,
+    pub at: i64,
+}
+
 /// 流程实例（v2 聚合根）。
 ///
 /// 不变量：`revision` 每次状态变更 +1，命令以它做乐观并发守卫（CAS）；
@@ -86,6 +104,9 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiator_acting_service: Option<Principal>,
     pub status: InstanceStatus,
+    /// 实例取消的来源（`withdraw` / `cancel`，含补偿标记）；非 `Cancelled` 为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<Cancellation>,
     /// 实例级变量（作用域第三级）。
     pub context: Scope,
     pub root_branch_id: Option<Id>,
@@ -114,6 +135,9 @@ pub struct AuditEntry {
     /// 代终端用户执行的管理动作的服务主体；直接操作为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acting_service: Option<Principal>,
+    /// 产生该审计记录的客户端 action id（命令的 `idempotency_key`）；未提供为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
 }
 
 /// 驳回至节点的记录：从 `from_node` 驳回到 `to_node`。
@@ -359,6 +383,9 @@ pub struct VoteRecord {
     /// 代 `actor` 执行的服务主体；直接操作为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acting_service: Option<Principal>,
+    /// 产生该投票的客户端 action id（命令的 `idempotency_key`）；未提供为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
 }
 
 /// 席位（审批任务）。
@@ -774,6 +801,7 @@ mod tests {
             initiator: "u-initiator".into(),
             initiator_acting_service: None,
             status: InstanceStatus::Rejected,
+            cancellation: None,
             context: BTreeMap::from([("amount".to_string(), json!(3))]),
             root_branch_id: Some("inst-1:b0000".into()),
             revision: 7,
@@ -786,6 +814,7 @@ mod tests {
                 by: "u-initiator".into(),
                 detail: "root".into(),
                 acting_service: None,
+                action_id: None,
             }],
             returns: vec![ReturnRecord {
                 from_node: "manager".into(),
@@ -855,6 +884,7 @@ mod tests {
                 comment: Some("信息不足".into()),
                 at: 180,
                 acting_service: None,
+                action_id: None,
             }],
             scope: BTreeMap::from([("urgent".to_string(), json!(true))]),
             created_at: 130,
