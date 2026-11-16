@@ -382,6 +382,7 @@ async fn start_on_agent(workflow: &mut WorkflowClient<Channel>) -> String {
                 definition_id: String::new(),
                 idempotency_key: String::new(),
                 workflow_id: String::new(),
+                on_behalf_of: String::new(),
             })
             .await
         {

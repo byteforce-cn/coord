@@ -1968,6 +1968,7 @@ mod tests {
             fault: None,
             suspension_meta: None,
             initiator: None,
+            initiator_acting_service: None,
             definition_hash: None,
             engine_version: None,
         };

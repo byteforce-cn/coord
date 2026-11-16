@@ -1648,6 +1648,29 @@ where
             .map(|(inst, _)| inst)
     }
 
+    /// 服务代终端用户发起（`Start.on_behalf_of`）。
+    ///
+    /// `initiator` 是被代表用户（实例 / 审计 / 自审判定的主体），`acting_service` 是
+    /// 代其执行的调用方服务（只做归因）。授权白名单在 agent 的 gRPC 面判定，本层只落值。
+    pub async fn start_as_with_id_on_behalf(
+        &self,
+        definition: &WorkflowDefinition,
+        input: Value,
+        initiator: Option<&str>,
+        acting_service: Option<&str>,
+        instance_id: Option<&str>,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        self.start_as_with_id_outcome_on_behalf(
+            definition,
+            input,
+            initiator,
+            acting_service,
+            instance_id,
+        )
+        .await
+        .map(|(inst, _)| inst)
+    }
+
     /// [`Self::start_as_with_id`] 的完整结果：`created == false` 表示命中重放/并发同 id。
     ///
     /// 同 id 且同定义（ns/name/version + 内容哈希）⇒ 返回既有实例；不同定义/版本/内容
@@ -1657,6 +1680,20 @@ where
         definition: &WorkflowDefinition,
         input: Value,
         initiator: Option<&str>,
+        instance_id: Option<&str>,
+    ) -> Result<(WorkflowInstance, bool), RuntimeError> {
+        self.start_as_with_id_outcome_on_behalf(definition, input, initiator, None, instance_id)
+            .await
+    }
+
+    /// [`Self::start_as_with_id_outcome`] 的服务代发起变体（见
+    /// [`Self::start_as_with_id_on_behalf`]）。
+    pub async fn start_as_with_id_outcome_on_behalf(
+        &self,
+        definition: &WorkflowDefinition,
+        input: Value,
+        initiator: Option<&str>,
+        acting_service: Option<&str>,
         instance_id: Option<&str>,
     ) -> Result<(WorkflowInstance, bool), RuntimeError> {
         let now_ms = self.clock.now_ms();
@@ -1687,6 +1724,7 @@ where
                 inst.status = InstanceStatus::Failed;
                 inst.fault = Some(fault);
                 inst.initiator = initiator.map(str::to_string);
+                inst.initiator_acting_service = acting_service.map(str::to_string);
                 inst.updated_at = now_ms;
                 let (inst, _created) = self
                     .persist_new_instance(inst, definition, instance_id.is_some())
@@ -1700,6 +1738,7 @@ where
             None => WorkflowInstance::new(definition, input_val, now_ms),
         };
         inst.initiator = initiator.map(str::to_string);
+        inst.initiator_acting_service = acting_service.map(str::to_string);
 
         let (inst, created) = self
             .persist_new_instance(inst, definition, instance_id.is_some())
@@ -8334,6 +8373,7 @@ mod tests {
             fault: None,
             suspension_meta: None,
             initiator: None,
+            initiator_acting_service: None,
             definition_hash: None,
             engine_version: None,
         }

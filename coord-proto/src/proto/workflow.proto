@@ -99,6 +99,12 @@ message WorkflowStartRequest {
   // - 不同定义或不同版本 ⇒ `ALREADY_EXISTS`（不覆盖既有实例）。
   // 合法字符集与上限：不含 `/`，不超过 128 字节。
   string workflow_id = 5;
+  // 服务代终端用户发起（与命令族的 `on_behalf_of` 同构）：调用方服务必须在
+  // `services.workflow_on_behalf_services` 白名单内。`initiator`（实例 / 审计 /
+  // 自审批守卫）落被代表用户；调用服务记入 `acting_service`
+  // （`GetInstanceDetail` / `History` 的 `INSTANCE_STARTED` 可读）。
+  // 空 = 直接以 CCT 主体发起（现状）。
+  string on_behalf_of = 6;
 }
 
 message WorkflowStartResponse {
@@ -687,6 +693,9 @@ message WorkflowGetInstanceDetailResponse {
   // 实例启动时钉死的定义身份（`initiator` 见字段 3）。
   string definition_namespace = 10;
   string definition_version = 11;
+  // 代 `initiator` 发起本实例的服务主体（Start `on_behalf_of`）；
+  // 直接发起为空串。
+  string acting_service = 12;
 }
 
 message ApprovalBranch {

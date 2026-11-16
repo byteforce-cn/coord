@@ -1,3 +1,22 @@
+## [contracts/v1.24.0] — 2026-11-16（Minor：Workflow Start 服务代发起，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 向 `WorkflowStartRequest` 追加
+`on_behalf_of`，向 `WorkflowGetInstanceDetailResponse` 追加 `acting_service`；无字段号/
+类型变更、不删 RPC；`buf breaking` 基线不变）。
+
+- `Start` 支持服务代终端用户发起：调用方必须列在 agent 配置
+  `services.workflow_on_behalf_services`；`initiator`（实例 / 审计 / 自审批守卫）落被代表
+  用户，调用服务记入 `acting_service`（`GetInstanceDetail` / `History` 的
+  `INSTANCE_STARTED`），实例级撤回 / 恢复 / 抄送与自审批判定改按被代表用户。
+- 语义与既有命令族的 `on_behalf_of` 一致（含保留主体 `system` 双侧拒绝、未授权在任何
+  副作用前 `PERMISSION_DENIED`）；空值 = 现状（直接以 CCT 主体发起）。
+- 遗留 v1 `WorkflowService` 不做 on-behalf 授权，`acting_service` 为空。
+
+**影响范围**：旧客户端不受影响（纯增量字段）。缺省行为逐字不变。
+
+**回滚预案**：回滚本分支即回到无 Start on-behalf 的版本；实例文档新增字段
+`serde(default)`，无落盘迁移。
+
 ## [contracts/v1.23.0] — 2026-11-16（Minor：Workflow 实例读面定义版本与结构化 fault，wire 向前兼容）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 向 `WorkflowGetStatusResponse` 追加

@@ -36,6 +36,9 @@ ADR-0013 交付了原生 `approve` 节点与 12 个审批 RPC，但三个消费�
 
 - 协议增量（`coord.workflow.v1`，Minor 兼容）：
   - 10 个命令请求新增 `string on_behalf_of`（空 = 直接以 CCT 主体执行）；
+  - `WorkflowStartRequest` 同样新增 `on_behalf_of`：`initiator`（实例 / 审计 /
+    自审批守卫）落被代表用户，调用服务经 `GetInstanceDetail.acting_service` 与
+    `History` 的 `INSTANCE_STARTED` 暴露；白名单与 `system` 拒绝口径与命令族一致；
   - `WorkflowListPendingTasksRequest` 新增 `string assignee`（空 = 调用方自身）；
   - `ApprovalTask` 新增 `repeated ApprovalVote votes`；
     `WorkflowGetInstanceDetailResponse` 新增 `repeated ApprovalAudit audit`。

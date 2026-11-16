@@ -72,6 +72,7 @@ mod tests {
                 definition_version: "1.0.0".into(),
                 definition_hash: "sha256:t4".into(),
                 initiator: "zhangsan".into(),
+                initiator_acting_service: None,
                 context: Scope::new(),
             },
             1_000,

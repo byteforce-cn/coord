@@ -53,6 +53,13 @@
   走读面（`getInstanceDetail` / `listTasks` / `history`）。
 - `addSign` 的 `BEFORE` / `AFTER` 必须给 `taskId`；缺锚点由服务端以 `INVALID_ARGUMENT` 拒绝
   （SDK 不做本地校验，保持与服务端口径一致）。
+### Added — workflow Start 服务代终端用户（issue #405）
+
+- `WorkflowClient.startByDefinitionOnBehalfOf` / `startByDefinitionWithIdOnBehalfOf`：发送
+  `on_behalf_of`（调用服务须在 `services.workflow_on_behalf_services` 白名单内）。
+  实例 `initiator` 落被代表用户，实例级撤回 / 恢复 / 抄送与自审批守卫按该用户判定。
+- `ApprovalInstanceDetail` 新增 `actingService()`（Start 的调用服务；直接发起为空串）。
+
 ### Added — workflow 实例读面：定义版本与结构化 fault（issue #408）
 
 - `WorkflowStatus` 新增 `definitionNamespace()` / `definitionVersion()` / `fault()`：版本是实例
