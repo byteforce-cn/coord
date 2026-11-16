@@ -2876,6 +2876,17 @@ where
     /// 生命周期事件与状态写同一次提交（durable 装配下同 Txn/同事务；legacy 分步，
     /// 见 [`Self::commit_instance`]）。
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+        self.cancel_instance_with(instance_id, None, false).await
+    }
+
+    /// 带原因与补偿声明的取消：审批聚合收口为 `Cancelled`（不是 `Terminated`），
+    /// `compensate` 只随聚合持久化并投影，coord 不执行 Saga 逆序。
+    pub async fn cancel_instance_with(
+        &self,
+        instance_id: &str,
+        reason: Option<&str>,
+        compensate: bool,
+    ) -> Result<(), RuntimeError> {
         // 取消即工作流终态：先收口审批聚合（完成或在途终止），失败 fail-closed 传播——
         // 绝不留下「工作流已取消、审批仍 open 可投票」的孤儿。收口覆盖**所有非终态实例**
         // （不止挂起在审批上的）：审批节点通过后工作流可能在下游 Running/Suspended，其聚合
@@ -2887,8 +2898,12 @@ where
                 .await
                 .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
             if inst.as_ref().is_some_and(|i| !i.status.is_terminal()) {
-                self.finalize_approval_aggregate(instance_id, "workflow_cancelled")
-                    .await?;
+                self.cancel_approval_aggregate(
+                    instance_id,
+                    reason.unwrap_or("workflow_cancelled"),
+                    compensate,
+                )
+                .await?;
             }
         }
         let outcome = self
@@ -2926,6 +2941,39 @@ where
     /// 错误处置由调用方决定：`cancel_instance` fail-closed 传播（宁可不取消也不留孤儿），
     /// `fail_instance` / `fail_approval` 最佳努力（工作流 fault 是权威结论，收口失败不阻断
     /// fault，聚合留给管理员 `Terminate`）。
+    /// 取消审批聚合：先尝试正常收口（`finish_if_complete`），仍在途则走
+    /// [`ApprovalBridge::cancel`]（`Cancelled`，不是 `Terminated`）。与终止同口径：
+    /// 聚合不存在 / 已终态视为目标达成，存储错误 fail-closed。
+    async fn cancel_approval_aggregate(
+        &self,
+        workflow_id: &str,
+        reason: &str,
+        compensate: bool,
+    ) -> Result<(), RuntimeError> {
+        let Some(bridge) = &self.approval else {
+            return Ok(());
+        };
+        match bridge.finish_if_complete(workflow_id).await {
+            Ok(Some(_)) | Err(BridgeError::NotFound(_)) => Ok(()),
+            Ok(None) => {
+                match bridge
+                    .cancel(workflow_id, SYSTEM_ACTOR, Some(reason), compensate)
+                    .await
+                {
+                    Ok(())
+                    | Err(BridgeError::NotFound(_))
+                    | Err(BridgeError::InvalidTransition(_)) => Ok(()),
+                    Err(e) => Err(RuntimeError::StoreError(format!(
+                        "approval cancel failed: {e}"
+                    ))),
+                }
+            }
+            Err(e) => Err(RuntimeError::StoreError(format!(
+                "approval finalize failed: {e}"
+            ))),
+        }
+    }
+
     async fn finalize_approval_aggregate(
         &self,
         workflow_id: &str,

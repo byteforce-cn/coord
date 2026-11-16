@@ -61,6 +61,10 @@ pub struct Engine {
     /// 直接调用引擎命令（测试/内部路径）时恒为 `None`。
     #[serde(skip)]
     acting_service: Option<Principal>,
+    /// 当前命令的客户端 action id（`idempotency_key`），由审批桥注入；见
+    /// [`Self::set_action_id`]。
+    #[serde(skip)]
+    action_id: Option<String>,
     /// 单次命令内的临时抑制：驳回回退在同一命令里先把分支判为 `Rejected`，再由回退
     /// 逻辑重开目标节点；抑制期间不得把根分支的否决升级为实例终态。
     #[serde(skip)]
@@ -102,6 +106,7 @@ impl Engine {
                 initiator: spec.initiator,
                 initiator_acting_service: spec.initiator_acting_service,
                 status: InstanceStatus::Pending,
+                cancellation: None,
                 context: spec.context,
                 root_branch_id: None,
                 revision: 0,
@@ -117,6 +122,7 @@ impl Engine {
             node_attempts: BTreeMap::new(),
             seq: 0,
             acting_service: None,
+            action_id: None,
             defer_instance_rejection: false,
         })
     }
@@ -126,6 +132,12 @@ impl Engine {
     /// 调用方必须在命令结束（成功或失败）后清空，避免归因泄漏到下一条命令。
     pub(crate) fn set_acting_service(&mut self, service: Option<Principal>) {
         self.acting_service = service;
+    }
+
+    /// 设置后续记录的客户端 action id；由审批桥在命令期间注入（命令的
+    /// `idempotency_key`），命令结束后必须清空（与 `acting_service` 同生命周期）。
+    pub(crate) fn set_action_id(&mut self, action_id: Option<String>) {
+        self.action_id = action_id;
     }
 
     // -------------------------------------------------------------- 流程
@@ -174,6 +186,7 @@ impl Engine {
             detail: format!("node={node} attempt={attempt}"),
             task: None,
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.touch(now);
         Ok((id, out))
@@ -289,6 +302,7 @@ impl Engine {
             detail: format!("seats={} comment={}", ids.len(), comment.unwrap_or("")),
             task: None,
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.touch(now);
         Ok((ids, out))
@@ -404,6 +418,7 @@ impl Engine {
                     })
                     .to_string(),
                     acting_service: self.acting_service.clone(),
+                    action_id: self.action_id.clone(),
                 });
                 ids
             }
@@ -450,6 +465,7 @@ impl Engine {
                     })
                     .to_string(),
                     acting_service: self.acting_service.clone(),
+                    action_id: self.action_id.clone(),
                 });
                 ids
             }
@@ -555,6 +571,7 @@ impl Engine {
             })
             .to_string(),
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.touch(now);
         let round = self
@@ -657,6 +674,7 @@ impl Engine {
             detail: format!("seats={cancelled}"),
             task: None,
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.touch(now);
         Ok(out)
@@ -956,6 +974,7 @@ impl Engine {
             })
             .to_string(),
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.touch(now);
         Ok(Vec::new())
@@ -1032,6 +1051,7 @@ impl Engine {
             by: by.into(),
             detail,
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.touch(now);
         Ok(Vec::new())
@@ -1110,6 +1130,7 @@ impl Engine {
             by: by.into(),
             detail: comment.unwrap_or("").to_string(),
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         Ok((new_branch, out))
     }
@@ -1276,6 +1297,7 @@ impl Engine {
             detail: format!("{} -> {} ({reason})", branch.node, target_node),
             task: None,
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         let jump_count = self.instance.jump_count;
         let mut data = json!({
@@ -1387,6 +1409,12 @@ impl Engine {
         self.cancel_open_branches(BranchStatus::Cancelled, &mut out, now);
         let from = self.instance.status;
         self.instance.status = InstanceStatus::Cancelled;
+        self.instance.cancellation = Some(Cancellation {
+            kind: "withdraw".into(),
+            reason: None,
+            compensate: false,
+            at: now,
+        });
         out.push(Effect::InstanceStatus {
             from,
             to: InstanceStatus::Cancelled,
@@ -1399,11 +1427,69 @@ impl Engine {
             detail: String::new(),
             task: None,
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.emit(
             &mut out,
             "com.china-workflow.instance.cancelled.v1",
             json!({"instance_id": self.instance.id}),
+        );
+        self.touch(now);
+        Ok(out)
+    }
+
+    /// 控制面取消（`Cancel`）：级联取消未决席位与轮次，实例置 `Cancelled`（**不是**
+    /// `Terminated`），并记录补偿声明。
+    ///
+    /// `compensate = true` 只记入 `Cancellation` 供读面投影；coord 没有业务补偿动作模型，
+    /// Saga 逆序由调用方执行（协调侧不猜测逆操作）。
+    pub fn cancel(
+        &mut self,
+        expected: u64,
+        by: &str,
+        reason: Option<&str>,
+        compensate: bool,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        if self.instance.status.is_terminal() {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "instance {} is {:?}",
+                self.instance.id, self.instance.status
+            )));
+        }
+        let mut out = Vec::new();
+        self.cancel_open_branches(BranchStatus::Cancelled, &mut out, now);
+        let from = self.instance.status;
+        self.instance.status = InstanceStatus::Cancelled;
+        self.instance.cancellation = Some(Cancellation {
+            kind: "cancel".into(),
+            reason: reason.map(str::to_string),
+            compensate,
+            at: now,
+        });
+        out.push(Effect::InstanceStatus {
+            from,
+            to: InstanceStatus::Cancelled,
+        });
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "cancel".into(),
+            branch: None,
+            by: by.into(),
+            detail: reason.unwrap_or_default().to_string(),
+            task: None,
+            acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
+        });
+        self.emit(
+            &mut out,
+            "com.china-workflow.instance.cancelled.v1",
+            json!({
+                "instance_id": self.instance.id,
+                "reason": reason.unwrap_or_default(),
+                "compensate": compensate,
+            }),
         );
         self.touch(now);
         Ok(out)
@@ -1437,6 +1523,7 @@ impl Engine {
             detail: reason.into(),
             task: None,
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.emit(
             &mut out,
@@ -1584,6 +1671,7 @@ impl Engine {
                 by: "engine".into(),
                 detail: json!({"reason": "DELEGATION_EXPIRED"}).to_string(),
                 acting_service: None,
+                action_id: None,
             });
         }
         self.touch(now);
@@ -1617,6 +1705,7 @@ impl Engine {
             by: "engine".into(),
             detail: reason.into(),
             acting_service: None,
+            action_id: None,
         });
         self.emit(
             &mut out,
@@ -1672,6 +1761,7 @@ impl Engine {
             by: "engine".into(),
             detail: reason.into(),
             acting_service: None,
+            action_id: None,
         });
         self.touch(now);
         Ok(out)
@@ -1767,6 +1857,7 @@ impl Engine {
             })
             .to_string(),
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         self.touch(now);
         Ok((ids, out))
@@ -2115,6 +2206,7 @@ impl Engine {
                     by: "engine".into(),
                     detail: json!({"reason": "BEFORE_ADDED"}).to_string(),
                     acting_service: None,
+                    action_id: None,
                 });
             }
         }
@@ -2168,6 +2260,7 @@ impl Engine {
                     by: "engine".into(),
                     detail: json!({"reason": "BEFORE_ADDED"}).to_string(),
                     acting_service: None,
+                    action_id: None,
                 });
             }
         }
@@ -2249,6 +2342,7 @@ impl Engine {
                         by: "engine".into(),
                         detail: json!({"reason": reason}).to_string(),
                         acting_service: None,
+                        action_id: None,
                     });
                 }
             }
@@ -2352,6 +2446,7 @@ impl Engine {
             comment: comment.map(str::to_string),
             at: now,
             acting_service: self.acting_service.clone(),
+            action_id: self.action_id.clone(),
         });
         t.status = to;
         t.updated_at = now;

@@ -156,6 +156,24 @@ public interface WorkflowClient {
      */
     void cancel(String workflowId);
 
+    /**
+     * Cancel a running instance, recording why and whether the caller wants compensation.
+     *
+     * <p>The instance's approval aggregate ends as {@code CANCELLED} (distinct from the
+     * management {@code TERMINATE}); History projects {@code INSTANCE_CANCELLED} with
+     * {@code attributes.compensate} and {@code attributes.reason}.</p>
+     *
+     * <p><b>Compensation is the caller's job.</b> {@code compensate = true} only records the
+     * declaration: coord has no business compensation-action model and does not run Saga steps
+     * in reverse.</p>
+     *
+     * @param workflowId the workflow instance ID
+     * @param reason     optional cancellation reason (may be null)
+     * @param compensate record a compensation request for the caller to execute
+     * @throws CoordException on communication failure
+     */
+    void cancel(String workflowId, String reason, boolean compensate);
+
     // ──── 工作流定义管理 ────
 
     /**

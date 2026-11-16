@@ -4305,28 +4305,71 @@ pub mod phase4 {
                         "round_id": task.round_id,
                     }),
                 });
+                // 该席位的否决票 action id 列表：TCK 要求 `TASK_REJECTED.attributes.rejectActionIds`。
+                let reject_action_ids: Vec<String> = task
+                    .votes
+                    .iter()
+                    .filter(|v| v.decision == ApprovalDecision::Reject)
+                    .filter_map(|v| v.action_id.clone())
+                    .collect();
+                let reject_reason = engine
+                    .rounds
+                    .get(&task.round_id)
+                    .and_then(|r| r.reject_reason.clone());
                 for (index, vote) in task.votes.iter().enumerate() {
                     let event_type = match vote.decision {
                         ApprovalDecision::Approve => "TASK_COMPLETED",
                         ApprovalDecision::Reject => "TASK_REJECTED",
                     };
+                    let mut attributes = serde_json::json!({
+                        "decision": json_label(&vote.decision),
+                        "actor": vote.actor,
+                        "on_behalf_of": vote.on_behalf_of,
+                        "acting_service": vote.acting_service,
+                        "comment": vote.comment,
+                        "round_id": vote.round_id,
+                    });
+                    if vote.decision == ApprovalDecision::Reject {
+                        // 轮次判定原因（SIGN_COMPLETION_UNSATISFIABLE / REJECT_THRESHOLD_REACHED /
+                        // ANY_REJECT / ON_EXHAUSTED），未判定时为空串。
+                        attributes["reason"] = serde_json::json!(reject_reason
+                            .clone()
+                            .unwrap_or_else(|| "REJECTED".into()));
+                        attributes["rejectActionIds"] =
+                            serde_json::json!(reject_action_ids.clone());
+                    }
                     events.push(HistoryEventView {
                         event_id: format!("{base}:vote:{index}"),
                         event_type: event_type.into(),
                         instance_id: iid.clone(),
                         step_name: node.clone(),
                         task_id: task.id.clone(),
-                        action_id: String::new(),
+                        action_id: vote.action_id.clone().unwrap_or_default(),
                         occurred_at: vote.at,
-                        attributes: serde_json::json!({
-                            "decision": json_label(&vote.decision),
-                            "actor": vote.actor,
-                            "on_behalf_of": vote.on_behalf_of,
-                            "acting_service": vote.acting_service,
-                            "comment": vote.comment,
-                            "round_id": vote.round_id,
-                        }),
+                        attributes,
                     });
+                }
+                // 撤回/取消/回退造成的席位自动取消：assignment 级事件（seedj
+                // `TASK_ASSIGNMENT_AUTO_CANCELLED`）。逐 principal 投影，终态原因取
+                // assignment 的 `resolved_reason`（TASK_CANCELLED / DELEGATION_EXPIRED …）。
+                if task.status == ApprovalTaskStatus::Cancelled {
+                    for (index, assignment) in task.assignments(task.updated_at).iter().enumerate()
+                    {
+                        events.push(HistoryEventView {
+                            event_id: format!("{base}:assignment:{index}:auto_cancelled"),
+                            event_type: "TASK_ASSIGNMENT_AUTO_CANCELLED".into(),
+                            instance_id: iid.clone(),
+                            step_name: node.clone(),
+                            task_id: task.id.clone(),
+                            action_id: String::new(),
+                            occurred_at: task.updated_at,
+                            attributes: serde_json::json!({
+                                "principal": assignment.principal,
+                                "status": json_label(&assignment.status),
+                                "resolved_reason": assignment.resolved_reason,
+                            }),
+                        });
+                    }
                 }
                 if task.votes.is_empty() {
                     let (event_type, suffix) = match task.status {
@@ -4338,17 +4381,19 @@ pub mod phase4 {
                         _ => ("", ""),
                     };
                     if !event_type.is_empty() {
+                        let assignments = task.assignments(task.updated_at);
                         events.push(HistoryEventView {
                             event_id: format!("{base}:{suffix}"),
                             event_type: event_type.into(),
                             instance_id: iid.clone(),
-                            step_name: node,
+                            step_name: node.clone(),
                             task_id: task.id.clone(),
                             action_id: String::new(),
                             occurred_at: task.updated_at,
                             attributes: serde_json::json!({
                                 "assignee": task.assignee,
                                 "kind": json_label(&task.kind),
+                                "assignments": assignments,
                             }),
                         });
                     }
@@ -4465,7 +4510,7 @@ pub mod phase4 {
                         .map(|b| b.node.clone())
                         .unwrap_or_default(),
                     task_id: entry.task.clone().unwrap_or_default(),
-                    action_id: String::new(),
+                    action_id: entry.action_id.clone().unwrap_or_default(),
                     occurred_at: entry.at,
                     attributes: attributes.clone(),
                 });
@@ -4479,12 +4524,19 @@ pub mod phase4 {
                     .audit
                     .iter()
                     .any(|a| a.action == "timeout_fail");
+                let cancelled = engine.instance.cancellation.as_ref();
+                let withdrawn = cancelled.is_some_and(|c| c.kind == "withdraw");
                 let event_type = match engine.instance.status {
                     coord_core::workflow::approval::model::InstanceStatus::Completed => {
                         "INSTANCE_COMPLETED"
                     }
                     coord_core::workflow::approval::model::InstanceStatus::Rejected => {
                         "INSTANCE_REJECTED"
+                    }
+                    coord_core::workflow::approval::model::InstanceStatus::Cancelled
+                        if withdrawn =>
+                    {
+                        "INSTANCE_WITHDRAWN"
                     }
                     coord_core::workflow::approval::model::InstanceStatus::Cancelled => {
                         "INSTANCE_CANCELLED"
@@ -4516,6 +4568,8 @@ pub mod phase4 {
                         attributes: serde_json::json!({
                             "status": json_label(&engine.instance.status).to_uppercase(),
                             "revision": engine.instance.revision,
+                            "reason": cancelled.and_then(|c| c.reason.clone()),
+                            "compensate": cancelled.is_some_and(|c| c.compensate),
                         }),
                     });
                 }
@@ -4523,6 +4577,16 @@ pub mod phase4 {
 
             events.sort_by(|a, b| (a.occurred_at, &a.event_id).cmp(&(b.occurred_at, &b.event_id)));
             Ok(events)
+        }
+
+        /// 审批聚合状态（大写）；无聚合返回 `None`。
+        ///
+        /// 工作流 `GetStatus` 用它区分同为 `FAULTED` 的「管理终止」（聚合 `TERMINATED`）与
+        /// 运行 fault（聚合仍 `RUNNING` 或已 `CANCELLED`）。
+        pub async fn approval_status(&self, workflow_id: &str) -> Option<String> {
+            let bridge = self.approval_bridge().ok()?;
+            let (engine, _rev) = bridge.store().load(workflow_id).await.ok()??;
+            Some(json_label(&engine.instance.status).to_uppercase())
         }
 
         /// 审批实例详情（引擎快照投影）。
@@ -4560,8 +4624,18 @@ pub mod phase4 {
         /// 冲突重放，并发完成的终态不会被取消覆盖。终态 ⇒ `FailedPrecondition`，
         /// 实例不存在 ⇒ `NotFound`。
         pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), WorkflowEngineError> {
+            self.cancel_instance_with(instance_id, None, false).await
+        }
+
+        /// 带原因与补偿声明的取消（`Cancel.reason` / `Cancel.compensate`）。
+        pub async fn cancel_instance_with(
+            &self,
+            instance_id: &str,
+            reason: Option<&str>,
+            compensate: bool,
+        ) -> Result<(), WorkflowEngineError> {
             self.runtime()?
-                .cancel_instance(instance_id)
+                .cancel_instance_with(instance_id, reason, compensate)
                 .await
                 .map_err(WorkflowEngineError::from)
         }
@@ -8140,6 +8214,174 @@ do:
         );
         assert!(events.iter().any(|e| e.event_type == "INSTANCE_REJECTED"));
         assert!(events.iter().any(|e| e.event_type == "TASK_REJECTED"));
+    }
+
+    /// #406：投票命令的 action id 进入 History（`action_id` + `rejectActionIds` + `reason`）。
+    #[tokio::test]
+    async fn history_carries_vote_action_id_and_reject_reason() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("history-action-id-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        let seat = await_open_seat(&store, &inst.id, "alice").await;
+        svc.approval_command(
+            &inst.id,
+            "alice",
+            ApprovalCommand::Reject {
+                task_id: &seat,
+                comment: Some("不同意"),
+            },
+            Some("act-reject-1"),
+        )
+        .await
+        .unwrap();
+
+        let events = svc.history(&inst.id).await.unwrap();
+        let rejected = events
+            .iter()
+            .find(|e| e.event_type == "TASK_REJECTED")
+            .expect("TASK_REJECTED");
+        assert_eq!(rejected.action_id, "act-reject-1");
+        assert_eq!(
+            rejected.attributes["rejectActionIds"],
+            serde_json::json!(["act-reject-1"])
+        );
+        assert!(
+            rejected.attributes["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "TASK_REJECTED must carry a reject reason: {:?}",
+            rejected.attributes
+        );
+        // 幂等键重放不改写 action id：同状态重复读取稳定。
+        assert_eq!(events, svc.history(&inst.id).await.unwrap());
+    }
+
+    /// #406：撤回投影 `INSTANCE_WITHDRAWN`，控制面取消投影 `INSTANCE_CANCELLED` +
+    /// `compensate`；两者都补 assignment 级自动取消事件。
+    #[tokio::test]
+    async fn withdraw_and_cancel_project_distinct_events() {
+        // 撤回（发起人）
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("history-withdraw-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &inst.id, "alice").await;
+        svc.approval_command(&inst.id, "initor", ApprovalCommand::Withdraw, None)
+            .await
+            .unwrap();
+        let events = svc.history(&inst.id).await.unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types.contains(&"INSTANCE_WITHDRAWN"), "{types:?}");
+        assert!(!types.contains(&"INSTANCE_CANCELLED"), "{types:?}");
+        assert!(
+            types.contains(&"TASK_ASSIGNMENT_AUTO_CANCELLED"),
+            "{types:?}"
+        );
+        let withdrawn = events
+            .iter()
+            .find(|e| e.event_type == "INSTANCE_WITHDRAWN")
+            .unwrap();
+        assert_eq!(withdrawn.attributes["compensate"], serde_json::json!(false));
+
+        // 控制面取消（带补偿声明）
+        let (svc2, store2) = approve_service(HashMap::new());
+        let def2 = svc2
+            .deploy_definition("test", &sample_approve_yaml("history-cancel-wf"))
+            .await
+            .unwrap();
+        let inst2 = svc2
+            .start_instance_as(&def2, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        await_open_seat(&store2, &inst2.id, "alice").await;
+        svc2.cancel_instance_with(&inst2.id, Some("用户取消"), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            svc2.approval_status(&inst2.id).await.as_deref(),
+            Some("CANCELLED")
+        );
+        let events2 = svc2.history(&inst2.id).await.unwrap();
+        let types2: Vec<&str> = events2.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types2.contains(&"INSTANCE_CANCELLED"), "{types2:?}");
+        assert!(!types2.contains(&"INSTANCE_WITHDRAWN"), "{types2:?}");
+        assert!(
+            types2.contains(&"TASK_ASSIGNMENT_AUTO_CANCELLED"),
+            "{types2:?}"
+        );
+        let cancelled = events2
+            .iter()
+            .find(|e| e.event_type == "INSTANCE_CANCELLED")
+            .unwrap();
+        assert_eq!(cancelled.attributes["compensate"], serde_json::json!(true));
+        assert_eq!(
+            cancelled.attributes["reason"],
+            serde_json::json!("用户取消")
+        );
+    }
+
+    /// #406：管理终止与运行 fault 的工作流状态同为 `FAILED`，靠审批聚合状态区分。
+    #[tokio::test]
+    async fn terminate_is_distinguishable_from_fault_via_approval_status() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("history-terminate-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &inst.id, "alice").await;
+        // admin 终止（sign_admins 为空时只有 system 可终止：测试直接用 SYSTEM_ACTOR 路径
+        // 的等价入口 `cancel_instance_with`）。
+        svc.cancel_instance_with(&inst.id, Some("管理取消"), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.approval_status(&inst.id).await.as_deref(),
+            Some("CANCELLED")
+        );
+
+        // 终止走审批命令（SYSTEM_ACTOR 恒可），聚合状态为 TERMINATED。
+        let (svc2, store2) = approve_service(HashMap::new());
+        let def2 = svc2
+            .deploy_definition("test", &sample_approve_yaml("history-terminate-wf-2"))
+            .await
+            .unwrap();
+        let inst2 = svc2
+            .start_instance_as(&def2, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        await_open_seat(&store2, &inst2.id, "alice").await;
+        // 内部生命周期权威 `system` 恒可终止；管理路径只允许 sign_admins。
+        svc2.approval_command(
+            &inst2.id,
+            "system",
+            ApprovalCommand::Terminate {
+                reason: "管理终止"
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            svc2.approval_status(&inst2.id).await.as_deref(),
+            Some("TERMINATED")
+        );
+        let loaded = svc2.get_instance(&inst2.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Failed);
     }
 
     /// `ListInstances` 状态 / 定义 / 启动时间窗过滤。

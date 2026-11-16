@@ -1728,6 +1728,7 @@ impl Workflow for WorkflowService {
                 definition_namespace: String::new(),
                 definition_version: String::new(),
                 fault: None,
+                approval_status: String::new(),
             })),
             Ok(None) => Err(Status::not_found("workflow not found")),
             Err(e) => Err(sanitized_internal(e)),
@@ -2455,6 +2456,7 @@ impl Workflow for WorkflowEngineService {
                             service: m.service.clone().unwrap_or_default(),
                         });
 
+                let approval_status = self.approval_status(&inst.id).await.unwrap_or_default();
                 Ok(Response::new(WorkflowGetStatusResponse {
                     workflow_id: inst.id,
                     status: status_str.to_string(),
@@ -2474,6 +2476,7 @@ impl Workflow for WorkflowEngineService {
                     definition_namespace: inst.definition_ns,
                     definition_version: inst.definition_version,
                     fault: inst.fault.as_ref().map(map_fault),
+                    approval_status,
                 }))
             }
             Ok(None) => Err(Status::not_found("workflow instance not found")),
@@ -2515,7 +2518,7 @@ impl Workflow for WorkflowEngineService {
         request: Request<WorkflowCancelRequest>,
     ) -> Result<Response<WorkflowCancelResponse>, Status> {
         let req = request.into_inner();
-        self.cancel_instance(&req.workflow_id)
+        self.cancel_instance_with(&req.workflow_id, non_empty(&req.reason), req.compensate)
             .await
             .map_err(map_engine_error)?;
         Ok(Response::new(WorkflowCancelResponse {}))

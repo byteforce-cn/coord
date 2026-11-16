@@ -251,7 +251,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 currentStep, output, errorMsg, definitionName, input,
                 createdAt, updatedAt, taskStack, currentStateName, suspension,
                 response.getDefinitionNamespace(), response.getDefinitionVersion(),
-                toFault(response));
+                toFault(response), response.getApprovalStatus());
     }
 
     private static WorkflowFault toFault(WorkflowGetStatusResponse response) {
@@ -293,9 +293,16 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public void cancel(String workflowId) {
-        WorkflowCancelRequest request = WorkflowCancelRequest.newBuilder()
+        cancel(workflowId, null, false);
+    }
+
+    @Override
+    public void cancel(String workflowId, String reason, boolean compensate) {
+        WorkflowCancelRequest.Builder builder = WorkflowCancelRequest.newBuilder()
                 .setWorkflowId(workflowId)
-                .build();
+                .setCompensate(compensate);
+        setOptional(builder::setReason, reason);
+        WorkflowCancelRequest request = builder.build();
 
         callWithRetry(
                 (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
