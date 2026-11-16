@@ -2333,6 +2333,11 @@ impl Workflow for WorkflowEngineService {
     ) -> Result<Response<WorkflowStartResponse>, Status> {
         let identity = gateway_identity(&request);
         let req = request.into_inner();
+        // 服务代终端用户发起：授权与命令族同一白名单口径（`approval_target`），
+        // 被代表用户落 `initiator`，调用服务落 `acting_service`。未认证路径保持
+        // `initiator = None`（旧快照兼容）。
+        let (actor, acting_service) = approval_target(self, &identity, &req.on_behalf_of)?;
+        let initiator = (actor != "anonymous").then_some(actor.as_str());
 
         // definition_id 与 definition_dsl 互斥（startByDefinition 真契约）
         if !req.definition_id.is_empty() && !req.definition_dsl.is_empty() {
@@ -2357,17 +2362,16 @@ impl Workflow for WorkflowEngineService {
                 .map_err(map_deploy_error)?
         };
 
-        // 发起人取自 CCT（空主体 ⇒ None），注入实例供审批自审判定。
-        let initiator = non_empty(&identity.subject);
         // 幂等键（可选）：同键重放返回首个 workflow_id（ADR-0016 D12 的 Start 幂等）。
         let idempotency_key = non_empty(req.idempotency_key.trim());
         // 调用方指定实例 id（可选）：由运行时做同定义重放 / 版本冲突判定。
         let requested_id = non_empty(req.workflow_id.trim());
         let inst = self
-            .start_instance_as_with_key_and_id(
+            .start_instance_as_with_key_and_id_on_behalf(
                 &def_id,
                 input,
                 initiator,
+                acting_service.as_deref(),
                 idempotency_key,
                 requested_id,
             )
@@ -3393,6 +3397,7 @@ impl Workflow for WorkflowEngineService {
             definition_name: detail.definition_name,
             definition_namespace: detail.definition_namespace,
             definition_version: detail.definition_version,
+            acting_service: detail.acting_service.unwrap_or_default(),
             branches: detail
                 .branches
                 .iter()
@@ -4390,6 +4395,114 @@ do:
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("approval seat for '{assignee}' never opened");
+    }
+
+    /// #405：服务代业务用户发起——`initiator` 落被代表用户，`acting_service` 落调用服务；
+    /// 非白名单服务被拒；自审批守卫与发起人权限按业务用户判定。
+    #[tokio::test]
+    async fn start_on_behalf_sets_initiator_and_acting_service() {
+        let (svc, store) = handler_approve_service_with_on_behalf(&["svc-seedj"]);
+        let def_id = svc
+            .deploy_definition("test", &approve_yaml("start-on-behalf-wf"))
+            .await
+            .unwrap();
+
+        let mut req = Request::new(WorkflowStartRequest {
+            definition_id: def_id,
+            on_behalf_of: "alice".into(),
+            ..Default::default()
+        });
+        req.extensions_mut().insert(GatewayIdentity {
+            subject: "svc-seedj".into(),
+            roles: vec![],
+        });
+        let started = Workflow::start(&svc, req).await.unwrap().into_inner();
+        let instance_id = started.workflow_id;
+        // 审批实例在驱动进入 approve 节点时创建：先等席位出现，再读详情/历史。
+        let task_id = await_seat(&store, &instance_id, "alice").await;
+
+        // 实例详情：initiator = 被代表用户，acting_service = 调用服务
+        let detail = Workflow::get_instance_detail(
+            &svc,
+            Request::new(WorkflowGetInstanceDetailRequest {
+                workflow_id: instance_id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(detail.initiator, "alice");
+        assert_eq!(detail.acting_service, "svc-seedj");
+
+        // History: INSTANCE_STARTED 携带 acting_service
+        let history = Workflow::history(
+            &svc,
+            Request::new(WorkflowHistoryRequest {
+                workflow_id: instance_id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        let started_event = history
+            .events
+            .iter()
+            .find(|e| e.event_type == "INSTANCE_STARTED")
+            .expect("INSTANCE_STARTED");
+        let attrs: serde_json::Value =
+            serde_json::from_str(&started_event.attributes_json).unwrap();
+        assert_eq!(attrs["initiator"], "alice");
+        assert_eq!(attrs["acting_service"], "svc-seedj");
+
+        // 自审批守卫按业务用户判定：alice 是自己发起的节点且未开 allow_self_approve
+        let mut approve_req = Request::new(WorkflowApproveRequest {
+            workflow_id: instance_id.clone(),
+            task_id,
+            comment: String::new(),
+            idempotency_key: String::new(),
+            on_behalf_of: "alice".into(),
+        });
+        approve_req.extensions_mut().insert(GatewayIdentity {
+            subject: "svc-seedj".into(),
+            roles: vec![],
+        });
+        let err = Workflow::approve(&svc, approve_req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        // 发起人可撤回：Withdraw 的授权按 initiator（被代表用户）判定
+        let mut withdraw_req = Request::new(WorkflowWithdrawRequest {
+            workflow_id: instance_id.clone(),
+            comment: "撤回".into(),
+            idempotency_key: String::new(),
+            on_behalf_of: "alice".into(),
+        });
+        withdraw_req.extensions_mut().insert(GatewayIdentity {
+            subject: "svc-seedj".into(),
+            roles: vec![],
+        });
+        let withdrawn = Workflow::withdraw(&svc, withdraw_req)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(withdrawn.status, "CANCELLED");
+
+        // 非白名单服务不得代发起
+        let (svc2, _) = handler_approve_service_with_on_behalf(&["svc-seedj"]);
+        let def2 = svc2
+            .deploy_definition("test", &approve_yaml("start-on-behalf-denied-wf"))
+            .await
+            .unwrap();
+        let mut denied = Request::new(WorkflowStartRequest {
+            definition_id: def2,
+            on_behalf_of: "alice".into(),
+            ..Default::default()
+        });
+        denied.extensions_mut().insert(GatewayIdentity {
+            subject: "mallory".into(),
+            roles: vec![],
+        });
+        let err = Workflow::start(&svc2, denied).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
     /// handler 层身份：actor 取自 `GatewayIdentity`（CCT subject），缺失扩展 ⇒ `anonymous`。

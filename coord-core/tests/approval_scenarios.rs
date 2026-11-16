@@ -20,6 +20,7 @@ fn start() -> Engine {
             definition_version: "1.0.0".into(),
             definition_hash: "sha256:t2".into(),
             initiator: "zhangsan".into(),
+            initiator_acting_service: None,
             context: Scope::new(),
         },
         1_000,
@@ -547,6 +548,7 @@ fn start_rejects_empty_required_fields() {
         definition_version: "1.0.0".into(),
         definition_hash: hash.into(),
         initiator: "zhangsan".into(),
+        initiator_acting_service: None,
         context: Scope::new(),
     };
 

@@ -163,9 +163,27 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String startByDefinitionWithId(String definitionId, String workflowId, byte[] input) {
+        return startByDefinitionWithIdAndOnBehalfOf(definitionId, workflowId, input, null);
+    }
+
+    @Override
+    public String startByDefinitionOnBehalfOf(String definitionId, byte[] input,
+                                              String onBehalfOf) {
+        return startByDefinitionWithIdAndOnBehalfOf(definitionId, null, input, onBehalfOf);
+    }
+
+    @Override
+    public String startByDefinitionWithIdOnBehalfOf(String definitionId, String workflowId,
+                                                    byte[] input, String onBehalfOf) {
+        return startByDefinitionWithIdAndOnBehalfOf(definitionId, workflowId, input, onBehalfOf);
+    }
+
+    private String startByDefinitionWithIdAndOnBehalfOf(String definitionId, String workflowId,
+                                                        byte[] input, String onBehalfOf) {
         WorkflowStartRequest.Builder req = WorkflowStartRequest.newBuilder()
-                .setDefinitionId(definitionId)
-                .setWorkflowId(workflowId);
+                .setDefinitionId(definitionId);
+        setOptional(req::setWorkflowId, workflowId);
+        setOptional(req::setOnBehalfOf, onBehalfOf);
         if (input != null && input.length > 0) {
             req.setInput(ByteString.copyFrom(input));
         }
@@ -176,8 +194,8 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                         .start((WorkflowStartRequest) r),
                 req.build(), "workflow.startByDefinitionWithId");
 
-        log.debug("Workflow started by definition with id: id={}, defId={}",
-                response.getWorkflowId(), definitionId);
+        log.debug("Workflow started by definition with id: id={}, defId={}, onBehalfOf={}",
+                response.getWorkflowId(), definitionId, onBehalfOf);
         return response.getWorkflowId();
     }
 
@@ -1088,7 +1106,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 audit.size());
         return new ApprovalInstanceDetail(
                 response.getInstanceId(), response.getStatus(), response.getInitiator(),
-                response.getRevision(), response.getDefinitionName(),
+                response.getActingService(), response.getRevision(), response.getDefinitionName(),
                 response.getDefinitionNamespace(), response.getDefinitionVersion(),
                 branches, tasks, rounds, audit);
     }

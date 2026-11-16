@@ -80,6 +80,7 @@ fn start_engine(id: &str, initiator: &str, definition_hash: &str) -> Engine {
             definition_version: "1.0.0".into(),
             definition_hash: definition_hash.into(),
             initiator: initiator.into(),
+            initiator_acting_service: None,
             context: Scope::new(),
         },
         1_000,

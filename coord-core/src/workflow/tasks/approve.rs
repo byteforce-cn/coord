@@ -95,6 +95,7 @@ mod tests {
             fault: None,
             suspension_meta: None,
             initiator: None,
+            initiator_acting_service: None,
             definition_hash: Some("sha256:test".into()),
             engine_version: None,
         }

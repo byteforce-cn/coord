@@ -226,12 +226,16 @@ auth:
   不可自批（`allowSelfApprove` 可开，匿名发起豁免）、加签/减签 = `signAdmins` ∪ 发起人、
   驳回至节点 = 未决席位持有人 ∪ `signAdmins` ∪ 发起人、终止 = `signAdmins`（内部
   `SYSTEM_ACTOR="system"` 恒可，用于运行时收口）。矩阵逐行见 ADR-0013 D7。
-- **服务代终端用户（ADR-0014 D2）**：业务服务可在 10 个命令请求里填 `on_behalf_of`、
-  在 `ListPendingTasks` 里填 `assignee`。调用方服务必须列在 agent 配置
+- **服务代终端用户（ADR-0014 D2）**：业务服务可在 10 个命令请求与 `Start` 里填
+  `on_behalf_of`、在 `ListPendingTasks` 里填 `assignee`。调用方服务必须列在 agent 配置
   `services.workflow_on_behalf_services`（缺省空 = 不授权）；生效主体是被代表用户，
   席位归属判定不变。`VoteRecord.actor` / `AuditEntry.by` 记被代表用户，新增
   `acting_service` 记执行服务（经 `GetInstanceDetail` 的 votes/audit 可见）。
   保留主体 `system` 两侧都拒绝；未授权代操作在任何副作用前 `PERMISSION_DENIED`。
+  `Start(on_behalf_of=...)` 落 `initiator` = 被代表用户，`GetInstanceDetail.acting_service`
+  与 `History` 的 `INSTANCE_STARTED.acting_service` 记调用服务；此后实例级撤回 / 恢复 /
+  实例级抄送与自审批守卫都按被代表用户判定。`Terminate` 仍要求 `sign_admins`：服务主体
+  按 `on_behalf_of=<管理员>` 代发（适配器需配置管理员主体）。
 - **任务级动作（`Urge` / `Cc` / `WithdrawTask`）**：催办与抄送只写审计/通知，不改审批
   计数与工作流状态（催办投影 `TASK_URGED`；抄送投影 `TASK_CC`）。任务级抄送要求该节点
   定义 `allowCc: true`；实例级抄送仅限发起人或 `sign_admins`。任务级撤回仅原审批人可

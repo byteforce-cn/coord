@@ -774,6 +774,10 @@ pub struct WorkflowInstance {
     /// 实例发起人（Start 命令注入）；`None` = 旧快照无此字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiator: Option<String>,
+    /// 代 `initiator` 发起本实例的服务主体（Start `on_behalf_of`）；
+    /// `None` = 直接发起或旧快照。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator_acting_service: Option<String>,
     /// 实例启动时钉死的定义内容哈希；`None` = 旧快照未钉死（首次成功驱动时回填）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_hash: Option<String>,
@@ -1172,6 +1176,7 @@ impl WorkflowInstance {
             fault: None,
             suspension_meta: None,
             initiator: None,
+            initiator_acting_service: None,
             definition_hash: Some(definition_hash(definition)),
             engine_version: Some(ENGINE_VERSION.to_string()),
         }

@@ -342,6 +342,7 @@ impl ApprovalBridge {
                             definition_version: wf.definition_version.clone(),
                             definition_hash: wf.definition_hash.clone().unwrap_or_default(),
                             initiator: wf.initiator.clone().unwrap_or_else(|| "anonymous".into()),
+                            initiator_acting_service: wf.initiator_acting_service.clone(),
                             context: workflow_scope(&wf.context),
                         },
                         now,
@@ -1478,6 +1479,7 @@ mod tests {
             fault: None,
             suspension_meta: None,
             initiator: Some("zhangsan".into()),
+            initiator_acting_service: None,
             definition_hash: Some("sha256:bridge".into()),
             engine_version: None,
         }
@@ -2341,6 +2343,7 @@ mod tests {
                 definition_version: "1.0.0".into(),
                 definition_hash: "sha256:x".into(),
                 initiator: "zhangsan".into(),
+                initiator_acting_service: None,
                 context: Scope::new(),
             },
             T0,

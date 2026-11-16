@@ -140,6 +140,25 @@ class WorkflowClientContractTest {
     }
 
     @Test
+    @DisplayName("startByDefinition*OnBehalfOf 发送 on_behalf_of（服务代终端用户发起）")
+    void startOnBehalfOfSendsRepresentedUser() {
+        wf.startByDefinitionOnBehalfOf("icps-flow-123", "{}".getBytes(), "alice");
+        assertThat(fake.lastStart.getDefinitionId()).isEqualTo("icps-flow-123");
+        assertThat(fake.lastStart.getOnBehalfOf()).isEqualTo("alice");
+        assertThat(fake.lastStart.getWorkflowId()).isEmpty();
+
+        wf.startByDefinitionWithIdOnBehalfOf("icps-flow-123", "inst-9",
+                "{}".getBytes(), "bob");
+        assertThat(fake.lastStart.getWorkflowId()).isEqualTo("inst-9");
+        assertThat(fake.lastStart.getDefinitionId()).isEqualTo("icps-flow-123");
+        assertThat(fake.lastStart.getOnBehalfOf()).isEqualTo("bob");
+
+        // 既有方法不发送 on_behalf_of（直接以 CCT 主体发起）
+        wf.startByDefinition("icps-flow-123", null);
+        assertThat(fake.lastStart.getOnBehalfOf()).isEmpty();
+    }
+
+    @Test
     @DisplayName("getStatus 映射 currentStateName + suspension（挂起元信息）")
     void getStatusMapsCurrentStateNameAndSuspension() {
         fake.nextStatus = WorkflowGetStatusResponse.newBuilder()
@@ -278,6 +297,7 @@ class WorkflowClientContractTest {
                 .setInstanceId("inst-1")
                 .setStatus("RUNNING")
                 .setInitiator("bob")
+                .setActingService("svc-seedj")
                 .setRevision(7L)
                 .setDefinitionName("order-approval")
                 .setDefinitionNamespace("icps")
@@ -336,6 +356,7 @@ class WorkflowClientContractTest {
         assertThat(d.instanceId()).isEqualTo("inst-1");
         assertThat(d.status()).isEqualTo("RUNNING");
         assertThat(d.initiator()).isEqualTo("bob");
+        assertThat(d.actingService()).isEqualTo("svc-seedj");
         assertThat(d.revision()).isEqualTo(7L);
         assertThat(d.definitionName()).isEqualTo("order-approval");
         assertThat(d.definitionNamespace()).isEqualTo("icps");

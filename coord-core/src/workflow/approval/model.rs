@@ -82,6 +82,9 @@ pub struct Instance {
     /// v2 实例不允许被其他版本驱动（见 ADR-0013 D1）。
     pub engine_version: String,
     pub initiator: Principal,
+    /// 代 `initiator` 发起本实例的服务主体（Start `on_behalf_of`）；`None` = 直接发起。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator_acting_service: Option<Principal>,
     pub status: InstanceStatus,
     /// 实例级变量（作用域第三级）。
     pub context: Scope,
@@ -769,6 +772,7 @@ mod tests {
             definition_hash: "sha256:abc".into(),
             engine_version: APPROVAL_ENGINE_VERSION.into(),
             initiator: "u-initiator".into(),
+            initiator_acting_service: None,
             status: InstanceStatus::Rejected,
             context: BTreeMap::from([("amount".to_string(), json!(3))]),
             root_branch_id: Some("inst-1:b0000".into()),

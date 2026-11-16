@@ -2576,6 +2576,8 @@ pub mod phase4 {
         /// 实例启动时钉死的定义命名空间 / 版本。
         pub definition_namespace: String,
         pub definition_version: String,
+        /// 代 `initiator` 发起实例的服务主体（Start `on_behalf_of`）；直接发起为 `None`。
+        pub acting_service: Option<String>,
         pub branches: Vec<ApprovalBranch>,
         pub tasks: Vec<ApprovalTask>,
         pub rounds: Vec<ApprovalRound>,
@@ -3448,6 +3450,29 @@ pub mod phase4 {
             idempotency_key: Option<&str>,
             workflow_id: Option<&str>,
         ) -> Result<WorkflowInstance, WorkflowEngineError> {
+            self.start_instance_as_with_key_and_id_on_behalf(
+                definition_id,
+                input,
+                initiator,
+                None,
+                idempotency_key,
+                workflow_id,
+            )
+            .await
+        }
+
+        /// 服务代终端用户发起（`Start.on_behalf_of`）：`initiator` = 被代表用户，
+        /// `acting_service` = 调用方服务（只做归因，授权白名单在 gRPC 面判定）。
+        #[allow(clippy::too_many_arguments)]
+        pub async fn start_instance_as_with_key_and_id_on_behalf(
+            &self,
+            definition_id: &str,
+            input: Value,
+            initiator: Option<&str>,
+            acting_service: Option<&str>,
+            idempotency_key: Option<&str>,
+            workflow_id: Option<&str>,
+        ) -> Result<WorkflowInstance, WorkflowEngineError> {
             let key = idempotency_key.map(str::trim).filter(|key| !key.is_empty());
             let requested = workflow_id.map(str::trim).filter(|id| !id.is_empty());
             if key.is_some() && requested.is_some() {
@@ -3493,7 +3518,13 @@ pub mod phase4 {
                 })?;
 
             self.runtime()?
-                .start_as_with_id(&def, input, initiator, instance_id.as_deref())
+                .start_as_with_id_on_behalf(
+                    &def,
+                    input,
+                    initiator,
+                    acting_service,
+                    instance_id.as_deref(),
+                )
                 .await
                 .map_err(WorkflowEngineError::from)
         }
@@ -3976,6 +4007,7 @@ pub mod phase4 {
                     "definition_version": engine.instance.definition_version,
                     "definition_hash": engine.instance.definition_hash,
                     "initiator": engine.instance.initiator,
+                    "acting_service": engine.instance.initiator_acting_service,
                 }),
             });
 
@@ -4262,6 +4294,7 @@ pub mod phase4 {
                 definition_name: engine.instance.definition_name.clone(),
                 definition_namespace: engine.instance.definition_ns.clone(),
                 definition_version: engine.instance.definition_version.clone(),
+                acting_service: engine.instance.initiator_acting_service.clone(),
                 branches: engine.branches.values().cloned().collect(),
                 tasks: engine.tasks.values().cloned().collect(),
                 rounds: engine.rounds.values().cloned().collect(),
@@ -4886,6 +4919,7 @@ events:
             fault: None,
             suspension_meta: None,
             initiator: None,
+            initiator_acting_service: None,
             definition_hash: None,
             engine_version: None,
         };

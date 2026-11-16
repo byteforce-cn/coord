@@ -34,6 +34,8 @@ pub struct StartSpec {
     /// 实例启动时钉死的定义内容哈希；漂移校验在加载定义的驱动层。
     pub definition_hash: String,
     pub initiator: Principal,
+    /// 代 `initiator` 发起实例的服务主体（Start `on_behalf_of`）；`None` = 直接发起。
+    pub initiator_acting_service: Option<Principal>,
     /// 实例级变量（作用域第三级）。
     pub context: Scope,
 }
@@ -98,6 +100,7 @@ impl Engine {
                 definition_hash: spec.definition_hash,
                 engine_version: APPROVAL_ENGINE_VERSION.into(),
                 initiator: spec.initiator,
+                initiator_acting_service: spec.initiator_acting_service,
                 status: InstanceStatus::Pending,
                 context: spec.context,
                 root_branch_id: None,

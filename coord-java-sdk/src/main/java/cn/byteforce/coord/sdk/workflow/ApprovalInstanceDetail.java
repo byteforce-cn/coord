@@ -13,6 +13,7 @@ public final class ApprovalInstanceDetail {
     private final String instanceId;
     private final String status;
     private final String initiator;
+    private final String actingService;
     private final long revision;
     private final String definitionName;
     private final String definitionNamespace;
@@ -34,8 +35,8 @@ public final class ApprovalInstanceDetail {
                                   long revision, String definitionName,
                                   List<ApprovalBranch> branches, List<ApprovalTask> tasks,
                                   List<ApprovalRound> rounds, List<ApprovalAudit> audit) {
-        this(instanceId, status, initiator, revision, definitionName, "", "", branches, tasks,
-                rounds, audit);
+        this(instanceId, status, initiator, "", revision, definitionName, "", "",
+                branches, tasks, rounds, audit);
     }
 
     /**
@@ -49,9 +50,36 @@ public final class ApprovalInstanceDetail {
                                   String definitionNamespace, String definitionVersion,
                                   List<ApprovalBranch> branches, List<ApprovalTask> tasks,
                                   List<ApprovalRound> rounds, List<ApprovalAudit> audit) {
+        this(instanceId, status, initiator, "", revision, definitionName, definitionNamespace,
+                definitionVersion, branches, tasks, rounds, audit);
+    }
+
+    /**
+     * Full constructor with the acting service (服务代发起).
+     *
+     * @param actingService the service that started the instance on behalf of the initiator;
+     *                      empty for a direct start
+     */
+    public ApprovalInstanceDetail(String instanceId, String status, String initiator,
+                                  String actingService, long revision, String definitionName,
+                                  List<ApprovalBranch> branches, List<ApprovalTask> tasks,
+                                  List<ApprovalRound> rounds, List<ApprovalAudit> audit) {
+        this(instanceId, status, initiator, actingService, revision, definitionName, "", "",
+                branches, tasks, rounds, audit);
+    }
+
+    /**
+     * Full constructor with the acting service and the pinned definition identity.
+     */
+    public ApprovalInstanceDetail(String instanceId, String status, String initiator,
+                                  String actingService, long revision, String definitionName,
+                                  String definitionNamespace, String definitionVersion,
+                                  List<ApprovalBranch> branches, List<ApprovalTask> tasks,
+                                  List<ApprovalRound> rounds, List<ApprovalAudit> audit) {
         this.instanceId = instanceId;
         this.status = status;
         this.initiator = initiator;
+        this.actingService = actingService != null ? actingService : "";
         this.revision = revision;
         this.definitionName = definitionName;
         this.definitionNamespace = definitionNamespace != null ? definitionNamespace : "";
@@ -69,6 +97,12 @@ public final class ApprovalInstanceDetail {
     public String instanceId() { return instanceId; }
     public String status() { return status; }
     public String initiator() { return initiator; }
+
+    /**
+     * The service that started the instance on behalf of {@link #initiator()} (Start
+     * {@code on_behalf_of}); empty for a direct start.
+     */
+    public String actingService() { return actingService; }
 
     /** Optimistic concurrency guard value (CAS); incremented on every state change. */
     public long revision() { return revision; }
@@ -95,6 +129,7 @@ public final class ApprovalInstanceDetail {
                 && Objects.equals(instanceId, that.instanceId)
                 && Objects.equals(status, that.status)
                 && Objects.equals(initiator, that.initiator)
+                && Objects.equals(actingService, that.actingService)
                 && Objects.equals(definitionName, that.definitionName)
                 && Objects.equals(definitionNamespace, that.definitionNamespace)
                 && Objects.equals(definitionVersion, that.definitionVersion)
@@ -106,14 +141,16 @@ public final class ApprovalInstanceDetail {
 
     @Override
     public int hashCode() {
-        return Objects.hash(instanceId, status, initiator, revision, definitionName,
-                definitionNamespace, definitionVersion, branches, tasks, rounds, audit);
+        return Objects.hash(instanceId, status, initiator, actingService, revision,
+                definitionName, definitionNamespace, definitionVersion, branches, tasks, rounds,
+                audit);
     }
 
     @Override
     public String toString() {
         return "ApprovalInstanceDetail{instanceId='" + instanceId + "', status='" + status
-                + "', initiator='" + initiator + "', revision=" + revision
+                + "', initiator='" + initiator + "', actingService='" + actingService
+                + "', revision=" + revision
                 + ", definitionName='" + definitionName + "', branches=" + branches.size()
                 + ", tasks=" + tasks.size() + ", rounds=" + rounds.size()
                 + ", audit=" + audit.size() + "}";

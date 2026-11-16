@@ -82,6 +82,39 @@ public interface WorkflowClient {
     String startByDefinitionWithId(String definitionId, String workflowId, byte[] input);
 
     /**
+     * Start an instance as a service acting on behalf of an end user (服务代终端用户发起).
+     *
+     * <p>The calling service must be listed in the agent's
+     * {@code services.workflow_on_behalf_services}; the instance's initiator is the
+     * represented user, so initiator-scoped operations (withdraw / resume / instance CC) and
+     * the self-approval guard apply to that user. The calling service is recorded as the
+     * acting service ({@code History}'s {@code INSTANCE_STARTED}, instance detail).</p>
+     *
+     * @param definitionId already-deployed definition ID
+     * @param input        initial input payload
+     * @param onBehalfOf   the represented end user
+     * @return the workflow instance ID
+     * @throws CoordException on communication, authorization, or definition-not-found failure
+     */
+    String startByDefinitionOnBehalfOf(String definitionId, byte[] input, String onBehalfOf);
+
+    /**
+     * Start with a caller-chosen instance ID as a service acting on behalf of an end user.
+     *
+     * <p>Replay semantics match {@link #startByDefinitionWithId}; see
+     * {@link #startByDefinitionOnBehalfOf} for the on-behalf authorization.</p>
+     *
+     * @param definitionId already-deployed definition ID
+     * @param workflowId   caller-chosen instance ID (no '/', at most 128 bytes)
+     * @param input        initial input payload
+     * @param onBehalfOf   the represented end user
+     * @return the workflow instance ID (equals {@code workflowId})
+     * @throws CoordException on communication, authorization, or ID-conflict failure
+     */
+    String startByDefinitionWithIdOnBehalfOf(String definitionId, String workflowId,
+                                             byte[] input, String onBehalfOf);
+
+    /**
      * Get the current status of a workflow instance.
      *
      * @param workflowId the workflow instance ID returned by {@link #start}
