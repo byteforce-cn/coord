@@ -7240,10 +7240,10 @@ mod tests {
         );
     }
 
-    /// 工作流取消：挂起在审批上 ⇒ 以内部系统 actor 终止审批实例（**默认空**
-    /// `sign_admins` 下也生效），再取消工作流。
+    /// 工作流取消：挂起在审批上 ⇒ 审批聚合收口为 `Cancelled`（不是 `Terminated`），
+    /// 以内部系统 actor 执行（**默认空** `sign_admins` 下也生效），再取消工作流。
     #[tokio::test]
-    async fn workflow_cancel_terminates_open_approval() {
+    async fn workflow_cancel_cancels_open_approval() {
         let (bridge, approval_store) = approval_bridge();
         let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
         let def = approve_resume_definition("approve-cancel-terminate-wf", None, &[]);
@@ -7261,9 +7261,16 @@ mod tests {
             .expect("approval instance");
         assert_eq!(
             engine.instance.status,
-            ApprovalStatus::Terminated,
-            "取消工作流必须终止未决审批实例"
+            ApprovalStatus::Cancelled,
+            "取消工作流必须把未决审批聚合收口为 Cancelled（与 Terminate 区分）"
         );
+        let cancellation = engine
+            .instance
+            .cancellation
+            .as_ref()
+            .expect("cancellation marker");
+        assert_eq!(cancellation.kind, "cancel");
+        assert!(!cancellation.compensate);
     }
 
     /// 挂起在审批上但审批实例不存在（从未开启/已被清除）：terminate 返回 `NotFound` ⇒

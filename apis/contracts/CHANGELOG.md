@@ -16,8 +16,8 @@
   Saga 逆序属于调用方业务领域（coord 没有逆动作模型）。
 - `GetStatus.approval_status` 暴露审批聚合状态：工作流状态同为 `FAULTED` 时，
   管理终止为 `TERMINATED`，运行 fault 的聚合仍 `RUNNING`/`CANCELLED`，调用方据此区分。
-- `Withdraw` 的显式 `comment` 仍记录在审计，但 `INSTANCE_WITHDRAWN.attributes.reason`
-  为空（撤回语义由事件类型本身表达）。
+- `INSTANCE_WITHDRAWN` 不带 `reason`：`Withdraw` 的 `comment` 当前不进入审批聚合
+  （`ApprovalCommand::Withdraw` 不携带 comment），撤回语义由事件类型本身表达。
 
 **影响范围**：旧客户端不受影响（新增字段/属性/事件类型为增量）；`Cancel` 的聚合终态从
 `TERMINATED` 变为 `CANCELLED` 是**行为修正**（同一 `GetStatus.status` 仍为 `FAULTED`，
