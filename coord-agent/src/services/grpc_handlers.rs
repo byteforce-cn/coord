@@ -1723,6 +1723,10 @@ impl Workflow for WorkflowService {
                 task_stack: vec![],
                 current_state_name: String::new(),
                 suspension: None,
+                // 遗留 v1 存储不区分定义命名空间/版本，也无结构化 fault。
+                definition_namespace: String::new(),
+                definition_version: String::new(),
+                fault: None,
             })),
             Ok(None) => Err(Status::not_found("workflow not found")),
             Err(e) => Err(sanitized_internal(e)),
@@ -1874,6 +1878,11 @@ impl Workflow for WorkflowService {
                         namespace: String::new(),
                         output_json: vec![],
                         context_json: vec![],
+                        // 遗留 v1 存储不区分定义命名空间/版本，也不携带发起人。
+                        definition_namespace: String::new(),
+                        definition_version: String::new(),
+                        initiator: String::new(),
+                        completed_at: 0,
                     })
                     .collect(),
                 next_page_token: next_token,
@@ -2168,6 +2177,17 @@ fn approval_target(
     }
 }
 
+/// 结构化 fault 投影（RFC 7807 → wire）；`error_message` 仍取 `title` 保持兼容。
+fn map_fault(f: &coord_core::workflow::model::WorkflowFault) -> coord_proto::agent::WorkflowFault {
+    coord_proto::agent::WorkflowFault {
+        r#type: f.r#type.clone(),
+        title: f.title.clone(),
+        detail: f.detail.clone(),
+        status: u32::from(f.status),
+        instance: f.instance.clone().unwrap_or_default(),
+    }
+}
+
 /// 空字符串 ⇒ `None`（proto3 无可选标量，空串与缺省同义）。
 fn non_empty(value: &str) -> Option<&str> {
     if value.is_empty() {
@@ -2425,7 +2445,11 @@ impl Workflow for WorkflowEngineService {
                     workflow_id: inst.id,
                     status: status_str.to_string(),
                     output: output_bytes,
-                    error_message: inst.fault.map(|f| f.title).unwrap_or_default(),
+                    error_message: inst
+                        .fault
+                        .as_ref()
+                        .map(|f| f.title.clone())
+                        .unwrap_or_default(),
                     definition_name: inst.definition_name,
                     input: input_bytes,
                     created_at: inst.created_at,
@@ -2433,6 +2457,9 @@ impl Workflow for WorkflowEngineService {
                     task_stack,
                     current_state_name,
                     suspension,
+                    definition_namespace: inst.definition_ns,
+                    definition_version: inst.definition_version,
+                    fault: inst.fault.as_ref().map(map_fault),
                 }))
             }
             Ok(None) => Err(Status::not_found("workflow instance not found")),
@@ -2683,12 +2710,21 @@ impl Workflow for WorkflowEngineService {
                             started_at: i.created_at,
                             updated_at: i.updated_at,
                             definition_name: i.definition_name,
-                            namespace: i.definition_ns,
+                            namespace: i.definition_ns.clone(),
                             output_json: i
                                 .output
                                 .map(|v| serde_json::to_vec(&v).unwrap_or_default())
                                 .unwrap_or_default(),
                             context_json: serde_json::to_vec(&i.context).unwrap_or_default(),
+                            definition_namespace: i.definition_ns,
+                            definition_version: i.definition_version,
+                            initiator: i.initiator.unwrap_or_default(),
+                            // 终态实例的最后一次更新就是终态转型；非终态无完成时间。
+                            completed_at: if i.status.is_terminal() {
+                                i.updated_at
+                            } else {
+                                0
+                            },
                         }
                     })
                     .collect();
@@ -3355,6 +3391,8 @@ impl Workflow for WorkflowEngineService {
             initiator: detail.initiator,
             revision: detail.revision as i64,
             definition_name: detail.definition_name,
+            definition_namespace: detail.definition_namespace,
+            definition_version: detail.definition_version,
             branches: detail
                 .branches
                 .iter()
@@ -4161,6 +4199,22 @@ events:
             status.current_state_name, "reject",
             "GetStatus must report the declared state name, not engine task names"
         );
+    }
+
+    /// 结构化 fault 投影：RFC 7807 字段逐项上 wire（`error_message` 另取 `title`）。
+    #[test]
+    fn test_map_fault_projects_rfc7807_fields() {
+        let mut fault =
+            coord_core::workflow::errors::WorkflowFault::timeout("审批超时", "deadline exceeded");
+        fault.instance = Some("/tasks/0".to_string());
+
+        let wire = map_fault(&fault);
+
+        assert_eq!(wire.r#type, fault.r#type);
+        assert_eq!(wire.title, "审批超时");
+        assert_eq!(wire.detail, "deadline exceeded");
+        assert_eq!(wire.status, 408);
+        assert_eq!(wire.instance, "/tasks/0");
     }
 
     /// internal 错误脱敏：客户端仅收到通用 "internal error"，不含内部细节

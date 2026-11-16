@@ -94,6 +94,15 @@
   `workflow.rs::test_current_state_name_normalizes_internal_route_task`、
   `grpc_handlers.rs::test_get_status_reports_declared_state_name_not_internal_task`。
 
+**定义身份与 fault（`GetStatus` / `GetInstanceDetail` / `ListInstances`）**：读面回报实例
+**启动时钉死**的 `definition_namespace` / `definition_version`（与
+`WorkflowInstance.definition_ns` / `definition_version` 同源，不是定义的最新版本）；
+`WorkflowInstanceSummary` 另带 `initiator` 与 `completed_at`（终态转型时间，非终态为 0）。
+失败实例的 `GetStatus.fault` 是 RFC 7807 结构化投影（`type` / `title` / `detail` /
+`status` / `instance`），`error_message` 保留为 `fault.title` 的兼容副本。
+- 判据：`workflow.rs::get_instance_detail_returns_snapshot_fields`、
+  `grpc_handlers.rs::test_map_fault_projects_rfc7807_fields`。
+
 ## 6. HTTP 任务派发：运行时表达式与凭据注入（`$context` / `$secrets` / `$constants`）
 
 `call` / operation 任务的 `with` 支持 HTTP 调用（`endpoint` / `method` / `headers` /

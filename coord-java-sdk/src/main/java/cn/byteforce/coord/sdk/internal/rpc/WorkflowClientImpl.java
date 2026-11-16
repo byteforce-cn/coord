@@ -86,6 +86,7 @@ import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinition;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinitionSummary;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinitionVersion;
+import cn.byteforce.coord.sdk.workflow.WorkflowFault;
 import cn.byteforce.coord.sdk.workflow.WorkflowInstanceSummary;
 import cn.byteforce.coord.sdk.workflow.WorkflowState;
 import cn.byteforce.coord.sdk.workflow.WorkflowStatus;
@@ -221,11 +222,23 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                     sm.getExpectedSignal(), sm.getEventType(), sm.getService());
         }
 
-        log.debug("Workflow status: id={}, state={}, defName={}, currentState={}, taskStackSize={}",
-                workflowId, state, definitionName, currentStateName, taskStack.size());
+        log.debug("Workflow status: id={}, state={}, defName={}, defVersion={}, currentState={}, taskStackSize={}",
+                workflowId, state, definitionName, response.getDefinitionVersion(),
+                currentStateName, taskStack.size());
         return new WorkflowStatus(response.getWorkflowId(), state,
                 currentStep, output, errorMsg, definitionName, input,
-                createdAt, updatedAt, taskStack, currentStateName, suspension);
+                createdAt, updatedAt, taskStack, currentStateName, suspension,
+                response.getDefinitionNamespace(), response.getDefinitionVersion(),
+                toFault(response));
+    }
+
+    private static WorkflowFault toFault(WorkflowGetStatusResponse response) {
+        if (!response.hasFault()) {
+            return null;
+        }
+        cn.byteforce.coord.contracts.workflow.v1.WorkflowFault f = response.getFault();
+        return new WorkflowFault(f.getType(), f.getTitle(), f.getDetail(), f.getStatus(),
+                f.getInstance());
     }
 
     @Override
@@ -516,7 +529,9 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 s.getStartedAt(), s.getUpdatedAt(), s.getDefinitionName(),
                 s.getNamespace(),
                 outputJson.length > 0 ? outputJson : null,
-                contextJson.length > 0 ? contextJson : null);
+                contextJson.length > 0 ? contextJson : null,
+                s.getDefinitionNamespace(), s.getDefinitionVersion(),
+                s.getInitiator(), s.getCompletedAt());
     }
 
     // ──── 人工审批 v2（ADR-0013 D7）────
@@ -1073,8 +1088,9 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 audit.size());
         return new ApprovalInstanceDetail(
                 response.getInstanceId(), response.getStatus(), response.getInitiator(),
-                response.getRevision(), response.getDefinitionName(), branches, tasks, rounds,
-                audit);
+                response.getRevision(), response.getDefinitionName(),
+                response.getDefinitionNamespace(), response.getDefinitionVersion(),
+                branches, tasks, rounds, audit);
     }
 
     @Override

@@ -15,6 +15,8 @@ public final class ApprovalInstanceDetail {
     private final String initiator;
     private final long revision;
     private final String definitionName;
+    private final String definitionNamespace;
+    private final String definitionVersion;
     private final List<ApprovalBranch> branches;
     private final List<ApprovalTask> tasks;
     private final List<ApprovalRound> rounds;
@@ -32,11 +34,28 @@ public final class ApprovalInstanceDetail {
                                   long revision, String definitionName,
                                   List<ApprovalBranch> branches, List<ApprovalTask> tasks,
                                   List<ApprovalRound> rounds, List<ApprovalAudit> audit) {
+        this(instanceId, status, initiator, revision, definitionName, "", "", branches, tasks,
+                rounds, audit);
+    }
+
+    /**
+     * Full constructor with the pinned definition identity.
+     *
+     * @param definitionNamespace namespace of the pinned definition (may be empty)
+     * @param definitionVersion   version of the pinned definition (may be empty)
+     */
+    public ApprovalInstanceDetail(String instanceId, String status, String initiator,
+                                  long revision, String definitionName,
+                                  String definitionNamespace, String definitionVersion,
+                                  List<ApprovalBranch> branches, List<ApprovalTask> tasks,
+                                  List<ApprovalRound> rounds, List<ApprovalAudit> audit) {
         this.instanceId = instanceId;
         this.status = status;
         this.initiator = initiator;
         this.revision = revision;
         this.definitionName = definitionName;
+        this.definitionNamespace = definitionNamespace != null ? definitionNamespace : "";
+        this.definitionVersion = definitionVersion != null ? definitionVersion : "";
         this.branches = branches != null
                 ? Collections.unmodifiableList(branches) : Collections.emptyList();
         this.tasks = tasks != null
@@ -55,6 +74,12 @@ public final class ApprovalInstanceDetail {
     public long revision() { return revision; }
 
     public String definitionName() { return definitionName; }
+
+    /** Namespace of the definition pinned when the instance started (may be empty). */
+    public String definitionNamespace() { return definitionNamespace; }
+
+    /** Version of the definition pinned when the instance started (may be empty). */
+    public String definitionVersion() { return definitionVersion; }
     public List<ApprovalBranch> branches() { return branches; }
     public List<ApprovalTask> tasks() { return tasks; }
     public List<ApprovalRound> rounds() { return rounds; }
@@ -71,6 +96,8 @@ public final class ApprovalInstanceDetail {
                 && Objects.equals(status, that.status)
                 && Objects.equals(initiator, that.initiator)
                 && Objects.equals(definitionName, that.definitionName)
+                && Objects.equals(definitionNamespace, that.definitionNamespace)
+                && Objects.equals(definitionVersion, that.definitionVersion)
                 && Objects.equals(branches, that.branches)
                 && Objects.equals(tasks, that.tasks)
                 && Objects.equals(rounds, that.rounds)
@@ -80,7 +107,7 @@ public final class ApprovalInstanceDetail {
     @Override
     public int hashCode() {
         return Objects.hash(instanceId, status, initiator, revision, definitionName,
-                branches, tasks, rounds, audit);
+                definitionNamespace, definitionVersion, branches, tasks, rounds, audit);
     }
 
     @Override

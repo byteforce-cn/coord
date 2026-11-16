@@ -2573,6 +2573,9 @@ pub mod phase4 {
         pub initiator: String,
         pub revision: u64,
         pub definition_name: String,
+        /// 实例启动时钉死的定义命名空间 / 版本。
+        pub definition_namespace: String,
+        pub definition_version: String,
         pub branches: Vec<ApprovalBranch>,
         pub tasks: Vec<ApprovalTask>,
         pub rounds: Vec<ApprovalRound>,
@@ -4257,6 +4260,8 @@ pub mod phase4 {
                 initiator: engine.instance.initiator.clone(),
                 revision: engine.instance.revision,
                 definition_name: engine.instance.definition_name.clone(),
+                definition_namespace: engine.instance.definition_ns.clone(),
+                definition_version: engine.instance.definition_version.clone(),
                 branches: engine.branches.values().cloned().collect(),
                 tasks: engine.tasks.values().cloned().collect(),
                 rounds: engine.rounds.values().cloned().collect(),
@@ -8017,6 +8022,8 @@ do:
         assert_eq!(detail.status, "RUNNING");
         assert_eq!(detail.initiator, "zhangsan");
         assert_eq!(detail.definition_name, "detail-wf");
+        assert_eq!(detail.definition_namespace, "test");
+        assert!(!detail.definition_version.is_empty());
         assert!(detail.revision >= 1, "修订号应每次变更 +1");
         assert_eq!(detail.branches.len(), 1);
         assert_eq!(detail.tasks.len(), 1);

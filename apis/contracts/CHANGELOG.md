@@ -1,3 +1,26 @@
+## [contracts/v1.23.0] — 2026-11-16（Minor：Workflow 实例读面定义版本与结构化 fault，wire 向前兼容）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 向 `WorkflowGetStatusResponse` 追加
+`definition_namespace` / `definition_version` / `fault`，向 `WorkflowInstanceSummary` 追加
+`definition_namespace` / `definition_version` / `initiator` / `completed_at`，向
+`WorkflowGetInstanceDetailResponse` 追加 `definition_namespace` / `definition_version`；
+新增 `WorkflowFault` 消息；无字段号/类型变更、不删 RPC；`buf breaking` 基线不变）。
+
+- `GetStatus` / `GetInstanceDetail` / `ListInstances` 回报实例**启动时钉死**的定义命名空间与
+  版本（与 `WorkflowInstance.definition_ns` / `definition_version` 同源），供调用方填
+  `definitionId + version`，不再需要在调用方旁路保存 instance→version 映射。遗留 v1 存储
+  不钉死版本，两项为空串。
+- `GetStatus.fault`（`WorkflowFault`：`type` / `title` / `detail` / `status` / `instance`）
+  暴露 RFC 7807 结构化错误；`error_message` 保留为 `fault.title` 的兼容副本，未失败时
+  `fault` 缺省。
+- `WorkflowInstanceSummary` 追加 `initiator`（Start 注入主体）与 `completed_at`（终态转型
+  时间；非终态为 0），`search` 不必再逐实例读详情。
+
+**影响范围**：旧客户端不受影响（纯增量字段；新消息仅作为 `fault` 的子消息出现）。
+
+**回滚预案**：回滚本分支即回到无上述字段/消息的版本；实例文档无迁移（字段来自既有
+`WorkflowInstance`）。
+
 ## [contracts/v1.22.0] — 2026-11-15（Minor：Workflow assignment 状态机 / 加签位置 / 超时策略 / Resume，wire 向前兼容）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 追加 `ResumeWorkflow` RPC、`AddSign` 的
