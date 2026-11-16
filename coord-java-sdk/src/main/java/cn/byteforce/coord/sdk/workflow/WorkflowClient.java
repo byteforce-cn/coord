@@ -154,6 +154,21 @@ public interface WorkflowClient {
     WorkflowDefinition getDefinition(String workflowId);
 
     /**
+     * Get a workflow definition by its identity triple.
+     *
+     * <p>The version is the definition's version string (coord does not force
+     * {@code major.minor}, matching is exact). Use this instead of listing versions
+     * when the caller already knows the version it started from.</p>
+     *
+     * @param namespace definition namespace
+     * @param name      definition name
+     * @param version   definition version string
+     * @return the full workflow definition (includes raw YAML)
+     * @throws CoordException on not found or communication failure
+     */
+    WorkflowDefinition getDefinition(String namespace, String name, String version);
+
+    /**
      * List all versions of a workflow definition (rollback target discovery,
      * aligned with policy {@code listBundleVersions}).
      *
@@ -242,6 +257,27 @@ public interface WorkflowClient {
     java.util.List<WorkflowInstanceSummary> listInstances(
             String namespace, String workflowId, String statusFilter, int pageSize, String pageToken);
 
+    /**
+     * List workflow instances filtered by definition and start-time window, keeping the
+     * server's next-page token.
+     *
+     * <p>{@code definition} accepts either the definition name or the definition id; a
+     * start bound of {@code 0} means "no bound". The window is inclusive on both ends.</p>
+     *
+     * @param namespace      optional namespace filter (null or empty for all)
+     * @param definition     optional definition name / id filter (null or empty for all)
+     * @param status         optional uppercase status filter (null or empty for all)
+     * @param startedAfterMs inclusive lower bound on the start time (Unix ms; 0 = unbounded)
+     * @param startedBeforeMs inclusive upper bound on the start time (Unix ms; 0 = unbounded)
+     * @param pageSize       max results per page (1-200; server caps at 200)
+     * @param pageToken      pagination token from the previous page (empty for the first page)
+     * @return this page of summaries plus the next-page token
+     * @throws CoordException on communication failure
+     */
+    InstancePage listInstances(String namespace, String definition, String status,
+                               long startedAfterMs, long startedBeforeMs,
+                               int pageSize, String pageToken);
+
     // ──── 人工审批 v2（ADR-0013 D7）────
 
     /**
@@ -315,6 +351,32 @@ public interface WorkflowClient {
                    List<String> pool, List<String> readers, String comment, String idempotencyKey);
 
     /**
+     * Add signers at an explicit position (加签位置).
+     *
+     * <p>{@link AddAssigneePosition#BEFORE} / {@link AddAssigneePosition#AFTER} require
+     * {@code taskId} as the anchor seat; {@link AddAssigneePosition#CURRENT} appends to the
+     * branch's current round and ignores the anchor. {@code actionId} is stored on the derived
+     * tasks ({@code spawnedByActionId}), so the caller can correlate them with its own action
+     * record.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param branchId       the approval branch ID
+     * @param approvers      explicit approver identities to add (may be null/empty)
+     * @param pool           pool identities to add (may be null/empty)
+     * @param readers        reader identities to add (may be null/empty)
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the change twice
+     * @param position       where the signers land (null = {@code CURRENT})
+     * @param taskId         anchor seat ID for BEFORE/AFTER (null/empty otherwise)
+     * @param actionId       client action id stored on derived tasks (null/empty = none)
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication, argument, or guard violation
+     */
+    String addSign(String workflowId, String branchId, List<String> approvers,
+                   List<String> pool, List<String> readers, String comment, String idempotencyKey,
+                   AddAssigneePosition position, String taskId, String actionId);
+
+    /**
      * Remove seats from an approval branch (减签).
      *
      * @param workflowId     the workflow instance ID
@@ -327,6 +389,26 @@ public interface WorkflowClient {
      */
     String removeSign(String workflowId, String branchId, List<String> taskIds,
                       String comment, String idempotencyKey);
+
+    /**
+     * Remove signers by assignee (按人减签) instead of by seat id.
+     *
+     * <p>{@code assignees} and {@code taskIds} are mutually exclusive; the anchor
+     * {@code taskId} only locates the round, the seats actually removed are the round's
+     * pending seats held by {@code assignees}. Seats that already voted are kept.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param branchId       the approval branch ID
+     * @param taskIds        seats to remove by id (may be null/empty)
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the change twice
+     * @param assignees      principals whose pending seats are removed (may be null/empty)
+     * @param taskId         anchor seat locating the round (null/empty = current round)
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication, argument, or guard violation
+     */
+    String removeSign(String workflowId, String branchId, List<String> taskIds,
+                      String comment, String idempotencyKey, List<String> assignees, String taskId);
 
     /**
      * Return the approval flow to a previous node (驳回返回到目标节点).
@@ -369,6 +451,26 @@ public interface WorkflowClient {
     String delegate(String workflowId, String taskId, String to, String comment, String idempotencyKey);
 
     /**
+     * Delegate a seat for a bounded time.
+     *
+     * <p>{@code delegateForMs} of {@code null} or {@code 0} means "no automatic expiry"
+     * (the original assignee keeps the seat until the delegation is revoked). Otherwise the
+     * delegation expires after that many milliseconds and the original assignee becomes the
+     * only handler again (History projects {@code DELEGATION_EXPIRED}).</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param taskId         the approval task (seat) ID
+     * @param to             the target assignee
+     * @param comment        optional comment (may be null)
+     * @param delegateForMs  delegation lifetime in ms (null/0 = no expiry)
+     * @param idempotencyKey unique key so retries do not apply the delegation twice
+     * @return the instance status after the command (uppercase)
+     * @throws CoordException on communication, argument, or guard violation
+     */
+    String delegate(String workflowId, String taskId, String to, String comment,
+                    Long delegateForMs, String idempotencyKey);
+
+    /**
      * Withdraw the whole approval instance (申请人撤回).
      *
      * @param workflowId     the workflow instance ID
@@ -389,6 +491,22 @@ public interface WorkflowClient {
      * @throws CoordException on communication or guard violation
      */
     String terminate(String workflowId, String reason, String idempotencyKey);
+
+    /**
+     * Resume a waiting instance (超时策略 {@code waiting} 停止等待) by rebuilding its seats
+     * with a new relative deadline.
+     *
+     * <p>Only the initiator / sign admins may resume. {@code newDueInMs} must be positive; the
+     * server converts it into an absolute deadline.</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param newDueInMs     new relative deadline in ms (must be &gt; 0)
+     * @param reason         optional reason (may be null)
+     * @param idempotencyKey unique key so retries do not rebuild seats twice
+     * @return the instance status after the command (uppercase, e.g. {@code RUNNING})
+     * @throws CoordException on communication, argument, or guard violation
+     */
+    String resumeWorkflow(String workflowId, long newDueInMs, String reason, String idempotencyKey);
 
     /**
      * Urge (催办) the current handlers of a seat.
@@ -481,6 +599,17 @@ public interface WorkflowClient {
     String removeSignOnBehalfOf(String workflowId, String branchId, List<String> taskIds,
                                 String comment, String idempotencyKey, String onBehalfOf);
 
+    /** Add signers at an explicit position as a service acting on behalf of an end user. */
+    String addSignOnBehalfOf(String workflowId, String branchId, List<String> approvers,
+                             List<String> pool, List<String> readers, String comment,
+                             String idempotencyKey, String onBehalfOf,
+                             AddAssigneePosition position, String taskId, String actionId);
+
+    /** Remove seats by assignee as a service acting on behalf of an end user. */
+    String removeSignOnBehalfOf(String workflowId, String branchId, List<String> taskIds,
+                                String comment, String idempotencyKey, String onBehalfOf,
+                                List<String> assignees, String taskId);
+
     /** Return to a previous node as a service acting on behalf of an end user. */
     String returnToNodeOnBehalfOf(String workflowId, String branchId, String targetNode,
                                   String comment, String idempotencyKey, String onBehalfOf);
@@ -493,9 +622,17 @@ public interface WorkflowClient {
     String delegateOnBehalfOf(String workflowId, String taskId, String to, String comment,
                               String idempotencyKey, String onBehalfOf);
 
+    /** Delegate a seat for a bounded time as a service acting on behalf of the current assignee. */
+    String delegateOnBehalfOf(String workflowId, String taskId, String to, String comment,
+                              Long delegateForMs, String idempotencyKey, String onBehalfOf);
+
     /** Withdraw as a service acting on behalf of the initiator. */
     String withdrawOnBehalfOf(String workflowId, String comment, String idempotencyKey,
                               String onBehalfOf);
+
+    /** Resume a waiting instance as a service acting on behalf of the initiator / sign admin. */
+    String resumeWorkflowOnBehalfOf(String workflowId, long newDueInMs, String reason,
+                                    String idempotencyKey, String onBehalfOf);
 
     /** Terminate as a service acting on behalf of a sign admin. */
     String terminateOnBehalfOf(String workflowId, String reason, String idempotencyKey,
