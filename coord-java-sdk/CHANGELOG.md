@@ -53,3 +53,13 @@
   走读面（`getInstanceDetail` / `listTasks` / `history`）。
 - `addSign` 的 `BEFORE` / `AFTER` 必须给 `taskId`；缺锚点由服务端以 `INVALID_ARGUMENT` 拒绝
   （SDK 不做本地校验，保持与服务端口径一致）。
+### Added — workflow 实例读面：定义版本与结构化 fault（issue #408）
+
+- `WorkflowStatus` 新增 `definitionNamespace()` / `definitionVersion()` / `fault()`：版本是实例
+  **启动时钉死**的定义版本（不是定义的最新版本）；`fault()` 为 RFC 7807 结构化错误
+  （`WorkflowFault.type/title/detail/status/instance`），未失败时为 `null`。
+  `errorMessage()` 保持为 `fault.title` 的兼容副本。
+- `ApprovalInstanceDetail` 新增 `definitionNamespace()` / `definitionVersion()`；既有构造器
+  保持兼容（两项为空串）。
+- `WorkflowInstanceSummary` 新增 `definitionNamespace()` / `definitionVersion()` /
+  `initiator()` / `completedAt()`（终态转型时间；非终态为 `0`）；既有 9 参构造器保持兼容。

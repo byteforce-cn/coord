@@ -20,6 +20,9 @@ public final class WorkflowStatus {
     private final List<TaskFrame> taskStack;
     private final String currentStateName;
     private final Suspension suspension;
+    private final String definitionNamespace;
+    private final String definitionVersion;
+    private final WorkflowFault fault;
 
     /**
      * Full constructor with all fields (当前状态名 + 挂起元信息).
@@ -30,6 +33,25 @@ public final class WorkflowStatus {
                           long createdAt, long updatedAt,
                           List<TaskFrame> taskStack,
                           String currentStateName, Suspension suspension) {
+        this(workflowId, state, currentStep, output, errorMessage, definitionName, input,
+                createdAt, updatedAt, taskStack, currentStateName, suspension, "", "", null);
+    }
+
+    /**
+     * Full constructor with the definition identity and the structured fault.
+     *
+     * @param definitionNamespace namespace of the pinned definition (may be empty)
+     * @param definitionVersion   version of the pinned definition (may be empty)
+     * @param fault               structured fault, or {@code null} when the instance has not failed
+     */
+    public WorkflowStatus(String workflowId, WorkflowState state,
+                          int currentStep, byte[] output, String errorMessage,
+                          String definitionName, byte[] input,
+                          long createdAt, long updatedAt,
+                          List<TaskFrame> taskStack,
+                          String currentStateName, Suspension suspension,
+                          String definitionNamespace, String definitionVersion,
+                          WorkflowFault fault) {
         this.workflowId = workflowId;
         this.state = state;
         this.currentStep = currentStep;
@@ -42,6 +64,9 @@ public final class WorkflowStatus {
         this.taskStack = taskStack != null ? Collections.unmodifiableList(taskStack) : Collections.emptyList();
         this.currentStateName = currentStateName != null ? currentStateName : "";
         this.suspension = suspension;
+        this.definitionNamespace = definitionNamespace != null ? definitionNamespace : "";
+        this.definitionVersion = definitionVersion != null ? definitionVersion : "";
+        this.fault = fault;
     }
 
     /**
@@ -103,6 +128,29 @@ public final class WorkflowStatus {
     public String currentStateName() { return currentStateName; }
 
     /**
+     * Namespace of the definition pinned when the instance started.
+     *
+     * @return definition namespace, or empty string for legacy snapshots
+     */
+    public String definitionNamespace() { return definitionNamespace; }
+
+    /**
+     * Version of the definition pinned when the instance started.
+     *
+     * <p>This is the version the instance runs, not the definition's latest version.</p>
+     *
+     * @return definition version, or empty string for legacy snapshots
+     */
+    public String definitionVersion() { return definitionVersion; }
+
+    /**
+     * Structured fault of a failed instance.
+     *
+     * @return the RFC 7807 projection, or {@code null} if the instance has not failed
+     */
+    public WorkflowFault fault() { return fault; }
+
+    /**
      * 挂起元信息（SUSPENDED/WAITING 时返回，否则为 {@code null}）。
      *
      * @return suspension metadata, or {@code null} if not suspended
@@ -115,8 +163,10 @@ public final class WorkflowStatus {
                 + ", currentStep=" + currentStep + ", definitionName='" + definitionName
                 + "', currentStateName='" + currentStateName
                 + "', errorMessage='" + errorMessage
+                + "', definitionVersion='" + definitionVersion
                 + "', createdAt=" + createdAt + ", updatedAt=" + updatedAt
                 + ", taskStackSize=" + taskStack.size()
-                + ", suspension=" + suspension + "}";
+                + ", suspension=" + suspension
+                + ", fault=" + fault + "}";
     }
 }

@@ -280,6 +280,8 @@ class WorkflowClientContractTest {
                 .setInitiator("bob")
                 .setRevision(7L)
                 .setDefinitionName("order-approval")
+                .setDefinitionNamespace("icps")
+                .setDefinitionVersion("1.2")
                 .addBranches(cn.byteforce.coord.contracts.workflow.v1.ApprovalBranch.newBuilder()
                         .setId("br-1")
                         .setNode("approve")
@@ -336,6 +338,8 @@ class WorkflowClientContractTest {
         assertThat(d.initiator()).isEqualTo("bob");
         assertThat(d.revision()).isEqualTo(7L);
         assertThat(d.definitionName()).isEqualTo("order-approval");
+        assertThat(d.definitionNamespace()).isEqualTo("icps");
+        assertThat(d.definitionVersion()).isEqualTo("1.2");
         assertThat(d.branches()).hasSize(1);
         assertThat(d.branches().get(0).id()).isEqualTo("br-1");
         assertThat(d.branches().get(0).node()).isEqualTo("approve");
@@ -707,6 +711,10 @@ class WorkflowClientContractTest {
                         .setUpdatedAt(1_755_000_100_000L)
                         .setDefinitionName("order-approval")
                         .setNamespace("icps")
+                        .setDefinitionNamespace("icps")
+                        .setDefinitionVersion("1.2")
+                        .setInitiator("alice")
+                        .setCompletedAt(1_755_000_100_000L)
                         .build())
                 .setNextPageToken("next-2")
                 .build();
@@ -729,6 +737,10 @@ class WorkflowClientContractTest {
         assertThat(s.definitionName()).isEqualTo("order-approval");
         assertThat(s.namespace()).isEqualTo("icps");
         assertThat(s.startedAt()).isEqualTo(1_755_000_000_000L);
+        assertThat(s.definitionNamespace()).isEqualTo("icps");
+        assertThat(s.definitionVersion()).isEqualTo("1.2");
+        assertThat(s.initiator()).isEqualTo("alice");
+        assertThat(s.completedAt()).isEqualTo(1_755_000_100_000L);
     }
 
     @Test
@@ -752,6 +764,55 @@ class WorkflowClientContractTest {
         assertThat(def.workflowId()).isEqualTo("def-7");
         assertThat(def.version()).isEqualTo("1.2");
         assertThat(def.definitionYaml()).isEqualTo("id: order-approval");
+    }
+
+    @Test
+    @DisplayName("getStatus 映射 definition_namespace/version 与结构化 fault")
+    void getStatusMapsDefinitionIdentityAndFault() {
+        fake.nextStatus = WorkflowGetStatusResponse.newBuilder()
+                .setWorkflowId("inst-1")
+                .setStatus("FAULTED")
+                .setDefinitionName("order-approval")
+                .setDefinitionNamespace("icps")
+                .setDefinitionVersion("1.2")
+                .setErrorMessage("审批超时")
+                .setFault(cn.byteforce.coord.contracts.workflow.v1.WorkflowFault.newBuilder()
+                        .setType("urn:io.serverlessworkflow:errors/timeout")
+                        .setTitle("审批超时")
+                        .setDetail("deadline exceeded")
+                        .setStatus(408)
+                        .setInstance("/tasks/0")
+                        .build())
+                .build();
+
+        WorkflowStatus s = wf.getStatus("inst-1");
+
+        assertThat(s.state()).isEqualTo(cn.byteforce.coord.sdk.workflow.WorkflowState.FAULTED);
+        assertThat(s.definitionNamespace()).isEqualTo("icps");
+        assertThat(s.definitionVersion()).isEqualTo("1.2");
+        // errorMessage 是 fault.title 的兼容副本
+        assertThat(s.errorMessage()).isEqualTo("审批超时");
+        assertThat(s.fault()).isNotNull();
+        assertThat(s.fault().type()).isEqualTo("urn:io.serverlessworkflow:errors/timeout");
+        assertThat(s.fault().title()).isEqualTo("审批超时");
+        assertThat(s.fault().detail()).isEqualTo("deadline exceeded");
+        assertThat(s.fault().status()).isEqualTo(408);
+        assertThat(s.fault().instance()).isEqualTo("/tasks/0");
+    }
+
+    @Test
+    @DisplayName("getStatus 无 fault 时 fault 为 null，定义身份缺省为空串")
+    void getStatusWithoutFaultHasNoFault() {
+        fake.nextStatus = WorkflowGetStatusResponse.newBuilder()
+                .setWorkflowId("inst-2")
+                .setStatus("RUNNING")
+                .build();
+
+        WorkflowStatus s = wf.getStatus("inst-2");
+
+        assertThat(s.fault()).isNull();
+        assertThat(s.definitionNamespace()).isEmpty();
+        assertThat(s.definitionVersion()).isEmpty();
     }
 
     /** In-process fake Workflow service —— 仅实现被测 RPC，其余走 gRPC 默认 UNIMPLEMENTED。 */

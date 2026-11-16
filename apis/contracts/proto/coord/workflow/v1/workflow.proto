@@ -127,6 +127,22 @@ message WorkflowGetStatusResponse {
   // 遗留 `document/do` DSL 无「声明状态」概念，仍为当前任务名。
   string current_state_name = 10;
   SuspensionMeta suspension = 11; // 挂起元信息（SUSPENDED/WAITING 时返回）
+  // 实例启动时钉死的定义身份（版本为空 = 遗留存储未钉死版本）。
+  string definition_namespace = 12;
+  string definition_version = 13;
+  // 结构化 fault（RFC 7807 投影）。`error_message` 保留兼容（= fault.title）；
+  // 未失败时该消息缺省。
+  WorkflowFault fault = 14;
+}
+
+// 结构化工作流错误（RFC 7807 Problem Details 的 wire 投影）。
+// `error_message` 仍是 `title` 的兼容副本；结构化消费方读本消息。
+message WorkflowFault {
+  string type = 1; // 标准错误类型 URI（如 `.../errors/timeout`）
+  string title = 2; // 人类可读摘要
+  string detail = 3; // 详细说明
+  uint32 status = 4; // 建议 HTTP 状态码（RFC 7807）
+  string instance = 5; // 错误定位（JSON Pointer），可空
 }
 
 // 挂起元信息（对应 WorkflowInstance.suspension_meta）
@@ -283,6 +299,13 @@ message WorkflowInstanceSummary {
   string namespace = 7; // 命名空间
   bytes output_json = 8; // 输出数据（JSON）
   bytes context_json = 9; // 运行时上下文（JSON）
+  // 定义身份（实例启动时钉死的版本）；遗留存储可能为空。
+  string definition_namespace = 10;
+  string definition_version = 11;
+  // 发起人（Start 注入的主体）；遗留存储可能为空。
+  string initiator = 12;
+  // 终态完成时间（Unix ms）；非终态为 0。
+  int64 completed_at = 13;
 }
 
 // 删除定义（保留策略；定义未被任何实例引用才允许）
@@ -661,6 +684,9 @@ message WorkflowGetInstanceDetailResponse {
   repeated ApprovalTask tasks = 7;
   repeated ApprovalRound rounds = 8;
   repeated ApprovalAudit audit = 9; // 管理动作审计（含 acting_service）
+  // 实例启动时钉死的定义身份（`initiator` 见字段 3）。
+  string definition_namespace = 10;
+  string definition_version = 11;
 }
 
 message ApprovalBranch {
