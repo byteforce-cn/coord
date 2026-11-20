@@ -132,3 +132,21 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
   `cargo deny check advisories` 无豁免（`deny.toml` 的 `ignore` 回到只有 §4 一条）。
 - **登记提交**：与 `deny.toml` 的 `ignore` 同一次提交；用
   `git log --oneline --grep 'chrono 族 unmaintained 豁免'` 定位。
+
+---
+
+## 8. 通告处置记录（2026-11-20）
+
+- **RUSTSEC-2026-0567 / 0568 / 0569 / 0570 / 0571 / 0572 / 0573（wasmtime 48.0.8）**：
+  8 条**漏洞型**通告（`Caller::get_module_export` panic、缺 `threads`/`gc` feature 时 abort、
+  GC heap 基址失效、`AsyncWriteStream` / `wasmtime-wasi-http` 无界内存、组件模型 stream
+  取消时 panic、GC heap 保留区非页对齐 abort）。`wasmtime 48.0.8 → 48.0.10` 修复
+  （cranelift / pulley / wasmtime-internal-* 同版本簇一并升级）。wasmtime 是
+  `coord-agent` `plugin-wasm`（非默认 feature）的可选依赖，无源码改动；沙箱行为
+  （fuel / epoch / `StoreLimits` / 宿主 import 能力白名单）由插件套件复验。
+- **为什么之前没拦住**：这三条依赖通告只在 `--all-features`（即启用 `plugin-wasm`）
+  的依赖图里可见；CI 的 `cargo-deny-action` 用 `--all-features`，本地用默认特性跑
+  `cargo deny check` 看不到它们。排查依赖通告必须以 CI 同口径的
+  `cargo deny --all-features check` 为准。
+- **RUSTSEC-2026-0543 / 0555 / 0559（chrono / chrono-tz / chrono-tz-build，unmaintained）**：
+  见 §7——登记豁免 + 关闭路径。`unmaintained` 策略不变（仍是 `all`）。
