@@ -19,6 +19,8 @@ use coord_proto::maintenance::{
 };
 use coord_proto::pki::v1::pki_client::PkiClient;
 use coord_proto::pki::v1::{PkiGetCaCertRequest, PkiIssueCertRequest, PkiListCertsRequest};
+use coord_proto::transit::v1::transit_client::TransitClient as TransitGrpcClient;
+use coord_proto::transit::v1::TransitExportKeyRequest;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tonic::service::interceptor::InterceptedService;
@@ -1899,6 +1901,12 @@ async fn build_pki_client(
     Ok(PkiClient::new(conn.connect_authed().await?))
 }
 
+async fn build_transit_client(
+    conn: &CliConn,
+) -> Result<TransitGrpcClient<AuthedChannel>, Box<dyn std::error::Error>> {
+    Ok(TransitGrpcClient::new(conn.connect_authed().await?))
+}
+
 /// `coord pki ca`：导出 CA 根证书（PEM）。
 pub async fn cmd_pki_ca(
     conn: impl Into<CliConn>,
@@ -1949,7 +1957,21 @@ pub async fn cmd_pki_issue(
     let cert_path = out_dir.join(format!("{stem}.pem"));
     let key_path = out_dir.join(format!("{stem}.key"));
     std::fs::write(&cert_path, cert.cert_pem.as_bytes())?;
-    write_private_key(&key_path, cert.key_pem.as_bytes())?;
+
+    // 私钥留在 coord（ADR-0019 D6）：CLI 的落盘是**受控导出路径**，走同一个
+    // ExportKey（需要 coord:transit:key_export），不再从 IssueCert 响应里拿材料。
+    let key_material = cert
+        .key_material
+        .ok_or("IssueCert response missing key_material")?;
+    let mut transit = build_transit_client(&conn).await?;
+    let exported = transit
+        .export_key(TransitExportKeyRequest {
+            name: key_material.key_name,
+            version: key_material.key_version,
+        })
+        .await?
+        .into_inner();
+    write_private_key(&key_path, &exported.material)?;
 
     if json {
         let out = serde_json::json!({

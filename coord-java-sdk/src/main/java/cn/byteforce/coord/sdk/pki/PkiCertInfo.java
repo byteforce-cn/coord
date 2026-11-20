@@ -7,7 +7,10 @@ public final class PkiCertInfo {
 
     private final String commonName;
     private final String certPem;
-    private final String keyPem;
+    /** 托管私钥的命名密钥名（材料在 coord，ADR-0019 D6） */
+    private final String keyName;
+    /** 签名使用的密钥版本 */
+    private final int keyVersion;
     private final long notBeforeEpochSec;
     private final long notAfterEpochSec;
     private final String serial;
@@ -16,17 +19,19 @@ public final class PkiCertInfo {
     /** rotation chain: serial this cert was rotated from (empty if first issued) */
     private final String parentSerial;
 
-    public PkiCertInfo(String commonName, String certPem, String keyPem,
+    public PkiCertInfo(String commonName, String certPem, String keyName, int keyVersion,
                        long notBeforeEpochSec, long notAfterEpochSec, String serial) {
-        this(commonName, certPem, keyPem, notBeforeEpochSec, notAfterEpochSec, serial, "active", "");
+        this(commonName, certPem, keyName, keyVersion, notBeforeEpochSec, notAfterEpochSec, serial,
+                "active", "");
     }
 
-    public PkiCertInfo(String commonName, String certPem, String keyPem,
+    public PkiCertInfo(String commonName, String certPem, String keyName, int keyVersion,
                        long notBeforeEpochSec, long notAfterEpochSec, String serial,
                        String status, String parentSerial) {
         this.commonName = commonName;
         this.certPem = certPem;
-        this.keyPem = keyPem;
+        this.keyName = keyName;
+        this.keyVersion = keyVersion;
         this.notBeforeEpochSec = notBeforeEpochSec;
         this.notAfterEpochSec = notAfterEpochSec;
         this.serial = serial;
@@ -36,7 +41,8 @@ public final class PkiCertInfo {
 
     public String commonName() { return commonName; }
     public String certPem() { return certPem; }
-    public String keyPem() { return keyPem; }
+    public String keyName() { return keyName; }
+    public int keyVersion() { return keyVersion; }
     public long notBeforeEpochSec() { return notBeforeEpochSec; }
     public long notAfterEpochSec() { return notAfterEpochSec; }
     public String serial() { return serial; }

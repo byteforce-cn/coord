@@ -1,135 +1,149 @@
 package cn.byteforce.coord.sdk.transit;
 
-import cn.byteforce.coord.sdk.CoordException;
+import cn.byteforce.coord.contracts.transit.v1.TransitDecryptBatchItem;
+import cn.byteforce.coord.contracts.transit.v1.TransitDecryptRequest;
+import cn.byteforce.coord.contracts.transit.v1.TransitDecryptResponse;
+import cn.byteforce.coord.contracts.transit.v1.TransitEncryptBatchItem;
+import cn.byteforce.coord.contracts.transit.v1.TransitEncryptRequest;
+import cn.byteforce.coord.contracts.transit.v1.TransitEncryptResponse;
+import cn.byteforce.coord.contracts.transit.v1.TransitExportKeyResponse;
+import cn.byteforce.coord.contracts.transit.v1.TransitGenerateDataKeyResponse;
+import cn.byteforce.coord.contracts.transit.v1.TransitKeyInfo;
+import cn.byteforce.coord.contracts.transit.v1.TransitKeyType;
+import cn.byteforce.coord.contracts.transit.v1.TransitRewrapBatchItem;
+import cn.byteforce.coord.contracts.transit.v1.TransitRewrapRequest;
+import cn.byteforce.coord.contracts.transit.v1.TransitRewrapResponse;
+import cn.byteforce.coord.contracts.transit.v1.TransitSignBatchItem;
+import cn.byteforce.coord.contracts.transit.v1.TransitSignRequest;
+import cn.byteforce.coord.contracts.transit.v1.TransitSignResponse;
+import cn.byteforce.coord.contracts.transit.v1.TransitVerifyBatchItem;
+import cn.byteforce.coord.contracts.transit.v1.TransitVerifyRequest;
+
+import java.util.List;
 
 /**
- * Envelope encryption API (Transit Service).
- * <p>
- * Provides AES-256-GCM envelope encryption: a local DEK (Data Encryption Key)
- * encrypts the plaintext, and the DEK itself is encrypted with a KEK (Key
- * Encryption Key) stored on the Agent. DEK is used once and discarded.
+ * Transit / KMS API（ADR-0019）：命名密钥 + 版本边界 + 非对称签名 + 按名信封加密。
+ *
+ * <p>密钥材料留在 coord；调用方只持有 {@code key_name} / {@code key_version}。
+ * 密文是自描述的 {@code CCT3} 包（含 key name 与版本），解密不需要服务端 DEK 记录。
  *
  * <pre>{@code
  * try (CoordClient client = CoordClient.create(config)) {
  *     TransitClient transit = client.transit();
- *
- *     // Encrypt
- *     byte[] plaintext = "sensitive data".getBytes(StandardCharsets.UTF_8);
- *     byte[] ciphertext = transit.encrypt(plaintext);
- *
- *     // Decrypt
- *     byte[] decrypted = transit.decrypt(ciphertext);
+ *     transit.createKey("app-key", TransitKeyType.AES256_GCM96);
+ *     TransitEncryptResponse ct = transit.encrypt("app-key", plaintext);
+ *     byte[] pt = transit.decrypt(ct.getCiphertext()).getPlaintext().toByteArray();
  * }
  * }</pre>
  */
 public interface TransitClient {
 
-    /**
-     * Encrypt plaintext using envelope encryption.
-     * <p>
-     * The returned ciphertext contains the encrypted DEK, nonce, and encrypted data
-     * in a self-contained packet.
-     *
-     * @param plaintext the data to encrypt
-     * @return encrypted packet (nonce + encrypted DEK + ciphertext)
-     * @throws CoordException on encryption or communication failure
-     */
-    byte[] encrypt(byte[] plaintext);
+    // ──── 密钥生命周期（coord:transit:key_manage / key_read）────
 
     /**
-     * Encrypt plaintext with additional context binding.
-     * <p>
-     * Context-bound encryption ensures the ciphertext can only be decrypted
-     * with the same context, providing an additional integrity guarantee.
+     * 创建密钥；同名同配置幂等，配置冲突抛 {@code ALREADY_EXISTS}。
      *
-     * @param plaintext the data to encrypt
-     * @param context   optional context bytes for additional binding
-     * @return encrypted packet
-     * @throws CoordException on encryption or communication failure
+     * <p>{@code pki/} 前缀保留给 PKI 服务，走此接口会得到 {@code PERMISSION_DENIED}。
      */
-    byte[] encrypt(byte[] plaintext, byte[] context);
+    TransitKeyInfo createKey(String name, TransitKeyType type);
+
+    /** 创建密钥；{@code exportable=true} 仅表示允许 ExportKey（仍需独立能力）。 */
+    TransitKeyInfo createKey(String name, TransitKeyType type, boolean exportable);
+
+    TransitKeyInfo readKey(String name);
+
+    List<TransitKeyInfo> listKeys(String namePrefix);
+
+    /** 非幂等：每次成功调用产生一个新版本。 */
+    TransitKeyInfo rotateKey(String name);
 
     /**
-     * Decrypt a ciphertext packet produced by {@link #encrypt(byte[])}.
+     * 局部更新配置；{@code null} 表示不修改该字段。
      *
-     * @param ciphertext the encrypted packet
-     * @return decrypted plaintext
-     * @throws CoordException on decryption or communication failure
+     * <p>版本必须落在合法区间；{@code deletionAllowed=true} 是 DeleteKey 的唯一闸门。
      */
-    byte[] decrypt(byte[] ciphertext);
+    TransitKeyInfo updateKeyConfig(
+            String name,
+            Integer minDecryptionVersion,
+            Integer minEncryptionVersion,
+            Boolean deletionAllowed);
+
+    /** 非幂等：不存在抛 {@code NOT_FOUND}；deletion_allowed=false 抛 {@code FAILED_PRECONDITION}。 */
+    void deleteKey(String name);
+
+    /** 非幂等：抬高 min_decryption_version 并删除更早版本材料。 */
+    TransitKeyInfo trimKey(String name, int minVersion);
 
     /**
-     * Decrypt a ciphertext packet with context binding.
+     * 导入 PEM/DER（PKCS#8）或原始对称密钥材料。
      *
-     * @param ciphertext the encrypted packet
-     * @param context    the same context used during encryption
-     * @return decrypted plaintext
-     * @throws CoordException on decryption or communication failure
+     * @param materialFormat "pem" / "der" / "raw"；空 = 自动
      */
-    byte[] decrypt(byte[] ciphertext, byte[] context);
-
-    // ──── HMAC 签名与验签（G-TR-3 / ADR-0012）────
+    TransitKeyInfo importKey(
+            String name, TransitKeyType type, byte[] material, String materialFormat, boolean exportable);
 
     /**
-     * Sign data with a purpose-bound HMAC key (default algorithm HMAC-SHA256),
-     * using the current primary material.
-     * <p>
-     * The purpose is a required opaque label; different purposes derive different
-     * keys and are mutually unverifiable. Persist {@code result.keyId()} with the
-     * signature — verification requires it.
+     * 导出材料（独立能力 {@code coord:transit:key_export}）；非 exportable 抛
+     * {@code FAILED_PRECONDITION}，CA 密钥恒抛 {@code PERMISSION_DENIED}。
      *
-     * @param data    the data to sign
-     * @param purpose required purpose label (non-empty, no NUL, &le;128 bytes)
-     * @return signature bytes plus the signing material id
-     * @throws CoordException {@code INVALID_ARGUMENT} when the purpose is missing/invalid
+     * @param version 0 = latest
      */
+    TransitExportKeyResponse exportKey(String name, int version);
+
+    // ──── 按名信封加密（coord:transit:crypto）────
+
+    TransitEncryptResponse encrypt(String name, byte[] plaintext);
+
+    TransitEncryptResponse encrypt(String name, byte[] plaintext, byte[] context);
+
+    /** @param version 0 = latest；显式版本必须落在 [min_encryption_version, latest]。 */
+    TransitEncryptResponse encrypt(String name, int version, byte[] plaintext, byte[] context);
+
+    /** 解密；key name/版本来自 CCT3 包头，context 是 AAD。 */
+    TransitDecryptResponse decrypt(byte[] ciphertext);
+
+    TransitDecryptResponse decrypt(byte[] ciphertext, byte[] context);
+
+    /** 密文进、密文出：用 latest_version 重包 DEK（不解出明文）。 */
+    TransitRewrapResponse rewrap(byte[] ciphertext, byte[] context);
+
+    /**
+     * 生成数据密钥；{@code withPlaintext=false} 时只返回包裹后的密文。
+     */
+    TransitGenerateDataKeyResponse generateDataKey(
+            String name, byte[] context, int version, boolean withPlaintext);
+
+    // ──── 批量（非原子、逐条结果、顺序 == 输入顺序）────
+
+    List<TransitEncryptBatchItem> encryptBatch(List<TransitEncryptRequest> items);
+
+    List<TransitDecryptBatchItem> decryptBatch(List<TransitDecryptRequest> items);
+
+    List<TransitRewrapBatchItem> rewrapBatch(List<TransitRewrapRequest> items);
+
+    // ──── 非对称签名（coord:transit:crypto）────
+
+    /** 使用密钥默认算法（RSA 默认 PSS + SHA-256；ECDSA 按曲线默认摘要）。 */
+    TransitSignResponse sign(String name, byte[] input);
+
+    TransitSignResponse sign(TransitSignRequest request);
+
+    boolean verify(TransitVerifyRequest request);
+
+    List<TransitSignBatchItem> signBatch(List<TransitSignRequest> items);
+
+    List<TransitVerifyBatchItem> verifyBatch(List<TransitVerifyRequest> items);
+
+    // ──── 用途化 HMAC（ADR-0012；与命名密钥是两套模型）────
+
     TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose);
 
-    /** Same as {@link #hmacSignWithPurpose(byte[], String)} with an explicit algorithm. */
     TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose, String algorithm);
 
-    /**
-     * Sign with an explicit material id (rotation window). Used to recompute
-     * hash variants with a historical material for cross-rotation duplicate
-     * detection (DRV-005); new writes must leave {@code keyId} empty/primary.
-     *
-     * @throws CoordException {@code FAILED_PRECONDITION} when the material is not injected
-     */
     TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose, String algorithm, String keyId);
 
-    /**
-     * Verify a signature against the given purpose and material id.
-     * <p>
-     * Both parameters are required: the material id selects the key version used
-     * at signing time. A missing (not injected) material fails loudly with
-     * {@code FAILED_PRECONDITION} instead of returning {@code false}.
-     *
-     * @return true when the signature matches
-     */
     boolean hmacVerifyWithPurpose(byte[] data, byte[] signature, String purpose, String keyId);
 
-    /** Same as {@link #hmacVerifyWithPurpose(byte[], byte[], String, String)} with an explicit algorithm. */
-    boolean hmacVerifyWithPurpose(byte[] data, byte[] signature, String purpose, String keyId, String algorithm);
-
-    // ──── KEK 材料迁移（G-TR-1）────
-
-    /**
-     * Re-wrap a persisted DEK with the current primary KEK material (management
-     * path; capability {@code coord:transit:crypto}).
-     * <p>
-     * Used during KEK rotation: while the old material is still injected
-     * ({@code COORD_TRANSIT_KEK_OLD} / {@code transit-kek-old.txt}), call this for
-     * every still-needed DEK so it no longer depends on the old material; only
-     * then may the old material be removed. The reply carries the new
-     * {@code dek_id} and the material id it is now wrapped with.
-     *
-     * @param dekId id of the DEK to migrate ({@code dek_id} as carried in stored
-     *              packets / records)
-     * @return the new dek id and material id
-     * @throws CoordException on communication failure; {@code NOT_FOUND} when the
-     *                        DEK is unknown or expired; {@code FAILED_PRECONDITION}
-     *                        when the DEK's material is not injected (fail-loud —
-     *                        re-inject the historical material first)
-     */
-    TransitRewrapResult rewrap(String dekId);
+    boolean hmacVerifyWithPurpose(
+            byte[] data, byte[] signature, String purpose, String keyId, String algorithm);
 }

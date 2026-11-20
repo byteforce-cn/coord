@@ -87,14 +87,22 @@ KEK 供给与 TLS fail-closed 均已落地（判据见 1.2 与本节）；**未�
 
 ## 3. PKI：访问控制与泄露应急（G-PKI-3）
 
-### 3.1 访问控制口径：`GetCertByCN` = 私钥读取权
+### 3.1 访问控制口径：私钥留库（ADR-0019 D6）
 
-PKI 的读取面有两档，**不得混同**：
+PKI 的读取面**不再返回私钥**。CA 与 leaf 私钥都在 transit 命名密钥档案中
+（KEK 包裹）；证书响应只带 `key_material = {kind: coord_managed, key_name,
+key_version}`。**私钥唯一出口**是 `Transit/ExportKey`（独立能力
+`coord:transit:key_export`）；CA 密钥 `never_exportable`，任何能力都导不出。
 
 | RPC | 返回 | 权限定级 |
 |:--|:--|:--|
-| `ListCerts` | 证书摘要（**不含私钥**；供验签方构建 JWKS） | 元数据只读 |
-| `GetCertByCN` | 当前有效证书（**含 PEM 私钥**；供持有方恢复签名能力） | **等同私钥读取权**：授权给某主体＝允许其冒用该 CN 身份，授权矩阵按此口径出授 |
+| `ListCerts` | 证书摘要（不含私钥；供验签方构建 JWKS） | `pki:cert:read`（元数据只读） |
+| `GetCertByCN` | 当前有效证书 + `key_material` 引用（**无材料**） | `pki:cert:read`；拿到引用不等于能签名/导出 |
+| `Transit/ExportKey` | 私钥材料（仅 `exportable=true` 的 leaf key） | `coord:transit:key_export`（等价私钥读取权） |
+
+**授权矩阵口径**：`pki:cert:read` 只给证书/元数据；需要「恢复私钥」的主体必须
+单独获得 `coord:transit:key_export`。给某主体导出 leaf key ＝ 允许其冒用该 CN
+身份——这条定级没有变，只是授权点从 `GetCertByCN` 移到了 `ExportKey`。
 
 **用途 scope（CN 命名约定）**：建议 `<服务>-<用途>`（如 `orders-api` /
 `orders-signer`），让同一服务的不同用途落到不同 CN、可分别轮换/撤销。
@@ -103,8 +111,9 @@ PKI 的读取面有两档，**不得混同**：
 控制**谁能调 RPC**，消费侧的 CN 校验控制**签出来的身份被谁接受**——两侧分别配置，
 不互相替代。
 
-**KV 面不得旁路 PKI**：`/_pki/`（CA 与证书私钥）、`/_lease/`、`/_idgen/`、
-`/_pd/` 是内部保留命名空间。鉴权开启时，只有 agent 自身身份（`agent-self-role`）
+**KV 面不得旁路 PKI**：`/_pki/`（证书/CA 记录与密钥引用）、`/_transit/`（KEK
+包裹的 CA/leaf 私钥材料与命名密钥档案）、`/_lease/`、`/_idgen/`、`/_pd/` 是内部
+保留命名空间。鉴权开启时，只有 agent 自身身份（`agent-self-role`）
 与 root 可经 `coord.kv.KV` / `coord.txn.Txn` 访问；普通 `data:kv:read` 的
 区间读/点查一律 `PERMISSION_DENIED`（`Watch` 同样拒绝订阅）。负控制：
 `coord/tests/auth_enforcement_test.rs::test_auth_enforcement_full_matrix`。
@@ -128,7 +137,8 @@ RPC。证书泄露后的收口靠 **CN 轮换 + 消费侧剔除**。操作步骤
 
 ### 3.3 KMS / HSM 路线：维持「非 HSM」显式边界
 
-当前定级 **非 HSM**：CA 与签名私钥驻内存或文件（主机被控即私钥被控）；
+当前定级 **非 HSM**：CA 与签名私钥静态存储由软件 KEK 包裹（在 transit 密钥
+档案里），但签名时会被解到进程内存（主机被控即私钥被控）；
 `transit` 的 KEK 同理（B-SE-2 / B-SE-6）。**重新评估触发**（任一命中即启动
 HSM/PKCS#11 或外部 KMS 集成设计，另行 ADR）：
 

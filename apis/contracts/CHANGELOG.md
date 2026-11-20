@@ -1,3 +1,33 @@
+## [contracts/v2.0.0] — 2026-11-20（Major：ADR-0019 KMS 化——transit 命名密钥 / 非对称签名 / CCT3；PKI 私钥留库）
+
+**发布口径**：**Major**（`coord.transit.v1` 与 `coord.pki.v1` 的 wire 形状按目标形状改写：
+删除旧 RPC 语义、删除响应字段；`buf breaking` 对这两个文件显式豁免一次，合并后下一 PR
+恢复强制基线）。
+
+- **`coord.transit.v1`**：新增命名密钥生命周期（`CreateKey` / `ReadKey` / `ListKeys` /
+  `RotateKey` / `UpdateKeyConfig` / `DeleteKey` / `TrimKey` / `ImportKey` / `ExportKey`）、
+  非对称 `Sign` / `Verify` 与 `SignBatch` / `VerifyBatch`、按名 `Encrypt` / `Decrypt` /
+  `Rewrap` / `EncryptBatch` / `DecryptBatch` / `RewrapBatch` / `GenerateDataKey`。
+  - 版本三边界：`latest_version` / `min_decryption_version` / `min_encryption_version`；
+    `version = 0` 表示 latest。
+  - 密文格式改为 `CCT3`（自描述 key name + version）；`CCT2` **直接移除**，不保留只读路径。
+  - `Rewrap` 改为「密文进、密文出」；旧 `Rewrap(dek_id)`（服务端 DEK 档案语义）删除。
+  - 签名参数 fail-loud：`prehashed=true` 缺 `hash_algorithm` 或 `input` 长度与
+    该 hash 不符 ⇒ `INVALID_ARGUMENT`；Ed25519 + prehashed 拒绝；RSA 空
+    `signature_algorithm` 默认 `pss`。
+  - 能力拆分：`coord:transit:key_read` / `key_manage` / `key_export` / `crypto`。
+  - 枚举快照：新增 `TransitKeyType`（8 值）与 `TransitDataKeyType`（4 值），
+    `coord-proto/wire-freeze/enums.txt` 同步；纯新增，无改名/改号。
+- **`coord.pki.v1`**：`IssueCert` / `RenewCert` / `RotateCert` / `GetCertByCN` 删除
+  `key_pem`（字段号 `3` reserved），新增 `PkiKeyMaterial key_material = 9`
+  （`kind=coord_managed` + `key_name` + `key_version`）。私钥唯一出口是
+  `Transit/ExportKey`；CA 密钥恒不可导出。
+- **不兼容性（显式）**：按 ADR-0019 D11 不提供迁移/兼容层——旧 CCT2 密文不可解密，
+  旧 PKI 记录（含明文 `key_pem`）不自动迁移；升级前按 runbook 重新签发/重新加密。
+- **判据**：`coord-agent/tests/agent_transit_test.rs`、`agent_pki_test.rs`、
+  `transit_interop_test.rs`（openssl 独立验签）；能力注册表门禁
+  `scripts/check-capability-registry.sh`。
+
 ## [contracts/v1.25.0] — 2026-11-16（Minor：Workflow History action id / 撤回与取消区分 / 补偿声明）
 
 **发布口径**：**Minor**（`coord.workflow.v1` 向 `WorkflowCancelRequest` 追加

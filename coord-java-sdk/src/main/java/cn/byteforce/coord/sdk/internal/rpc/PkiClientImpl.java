@@ -47,6 +47,13 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
         this.config = config;
     }
 
+    private static cn.byteforce.coord.contracts.pki.v1.PkiKeyMaterial keyMaterialOf(
+            cn.byteforce.coord.contracts.pki.v1.PkiKeyMaterial material) {
+        return material == null
+                ? cn.byteforce.coord.contracts.pki.v1.PkiKeyMaterial.getDefaultInstance()
+                : material;
+    }
+
     @Override
     public void initCa(String caCommonName) {
         PkiInitCaRequest request = PkiInitCaRequest.newBuilder()
@@ -92,7 +99,8 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
         return new PkiCertInfo(
                 response.getCommonName(),
                 response.getCertPem(),
-                response.getKeyPem(),
+                keyMaterialOf(response.getKeyMaterial()).getKeyName(),
+                keyMaterialOf(response.getKeyMaterial()).getKeyVersion(),
                 response.getNotBefore(),
                 response.getNotAfter(),
                 response.getSerial(),
@@ -117,7 +125,8 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
         return new PkiCertInfo(
                 response.getCommonName(),
                 response.getCertPem(),
-                response.getKeyPem(),
+                keyMaterialOf(response.getKeyMaterial()).getKeyName(),
+                keyMaterialOf(response.getKeyMaterial()).getKeyVersion(),
                 response.getNotBefore(),
                 response.getNotAfter(),
                 response.getSerial(),
@@ -156,7 +165,8 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
         return new PkiCertInfo(
                 response.getCommonName(),
                 response.getCertPem(),
-                response.getKeyPem(),
+                keyMaterialOf(response.getKeyMaterial()).getKeyName(),
+                keyMaterialOf(response.getKeyMaterial()).getKeyVersion(),
                 response.getNotBefore(),
                 response.getNotAfter(),
                 response.getSerial(),
@@ -207,7 +217,8 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
         return new PkiCertInfo(
                 response.getCommonName(),
                 response.getCertPem(),
-                response.getKeyPem(),
+                keyMaterialOf(response.getKeyMaterial()).getKeyName(),
+                keyMaterialOf(response.getKeyMaterial()).getKeyVersion(),
                 response.getNotBefore(),
                 response.getNotAfter(),
                 response.getSerial(),

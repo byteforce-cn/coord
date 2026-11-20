@@ -558,7 +558,22 @@ const BUILTIN_CAPABILITY_META: &[(&str, CapabilityType, &str)] = &[
     (
         "coord:transit:crypto",
         CapabilityType::Write,
-        "加解密与 HMAC（Encrypt/Decrypt/HmacSign/HmacVerify/Rewrap）",
+        "加解密、签名与 HMAC（Encrypt/Decrypt/Rewrap/GenerateDataKey/Sign/Verify/Hmac*）",
+    ),
+    (
+        "coord:transit:key_read",
+        CapabilityType::Read,
+        "读取密钥元数据（ReadKey/ListKeys）",
+    ),
+    (
+        "coord:transit:key_manage",
+        CapabilityType::Write,
+        "密钥生命周期（CreateKey/RotateKey/UpdateKeyConfig/DeleteKey/TrimKey/ImportKey）",
+    ),
+    (
+        "coord:transit:key_export",
+        CapabilityType::Write,
+        "导出密钥材料（ExportKey；CA 密钥恒不可导出）",
     ),
     (
         "coord:workflow:define",
@@ -1254,8 +1269,8 @@ mod tests {
         registry.bootstrap_builtin();
         assert_eq!(
             registry.count(),
-            122,
-            "should have all 122 built-in capabilities (91 live: data 12 / coord 49 / pki 4 / admin 26; \
+            125,
+            "should have all 125 built-in capabilities (94 live: data 12 / coord 52 / pki 4 / admin 26; \
              31 deprecated: data 7 / coord 23 / admin 1)"
         );
     }
@@ -1353,19 +1368,19 @@ mod tests {
         let registry = CapabilityRegistry::new();
         registry.bootstrap_builtin();
         let all_caps = registry.list();
-        assert_eq!(all_caps.len(), 122);
+        assert_eq!(all_caps.len(), 125);
 
         // Encrypt all 120 capabilities
         let encrypted_all = store
             .encrypt_all(&all_caps)
             .expect("encrypt all should succeed");
-        assert_eq!(encrypted_all.len(), 122);
+        assert_eq!(encrypted_all.len(), 125);
 
         // Decrypt all
         let decrypted_all = store
             .decrypt_all(&encrypted_all)
             .expect("decrypt all should succeed");
-        assert_eq!(decrypted_all.len(), 122);
+        assert_eq!(decrypted_all.len(), 125);
 
         // Verify round-trip for each
         for (orig, dec) in all_caps.iter().zip(decrypted_all.iter()) {

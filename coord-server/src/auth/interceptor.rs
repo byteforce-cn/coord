@@ -39,11 +39,13 @@ const TRUSTED_AGENT_CLUSTER_CN: &str = "coord-agent-cluster";
 
 /// 服务端内部保留的 KV 命名空间（客户端 KV 面不可直接读写）。
 ///
-/// 这些键空间由 server/agent 自身维护：`/_pki/` 含 **CA 与证书私钥**，
+/// 这些键空间由 server/agent 自身维护：`/_pki/` 是 CA/证书记录（含密钥**引用**），
+/// `/_transit/keys|keymat` 是命名密钥档案与 **KEK 包裹后的材料**，
 /// `/_lease/` `/_idgen/` `/_pd/` 是状态机簿记。若允许 `data:kv:read` 直读，
-/// PKI 的 `pki:*` 授权可被 KV 读权限旁路（拿走信任根私钥 = 可自签任意身份）。
-/// 放行主体仅限 agent 自身身份（[`AGENT_SELF_ROLE`]）与 root。
-const RESERVED_INTERNAL_KV_PREFIXES: &[&[u8]] = &[b"/_pki/", b"/_lease/", b"/_idgen/", b"/_pd/"];
+/// PKI/transit 的能力授权可被 KV 读权限旁路（拿走信任根材料或密钥档案 ⇒
+/// 可自签/冒用任意身份）。放行主体仅限 agent 自身身份（[`AGENT_SELF_ROLE`]）与 root。
+const RESERVED_INTERNAL_KV_PREFIXES: &[&[u8]] =
+    &[b"/_pki/", b"/_transit/", b"/_lease/", b"/_idgen/", b"/_pd/"];
 
 /// 一次 KV 访问是否触碰内部保留命名空间；命中返回该前缀（用于错误消息）。
 pub fn reserved_internal_prefix(access: &ScopeAccess) -> Option<&'static str> {

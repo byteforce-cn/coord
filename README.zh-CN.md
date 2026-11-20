@@ -213,9 +213,9 @@ rustls/webpki、浏览器、Envoy）必须有该扩展。完整步骤见
 [`docs/pki-quickstart.md`](docs/pki-quickstart.md)。
 
 边界：仅 dev / test / 内部验证——无吊销（CRL/OCSP）、非 HSM、不是生产信任根
-（`docs/production/ops/boundaries.md` B-PKI-1）。CA 与证书私钥在保留 KV 命名空间
-`/_pki/`（鉴权开启时仅 agent 自身身份或 root 可经 KV 读取）；未开静态加密时快照会明文
-包含这些私钥。
+（`docs/production/ops/boundaries.md` B-PKI-1）。证书/CA 记录在保留 KV 命名空间
+`/_pki/`，私钥材料以 KEK 包裹形态存于 `/_transit/`（鉴权开启时仅 agent 自身身份或
+root 可经 KV 读取）；快照只含包裹后的材料，不含 KEK。
 
 ## 项目结构
 
@@ -252,7 +252,7 @@ Coord 处于 pre-1.0，并明确列出**不承诺**的事项；完整清单（�
 - **Raft 日志压缩**——缺省每 5000 条自动快照并回收已入快照的日志（保留窗口 `raft.max_in_snapshot_log_to_keep`，默认保留 1000 条供落后副本追赶）；`raft.snapshot_logs_since_last = 0` 会同时关闭两者，日志不再回收（见 ADR-0004）。
 - **Multi-Raft（region 模式）**——不支持动态增删 region；watch 不能跨 region。
 - **鉴权依赖 raft quorum**——登录与令牌刷新需要 quorum；凭据过期的客户端在 quorum 恢复前不可用。
-- **`transit` 的 KEK 由运维注入**——不接外部 KMS，也没有内建的材料轮换流程（`coord dev` 例外：使用固定 dev 默认材料，见 [ADR-0009](docs/adr/0009-dev-mode-builtin-services.md)）。
+- **`transit` 的 KEK 由运维注入**——不接外部 KMS/HSM；命名密钥可用 `Transit/RotateKey` 轮换，但 KEK 轮换是 `docs/production/ops/runbook.md` §4.4 的手工 rewrap/trim 流程（`coord dev` 例外：使用固定 dev 默认材料，见 [ADR-0009](docs/adr/0009-dev-mode-builtin-services.md)）。
 - **资源边界**——插件队列有界；客户端口与 agent 健康监听均有连接上限（但无连接寿命回收）；
   缓存容量上界由 reaper 周期强制（默认 1GB；周期内可短暂超界，指标可观测）；
   消息队列的字节配额在 publish 入口严格强制（同事务记账，超界拒绝 `RESOURCE_EXHAUSTED`），

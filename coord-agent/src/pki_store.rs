@@ -6,8 +6,8 @@
 // - 并发 get-or-create 用 Txn CAS（Version==0）保证只产生一份密钥，无竞态双签发。
 //
 // Key 空间：
-//   /_pki/v1/ca                     → CaRecord（CA 证书 + 私钥）
-//   /_pki/v1/certs/{CN}             → CertRecord（当前 active）
+//   /_pki/v1/ca                     → CaRecord（CA 证书 + 私钥的 key 引用）
+//   /_pki/v1/certs/{CN}             → CertRecord（当前 active；只含 key_name/version）
 //   /_pki/v1/history/{CN}/{serial}  → CertRecord（轮换后的 retired 历史，保留至 not_after）
 
 use std::collections::HashMap;
@@ -38,15 +38,17 @@ pub enum CertStatus {
     Retired,
 }
 
-/// 持久化的证书记录（含私钥；经 coord-server Barrier 加密落库）
+/// 持久化的证书记录（**不含私钥材料**；只存 transit 密钥名/版本，ADR-0019 D6）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertRecord {
     /// 通用名称（CN）
     pub common_name: String,
     /// 证书 PEM
     pub cert_pem: String,
-    /// 私钥 PEM
-    pub key_pem: String,
+    /// 托管私钥的命名密钥名（`pki/leaf/{cn}`；材料在 transit 档案里，ADR-0019 D6）
+    pub key_name: String,
+    /// 签名使用的密钥版本
+    pub key_version: u32,
     /// 生效时间（UNIX 秒）
     pub not_before: i64,
     /// 失效时间（UNIX 秒）
@@ -77,13 +79,15 @@ impl CertRecord {
     }
 }
 
-/// CA 持久化记录（证书 + 私钥，经 Barrier 加密落库）
+/// CA 持久化记录（证书 + 私钥引用；材料在 transit 档案里，ADR-0019 D6）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaRecord {
     /// CA 证书 PEM
     pub cert_pem: String,
-    /// CA 私钥 PEM
-    pub key_pem: String,
+    /// CA 私钥的命名密钥名（`pki/ca`；never_exportable，ADR-0019 D6）
+    pub key_name: String,
+    /// CA 私钥版本
+    pub key_version: u32,
     /// CA 通用名称
     pub common_name: String,
 }
@@ -642,7 +646,8 @@ mod tests {
         CertRecord {
             common_name: cn.to_string(),
             cert_pem: format!("-----BEGIN CERTIFICATE-----\n{cn}\n-----END CERTIFICATE-----"),
-            key_pem: format!("-----BEGIN PRIVATE KEY-----\n{serial}\n-----END PRIVATE KEY-----"),
+            key_name: format!("pki/leaf/test/{serial}"),
+            key_version: 1,
             not_before: 1_700_000_000,
             not_after: 9_999_999_999, // 远期不过期
             serial: serial.to_string(),
@@ -684,7 +689,8 @@ mod tests {
         let json = r#"{
             "common_name":"svc-a",
             "cert_pem":"CERT",
-            "key_pem":"KEY",
+            "key_name":"pki/test/1",
+            "key_version":1,
             "not_before":1700000000,
             "not_after":9999999999,
             "serial":"0x1"
@@ -702,7 +708,8 @@ mod tests {
     fn test_ca_serialization_roundtrip() {
         let record = CaRecord {
             cert_pem: "CA-CERT".into(),
-            key_pem: "CA-KEY".into(),
+            key_name: "pki/ca".into(),
+            key_version: 1,
             common_name: "coord-agent-ca".into(),
         };
         let bytes = serialize_ca(&record).expect("serialize");
@@ -762,7 +769,8 @@ mod tests {
         assert_eq!(store.get_ca().await.unwrap(), None);
         let ca = CaRecord {
             cert_pem: "C".into(),
-            key_pem: "K".into(),
+            key_name: "pki/ca".into(),
+            key_version: 1,
             common_name: "ca".into(),
         };
         store.create_ca(&ca).await.expect("create");

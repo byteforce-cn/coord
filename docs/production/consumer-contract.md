@@ -514,8 +514,12 @@ trigger:
 | `Pki/RotateCert` | `pki:cert:rotate` |
 | `Pki/ListCerts` / `GetCertByCN` / `GetCaCert` / `VerifyCert` | `pki:cert:read` |
 
-- **权限定级 `GetCertByCN` = 私钥读取权**（返回含 PEM 私钥；`ListCerts` 才是
-  无私钥摘要）——授权矩阵按此口径出授（`security.md` §3.1）。
+- **私钥留库（ADR-0019 D6）**：`IssueCert` / `RenewCert` / `RotateCert` /
+  `GetCertByCN` **都不返回私钥**，只返回 `key_material = {kind: coord_managed,
+  key_name, key_version}`；CA 与 leaf 私钥在 transit 命名密钥档案里（KEK 包裹）。
+  私钥唯一出口是 `Transit/ExportKey`（`coord:transit:key_export`）；leaf key
+  `exportable=true`（受控恢复），CA key `never_exportable`。授权矩阵口径见
+  `security.md` §3.1。
 - **到期 = 换新触发**（G-PKI-1）：`IssueCert` / `RotateCert` 对过期记录走替换
   路径重签（新 serial / 新密钥）；`RenewCert(serial)` 为按序列号恢复入口；
   `GetCertByCN` 仅未过期返回，否则 `NOT_FOUND`。
@@ -526,8 +530,10 @@ trigger:
   DNS 名（非 ASCII 等）⇒ `INVALID_ARGUMENT`（显式传 `dns_names` 可保留任意 CN）。
   `RotateCert` 未传 SAN ⇒ 继承当前证书；`RenewCert` 同样继承。
 - **参数一致才幂等**：同 CN 的 `IssueCert` 仅在 SAN 与 TTL 都与当前 active 记录一致时
-  返回既有证书（同 serial / 同私钥）；SAN 或 TTL 不同 ⇒ 等价 `RotateCert`
-  （新 serial + 新密钥，旧记录 retired 保留至 `not_after`，按 serial 仍可取回）。
+  返回既有证书（同 serial / 同 key 版本）；SAN 或 TTL 不同 ⇒ 等价 `RotateCert`
+  （新 serial + 新密钥版本，旧记录 retired 保留至 `not_after`，按 serial 仍可取回）。
+- **leaf key 的命名与版本**：`pki/leaf/{cn}`，版本 = 轮换代次（`RotateCert`/`RenewCert`/
+  过期替换各产生 +1）；证书响应里的 `key_version` 是签名/解密要用的版本。
 - 观测：`coord_agent_pki_certs_active` / `..._certs_expiring_soon`（窗口
   `expiry_warn_hours`，默认 6h），告警 `CoordPkiCertExpiringSoon`。dev 下
   `agent_port+1/metrics` 可见这些 gauge（≤1 个 30s 采样周期），但**不等于**告警会
@@ -537,22 +543,45 @@ trigger:
   （playbook：`security.md` §3.2 / runbook §4.5）；非 HSM 边界与重估触发见
   `boundaries.md` B-PKI-1。
 
-## 10. Transit（信封加密与 HMAC，G-TR-1 / G-TR-2 / G-TR-3）
+## 10. Transit（命名密钥 / KMS 面与 HMAC，ADR-0019 / G-TR-3）
 
 | RPC（组） | 能力 |
 |:--|:--|
-| `Transit/Encrypt` / `Decrypt` / `HmacSign` / `HmacVerify` / `Rewrap` | `coord:transit:crypto` |
+| `Transit/CreateKey` / `RotateKey` / `UpdateKeyConfig` / `DeleteKey` / `TrimKey` / `ImportKey` | `coord:transit:key_manage` |
+| `Transit/ReadKey` / `ListKeys` | `coord:transit:key_read` |
+| `Transit/ExportKey` | `coord:transit:key_export` |
+| `Transit/Encrypt` / `Decrypt` / `Rewrap` / `EncryptBatch` / `DecryptBatch` / `RewrapBatch` / `GenerateDataKey` / `Sign` / `Verify` / `SignBatch` / `VerifyBatch` / `HmacSign` / `HmacVerify` | `coord:transit:crypto` |
 
-- 信封加密：DEK 一次性、KEK 留在 agent；**KEK 必须外部注入**（未注入 ⇒ 启用
-  transit 的 agent **拒绝启动**，B-SE-2）。
-- **多材料解密窗口（G-TR-1）**：主材料 + 历史材料（`COORD_TRANSIT_KEK_OLD` /
-  `transit-kek-old.txt`）；密文/DEK 记录携带材料标识；`Rewrap` 为管理路径
-  （旧材料解出 DEK → 主材料重包，返回 `new_dek_id` / `kek_id`）。**迁移完成前
-  不得下线旧材料**（流程见 runbook §4.4）。
-- **G-TR-2（产品决策定谳）**：**不提供远程非对称签名**——transit 维持对称
-  加密 + HMAC，PKI 维持「密钥交付持有方」模型。「私钥不出域」的签名场景
-  （token / 审计锚点等）不在承诺内；触发条件（组织 KMS 方向确定）时另行立项
-  评估。边界条目：`boundaries.md` B-TR-1。
+- **命名密钥 + 版本三边界（ADR-0019 D2）**：档案含 `type` / `latest_version` /
+  `min_decryption_version` / `min_encryption_version` / `deletion_allowed` /
+  `exportable` / `versions[]`；版本材料由 KEK 包裹。`version = 0` = latest；
+  加密/签名显式版本必须 ≥ `min_encryption_version`，解密/验签版本必须 ≥
+  `min_decryption_version`；越界 ⇒ `FAILED_PRECONDITION`（KeyVersionException）。
+- **CCT3 密文**：`"CCT3" || name_len || name || version || nonce || dek_packet ||
+  ciphertext`，自描述 key name 与版本；`context` 仍是数据 AAD。CCT2（无 key
+  name/版本）已移除（ADR-0019 D5/D11）。`Rewrap` 是**密文进、密文出**：解包
+  DEK 后用 latest 重包，不解明文；旧 `Rewrap(dek_id)` 语义已删除。
+- **签名**：Ed25519 / ECDSA P-256/P-384/P-521（DER）/ RSA PKCS#1 v1.5 + PSS
+  （默认 PSS）；`prehashed=true` 必须给 `hash_algorithm`，且 `input` 必须是该 hash
+  的完整摘要（32 / 48 / 64 字节；缺参数或长度不符 ⇒ `INVALID_ARGUMENT`），
+  Ed25519 + prehashed 明确拒绝；响应回显 `key_version`
+  与规范化算法名。跨实现验签判据：`coord-agent/tests/transit_interop_test.rs`
+  （openssl 独立验证三种算法族）。
+- **`pki/` 前缀独占**：PKI 的 CA/leaf 密钥在同一条档案里，但 `pki/` 下的
+  CreateKey / ImportKey / RotateKey / UpdateKeyConfig / DeleteKey / TrimKey
+  一律 `PERMISSION_DENIED`——否则具有 `key_manage` 的调用方可以预置一把自己
+  知道材料的 leaf key，或裁剪 CA 的历史版本。ReadKey / ListKeys / ExportKey
+  不受此限（leaf 导出是受控恢复路径；CA 由 `never_exportable` 恒拒绝）。
+- **导出/删除闸门**：`exportable` 默认 false，导出是独立能力；CA key
+  `never_exportable` ⇒ `PERMISSION_DENIED`；`deletion_allowed` 默认 false，
+  `DeleteKey` 拒绝。导出的 actor 审计仍是 v2 backlog（ADR-0019 D8），在此之前
+  不得把 KMS 写操作面读作「已审计」。
+- **KEK 供给与多材料窗口（B-SE-2 / B-SE-6）**：KEK 必须外部注入（未注入 ⇒
+  启用 transit 的 agent **拒绝启动**）；每个版本材料记录包裹它的 `kek_id`。
+  下线旧 KEK 前必须 `RotateKey` 换代、把存量密文 `Rewrap` 到新版本、再
+  `TrimKey` 删除旧版本材料（流程见 runbook §4.4）。
+- **不提供**：`convergent` 加密、`hash` / `random` 下放、客户端离线缓存
+  （ADR-0019 D10）。
 - **HMAC 用途化与轮换窗口（G-TR-3，ADR-0012）**：`HmacSign` / `HmacVerify` 的 `purpose`
   必填（非空、不含 NUL、≤128 字节；空/非法 ⇒ `INVALID_ARGUMENT`），按用途域分隔派生、
   互不可验。签名的 `key_id` 是材料标识（Vault Transit 的 key version 等价物），**必须与
@@ -612,8 +641,8 @@ trigger:
 | B-RG-1 / B-RG-2 | v1 静态 Region 拓扑（`[kv_t]` 的表驱动生命周期已接线，但 split/merge 数据搬迁未交付）；region 模式 watch 拒绝跨 region | 静态拓扑规划；watch 前缀受限 |
 | B-CX-1 / B-CX-2 | 连接数上限但无寿命回收；客户端连接池机会式回收 | 容量规划考虑长连接占坑 |
 | B-SE-1..B-SE-8 | TLS fail-closed / KEK 注入 / dev 例外等安全边界 | 生产接入按 TLS+注入材料配置 |
-| B-PKI-1 | 非 HSM + 无吊销；`GetCertByCN`=私钥读取权 | 授权口径 + 轮换应急（§9） |
-| B-TR-1 | 不提供远程非对称签名（G-TR-2） | 需「私钥不出域」签名时另行立项 |
+| B-PKI-1 | 非 HSM + 无吊销；私钥留库（`GetCertByCN` 不含材料） | 授权口径 + 轮换应急（§9） |
+| B-TR-1 | KMS 面：软件 KEK（非 HSM）；无 convergent/hash/random/离线缓存 | ADR-0019；边界见 boundaries.md |
 | B-PL-3 | 缓存容量周期收敛、非真 LRU、ISR 本地回收 | 缓存不作为配额硬边界依赖 |
 | B-PL-5 | 缓存 `Keys` 为有界/本节点视角枚举；`Clear` 批式、与并发写按到达顺序 | 运维清理窗口内暂停并发写；键不得含 NUL |
 | B-PL-4 | MQ 逐写严格上界；ISR 下配额/回收各节点本地；删除仅经 `DeleteTopic` | §5.4 前置条件；不得用内部分段方法代餐 |

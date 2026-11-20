@@ -267,12 +267,24 @@ KEK 更换分三步，**在完成迁移前不得移除旧材料**：
    材料，标识不换代会让旧记录 / 旧签名落到新材料上）：
    - 环境变量 `COORD_TRANSIT_KEK_OLD`：`<旧标识>:hex64[,...]`；
    - 或 `<data_dir>/transit-kek-old.txt`（每行 `kek_id hex64`，`#` 注释）。
-   此时新写入的 DEK 由主材料（新标识）包裹；旧材料密文按记录中的材料标识自动选旧
-   材料解密（旧记录无标识 ⇒ 按「主 → 历史」逐材料试解）。
-2. **迁移存量**：对仍有效的存量 DEK 调 `Transit/Rewrap`（管理路径）：
-   旧材料解出 DEK → **主材料重包**（新 nonce / 新 dek_id，材料标识更新为
-   主材料）；返回 `new_dek_id` 与 `kek_id`。此后旧材料对该条已无依赖。
-3. **下线旧材料**：确认无存量后，从注入集合移除旧材料并重启 agent。
+   此时 `CreateKey` / `RotateKey` 产生的**版本材料**与 CCT3 的 DEK 由主材料（新标识）
+   包裹；旧版本材料按记录里的 `kek_id` 自动选旧材料解开（版本材料键：
+   `/_transit/keymat/{name}/{version}`）。
+2. **迁移存量密文**：对仍有效的存量 CCT3 密文调 `Transit/Rewrap`（密文进、密文出）：
+   旧材料解出 DEK → **latest 版本（新 KEK）重包**，不触碰明文。把调用方存储里的密文
+   替换为返回的新密文后，旧版本对该条已无依赖。
+3. **迁移密钥版本**：加密类密钥在确认存量密文都已 rewrap 后，用 `RotateKey` 产生新
+   版本（新 KEK），再 `TrimKey(min=新版本)` 删除旧版本材料；此后旧 KEK 不再被该 key
+   引用。签名类密钥的**历史签名**无法重签：旧版本材料下线后，coord 内按旧版本验签会
+   报 `FAILED_PRECONDITION`——需要继续在 coord 内验旧签名的部署必须保留旧 KEK；只在外
+   部用公钥验签的部署可以下线。
+4. **下线旧材料**：确认没有版本材料仍引用旧 `kek_id`（按 `created_at` + 轮换时间核对；
+   `ReadKey` 的 `versions[]` 只给版本与时间，不给 `kek_id`），从注入集合移除旧材料并
+   重启 agent。
+
+> **CA 密钥例外**：`pki/ca` 是 `never_exportable` 且不可删除；它没有可迁移的导出路径，
+> 也无法在不换根的前提下重新包裹。**CA 密钥的 KEK 材料必须保持注入**。要真正退役该
+> KEK，只能轮换 CA 根（换新 CA 私钥 + 重签根证书 = 信任根变更），不属于本节流程。
 
 **回退路径**：任一步出问题都可退回「新旧并存」——只要旧材料仍在注入集合，
 旧密文（含未 rewrap 的）仍可解密。移除旧材料后旧密文解密报
@@ -280,12 +292,12 @@ KEK 更换分三步，**在完成迁移前不得移除旧材料**：
 
 **演练（预期 / 判据）**：
 
-- 预期：并存窗口内旧材料密文可解密；`Rewrap` 后记录 `kek_id` 变为主材料且仅主
-  材料可解；移除旧材料后未迁移的旧密文**必须**解密失败（负控制）。
-- 判据（自动化）：`coord-agent` 单测
-  `test_multi_material_decrypt_window_and_rewrap`（含负控制）、
-  `test_legacy_record_without_material_id_falls_back_to_try_all`、
-  `test_keyring_old_material_parsing_rules`。
+- 预期：并存窗口内旧材料包裹的版本材料可解密；`Rewrap` 后密文版本升级到 latest
+  且新密文只依赖新 KEK；`TrimKey` 后旧版本材料被删除；移除旧材料后仍引用旧版本的
+  密文**必须**解密失败（负控制）。
+- 判据（自动化）：`coord-agent` 单测 `test_rotate_bounds_and_rewrap`（含
+  min_decryption 越界负控制）、`test_kek_comes_from_material_not_from_kek_id`、
+  `test_keyring_old_material_parsing_rules`、`test_key_archive_shared_across_instances_and_restart`。
 
 **HMAC 轮换（G-TR-3 / ADR-0012）**：
 
@@ -331,9 +343,9 @@ grpcurl -plaintext -H "authorization: Bearer $COORD_TOKEN" \
 TLS/mTLS 集群把 `-plaintext` 换成 `-cacert <ca.pem>`（必要时 `-cert/-key`）；服务名
 写错（如 `PKI`）会得到 `unknown service`，不要照抄旧示例。
 
-**预期**：`RotateCert` 后 `GetCertByCN` 返回新 serial / 新密钥材料，
-`VerifyCert` `valid=true`；`ListCerts` 可见 active（新）+ retired（旧）并存
-（滚动验签窗口）。
+**预期**：`RotateCert` 后 `GetCertByCN` 返回新 serial / 新 `key_version` 引用
+（不再有私钥材料），`VerifyCert` `valid=true`；`ListCerts` 可见 active（新）+
+retired（旧）并存（滚动验签窗口）。
 
 **泄露应急（严格按此顺序）**：
 
@@ -341,18 +353,22 @@ TLS/mTLS 集群把 `-plaintext` 换成 `-cacert <ca.pem>`（必要时 `-cert/-ke
    即刻生效，不依赖 CA（CA 侧无法阻止不校验本 store 的消费方继续接受旧
    证书）；
 2. **再作废材料**：`RotateCert`（同 CN）或换新 CN `IssueCert`；若需按序列号
-   恢复签名能力用 `RenewCert(serial)`；
+   恢复签名能力用 `RenewCert(serial)`。私钥在 coord 内，**不需要**（也不应该）
+   把旧 leaf key 导出后继续使用；确需受控恢复时走 `Transit/ExportKey`
+   （`coord:transit:key_export`），并把该动作按私钥读取事件审计；
 3. **负控制验证**：用旧证书做一次验证/连接——**必须失败**；
 4. **归档**：CN / 旧 serial / 新 serial / 时间 / 执行人（演练记录按 §7）。
 
-**内部键空间与升级**：CA 与证书私钥落在 `/_pki/`（普通 KV 键）。鉴权开启时
-`/_pki/` 与 `/_lease/`、`/_idgen/`、`/_pd/` 同属内部保留命名空间：仅 agent 自身
-身份 / root 可经 KV 面访问，普通 `data:kv:read` 一律 `PERMISSION_DENIED`（`Watch`
-同样拒绝）。升级到带 SAN 的版本后，旧 dev 数据目录中的无 SAN 记录会在下一次
+**内部键空间与升级**：证书记录与 CA **引用**落在 `/_pki/`；私钥材料（KEK 包裹）
+落在 `/_transit/keys` + `/_transit/keymat`。鉴权开启时 `/_pki/`、`/_transit/` 与
+`/_lease/`、`/_idgen/`、`/_pd/` 同属内部保留命名空间：仅 agent 自身身份 / root 可经
+KV 面访问，普通 `data:kv:read` 一律 `PERMISSION_DENIED`（`Watch` 同样拒绝）。升级到带 SAN 的版本后，旧 dev 数据目录中的无 SAN 记录会在下一次
 `IssueCert` 时按「参数一致才幂等」自动替换；也可 `--fresh` 或换 CN 立即重来。
 
-**备份注意**：快照与导出是**全量 KV 对**，包含 `/_pki/` 的 CA 与证书私钥；未开
-静态加密时以明文导出。备份文件的保管等级等同信任根私钥。
+**备份注意**：快照与导出是**全量 KV 对**，包含 `/_pki/` 的证书/CA 引用与
+`/_transit/` 的 KEK 包裹材料。材料离开本机 KEK **不可解**：只备份 KV 而不备份
+KEK 材料等于没有备份；反之 KEK 泄露 + 快照泄露 = 全部私钥泄露。备份文件与 KEK
+材料的保管等级等同信任根私钥。
 
 **判据（自动化）**：`coord-agent/src/pki.rs` 单测
 `test_rotate_cert_replaces_expired_record`、

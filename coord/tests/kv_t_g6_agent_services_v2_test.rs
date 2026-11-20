@@ -707,12 +707,24 @@ async fn exercise_feature_flags(channel: tonic::transport::Channel) {
 
 async fn exercise_transit(channel: tonic::transport::Channel) {
     use coord_proto::transit::v1::transit_client::TransitClient;
-    use coord_proto::transit::v1::{TransitDecryptRequest, TransitEncryptRequest};
+    use coord_proto::transit::v1::{
+        TransitCreateKeyRequest, TransitDecryptRequest, TransitEncryptRequest, TransitKeyType,
+    };
 
     let mut transit = TransitClient::new(channel);
+    transit
+        .create_key(TransitCreateKeyRequest {
+            name: "v2-smoke".into(),
+            r#type: TransitKeyType::Aes256Gcm96 as i32,
+            exportable: false,
+        })
+        .await
+        .expect("Transit.CreateKey must succeed");
     let plaintext = b"v2-smoke-secret";
     let ciphertext = transit
         .encrypt(TransitEncryptRequest {
+            name: "v2-smoke".into(),
+            version: 0,
             plaintext: plaintext.to_vec(),
             context: Vec::new(),
         })
@@ -723,6 +735,7 @@ async fn exercise_transit(channel: tonic::transport::Channel) {
     assert!(!ciphertext.is_empty(), "ciphertext must not be empty");
     let decrypted = transit
         .decrypt(TransitDecryptRequest {
+            name: "v2-smoke".into(),
             ciphertext,
             context: Vec::new(),
         })

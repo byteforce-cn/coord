@@ -43,12 +43,14 @@ coord pki issue \
 ```
 
 产物：`orders-api.pem` / `orders-api.key`（私钥权限 `0600`）；stdout 打印
-`serial` / `not_before` / `not_after`，`--json` 输出可脚本化元数据。
+`serial` / `not_before` / `not_after`，`--json` 输出可脚本化元数据。私钥实际留在
+coord（ADR-0019），CLI 通过 `Transit/ExportKey` 受控导出到 `.key`；生产环境需要
+`coord:transit:key_export` 能力（dev 默认不鉴权）。
 
 - 只给 `--cn`（不传 `--dns` / `--ip`）时，CN 会**派生为 DNS SAN**；CN 不是合法
   DNS 名（非 ASCII 等）⇒ `INVALID_ARGUMENT`，CLI 退出码 2。
 - 同 CN 重复 `issue` 且 SAN/TTL 一致 ⇒ 幂等返回同一张证书；参数不同 ⇒ 换新
-  （新 serial/私钥，旧证书 retired 保留至到期）。
+  （新 serial / 新 key 版本，旧证书 retired 保留至到期）。
 
 ## 3. 验收：两条都过才算数
 
