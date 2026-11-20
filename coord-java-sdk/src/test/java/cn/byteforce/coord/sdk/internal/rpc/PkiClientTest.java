@@ -83,7 +83,8 @@ class PkiClientTest {
         assertThat(cert.commonName()).isEqualTo("svc-a.local");
         assertThat(cert.serial()).isEqualTo("0x1");
         assertThat(cert.certPem()).contains("BEGIN CERTIFICATE");
-        assertThat(cert.keyPem()).isNotEmpty();
+        assertThat(cert.keyName()).isNotEmpty();
+        assertThat(cert.keyVersion()).isEqualTo(1);
         assertThat(cert.status()).isEqualTo("active");
         assertThat(fake.issueCalls).isEqualTo(1);
     }
@@ -146,7 +147,8 @@ class PkiClientTest {
     void getCertByCNReturnsActiveWithPrivateKey() {
         PkiCertInfo cert = pki.getCertByCN("svc-a.local");
         assertThat(cert.serial()).isEqualTo("0x2");
-        assertThat(cert.keyPem()).isNotEmpty();
+        assertThat(cert.keyName()).isNotEmpty();
+        assertThat(cert.keyVersion()).isEqualTo(2);
         assertThat(cert.status()).isEqualTo("active");
     }
 
@@ -171,7 +173,10 @@ class PkiClientTest {
             observer.onNext(PkiIssueCertResponse.newBuilder()
                     .setCommonName(request.getCommonName())
                     .setCertPem("-----BEGIN CERTIFICATE-----\n" + request.getCommonName() + "\n-----END CERTIFICATE-----")
-                    .setKeyPem("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----")
+                    .setKeyMaterial(cn.byteforce.coord.contracts.pki.v1.PkiKeyMaterial.newBuilder()
+                            .setKind("coord_managed")
+                            .setKeyName("pki/leaf/svc-a.local")
+                            .setKeyVersion(1))
                     .setNotBefore(1_700_000_000L)
                     .setNotAfter(1_700_086_400L)
                     .setSerial("0x1")
@@ -185,7 +190,10 @@ class PkiClientTest {
             observer.onNext(PkiRenewCertResponse.newBuilder()
                     .setCommonName("svc-a.local")
                     .setCertPem("-----BEGIN CERTIFICATE-----\nrenewed\n-----END CERTIFICATE-----")
-                    .setKeyPem("-----BEGIN PRIVATE KEY-----\nrenewed-key\n-----END PRIVATE KEY-----")
+                    .setKeyMaterial(cn.byteforce.coord.contracts.pki.v1.PkiKeyMaterial.newBuilder()
+                            .setKind("coord_managed")
+                            .setKeyName("pki/leaf/svc-a.local")
+                            .setKeyVersion(2))
                     .setSerial("0x3")
                     .setStatus("active")
                     .setParentSerial("0x2")
@@ -200,7 +208,10 @@ class PkiClientTest {
             observer.onNext(PkiRotateCertResponse.newBuilder()
                     .setCommonName(request.getCommonName())
                     .setCertPem("-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----")
-                    .setKeyPem("-----BEGIN PRIVATE KEY-----\nnew-key\n-----END PRIVATE KEY-----")
+                    .setKeyMaterial(cn.byteforce.coord.contracts.pki.v1.PkiKeyMaterial.newBuilder()
+                            .setKind("coord_managed")
+                            .setKeyName("pki/leaf/svc-a.local")
+                            .setKeyVersion(2))
                     .setNotBefore(1_700_000_000L)
                     .setNotAfter(1_700_086_400L)
                     .setSerial("0x2")
@@ -233,7 +244,10 @@ class PkiClientTest {
             observer.onNext(PkiGetCertByCNResponse.newBuilder()
                     .setCommonName(request.getCommonName())
                     .setCertPem("-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----")
-                    .setKeyPem("-----BEGIN PRIVATE KEY-----\nnew-key\n-----END PRIVATE KEY-----")
+                    .setKeyMaterial(cn.byteforce.coord.contracts.pki.v1.PkiKeyMaterial.newBuilder()
+                            .setKind("coord_managed")
+                            .setKeyName("pki/leaf/svc-a.local")
+                            .setKeyVersion(2))
                     .setNotBefore(1_700_000_000L)
                     .setNotAfter(1_700_086_400L)
                     .setSerial("0x2")

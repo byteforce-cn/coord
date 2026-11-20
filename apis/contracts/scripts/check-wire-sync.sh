@@ -64,8 +64,8 @@ check_wire() {
     fi
   done < <(sed -E 's|//.*||' "$contract" \
            | grep -vE 'reserved|option' \
-           | grep -oE '[a-z_][a-z0-9_]* = [0-9]+;' \
-           | sed -E 's/([a-z0-9_]+) = ([0-9]+);/\1 \2/')
+           | grep -oE '(^|[[:space:]])[a-z_][a-z0-9_]* = [0-9]+;' \
+           | sed -E 's/^[[:space:]]*([a-z0-9_]+) = ([0-9]+);/\1 \2/')
 }
 
 # ── 1) STABLE 层：proto/coord/<svc>/<svc>.proto ↔ coord-proto/<svc>.proto

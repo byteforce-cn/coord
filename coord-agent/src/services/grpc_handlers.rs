@@ -29,6 +29,8 @@ use crate::services::{
     rate_limiter::RateLimiterService,
     scheduler::SchedulerService,
     transit::TransitService,
+    transit_key::{DataKeyKind, KeyError, KeyType, MaterialFormat},
+    transit_key_store::KeyArchive,
     workflow::{WorkflowInstance, WorkflowService, WorkflowState},
 };
 
@@ -74,19 +76,33 @@ use coord_proto::agent::{
     ReplicaShardProgress, SchedulerClaimJobRequest, SchedulerClaimJobResponse,
     SchedulerCompleteJobRequest, SchedulerCompleteJobResponse, SchedulerGetJobRequest,
     SchedulerGetJobResponse, SchedulerHeartbeatRequest, SchedulerHeartbeatResponse,
-    SchedulerRegisterJobRequest, SchedulerRegisterJobResponse, TransitDecryptRequest,
-    TransitDecryptResponse, TransitEncryptRequest, TransitEncryptResponse, TransitHmacSignRequest,
-    TransitHmacSignResponse, TransitHmacVerifyRequest, TransitHmacVerifyResponse,
-    TransitRewrapRequest, TransitRewrapResponse, WorkflowCancelRequest, WorkflowCancelResponse,
-    WorkflowDefinitionSummary, WorkflowDefinitionVersion, WorkflowDeleteDefinitionRequest,
-    WorkflowDeleteDefinitionResponse, WorkflowDeleteInstanceRequest,
-    WorkflowDeleteInstanceResponse, WorkflowDeployRequest, WorkflowDeployResponse,
-    WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse, WorkflowGetStatusRequest,
-    WorkflowGetStatusResponse, WorkflowInstanceSummary, WorkflowListDefinitionVersionsRequest,
-    WorkflowListDefinitionVersionsResponse, WorkflowListDefinitionsRequest,
-    WorkflowListDefinitionsResponse, WorkflowListInstancesRequest, WorkflowListInstancesResponse,
-    WorkflowRollbackDefinitionRequest, WorkflowRollbackDefinitionResponse, WorkflowSignalRequest,
-    WorkflowSignalResponse, WorkflowStartRequest, WorkflowStartResponse,
+    SchedulerRegisterJobRequest, SchedulerRegisterJobResponse, TransitBatchError,
+    TransitCreateKeyRequest, TransitCreateKeyResponse, TransitDecryptBatchItem,
+    TransitDecryptBatchRequest, TransitDecryptBatchResponse, TransitDecryptRequest,
+    TransitDecryptResponse, TransitDeleteKeyRequest, TransitDeleteKeyResponse,
+    TransitEncryptBatchItem, TransitEncryptBatchRequest, TransitEncryptBatchResponse,
+    TransitEncryptRequest, TransitEncryptResponse, TransitExportKeyRequest,
+    TransitExportKeyResponse, TransitGenerateDataKeyRequest, TransitGenerateDataKeyResponse,
+    TransitHmacSignRequest, TransitHmacSignResponse, TransitHmacVerifyRequest,
+    TransitHmacVerifyResponse, TransitImportKeyRequest, TransitImportKeyResponse,
+    TransitKeyCapabilities, TransitKeyInfo, TransitKeyVersion, TransitListKeysRequest,
+    TransitListKeysResponse, TransitReadKeyRequest, TransitReadKeyResponse, TransitRewrapBatchItem,
+    TransitRewrapBatchRequest, TransitRewrapBatchResponse, TransitRewrapRequest,
+    TransitRewrapResponse, TransitRotateKeyRequest, TransitRotateKeyResponse, TransitSignBatchItem,
+    TransitSignBatchRequest, TransitSignBatchResponse, TransitSignRequest, TransitSignResponse,
+    TransitTrimKeyRequest, TransitTrimKeyResponse, TransitUpdateKeyConfigRequest,
+    TransitUpdateKeyConfigResponse, TransitVerifyBatchItem, TransitVerifyBatchRequest,
+    TransitVerifyBatchResponse, TransitVerifyRequest, TransitVerifyResponse, WorkflowCancelRequest,
+    WorkflowCancelResponse, WorkflowDefinitionSummary, WorkflowDefinitionVersion,
+    WorkflowDeleteDefinitionRequest, WorkflowDeleteDefinitionResponse,
+    WorkflowDeleteInstanceRequest, WorkflowDeleteInstanceResponse, WorkflowDeployRequest,
+    WorkflowDeployResponse, WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse,
+    WorkflowGetStatusRequest, WorkflowGetStatusResponse, WorkflowInstanceSummary,
+    WorkflowListDefinitionVersionsRequest, WorkflowListDefinitionVersionsResponse,
+    WorkflowListDefinitionsRequest, WorkflowListDefinitionsResponse, WorkflowListInstancesRequest,
+    WorkflowListInstancesResponse, WorkflowRollbackDefinitionRequest,
+    WorkflowRollbackDefinitionResponse, WorkflowSignalRequest, WorkflowSignalResponse,
+    WorkflowStartRequest, WorkflowStartResponse,
 };
 
 // 审批 v2（ADR-0013 D7）请求/响应类型。
@@ -3785,19 +3801,271 @@ fn map_transit_hmac_error(e: String) -> Status {
     }
 }
 
+fn parse_material_format(raw: &str) -> Result<Option<MaterialFormat>, Status> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(None),
+        "pem" => Ok(Some(MaterialFormat::Pem)),
+        "der" => Ok(Some(MaterialFormat::Der)),
+        "raw" => Ok(Some(MaterialFormat::Raw)),
+        other => Err(Status::invalid_argument(format!(
+            "unknown material_format '{other}' (expected pem/der/raw)"
+        ))),
+    }
+}
+
+/// 命名密钥错误 → gRPC 状态（fail-loud，静默默认一律不给）
+fn map_transit_key_error(e: crate::services::transit_key::KeyError) -> Status {
+    use crate::services::transit_key::KeyError;
+    match e {
+        KeyError::InvalidArgument(m) => Status::invalid_argument(m),
+        KeyError::NotFound(m) => Status::not_found(m),
+        KeyError::AlreadyExists(m) => Status::already_exists(m),
+        KeyError::FailedPrecondition(m) => Status::failed_precondition(m),
+        KeyError::PermissionDenied(m) => Status::permission_denied(m),
+        KeyError::Conflict(m) => Status::aborted(m),
+        KeyError::Internal(m) => sanitized_internal(m),
+    }
+}
+
+fn map_transit_key_type(value: i32) -> Result<KeyType, Status> {
+    use coord_proto::agent::TransitKeyType;
+    match TransitKeyType::try_from(value).ok() {
+        Some(TransitKeyType::Aes256Gcm96) => Ok(KeyType::Aes256Gcm96),
+        Some(TransitKeyType::Ed25519) => Ok(KeyType::Ed25519),
+        Some(TransitKeyType::EcdsaP256) => Ok(KeyType::EcdsaP256),
+        Some(TransitKeyType::EcdsaP384) => Ok(KeyType::EcdsaP384),
+        Some(TransitKeyType::EcdsaP521) => Ok(KeyType::EcdsaP521),
+        Some(TransitKeyType::Rsa2048) => Ok(KeyType::Rsa2048),
+        Some(TransitKeyType::Rsa3072) => Ok(KeyType::Rsa3072),
+        Some(TransitKeyType::Rsa4096) => Ok(KeyType::Rsa4096),
+        _ => Err(Status::invalid_argument(format!(
+            "unknown or unspecified key type: {value}"
+        ))),
+    }
+}
+
+fn key_type_proto(key_type: KeyType) -> i32 {
+    use coord_proto::agent::TransitKeyType;
+    match key_type {
+        KeyType::Aes256Gcm96 => TransitKeyType::Aes256Gcm96 as i32,
+        KeyType::Ed25519 => TransitKeyType::Ed25519 as i32,
+        KeyType::EcdsaP256 => TransitKeyType::EcdsaP256 as i32,
+        KeyType::EcdsaP384 => TransitKeyType::EcdsaP384 as i32,
+        KeyType::EcdsaP521 => TransitKeyType::EcdsaP521 as i32,
+        KeyType::Rsa2048 => TransitKeyType::Rsa2048 as i32,
+        KeyType::Rsa3072 => TransitKeyType::Rsa3072 as i32,
+        KeyType::Rsa4096 => TransitKeyType::Rsa4096 as i32,
+    }
+}
+
+fn key_info_proto(archive: KeyArchive) -> TransitKeyInfo {
+    let key_type = KeyType::parse(&archive.key_type).unwrap_or(KeyType::Aes256Gcm96);
+    let capabilities = key_type.capabilities();
+    TransitKeyInfo {
+        name: archive.name,
+        r#type: key_type_proto(key_type),
+        latest_version: archive.latest_version,
+        min_decryption_version: archive.min_decryption_version,
+        min_encryption_version: archive.min_encryption_version,
+        deletion_allowed: archive.deletion_allowed,
+        exportable: archive.exportable,
+        created_at: archive.created_at,
+        versions: archive
+            .versions
+            .into_iter()
+            .map(|meta| TransitKeyVersion {
+                version: meta.version,
+                created_at: meta.created_at,
+            })
+            .collect(),
+        capabilities: Some(TransitKeyCapabilities {
+            supports_encryption: capabilities.supports_encryption,
+            supports_signing: capabilities.supports_signing,
+            supports_hmac: capabilities.supports_hmac,
+            supports_derivation: capabilities.supports_derivation,
+        }),
+    }
+}
+
+fn batch_error_proto(e: &KeyError) -> TransitBatchError {
+    TransitBatchError {
+        code: e.code().to_string(),
+        message: e.message().to_string(),
+    }
+}
+
 #[tonic::async_trait]
 impl Transit for TransitService {
+    async fn create_key(
+        &self,
+        request: Request<TransitCreateKeyRequest>,
+    ) -> Result<Response<TransitCreateKeyResponse>, Status> {
+        let req = request.into_inner();
+        let key_type = map_transit_key_type(req.r#type)?;
+        let archive = self
+            .registry()
+            .create_key(crate::services::transit_key::CreateKeySpec {
+                name: req.name,
+                key_type,
+                exportable: req.exportable,
+            })
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitCreateKeyResponse {
+            key: Some(key_info_proto(archive)),
+        }))
+    }
+
+    async fn read_key(
+        &self,
+        request: Request<TransitReadKeyRequest>,
+    ) -> Result<Response<TransitReadKeyResponse>, Status> {
+        let req = request.into_inner();
+        let archive = self
+            .registry()
+            .read_key(&req.name)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitReadKeyResponse {
+            key: Some(key_info_proto(archive)),
+        }))
+    }
+
+    async fn list_keys(
+        &self,
+        request: Request<TransitListKeysRequest>,
+    ) -> Result<Response<TransitListKeysResponse>, Status> {
+        let req = request.into_inner();
+        let keys = self
+            .registry()
+            .list_keys(&req.name_prefix)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitListKeysResponse {
+            keys: keys.into_iter().map(key_info_proto).collect(),
+        }))
+    }
+
+    async fn rotate_key(
+        &self,
+        request: Request<TransitRotateKeyRequest>,
+    ) -> Result<Response<TransitRotateKeyResponse>, Status> {
+        let req = request.into_inner();
+        let archive = self
+            .registry()
+            .rotate_key(&req.name)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitRotateKeyResponse {
+            key: Some(key_info_proto(archive)),
+        }))
+    }
+
+    async fn update_key_config(
+        &self,
+        request: Request<TransitUpdateKeyConfigRequest>,
+    ) -> Result<Response<TransitUpdateKeyConfigResponse>, Status> {
+        let req = request.into_inner();
+        let archive = self
+            .registry()
+            .update_key_config(
+                &req.name,
+                crate::services::transit_key::KeyConfigPatch {
+                    min_decryption_version: req.min_decryption_version,
+                    min_encryption_version: req.min_encryption_version,
+                    deletion_allowed: req.deletion_allowed,
+                },
+            )
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitUpdateKeyConfigResponse {
+            key: Some(key_info_proto(archive)),
+        }))
+    }
+
+    async fn delete_key(
+        &self,
+        request: Request<TransitDeleteKeyRequest>,
+    ) -> Result<Response<TransitDeleteKeyResponse>, Status> {
+        let req = request.into_inner();
+        self.registry()
+            .delete_key(&req.name)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitDeleteKeyResponse {}))
+    }
+
+    async fn trim_key(
+        &self,
+        request: Request<TransitTrimKeyRequest>,
+    ) -> Result<Response<TransitTrimKeyResponse>, Status> {
+        let req = request.into_inner();
+        let archive = self
+            .registry()
+            .trim_key(&req.name, req.min_version)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitTrimKeyResponse {
+            key: Some(key_info_proto(archive)),
+        }))
+    }
+
+    async fn import_key(
+        &self,
+        request: Request<TransitImportKeyRequest>,
+    ) -> Result<Response<TransitImportKeyResponse>, Status> {
+        let req = request.into_inner();
+        let key_type = map_transit_key_type(req.r#type)?;
+        let format = parse_material_format(&req.material_format)?;
+        let archive = self
+            .registry()
+            .import_key(crate::services::transit_key::ImportKeySpec {
+                name: req.name,
+                key_type,
+                material: req.material,
+                format,
+                exportable: req.exportable,
+            })
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitImportKeyResponse {
+            key: Some(key_info_proto(archive)),
+        }))
+    }
+
+    async fn export_key(
+        &self,
+        request: Request<TransitExportKeyRequest>,
+    ) -> Result<Response<TransitExportKeyResponse>, Status> {
+        let req = request.into_inner();
+        let exported = self
+            .registry()
+            .export_key(&req.name, req.version)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitExportKeyResponse {
+            r#type: key_type_proto(exported.key_type),
+            key_version: exported.key_version,
+            material: exported.material,
+            material_format: exported.format.to_string(),
+            contains_private_key: exported.contains_private_key,
+        }))
+    }
+
     async fn encrypt(
         &self,
         request: Request<TransitEncryptRequest>,
     ) -> Result<Response<TransitEncryptResponse>, Status> {
         let req = request.into_inner();
-        // 持久化路径：DEK 落 coord-server KV ⇒ 重启后仍可解密；
-        // KV 写失败即报错（fail-closed），不回退到"只在本进程有效"的密文。
-        match self.encrypt_persisted(&req.plaintext).await {
-            Ok((ciphertext, _dek_id)) => Ok(Response::new(TransitEncryptResponse { ciphertext })),
-            Err(e) => Err(sanitized_internal(e)),
-        }
+        let (ciphertext, key_version) = self
+            .registry()
+            .encrypt(&req.name, req.version, &req.plaintext, &req.context)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitEncryptResponse {
+            ciphertext,
+            key_version,
+        }))
     }
 
     async fn decrypt(
@@ -3805,12 +4073,279 @@ impl Transit for TransitService {
         request: Request<TransitDecryptRequest>,
     ) -> Result<Response<TransitDecryptResponse>, Status> {
         let req = request.into_inner();
-        // DEK ID 现在嵌入在 ciphertext 包头中（自描述格式），不再需要外部传入；
-        // 内存未命中时从共享 KV 回取（重启恢复），消费后删除 KV 记录（用后即焚）。
-        match self.decrypt_persisted(&req.ciphertext, "").await {
-            Ok(plaintext) => Ok(Response::new(TransitDecryptResponse { plaintext })),
-            Err(e) => Err(sanitized_internal(e)),
+        let name = (!req.name.is_empty()).then_some(req.name.as_str());
+        let (plaintext, key_version) = self
+            .registry()
+            .decrypt(name, &req.ciphertext, &req.context)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitDecryptResponse {
+            plaintext,
+            key_version,
+        }))
+    }
+
+    async fn rewrap(
+        &self,
+        request: Request<TransitRewrapRequest>,
+    ) -> Result<Response<TransitRewrapResponse>, Status> {
+        let req = request.into_inner();
+        let name = (!req.name.is_empty()).then_some(req.name.as_str());
+        let (ciphertext, key_version) = self
+            .registry()
+            .rewrap(name, &req.ciphertext, &req.context)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitRewrapResponse {
+            ciphertext,
+            key_version,
+        }))
+    }
+
+    async fn encrypt_batch(
+        &self,
+        request: Request<TransitEncryptBatchRequest>,
+    ) -> Result<Response<TransitEncryptBatchResponse>, Status> {
+        let req = request.into_inner();
+        let mut items = Vec::with_capacity(req.items.len());
+        for item in req.items {
+            match self
+                .registry()
+                .encrypt(&item.name, item.version, &item.plaintext, &item.context)
+                .await
+            {
+                Ok((ciphertext, key_version)) => items.push(TransitEncryptBatchItem {
+                    ok: true,
+                    result: Some(TransitEncryptResponse {
+                        ciphertext,
+                        key_version,
+                    }),
+                    error: None,
+                }),
+                Err(e) => items.push(TransitEncryptBatchItem {
+                    ok: false,
+                    result: None,
+                    error: Some(batch_error_proto(&e)),
+                }),
+            }
         }
+        Ok(Response::new(TransitEncryptBatchResponse { items }))
+    }
+
+    async fn decrypt_batch(
+        &self,
+        request: Request<TransitDecryptBatchRequest>,
+    ) -> Result<Response<TransitDecryptBatchResponse>, Status> {
+        let req = request.into_inner();
+        let mut items = Vec::with_capacity(req.items.len());
+        for item in req.items {
+            let name = (!item.name.is_empty()).then_some(item.name.as_str());
+            match self
+                .registry()
+                .decrypt(name, &item.ciphertext, &item.context)
+                .await
+            {
+                Ok((plaintext, key_version)) => items.push(TransitDecryptBatchItem {
+                    ok: true,
+                    result: Some(TransitDecryptResponse {
+                        plaintext,
+                        key_version,
+                    }),
+                    error: None,
+                }),
+                Err(e) => items.push(TransitDecryptBatchItem {
+                    ok: false,
+                    result: None,
+                    error: Some(batch_error_proto(&e)),
+                }),
+            }
+        }
+        Ok(Response::new(TransitDecryptBatchResponse { items }))
+    }
+
+    async fn rewrap_batch(
+        &self,
+        request: Request<TransitRewrapBatchRequest>,
+    ) -> Result<Response<TransitRewrapBatchResponse>, Status> {
+        let req = request.into_inner();
+        let mut items = Vec::with_capacity(req.items.len());
+        for item in req.items {
+            let name = (!item.name.is_empty()).then_some(item.name.as_str());
+            match self
+                .registry()
+                .rewrap(name, &item.ciphertext, &item.context)
+                .await
+            {
+                Ok((ciphertext, key_version)) => items.push(TransitRewrapBatchItem {
+                    ok: true,
+                    result: Some(TransitRewrapResponse {
+                        ciphertext,
+                        key_version,
+                    }),
+                    error: None,
+                }),
+                Err(e) => items.push(TransitRewrapBatchItem {
+                    ok: false,
+                    result: None,
+                    error: Some(batch_error_proto(&e)),
+                }),
+            }
+        }
+        Ok(Response::new(TransitRewrapBatchResponse { items }))
+    }
+
+    async fn generate_data_key(
+        &self,
+        request: Request<TransitGenerateDataKeyRequest>,
+    ) -> Result<Response<TransitGenerateDataKeyResponse>, Status> {
+        let req = request.into_inner();
+        use coord_proto::agent::TransitDataKeyType;
+        let kind = match TransitDataKeyType::try_from(req.r#type).ok() {
+            Some(TransitDataKeyType::DataKeyTypePlaintext) => DataKeyKind::Plaintext,
+            Some(TransitDataKeyType::DataKeyTypeWrapped) => DataKeyKind::Wrapped,
+            Some(TransitDataKeyType::DataKeyTypePlaintextAndWrapped) => {
+                DataKeyKind::PlaintextAndWrapped
+            }
+            _ => {
+                return Err(Status::invalid_argument(
+                    "data key type must be PLAINTEXT, WRAPPED or PLAINTEXT_AND_WRAPPED",
+                ))
+            }
+        };
+        let generated = self
+            .registry()
+            .generate_data_key(&req.name, req.version, &req.context, kind)
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitGenerateDataKeyResponse {
+            plaintext: generated.plaintext.unwrap_or_default(),
+            ciphertext: generated.ciphertext.unwrap_or_default(),
+            key_version: generated.key_version,
+        }))
+    }
+
+    async fn sign(
+        &self,
+        request: Request<TransitSignRequest>,
+    ) -> Result<Response<TransitSignResponse>, Status> {
+        let req = request.into_inner();
+        let out = self
+            .registry()
+            .sign(crate::services::transit_key::SignSpec {
+                name: req.name,
+                version: req.version,
+                input: req.input,
+                prehashed: req.prehashed,
+                hash_algorithm: Some(req.hash_algorithm).filter(|h| !h.is_empty()),
+                signature_algorithm: Some(req.signature_algorithm).filter(|a| !a.is_empty()),
+            })
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitSignResponse {
+            signature: out.signature,
+            key_version: out.key_version,
+            algorithm: out.algorithm,
+        }))
+    }
+
+    async fn verify(
+        &self,
+        request: Request<TransitVerifyRequest>,
+    ) -> Result<Response<TransitVerifyResponse>, Status> {
+        let req = request.into_inner();
+        let out = self
+            .registry()
+            .verify(crate::services::transit_key::VerifySpec {
+                name: req.name,
+                version: req.version,
+                input: req.input,
+                signature: req.signature,
+                prehashed: req.prehashed,
+                hash_algorithm: Some(req.hash_algorithm).filter(|h| !h.is_empty()),
+                signature_algorithm: Some(req.signature_algorithm).filter(|a| !a.is_empty()),
+            })
+            .await
+            .map_err(map_transit_key_error)?;
+        Ok(Response::new(TransitVerifyResponse {
+            valid: out.valid,
+            key_version: out.key_version,
+        }))
+    }
+
+    async fn sign_batch(
+        &self,
+        request: Request<TransitSignBatchRequest>,
+    ) -> Result<Response<TransitSignBatchResponse>, Status> {
+        let req = request.into_inner();
+        let mut items = Vec::with_capacity(req.items.len());
+        for item in req.items {
+            match self
+                .registry()
+                .sign(crate::services::transit_key::SignSpec {
+                    name: item.name,
+                    version: item.version,
+                    input: item.input,
+                    prehashed: item.prehashed,
+                    hash_algorithm: Some(item.hash_algorithm).filter(|h| !h.is_empty()),
+                    signature_algorithm: Some(item.signature_algorithm).filter(|a| !a.is_empty()),
+                })
+                .await
+            {
+                Ok(out) => items.push(TransitSignBatchItem {
+                    ok: true,
+                    result: Some(TransitSignResponse {
+                        signature: out.signature,
+                        key_version: out.key_version,
+                        algorithm: out.algorithm,
+                    }),
+                    error: None,
+                }),
+                Err(e) => items.push(TransitSignBatchItem {
+                    ok: false,
+                    result: None,
+                    error: Some(batch_error_proto(&e)),
+                }),
+            }
+        }
+        Ok(Response::new(TransitSignBatchResponse { items }))
+    }
+
+    async fn verify_batch(
+        &self,
+        request: Request<TransitVerifyBatchRequest>,
+    ) -> Result<Response<TransitVerifyBatchResponse>, Status> {
+        let req = request.into_inner();
+        let mut items = Vec::with_capacity(req.items.len());
+        for item in req.items {
+            match self
+                .registry()
+                .verify(crate::services::transit_key::VerifySpec {
+                    name: item.name,
+                    version: item.version,
+                    input: item.input,
+                    signature: item.signature,
+                    prehashed: item.prehashed,
+                    hash_algorithm: Some(item.hash_algorithm).filter(|h| !h.is_empty()),
+                    signature_algorithm: Some(item.signature_algorithm).filter(|a| !a.is_empty()),
+                })
+                .await
+            {
+                Ok(out) => items.push(TransitVerifyBatchItem {
+                    ok: true,
+                    result: Some(TransitVerifyResponse {
+                        valid: out.valid,
+                        key_version: out.key_version,
+                    }),
+                    error: None,
+                }),
+                Err(e) => items.push(TransitVerifyBatchItem {
+                    ok: false,
+                    result: None,
+                    error: Some(batch_error_proto(&e)),
+                }),
+            }
+        }
+        Ok(Response::new(TransitVerifyBatchResponse { items }))
     }
 
     async fn hmac_sign(
@@ -3849,36 +4384,6 @@ impl Transit for TransitService {
         ) {
             Ok(valid) => Ok(Response::new(TransitHmacVerifyResponse { valid })),
             Err(e) => Err(map_transit_hmac_error(e)),
-        }
-    }
-
-    /// KEK 材料迁移（管理路径，G-TR-1）：旧材料解出 DEK → 主材料重包。
-    /// 旧材料密文经此迁移后，旧材料方可从注入集合下线。
-    async fn rewrap(
-        &self,
-        request: Request<TransitRewrapRequest>,
-    ) -> Result<Response<TransitRewrapResponse>, Status> {
-        let req = request.into_inner();
-        if req.dek_id.is_empty() {
-            return Err(Status::invalid_argument("dek_id must not be empty"));
-        }
-        match self.rewrap_persisted(&req.dek_id).await {
-            Ok(new_dek_id) => Ok(Response::new(TransitRewrapResponse {
-                new_dek_id,
-                kek_id: self.primary_kek_id().to_string(),
-            })),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("not found") || msg.contains("expired") {
-                    // 不存在 / 已过期：明确 NOT_FOUND（过期拒绝轮换）
-                    Err(Status::not_found(msg))
-                } else if msg.contains("is not injected") {
-                    // 包裹材料未注入（旧材料已下线但仍有存量）：前置条件不满足
-                    Err(Status::failed_precondition(msg))
-                } else {
-                    Err(sanitized_internal(msg))
-                }
-            }
         }
     }
 }

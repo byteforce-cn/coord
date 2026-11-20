@@ -1,6 +1,6 @@
 # 依赖治理与 bincode 退场记录（已完成）
 
-> Owner: maintainers ｜ Last verified: 2026-10-15
+> Owner: maintainers ｜ Last verified: 2026-11-20
 
 - **现状**：bincode 已完全退场——依赖图无 bincode（`cargo tree -i bincode`
   无匹配）；持久化与 RPC 载荷统一为信封 V2（postcard，
@@ -150,3 +150,23 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
   `cargo deny --all-features check` 为准。
 - **RUSTSEC-2026-0543 / 0555 / 0559（chrono / chrono-tz / chrono-tz-build，unmaintained）**：
   见 §7——登记豁免 + 关闭路径。`unmaintained` 策略不变（仍是 `all`）。
+
+---
+
+## 9. 通告处置记录（2026-11-20，ADR-0019 密码学原语）
+
+- **RUSTSEC-2023-0071（`rsa` 0.9.x，Marvin Attack）** 与
+  **RUSTSEC-2026-0387（`crypto-bigint` 0.5.5，非恒定时间操作）**：ADR-0019 引入
+  非对称签名时，`rsa 0.9` 与 `p256/p384/p521 0.13`（经 `elliptic-curve 0.13`
+  使用 `crypto-bigint 0.5`）同时命中。处置是把 `rsa` 升到 0.10、ECC 三件套升到
+  0.14（`elliptic-curve 0.14.3` → `crypto-bigint 0.7.11`）。两条都是**漏洞型**
+  通告，靠版本升级关闭，`deny.toml` 未新增豁免。
+- **升级代价**：`rsa 0.10` 删除 `pkcs1v15::SigningKey` / `pss::SigningKey` 包装，
+  改用 `PrivateKey::pkcs1v15_sign_prehash` / `pss_sign_prehash`（验签对应
+  `PublicKey::*_verify_prehash`）；`rsa 0.10` 的 digest/sha2 是 0.11，而工作区其余
+  使用者固定在 0.10，因此以 `sha2_11` 别名并存——摘要字节仍由 0.10 计算，0.11 只
+  作为 RSA 泛型参数的类型标记。
+- **判据**：`cargo audit` 0 vulnerabilities；`cargo tree -i crypto-bigint@0.5.5`
+  无匹配；`cargo deny --all-features check` 全绿；
+  `coord-agent/tests/transit_interop_test.rs` 的 openssl 独立验签覆盖
+  Ed25519 / ECDSA / RSA（PKCS#1 v1.5 + PSS，salt = digest 长度）。

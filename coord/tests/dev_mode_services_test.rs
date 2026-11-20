@@ -262,9 +262,19 @@ async fn dev_mode_agent_serves_full_builtin_service_set() {
 
     // transit：dev 默认 KEK 必须真的可用（缺材料回退仅限 dev；见 ADR-0009）。
     let mut transit = coord_proto::transit::v1::transit_client::TransitClient::new(channel.clone());
+    transit
+        .create_key(coord_proto::transit::v1::TransitCreateKeyRequest {
+            name: "dev-mode".into(),
+            r#type: coord_proto::transit::v1::TransitKeyType::Aes256Gcm96 as i32,
+            exportable: false,
+        })
+        .await
+        .expect("Transit.CreateKey must succeed in dev mode");
     let plaintext = b"dev-mode-e2e-secret";
     let ciphertext = transit
         .encrypt(coord_proto::transit::v1::TransitEncryptRequest {
+            name: "dev-mode".into(),
+            version: 0,
             plaintext: plaintext.to_vec(),
             context: vec![],
         })
@@ -275,6 +285,7 @@ async fn dev_mode_agent_serves_full_builtin_service_set() {
     assert!(!ciphertext.is_empty(), "ciphertext must not be empty");
     let decrypted = transit
         .decrypt(coord_proto::transit::v1::TransitDecryptRequest {
+            name: "dev-mode".into(),
             ciphertext,
             context: vec![],
         })

@@ -296,13 +296,31 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.policy.v1.Policy/ListBundles" => Some("coord:policy:manage"),
         "/coord.policy.v1.Policy/ListBundleVersions" => Some("coord:policy:manage"),
 
-        // Transit —— 加密/签名
+        // Transit —— 密钥档案生命周期（ADR-0019 D8：读/管理/导出三面分离）
+        "/coord.transit.v1.Transit/CreateKey" => Some("coord:transit:key_manage"),
+        "/coord.transit.v1.Transit/ReadKey" => Some("coord:transit:key_read"),
+        "/coord.transit.v1.Transit/ListKeys" => Some("coord:transit:key_read"),
+        "/coord.transit.v1.Transit/RotateKey" => Some("coord:transit:key_manage"),
+        "/coord.transit.v1.Transit/UpdateKeyConfig" => Some("coord:transit:key_manage"),
+        "/coord.transit.v1.Transit/DeleteKey" => Some("coord:transit:key_manage"),
+        "/coord.transit.v1.Transit/TrimKey" => Some("coord:transit:key_manage"),
+        "/coord.transit.v1.Transit/ImportKey" => Some("coord:transit:key_manage"),
+        // 导出是独立能力：不挂在 crypto 上（ADR-0019 D7）
+        "/coord.transit.v1.Transit/ExportKey" => Some("coord:transit:key_export"),
+        // Transit —— 加解密 / 签名 / HMAC（同一密钥使用面）
         "/coord.transit.v1.Transit/Encrypt" => Some("coord:transit:crypto"),
         "/coord.transit.v1.Transit/Decrypt" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/Rewrap" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/EncryptBatch" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/DecryptBatch" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/RewrapBatch" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/GenerateDataKey" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/Sign" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/Verify" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/SignBatch" => Some("coord:transit:crypto"),
+        "/coord.transit.v1.Transit/VerifyBatch" => Some("coord:transit:crypto"),
         "/coord.transit.v1.Transit/HmacSign" => Some("coord:transit:crypto"),
         "/coord.transit.v1.Transit/HmacVerify" => Some("coord:transit:crypto"),
-        // KEK 材料迁移（G-TR-1 管理路径）
-        "/coord.transit.v1.Transit/Rewrap" => Some("coord:transit:crypto"),
 
         // CircuitBreaker —— 熔断
         "/coord.circuitbreaker.v1.CircuitBreaker/GetState" => Some("coord:breaker:read"),

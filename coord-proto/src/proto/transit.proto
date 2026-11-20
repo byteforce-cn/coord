@@ -1,13 +1,49 @@
 syntax = "proto3";
 
 // ============================================================
-// Coord 对外契约 — 安全传输（信封加密）（能力承诺面，v1.2）
+// Coord 对外契约 — 安全传输 / KMS 密钥面（能力承诺面，v2.0）
 //
 // 状态：COMMITTED（承诺中）｜ 目标日期：2026-12-31 ｜ 状态表：apis/contracts/STATUS.md
 // wire 基线：coord-proto/src/proto/transit.proto 的 coord.transit.v1.Transit
-//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//            （字段编号/类型逐项一致）
 //
-// 验收口径与目标日期约定见 WHITEPAPER.md。
+// 语义总纲：ADR-0019（KMS 化——coord 托管密钥材料与远程签名）。
+//
+// ── 命名密钥与版本（ADR-0019 D2）──
+// 一把密钥 = 一份档案（type / latest_version / min_decryption_version /
+// min_encryption_version / deletion_allowed / exportable / created_at / versions[]）
+// + 每版本一条**经 KEK 包裹**的材料。`version = 0` 一律表示 latest_version。
+//
+// 三个版本边界都在服务端判定：
+// - 加密 / 签名（未指定版本）使用 latest_version；
+// - 显式指定版本必须落在 [min_encryption_version, latest_version]；
+// - 解密 / 验签必须落在 [min_decryption_version, latest_version]；
+//   越界 ⇒ FAILED_PRECONDITION（KeyVersionException），不是 NOT_FOUND。
+// - `pki/` 前缀由 PKI 服务独占：CreateKey / ImportKey / RotateKey /
+//   UpdateKeyConfig / DeleteKey / TrimKey 对该前缀 ⇒ PERMISSION_DENIED；
+//   ReadKey / ListKeys / ExportKey 不受此限（CA key 由 never_exportable 恒拒绝导出）。
+//
+// ── 加密格式 CCT3（ADR-0019 D5）──
+//   "CCT3" || name_len(u8) || name || version(u32 BE) || nonce(12)
+//          || dek_packet(60) || ciphertext
+// `dek_packet` = nonce(12) || AES-256-GCM(DEK, key_material)，AAD 绑定
+// name/version/type；`ciphertext` 的 AAD 就是请求里的 `context`（语义不变）。
+// CCT2（无 key name / 无版本）已移除，不保留只读兼容路径（ADR-0019 D5/D11）。
+//
+// ── 错误口径（fail-loud）──
+// - 参数非法 / 密钥类型不支持该操作 / 未知算法 ⇒ INVALID_ARGUMENT；
+// - 密钥不存在 / 版本材料不存在 ⇒ NOT_FOUND；
+// - 版本越界、材料未注入、未标记 exportable、deletion_allowed=false
+//   ⇒ FAILED_PRECONDITION；
+// - 同名 createKey 配置冲突 ⇒ ALREADY_EXISTS；
+// - 签名格式非法 ⇒ INVALID_ARGUMENT；签名格式合法但不匹配 ⇒ valid=false。
+// 本服务不使用「静默默认」补齐签名参数：prehashed=true 缺 hash_algorithm
+// 即拒绝（ADR-0019 D4）。
+//
+// ── 幂等性 ──
+// createKey：同名同配置幂等（返回现有档案）；配置冲突 ⇒ ALREADY_EXISTS。
+// rotateKey / trimKey / deleteKey / importKey：非幂等（重复调用产生新版本或
+// 以 NOT_FOUND 拒绝）。encrypt / decrypt / rewrap / sign / verify 幂等。
 // ============================================================
 
 package coord.transit.v1;
@@ -19,47 +55,374 @@ option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/tran
 // ============================================================
 
 service Transit {
+  // ── 密钥档案生命周期（能力：coord:transit:key_manage，读面 coord:transit:key_read）──
+  rpc CreateKey(TransitCreateKeyRequest) returns (TransitCreateKeyResponse);
+  rpc ReadKey(TransitReadKeyRequest) returns (TransitReadKeyResponse);
+  rpc ListKeys(TransitListKeysRequest) returns (TransitListKeysResponse);
+  rpc RotateKey(TransitRotateKeyRequest) returns (TransitRotateKeyResponse);
+  rpc UpdateKeyConfig(TransitUpdateKeyConfigRequest) returns (TransitUpdateKeyConfigResponse);
+  rpc DeleteKey(TransitDeleteKeyRequest) returns (TransitDeleteKeyResponse);
+  rpc TrimKey(TransitTrimKeyRequest) returns (TransitTrimKeyResponse);
+  rpc ImportKey(TransitImportKeyRequest) returns (TransitImportKeyResponse);
+  // 导出是独立能力（coord:transit:key_export），不挂在 coord:transit:crypto 上；
+  // 仅 exportable=true 的密钥可导出，CA 密钥恒不可导出（ADR-0019 D6/D7）。
+  rpc ExportKey(TransitExportKeyRequest) returns (TransitExportKeyResponse);
+
+  // ── 按名加解密（能力：coord:transit:crypto）──
   rpc Encrypt(TransitEncryptRequest) returns (TransitEncryptResponse);
   rpc Decrypt(TransitDecryptRequest) returns (TransitDecryptResponse);
+  // 密文进、密文出：解包 DEK 后用 latest_version 重包，不解出明文。
+  rpc Rewrap(TransitRewrapRequest) returns (TransitRewrapResponse);
+  rpc EncryptBatch(TransitEncryptBatchRequest) returns (TransitEncryptBatchResponse);
+  rpc DecryptBatch(TransitDecryptBatchRequest) returns (TransitDecryptBatchResponse);
+  rpc RewrapBatch(TransitRewrapBatchRequest) returns (TransitRewrapBatchResponse);
+  rpc GenerateDataKey(TransitGenerateDataKeyRequest) returns (TransitGenerateDataKeyResponse);
 
-  // 新增 — HMAC 签名与验签 (Phase B.2)
+  // ── 非对称签名（能力：coord:transit:crypto；ADR-0019 D4）──
+  rpc Sign(TransitSignRequest) returns (TransitSignResponse);
+  rpc Verify(TransitVerifyRequest) returns (TransitVerifyResponse);
+  // 单 RPC 批量：非原子、逐条结果、结果顺序 == 输入顺序。
+  rpc SignBatch(TransitSignBatchRequest) returns (TransitSignBatchResponse);
+  rpc VerifyBatch(TransitVerifyBatchRequest) returns (TransitVerifyBatchResponse);
+
+  // ── 用途化 HMAC（ADR-0012；与命名密钥是两套模型，见消息头注）──
   rpc HmacSign(TransitHmacSignRequest) returns (TransitHmacSignResponse);
   rpc HmacVerify(TransitHmacVerifyRequest) returns (TransitHmacVerifyResponse);
-
-  // KEK 材料迁移（管理路径，G-TR-1）：用包裹该 DEK 的材料解出 DEK，
-  // 再用当前**主材料**重包（新 nonce / 新 dek_id）。旧材料密文经此迁移到
-  // 新材料后，旧材料方可从注入集合下线。
-  //
-  // 错误：dek_id 不存在 / 已过期 → `NOT_FOUND`（已过期拒绝轮换）；
-  // 包裹材料未注入（旧材料已下线但仍有存量）→ `FAILED_PRECONDITION`。
-  rpc Rewrap(TransitRewrapRequest) returns (TransitRewrapResponse);
 }
 
+// ── 密钥类型与能力矩阵（服务端权威）──
+
+enum TransitKeyType {
+  KEY_TYPE_UNSPECIFIED = 0;
+  // 对称加密（信封加密的密钥加密密钥）
+  AES256_GCM96 = 1;
+  // 签名密钥（内部材料是 PKCS#8 私钥；公钥随证书/调用方自行取用）
+  ED25519 = 2;
+  ECDSA_P256 = 3;
+  ECDSA_P384 = 4;
+  ECDSA_P521 = 5;
+  RSA_2048 = 6;
+  RSA_3072 = 7;
+  RSA_4096 = 8;
+}
+
+// 能力矩阵由服务端返回，调用方不得在客户端写死（ADR-0019 D1）。
+message TransitKeyCapabilities {
+  bool supports_encryption = 1;
+  bool supports_signing = 2;
+  bool supports_hmac = 3;
+  bool supports_derivation = 4;
+}
+
+message TransitKeyVersion {
+  uint32 version = 1;
+  int64 created_at = 2; // UNIX epoch seconds
+}
+
+message TransitKeyInfo {
+  string name = 1;
+  TransitKeyType type = 2;
+  uint32 latest_version = 3;
+  uint32 min_decryption_version = 4;
+  uint32 min_encryption_version = 5;
+  bool deletion_allowed = 6;
+  bool exportable = 7;
+  int64 created_at = 8;
+  // 现存版本（升序）；trim 后 < min_decryption_version 的版本不再列出。
+  repeated TransitKeyVersion versions = 9;
+  TransitKeyCapabilities capabilities = 10;
+}
+
+message TransitCreateKeyRequest {
+  string name = 1;
+  TransitKeyType type = 2;
+  // 导出开关只在创建/导入时确定（ADR-0019 D7）；默认 false。
+  bool exportable = 3;
+}
+
+message TransitCreateKeyResponse {
+  TransitKeyInfo key = 1;
+}
+
+message TransitReadKeyRequest {
+  string name = 1;
+}
+
+message TransitReadKeyResponse {
+  TransitKeyInfo key = 1;
+}
+
+message TransitListKeysRequest {
+  // 名称前缀过滤；空 = 全部。分页不在承诺面内（调用方按前缀收敛）。
+  string name_prefix = 1;
+}
+
+message TransitListKeysResponse {
+  repeated TransitKeyInfo keys = 1;
+}
+
+// 非幂等：每次成功调用产生一个新版本（latest_version 单调递增）。
+message TransitRotateKeyRequest {
+  string name = 1;
+}
+
+message TransitRotateKeyResponse {
+  TransitKeyInfo key = 1;
+}
+
+message TransitUpdateKeyConfigRequest {
+  string name = 1;
+  // 只更新出现的字段（proto3 optional 的字段存在性）；版本必须落在合法区间。
+  optional uint32 min_decryption_version = 2;
+  optional uint32 min_encryption_version = 3;
+  optional bool deletion_allowed = 4;
+}
+
+message TransitUpdateKeyConfigResponse {
+  TransitKeyInfo key = 1;
+}
+
+// 非幂等：不存在 ⇒ NOT_FOUND；deletion_allowed=false ⇒ FAILED_PRECONDITION。
+message TransitDeleteKeyRequest {
+  string name = 1;
+}
+
+message TransitDeleteKeyResponse {}
+
+// 非幂等：把 min_decryption_version 抬到 >= min_version，并删除更早版本的材料。
+message TransitTrimKeyRequest {
+  string name = 1;
+  uint32 min_version = 2;
+}
+
+message TransitTrimKeyResponse {
+  TransitKeyInfo key = 1;
+}
+
+message TransitImportKeyRequest {
+  string name = 1;
+  TransitKeyType type = 2;
+  // 非对称：PKCS#8（PEM 或 DER）；对称：原始密钥字节。
+  bytes material = 3;
+  // "pem" | "der" | "raw"；空 = 自动（PEM 以 -----BEGIN 开头，否则按 type 决定）。
+  string material_format = 4;
+  bool exportable = 5;
+}
+
+message TransitImportKeyResponse {
+  TransitKeyInfo key = 1;
+}
+
+message TransitExportKeyRequest {
+  string name = 1;
+  // 0 = latest_version。
+  uint32 version = 2;
+}
+
+message TransitExportKeyResponse {
+  TransitKeyType type = 1;
+  uint32 key_version = 2;
+  // 非对称：PKCS#8 PEM（含私钥）；对称：原始密钥字节。
+  bytes material = 3;
+  string material_format = 4; // "pem" | "raw"
+  bool contains_private_key = 5;
+}
+
+// ── 按名加解密（CCT3）──
+
 message TransitEncryptRequest {
-  bytes plaintext = 1;
-  bytes context = 2;
+  string name = 1;
+  // 0 = latest_version；显式版本必须在 [min_encryption_version, latest]。
+  uint32 version = 2;
+  bytes plaintext = 3;
+  // AAD（语义与既有实现一致，不引入第二套语义）。
+  bytes context = 4;
 }
 
 message TransitEncryptResponse {
   bytes ciphertext = 1;
+  uint32 key_version = 2;
 }
 
 message TransitDecryptRequest {
-  bytes ciphertext = 1;
-  bytes context = 2;
+  // 非空时必须与密文内嵌 name 一致（不一致 ⇒ INVALID_ARGUMENT）。
+  string name = 1;
+  bytes ciphertext = 2;
+  bytes context = 3;
 }
 
 message TransitDecryptResponse {
   bytes plaintext = 1;
+  uint32 key_version = 2;
 }
 
-// Transit HMAC 签名与验签（G-TR-3 / ADR-0012：用途化密钥 + 轮换窗口）
+message TransitRewrapRequest {
+  // 非空时必须与密文内嵌 name 一致。
+  string name = 1;
+  bytes ciphertext = 2;
+  bytes context = 3;
+}
+
+message TransitRewrapResponse {
+  bytes ciphertext = 1;
+  // 重包后的版本（= 该 key 的 latest_version）。
+  uint32 key_version = 2;
+}
+
+message TransitEncryptBatchRequest {
+  repeated TransitEncryptRequest items = 1;
+}
+
+message TransitEncryptBatchResponse {
+  repeated TransitEncryptBatchItem items = 1;
+}
+
+message TransitEncryptBatchItem {
+  bool ok = 1;
+  TransitEncryptResponse result = 2;
+  TransitBatchError error = 3;
+}
+
+message TransitDecryptBatchRequest {
+  repeated TransitDecryptRequest items = 1;
+}
+
+message TransitDecryptBatchResponse {
+  repeated TransitDecryptBatchItem items = 1;
+}
+
+message TransitDecryptBatchItem {
+  bool ok = 1;
+  TransitDecryptResponse result = 2;
+  TransitBatchError error = 3;
+}
+
+message TransitRewrapBatchRequest {
+  repeated TransitRewrapRequest items = 1;
+}
+
+message TransitRewrapBatchResponse {
+  repeated TransitRewrapBatchItem items = 1;
+}
+
+message TransitRewrapBatchItem {
+  bool ok = 1;
+  TransitRewrapResponse result = 2;
+  TransitBatchError error = 3;
+}
+
+// 批量内的逐条错误；`code` 是 gRPC 状态名（INVALID_ARGUMENT / NOT_FOUND /
+// FAILED_PRECONDITION / INTERNAL），批量本身成功（HTTP/gRPC 级 ok）。
+message TransitBatchError {
+  string code = 1;
+  string message = 2;
+}
+
+enum TransitDataKeyType {
+  DATA_KEY_TYPE_UNSPECIFIED = 0;
+  // 只返回明文 DEK（调用方自行加密/持有）。
+  DATA_KEY_TYPE_PLAINTEXT = 1;
+  // 只返回用该 key 版本包裹的 DEK（Vault 形态：明文不出服务端）。
+  DATA_KEY_TYPE_WRAPPED = 2;
+  // 两者都返回（明文 32 字节 + 对应密文）。
+  DATA_KEY_TYPE_PLAINTEXT_AND_WRAPPED = 3;
+}
+
+message TransitGenerateDataKeyRequest {
+  string name = 1;
+  uint32 version = 2; // 0 = latest
+  bytes context = 3;
+  TransitDataKeyType type = 4;
+}
+
+message TransitGenerateDataKeyResponse {
+  // 仅在 type = PLAINTEXT / PLAINTEXT_AND_WRAPPED 时出现。
+  bytes plaintext = 1;
+  // 仅在 type = WRAPPED / PLAINTEXT_AND_WRAPPED 时出现（CCT3）。
+  bytes ciphertext = 2;
+  uint32 key_version = 3;
+}
+
+// ── 非对称签名（Ed25519 / ECDSA / RSA）──
+//
+// 算法选择：
+// - Ed25519：唯一算法；`signature_algorithm` 为空或 "ed25519"。
+// - ECDSA：唯一算法；`signature_algorithm` 为空或 "ecdsa"；签名为 ASN.1 DER
+//   （openssl / JDK 可独立验证）。
+// - RSA：`signature_algorithm` 为空 ⇒ "pss"；可选 "pkcs1v15" / "pss"。
+// - `prehashed=true` 时 `hash_algorithm` 必填（"SHA256" | "SHA384" | "SHA512"），
+//   缺省 ⇒ INVALID_ARGUMENT（静默默认会造成签名歧义）；`input` 必须恰好是该 hash
+//   的输出长度（32 / 48 / 64 字节），否则同样 INVALID_ARGUMENT。
+// - Ed25519 + prehashed ⇒ INVALID_ARGUMENT（EdDSA 不支持预哈希路径）。
+// 响应回显实际使用的 `key_version` 与规范化后的算法名，验签方据此定位版本。
+
+message TransitSignRequest {
+  string name = 1;
+  uint32 version = 2; // 0 = latest
+  bytes input = 3;
+  bool prehashed = 4;
+  string hash_algorithm = 5;
+  string signature_algorithm = 6;
+}
+
+message TransitSignResponse {
+  bytes signature = 1;
+  uint32 key_version = 2;
+  // 规范化回显："ed25519" | "ecdsa" | "rsa-pkcs1v15" | "rsa-pss"。
+  string algorithm = 3;
+}
+
+message TransitVerifyRequest {
+  string name = 1;
+  uint32 version = 2;
+  bytes input = 3;
+  bytes signature = 4;
+  bool prehashed = 5;
+  string hash_algorithm = 6;
+  string signature_algorithm = 7;
+}
+
+message TransitVerifyResponse {
+  bool valid = 1;
+  uint32 key_version = 2;
+}
+
+message TransitSignBatchRequest {
+  repeated TransitSignRequest items = 1;
+}
+
+message TransitSignBatchResponse {
+  repeated TransitSignBatchItem items = 1;
+}
+
+message TransitSignBatchItem {
+  bool ok = 1;
+  TransitSignResponse result = 2;
+  TransitBatchError error = 3;
+}
+
+message TransitVerifyBatchRequest {
+  repeated TransitVerifyRequest items = 1;
+}
+
+message TransitVerifyBatchResponse {
+  repeated TransitVerifyBatchItem items = 1;
+}
+
+message TransitVerifyBatchItem {
+  bool ok = 1;
+  TransitVerifyResponse result = 2;
+  TransitBatchError error = 3;
+}
+
+// Transit HMAC 签名与验签（ADR-0012：用途化密钥 + 轮换窗口）
 //
 // purpose 必填：按用途域分隔派生 HMAC 密钥 ⇒ 不同用途互不可验；空/非法 ⇒ INVALID_ARGUMENT。
-// key_id 为材料标识，承担 Vault Transit「密钥版本」角色；跨 agent 一致性要求：
+// key_id 为材料标识，承担材料轮换窗口的版本角色；跨 agent 一致性要求：
 // 同一集群所有 agent 必须注入相同材料与相同标识，同一 (purpose, data, key_id, algorithm)
 // 在任一 agent 结果一致。
 // purpose 是域分隔标签，不是授权边界：持有 coord:transit:crypto 的调用方可使用任意合法 purpose（不设白名单，见 ADR-0012 §1）。
+// 命名密钥（KeyType）与 purpose 是两套模型：命名密钥不参与 HMAC 派生（见 ADR-0019 D1）。
 
 message TransitHmacSignRequest {
   bytes data = 1;
@@ -90,19 +453,3 @@ message TransitHmacVerifyRequest {
 message TransitHmacVerifyResponse {
   bool valid = 1;
 }
-
-// Transit KEK 材料迁移（G-TR-1）
-
-message TransitRewrapRequest {
-  string dek_id = 1;
-}
-
-message TransitRewrapResponse {
-  // 重包后的新 dek_id（旧 id 在同一操作中下线）
-  string new_dek_id = 1;
-  // 重包后的材料标识（= 当前主材料）
-  string kek_id = 2;
-}
-
-// ============================================================
-// CircuitBreaker — Resilience

@@ -92,9 +92,21 @@ async fn test_dev_switch_activates_default_kek_and_serves_transit() {
             .await
             .expect("transit service must be mounted under the dev switch");
 
+    // 命名密钥是 CCT3 的前提（ADR-0019 D5）；dev 下用内建材料创建一把即可。
+    client
+        .create_key(coord_proto::transit::v1::TransitCreateKeyRequest {
+            name: "dev-key".into(),
+            r#type: coord_proto::transit::v1::TransitKeyType::Aes256Gcm96 as i32,
+            exportable: false,
+        })
+        .await
+        .expect("CreateKey must succeed with the dev default KEK");
+
     let plaintext = b"dev-default-kek-probe";
     let ciphertext = client
         .encrypt(coord_proto::transit::v1::TransitEncryptRequest {
+            name: "dev-key".into(),
+            version: 0,
             plaintext: plaintext.to_vec(),
             context: vec![],
         })
@@ -104,6 +116,7 @@ async fn test_dev_switch_activates_default_kek_and_serves_transit() {
         .ciphertext;
     let decrypted = client
         .decrypt(coord_proto::transit::v1::TransitDecryptRequest {
+            name: "dev-key".into(),
             ciphertext,
             context: vec![],
         })

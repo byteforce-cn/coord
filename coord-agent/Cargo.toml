@@ -40,10 +40,16 @@ redb = { workspace = true }
 rand = { workspace = true }
 aes-gcm = { workspace = true }
 sha2 = { workspace = true }
+sha2_11 = { workspace = true }
 # transit KEK 由启动注入的材料经 HKDF-SHA256 派生；不可用配置串直接推导
 # （已并入 workspace 依赖表与 Cargo.lock，coord-server 同款）。
 hkdf = { workspace = true }
 ed25519-dalek = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+p521 = { workspace = true }
+rsa = { workspace = true }
+getrandom = { workspace = true }
 hmac = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }

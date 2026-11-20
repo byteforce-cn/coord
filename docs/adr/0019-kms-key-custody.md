@@ -37,12 +37,17 @@ PKI 与 transit 共用同一套密钥档案与签名原语——**不做两套�
 ```
 /_transit/keys/{name}                   档案：type / latest_version / min_decryption_version
                                               / min_encryption_version / deletion_allowed
-                                              / exportable / created_at
-/_transit/keys/{name}/v/{version}       版本材料（用 KEK 包裹的私钥或对称密钥）
+                                              / exportable / created_at / versions[]
+/_transit/keymat/{name}/{version}       版本材料（用 KEK 包裹的私钥或对称密钥）
 ```
 
+材料键使用独立前缀（而不是 `.../v/{version}` 后缀）：密钥名允许 `/`（PKI 的
+`pki/leaf/{cn}` 与 `pki/ca`），后缀解析会让「名字里恰好含 `/v/`」与材料键混淆。
+
 三个版本边界都在服务端，请求可显式指定版本；`version = 0` 表示 `latest_version`。
-PKI 的 leaf key 走同一档案（`pki/{cn}/{serial}`），证书的轮换代次即密钥版本。
+PKI 的 CA key 固定在 `pki/ca`（never_exportable），leaf key 走同一档案
+（`pki/leaf/{cn}`），证书的轮换代次即密钥版本。两条命名前缀都归 PKI 服务独占，
+Transit 的公开写面对 `pki/` 一律 `PERMISSION_DENIED`。
 
 ### D3 材料保护级别不变：软件 KEK，非 HSM
 
@@ -85,8 +90,7 @@ CCT3 || key_name_len(u8) || key_name || version(u32) || nonce(12) || dek_packet(
 导出私钥与「私钥不出域」是相反主张，因此：
 
 - `exportable` 默认 `false`；`false` 时 `ExportKey` ⇒ `FAILED_PRECONDITION`；
-- 导出需要**独立能力**（`coord:transit:key:export` / `coord:pki:key:export`），不挂在
-  `coord:transit:crypto` 上；
+- 导出需要**独立能力**（`coord:transit:key_export`），不挂在 `coord:transit:crypto` 上；
 - 每次导出写审计（见 D8）。
 
 ### D8 能力拆分与审计前提
@@ -95,10 +99,16 @@ CCT3 || key_name_len(u8) || key_name || version(u32) || nonce(12) || dek_packet(
 
 | 面 | 能力 |
 |:--|:--|
-| 读元数据 | `coord:transit:key:read` / `coord:pki:cert:read` |
+| 读元数据 | `coord:transit:key_read` / `coord:pki:cert:read` |
 | 加解密 / HMAC / 签名 | `coord:transit:crypto` |
-| 密钥生命周期（create/rotate/config/delete/trim/import） | `coord:transit:key:manage` / `coord:pki:key:manage` |
-| 导出材料 | `coord:transit:key:export` / `coord:pki:key:export` |
+| 密钥生命周期（create/rotate/config/delete/trim/import） | `coord:transit:key_manage` |
+| 导出材料 | `coord:transit:key_export` |
+
+能力注册表的 ID 语法是 `domain:service:action` **三段**（`capability_def` 只接受
+三段）；因此上面的子资源面写成 `coord:transit:key_read` / `key_manage` /
+`key_export`，而不是四段式。PKI 私钥没有第二个导出 RPC（D6）：leaf/CA 都是
+transit 档案里的密钥，导出走同一个 `Transit/ExportKey` 与同一个
+`coord:transit:key_export` 能力；`pki:cert:read` 只覆盖证书/元数据。
 
 **审计前提**：`coord-server/src/audit/mod.rs` 当前只覆盖鉴权拒绝与认证路径，管理操作的调用方
 身份传递是 v2 backlog。KMS 的写操作（create/rotate/delete/import/export/trim）必须带

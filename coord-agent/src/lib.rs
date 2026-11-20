@@ -72,8 +72,14 @@ pub use proxy::AgentInner;
 // 只验证 gRPC 注册；生产装配仍只经 `build_agent_grpc_router` 使用。
 pub use proxy_v2::{KvV2Proxy, LeaseV2Proxy, StorageV2Proxy, TsoV2Proxy, TxnV2Proxy, WatchV2Proxy};
 pub use service::{BaseService, ServiceConfig, ServiceResult, WorkflowDispatchConfig};
-pub use services::transit_store::{
-    DekRecord, DekStoreError, KvTransitDekStore, MemoryTransitDekStore, TransitDekStore,
+pub use services::transit_key::{
+    CreateKeySpec, ExportedKey, GeneratedDataKey, ImportKeySpec, KeyCapabilities, KeyConfigPatch,
+    KeyError, KeyType, MaterialFormat, SignOutput, SignSpec, TransitKeyRegistry, VerifyOutput,
+    VerifySpec,
+};
+pub use services::transit_key_store::{
+    KeyArchive, KeyVersionMeta, KeyVersionRecord, KvTransitKeyStore, MemoryTransitKeyStore,
+    TransitKeyStore, TransitKeyStoreError,
 };
 pub use threadpool::{AgentThreadPools, ThreadPoolConfig};
 pub use tls::{build_agent_tls_channel, build_agent_tls_server_config, AgentTlsConfig};
@@ -2044,12 +2050,16 @@ impl AgentServer {
         // 加密面可用，实际拿不到 transit 服务）。
         // dev 例外（ADR-0009）：仅 `with_dev_default_transit_kek(true)` 的调用链
         // （`coord dev`）在缺材料时回退到内建默认材料；生产路径不可达。
+        let mut transit_registry: Option<Arc<crate::services::transit_key::TransitKeyRegistry>> =
+            None;
         if self.config.services.transit {
             use crate::services::transit::{
                 TransitConfig, TransitKekKeyring, TransitKekMaterial, TransitService,
                 TRANSIT_KEK_ENV, TRANSIT_KEK_FILE, TRANSIT_KEK_OLD_ENV,
             };
-            use crate::services::transit_store::{KvTransitDekStore, TransitDekStore};
+            use crate::services::transit_key_store::{
+                KvTransitKeyStore, MemoryTransitKeyStore, TransitKeyStore,
+            };
 
             let transit_config = TransitConfig::from_env();
             // 主材料 fail-closed（口径不变）；历史材料可选（G-TR-1 多材料解密窗口，
@@ -2084,28 +2094,29 @@ impl AgentServer {
                 }
             };
 
-            // 生产（已连接 server 集群）：加密态 DEK 落共享 KV —— 重启不丢密钥、
-            // 单次使用跨 Agent 成立；骨架模式（无 server）：降级内存 store（dev/单测）。
+            // 生产（已连接 server 集群）：密钥档案落共享 KV —— 重启不丢、多 agent 共享；
+            // 骨架模式（无 server）：降级内存 store（dev/单测，重启即丢）。
             let transit_svc = match &inner {
                 Some(inner) => {
-                    let store: Arc<dyn TransitDekStore> =
-                        Arc::new(KvTransitDekStore::new(inner.clone()));
+                    let store: Arc<dyn TransitKeyStore> =
+                        Arc::new(KvTransitKeyStore::new(inner.clone()));
                     TransitService::with_store_keyring(transit_config, store, keyring)
                 }
                 None => {
                     tracing::warn!(
-                        "Transit service running without Server KV: DEK persistence disabled \
-                         (keys are lost on restart)"
+                        "Transit service running without Server KV: key archives are process-local \
+                         (lost on restart)"
                     );
                     TransitService::with_store_keyring(
                         transit_config,
-                        Arc::new(crate::services::transit_store::MemoryTransitDekStore::new()),
+                        Arc::new(MemoryTransitKeyStore::new()),
                         keyring,
                     )
                 }
             }
             .map_err(|e| format!("failed to create transit service: {e}"))?;
 
+            transit_registry = Some(transit_svc.registry().clone());
             let transit_svc = Arc::new(transit_svc);
             let _ = register_native_service(
                 &plugin_manager,
@@ -2183,14 +2194,28 @@ impl AgentServer {
             use crate::pki_store::{KvPkiStore, PkiStore};
 
             let pki_config = PkiConfig::default();
+            // PKI 私钥托管在 transit 命名密钥档案里（ADR-0019 D1/D2/D6）：
+            // 共享同一注册表 ⇒ pki 依赖 transit 的 KEK 材料，未启用时拒绝装配。
+            let registry = transit_registry.clone().ok_or_else(|| {
+                "services.pki = true requires services.transit = true: PKI private keys are \
+                 stored in the transit key archive (ADR-0019); enable transit with injected KEK \
+                 material, or set services.pki = false"
+                    .to_string()
+            })?;
             // 生产（已连接 server 集群）：共享 KV store —— 多 agent 共享同一 CA 根、重启不丢；
             // 骨架模式（无 server）：降级内存 store（dev/单测）。
             let pki_svc: Option<crate::pki::PkiService> = match inner {
                 Some(ref inner) => {
                     let store: Arc<dyn PkiStore> = Arc::new(KvPkiStore::new(inner.clone()));
-                    Some(crate::pki::PkiService::with_store(pki_config, store))
+                    Some(crate::pki::PkiService::with_store_and_keys(
+                        pki_config, store, registry,
+                    ))
                 }
-                None => crate::pki::PkiService::new(pki_config).ok(),
+                None => Some(crate::pki::PkiService::with_store_and_keys(
+                    pki_config,
+                    Arc::new(crate::pki_store::MemoryPkiStore::new()),
+                    registry,
+                )),
             };
 
             if let Some(pki_svc) = pki_svc {

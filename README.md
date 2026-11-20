@@ -232,9 +232,10 @@ SAN (Go ≥1.15, rustls/webpki, browsers, Envoy) need the extension. Full walkth
 [`docs/pki-quickstart.md`](docs/pki-quickstart.md).
 
 Boundary: dev/test/internal verification only — no revocation (CRL/OCSP), no HSM, not a
-production trust root (`docs/production/ops/boundaries.md`, B-PKI-1). CA and certificate
-private keys live in the reserved KV namespace `/_pki/` (only the agent identity or root may
-read it via KV); snapshots contain them in plaintext unless static encryption is enabled.
+production trust root (`docs/production/ops/boundaries.md`, B-PKI-1). Certificate/CA records
+live in the reserved KV namespace `/_pki/`; private keys are KEK-wrapped under `/_transit/`
+(only the agent identity or root may read either via KV). A snapshot contains the wrapped
+material but not the KEK, so the snapshot alone cannot decrypt it.
 
 ## Project layout
 
@@ -272,7 +273,7 @@ current status and the work required to close each item — is
 - **Raft log compaction** — automatic snapshots run every 5000 logs by default and logs covered by a snapshot are reclaimed (`raft.max_in_snapshot_log_to_keep` keeps 1000 behind the snapshot for lagging followers); setting `raft.snapshot_logs_since_last = 0` disables both, so logs are never reclaimed (see ADR-0004).
 - **Multi-Raft (region mode)** — no dynamic region add/remove; watches cannot span regions.
 - **Authentication needs raft quorum** — logins and token refresh require quorum; clients whose credentials have expired cannot operate until quorum returns.
-- **`transit` KEK is operator-supplied** — no external KMS integration, and no built-in key-rotation flow. (`coord dev` uses a fixed dev-only default instead; see [ADR-0009](docs/adr/0009-dev-mode-builtin-services.md).)
+- **`transit` KEK is operator-supplied** — no external KMS/HSM; named keys can be rotated (`Transit/RotateKey`), but KEK rotation is the manual rewrap/trim procedure in `docs/production/ops/runbook.md` §4.4. (`coord dev` uses a fixed dev-only default instead; see [ADR-0009](docs/adr/0009-dev-mode-builtin-services.md).)
 - **Resource bounds** — plugin queues are bounded; the client port and the agent health listener enforce connection caps (but not connection-lifetime recycling); the cache enforces its configured size limit via a periodic reaper (brief overshoot within the reaper interval is possible); the message queue enforces its byte quota at publish (same-transaction accounting — over-quota and oversize publishes are rejected with `RESOURCE_EXHAUSTED`) and a reaper prunes messages/DLQ past each topic's `retention_secs` (`0` disables time-based pruning).
 
 **Non-goals.** No Spring Boot starter (see [Quick start](#quick-start)).
