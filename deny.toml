@@ -11,12 +11,19 @@ yanked = "deny"
 unmaintained = "all"
 unsound = "all"
 
-# 例外：当前 1 条，为 **unmaintained（非漏洞）**；每条必须写明理由与关闭路径。
+# 例外：当前 4 条，均为 **unmaintained（非漏洞）**；每条必须写明理由与关闭路径。
 #
 # RUSTSEC-2024-0449 —— unsafe-libyaml（serde_yaml 的 YAML 后端）被标记为 unmaintained。
 # coord-core / coord-agent 直接用 serde_yaml 解析工作流 YAML；serde_yaml 0.9.34 是最后
 # 一版（deprecated），无同 API 的维护替代。解析器迁移属于工作流 DSL 输入面的独立
 # 工作，关闭路径见 docs/production/ops/dependencies.md §4。
+#
+# RUSTSEC-2026-0543 / 2026-0555 / 2026-0559 —— chrono / chrono-tz / chrono-tz-build
+# 被标记为 unmaintained（chrono-tz-build 是 chrono-tz 的 build 依赖）。两者均由**第三方**
+# 传递引入，不是本仓直接依赖：
+#   openraft 0.10.0 → display-more 0.2.6 → chrono-tz 0.8.6 → chrono
+#   regorus  0.10.1 → chrono-tz 0.10.4 → chrono
+# 关闭路径与判据见 docs/production/ops/dependencies.md §7。
 #
 # （历史）RUSTSEC-2025-0141 / bincode 豁免已随退场计划关闭，bincode 已从依赖图消失；
 # 重新引入 bincode 将直接 fail-closed。
@@ -25,6 +32,9 @@ unsound = "all"
 # 新增条目必须同时登记到退场计划文档。
 ignore = [
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml 为 unmaintained（非漏洞，无可用升级）：它是 serde_yaml 的 YAML 后端，coord-core / coord-agent 直接用 serde_yaml 解析工作流 YAML；serde_yaml 0.9.34 为最后一版且无同 API 维护替代。关闭路径：迁移工作流 YAML 解析到维护中的实现，见 docs/production/ops/dependencies.md §4。" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 为 unmaintained（非漏洞）：本仓不直接依赖，仅经 chrono-tz 传递引入（openraft 0.10 的 display-more 0.2.6 与 regorus 0.10.1）。chrono-tz 移除后 chrono 自然离开依赖图。关闭路径见 docs/production/ops/dependencies.md §7。" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz 为 unmaintained（非漏洞）：本仓不直接依赖。两条传递路径：openraft 0.10 → display-more 0.2.6（展示格式化用）与 regorus 0.10.1（策略时区/时间函数）。关闭路径：regorus 升到 0.12+（其后端已切 yaml_serde）与 openraft 升级消除 display-more，见 docs/production/ops/dependencies.md §7。" },
+    { id = "RUSTSEC-2026-0559", reason = "chrono-tz-build 为 unmaintained（非漏洞）：它是 chrono-tz 的 build 依赖，仅经 chrono-tz 传递引入。chrono-tz 离开依赖图后本条自然消失。关闭路径见 docs/production/ops/dependencies.md §7。" },
 ]
 
 [licenses]
