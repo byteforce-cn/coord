@@ -1,8 +1,8 @@
 ## [contracts/v2.0.0] — 2026-11-20（Major：ADR-0019 KMS 化——transit 命名密钥 / 非对称签名 / CCT3；PKI 私钥留库）
 
 **发布口径**：**Major**（`coord.transit.v1` 与 `coord.pki.v1` 的 wire 形状按目标形状改写：
-删除旧 RPC 语义、删除响应字段；`buf breaking` 对这两个文件显式豁免一次，合并后下一 PR
-恢复强制基线）。
+删除旧 RPC 语义、删除响应字段；`buf breaking` 对这两个文件的一次性豁免已在合并后
+立即删除，强制基线恢复）。
 
 - **`coord.transit.v1`**：新增命名密钥生命周期（`CreateKey` / `ReadKey` / `ListKeys` /
   `RotateKey` / `UpdateKeyConfig` / `DeleteKey` / `TrimKey` / `ImportKey` / `ExportKey`）、

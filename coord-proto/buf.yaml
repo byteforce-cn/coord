@@ -29,9 +29,3 @@ lint:
 breaking:
   use:
     - FILE
-  # ADR-0019 一次性 wire 破坏：transit（CCT3 / 命名密钥 / 签名）与 pki（key_pem →
-  # key_material）按目标形状改写。合并后 main 基线即为新形状，紧随的 PR 删除这
-  # 两条 ignore，恢复对这两个文件的 breaking 强制。
-  ignore:
-    - src/proto/transit.proto
-    - src/proto/pki.proto
