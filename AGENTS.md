@@ -7,6 +7,20 @@
 - Rust：`cargo build` / `cargo test`；`cargo clippy --all-targets --all-features`；`cargo fmt --all -- --check`。
 - Java（`coord-java-sdk` / `java-example`）与 UI（`coord-ui`）：见 `CONTRIBUTING.md`。
 
+## 兼容性（强制）
+
+本仓当前**没有需要保活的历史包袱**：wire、存储格式、SDK 形状、配置项都可以直接改到目标形状。
+
+- **默认写终态，不写过渡态**：直接改定义、删旧路径，不做「先加新字段再逐步迁移」。
+- **禁止**：新旧双路径（按版本/开关分叉）、兼容层与适配壳、保留别名、`deprecated` 字段与弃用期、
+  「暂时保留旧行为」的注释、猜版本的探测逻辑、只为迁移存在的脚本。
+- **改契约照旧双侧同步**：`apis/contracts/proto/**` 与 `coord-proto/src/proto/**` 一起改，
+  不留 `reserved` 之外的占位；`STATUS.md` / `CHANGELOG.md` 同事务更新。
+- **不兼容的删除要写进 PR 描述**（破坏点 + 影响面），但不要写成迁移指南。
+- **例外只有一种**：某个形状已经作为对外承诺（`STATUS.md` 的 `STABLE` / 已发布 SDK 版本）交付给
+  外部消费方，且确有调用方在用。此时**显式**立 ADR 说明保活范围与期限——不允许靠习惯默认加
+  兼容层，也不允许以「可能有调用方」为理由提前铺兼容。
+
 ## 注释（.rs / .toml / .yml 等）
 
 - **只写当前「为什么」**：不变量、陷阱、契约。
