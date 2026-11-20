@@ -16,6 +16,8 @@
     该 hash 不符 ⇒ `INVALID_ARGUMENT`；Ed25519 + prehashed 拒绝；RSA 空
     `signature_algorithm` 默认 `pss`。
   - 能力拆分：`coord:transit:key_read` / `key_manage` / `key_export` / `crypto`。
+  - 枚举快照：新增 `TransitKeyType`（8 值）与 `TransitDataKeyType`（4 值），
+    `coord-proto/wire-freeze/enums.txt` 同步；纯新增，无改名/改号。
 - **`coord.pki.v1`**：`IssueCert` / `RenewCert` / `RotateCert` / `GetCertByCN` 删除
   `key_pem`（字段号 `3` reserved），新增 `PkiKeyMaterial key_material = 9`
   （`kind=coord_managed` + `key_name` + `key_version`）。私钥唯一出口是
