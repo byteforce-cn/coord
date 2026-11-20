@@ -27,10 +27,6 @@ lint:
 breaking:
   use:
     - FILE
-  # ADR-0019 一次性 wire 破坏（与 coord-proto/buf.yaml 同口径，合并后删除）。
-  ignore:
-    - proto/coord/transit/v1/transit.proto
-    - proto/coord/pki/v1/pki.proto
   # CI 中从仓库根执行：
   #   buf breaking apis/contracts --against '.git#branch=main,subdir=apis/contracts'
   # 任何 Breaking Change（删字段/改编号/改类型/删 RPC）将阻断合并。
