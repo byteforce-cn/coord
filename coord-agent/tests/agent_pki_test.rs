@@ -533,6 +533,101 @@ async fn test_renew_unknown_serial_returns_not_found() {
     );
 }
 
+/// 按 serial 只读查询：active / retired 都可查，未知 ⇒ None（不含私钥材料）。
+#[tokio::test]
+async fn test_get_cert_by_serial_active_retired_and_unknown() {
+    use coord_agent::pki_store::CertStatus;
+
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("Serial Lookup CA")
+        .await
+        .expect("初始化 CA 失败");
+    let cn = "svc-serial.coord.local";
+
+    let active = pki.issue_cert(cn, 0).await.expect("issue");
+    let found = pki
+        .get_cert_by_serial(&active.serial)
+        .await
+        .expect("query")
+        .expect("active record");
+    assert_eq!(found.serial, active.serial);
+    assert_eq!(found.common_name, cn);
+    assert_eq!(found.status, CertStatus::Active);
+    assert_eq!(found.cert_pem, active.cert_pem);
+
+    let rotated = pki.rotate_cert(cn, 0).await.expect("rotate");
+    let old = pki
+        .get_cert_by_serial(&active.serial)
+        .await
+        .expect("query")
+        .expect("retired record");
+    assert_eq!(old.status, CertStatus::Retired);
+    assert_eq!(old.cert_pem, active.cert_pem);
+    assert_ne!(rotated.serial, active.serial);
+
+    assert!(
+        pki.get_cert_by_serial("deadbeef")
+            .await
+            .expect("query")
+            .is_none(),
+        "未知 serial 必须返回 None"
+    );
+}
+
+/// gRPC 响应：过期记录按 not_after 报 `expired`；未知 serial ⇒ NOT_FOUND。
+#[tokio::test]
+async fn test_get_cert_by_serial_rpc_reports_expired_and_not_found() {
+    use coord_agent::pki_store::{CertRecord, CertStatus};
+    use coord_proto::pki::v1::pki_server::Pki as PkiRpc;
+    use coord_proto::pki::v1::PkiGetCertBySerialRequest;
+
+    let store = Arc::new(MemoryPkiStore::new());
+    let keys = new_keys();
+    let pki = make_pki_with_store(store.clone(), &keys);
+    pki.init_ca("Serial RPC CA").await.expect("初始化 CA 失败");
+
+    let cn = "svc-serial-expired.coord.local";
+    let expired = CertRecord {
+        common_name: cn.into(),
+        cert_pem: "-----BEGIN CERTIFICATE-----\nEXPIRED\n-----END CERTIFICATE-----".into(),
+        key_name: format!("pki/leaf/{cn}"),
+        key_version: 1,
+        not_before: 1_700_000_000,
+        not_after: 1_700_000_001,
+        serial: "expired-serial-1".into(),
+        status: CertStatus::Active,
+        parent_serial: None,
+        dns_names: Vec::new(),
+        ip_addresses: Vec::new(),
+    };
+    store.create_cert(cn, &expired).await.expect("seed expired");
+
+    let response = PkiRpc::get_cert_by_serial(
+        &pki,
+        tonic::Request::new(PkiGetCertBySerialRequest {
+            serial: expired.serial.clone(),
+        }),
+    )
+    .await
+    .expect("GetCertBySerial")
+    .into_inner();
+    assert_eq!(response.common_name, cn);
+    assert_eq!(response.serial, expired.serial);
+    assert_eq!(response.cert_pem, expired.cert_pem);
+    assert_eq!(response.status, "expired");
+
+    let err = PkiRpc::get_cert_by_serial(
+        &pki,
+        tonic::Request::new(PkiGetCertBySerialRequest {
+            serial: "deadbeef".into(),
+        }),
+    )
+    .await
+    .expect_err("unknown serial");
+    assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
+}
+
 /// G-PKI-1 验收：到期 = 换新触发
 #[tokio::test]
 async fn test_expired_current_record_is_reissued_not_returned() {

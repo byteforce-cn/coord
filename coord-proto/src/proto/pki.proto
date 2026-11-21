@@ -37,6 +37,9 @@ service Pki {
   rpc RotateCert(PkiRotateCertRequest) returns (PkiRotateCertResponse);
   rpc ListCerts(PkiListCertsRequest) returns (PkiListCertsResponse);
   rpc GetCertByCN(PkiGetCertByCNRequest) returns (PkiGetCertByCNResponse);
+  // 按 serial 只读查询（含 retired / expired；不含私钥；能力 pki:cert:read）。
+  // 不存在 ⇒ NOT_FOUND。
+  rpc GetCertBySerial(PkiGetCertBySerialRequest) returns (PkiGetCertBySerialResponse);
 }
 
 message PkiInitCaRequest {
@@ -71,7 +74,7 @@ message PkiIssueCertResponse {
   int64 not_before = 4; // UNIX epoch seconds
   int64 not_after = 5; // UNIX epoch seconds
   string serial = 6; // hex-encoded
-  string status = 7; // active / retired
+  string status = 7; // active / retired / expired
   string parent_serial = 8; // 轮换链（首次签发为空）
   PkiKeyMaterial key_material = 9;
 }
@@ -88,7 +91,7 @@ message PkiRenewCertResponse {
   int64 not_before = 4;
   int64 not_after = 5;
   string serial = 6;
-  string status = 7;
+  string status = 7; // active / retired / expired
   string parent_serial = 8;
   PkiKeyMaterial key_material = 9;
 }
@@ -110,7 +113,7 @@ message PkiRotateCertResponse {
   int64 not_before = 4;
   int64 not_after = 5;
   string serial = 6;
-  string status = 7;
+  string status = 7; // active / retired / expired
   string parent_serial = 8;
   PkiKeyMaterial key_material = 9;
 }
@@ -131,7 +134,7 @@ message PkiCertSummary {
   int64 not_before = 3; // UNIX epoch seconds
   int64 not_after = 4; // UNIX epoch seconds
   string serial = 5; // hex-encoded
-  string status = 6; // active / retired
+  string status = 6; // active / retired / expired
   string parent_serial = 7;
 }
 
@@ -147,9 +150,26 @@ message PkiGetCertByCNResponse {
   int64 not_before = 4;
   int64 not_after = 5;
   string serial = 6;
-  string status = 7;
+  string status = 7; // active / retired / expired
   string parent_serial = 8;
   PkiKeyMaterial key_material = 9;
+}
+
+// 按 serial 只读查询（含 retired / expired；不含私钥）
+message PkiGetCertBySerialRequest {
+  string serial = 1; // hex-encoded（与 IssueCert 响应的 serial 同一口径）
+}
+
+message PkiGetCertBySerialResponse {
+  string common_name = 1;
+  string cert_pem = 2;
+  int64 not_before = 3; // UNIX epoch seconds
+  int64 not_after = 4; // UNIX epoch seconds
+  string serial = 5; // hex-encoded
+  // active / retired / expired。expired 由服务端按 not_after 与当前时间判定，
+  // 覆盖 active/retired 存储态。
+  string status = 6;
+  string parent_serial = 7;
 }
 
 message PkiVerifyCertRequest {

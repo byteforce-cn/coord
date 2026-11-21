@@ -630,6 +630,18 @@ impl PkiService {
         }
     }
 
+    /// 按 serial 只读取回（含 retired / expired；无记录 ⇒ None，不含私钥材料）。
+    ///
+    /// 与 `RenewCert` 的「按 serial 还原真实 CN」共用同一存储查找；本方法没有副作用。
+    pub async fn get_cert_by_serial(&self, serial: &str) -> Result<Option<CertInfo>, PkiError> {
+        let record = self
+            .store
+            .get_cert_by_serial(serial)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?;
+        Ok(record.map(Into::into))
+    }
+
     /// 取得 leaf 密钥版本：首次创建（version 1）或轮换代次（latest + 1）。
     ///
     /// PKI leaf key 走 transit 命名密钥档案（`pki/leaf/{cn}`），与 CA 共用同一 KEK；
@@ -986,10 +998,11 @@ impl From<std::io::Error> for PkiError {
 
 use coord_proto::agent::{
     pki_server::Pki, PkiCertSummary, PkiGetCaCertRequest, PkiGetCaCertResponse,
-    PkiGetCertByCnRequest, PkiGetCertByCnResponse, PkiInitCaRequest, PkiInitCaResponse,
-    PkiIssueCertRequest, PkiIssueCertResponse, PkiKeyMaterial, PkiListCertsRequest,
-    PkiListCertsResponse, PkiRenewCertRequest, PkiRenewCertResponse, PkiRotateCertRequest,
-    PkiRotateCertResponse, PkiVerifyCertRequest, PkiVerifyCertResponse,
+    PkiGetCertByCnRequest, PkiGetCertByCnResponse, PkiGetCertBySerialRequest,
+    PkiGetCertBySerialResponse, PkiInitCaRequest, PkiInitCaResponse, PkiIssueCertRequest,
+    PkiIssueCertResponse, PkiKeyMaterial, PkiListCertsRequest, PkiListCertsResponse,
+    PkiRenewCertRequest, PkiRenewCertResponse, PkiRotateCertRequest, PkiRotateCertResponse,
+    PkiVerifyCertRequest, PkiVerifyCertResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -1016,6 +1029,15 @@ fn status_to_str(status: CertStatus) -> &'static str {
     }
 }
 
+/// 对外状态：过期优先于存储态 active/retired（服务端单一判定点）。
+fn status_to_str_at(status: CertStatus, not_after: i64) -> &'static str {
+    if now_unix() > not_after {
+        "expired"
+    } else {
+        status_to_str(status)
+    }
+}
+
 /// 私钥引用（材料在 coord 内；调用方拿不到材料本身）
 fn key_material_of(cert: &CertInfo) -> Option<PkiKeyMaterial> {
     Some(PkiKeyMaterial {
@@ -1033,7 +1055,7 @@ fn cert_to_issue_response(cert_info: CertInfo) -> PkiIssueCertResponse {
         not_before: cert_info.not_before,
         not_after: cert_info.not_after,
         serial: cert_info.serial,
-        status: status_to_str(cert_info.status).into(),
+        status: status_to_str_at(cert_info.status, cert_info.not_after).into(),
         parent_serial: cert_info.parent_serial.unwrap_or_default(),
         key_material,
     }
@@ -1084,7 +1106,7 @@ impl Pki for PkiService {
             not_before: cert_info.not_before,
             not_after: cert_info.not_after,
             serial: cert_info.serial,
-            status: status_to_str(cert_info.status).into(),
+            status: status_to_str_at(cert_info.status, cert_info.not_after).into(),
             parent_serial: cert_info.parent_serial.unwrap_or_default(),
             key_material,
         }))
@@ -1110,7 +1132,7 @@ impl Pki for PkiService {
             not_before: cert_info.not_before,
             not_after: cert_info.not_after,
             serial: cert_info.serial,
-            status: status_to_str(cert_info.status).into(),
+            status: status_to_str_at(cert_info.status, cert_info.not_after).into(),
             parent_serial: cert_info.parent_serial.unwrap_or_default(),
             key_material,
         }))
@@ -1132,7 +1154,7 @@ impl Pki for PkiService {
                 not_before: c.not_before,
                 not_after: c.not_after,
                 serial: c.serial,
-                status: status_to_str(c.status).into(),
+                status: status_to_str_at(c.status, c.not_after).into(),
                 parent_serial: c.parent_serial.unwrap_or_default(),
             })
             .collect();
@@ -1157,9 +1179,31 @@ impl Pki for PkiService {
             not_before: cert_info.not_before,
             not_after: cert_info.not_after,
             serial: cert_info.serial,
-            status: status_to_str(cert_info.status).into(),
+            status: status_to_str_at(cert_info.status, cert_info.not_after).into(),
             parent_serial: cert_info.parent_serial.unwrap_or_default(),
             key_material,
+        }))
+    }
+
+    async fn get_cert_by_serial(
+        &self,
+        request: Request<PkiGetCertBySerialRequest>,
+    ) -> Result<Response<PkiGetCertBySerialResponse>, Status> {
+        let req = request.into_inner();
+        let cert_info = PkiService::get_cert_by_serial(self, &req.serial)
+            .await
+            .map_err(status_from_pki_error)?
+            .ok_or_else(|| {
+                Status::not_found(format!("certificate not found by serial: {}", req.serial))
+            })?;
+        Ok(Response::new(PkiGetCertBySerialResponse {
+            common_name: cert_info.common_name,
+            cert_pem: cert_info.cert_pem,
+            not_before: cert_info.not_before,
+            not_after: cert_info.not_after,
+            serial: cert_info.serial,
+            status: status_to_str_at(cert_info.status, cert_info.not_after).into(),
+            parent_serial: cert_info.parent_serial.unwrap_or_default(),
         }))
     }
 
@@ -1321,6 +1365,15 @@ mod tests {
             !pki.verify_cert(&cert_pem).expect("verify"),
             "过期证书必须被拒绝"
         );
+    }
+
+    #[test]
+    fn test_external_status_marks_expired_over_stored_state() {
+        let now = now_unix();
+        assert_eq!(status_to_str_at(CertStatus::Active, now + 60), "active");
+        assert_eq!(status_to_str_at(CertStatus::Retired, now + 60), "retired");
+        assert_eq!(status_to_str_at(CertStatus::Active, now - 1), "expired");
+        assert_eq!(status_to_str_at(CertStatus::Retired, now - 1), "expired");
     }
 
     #[tokio::test]

@@ -162,8 +162,19 @@ public interface PkiClient {
     PkiCertInfo getCertByCN(String commonName);
 
     /**
+     * Read a certificate by serial (active, retired, or expired) without any
+     * private key material. Unknown serials surface as {@code NOT_FOUND}.
+     *
+     * @param serialNumber the hex-encoded serial (as returned by issue/rotate)
+     * @return certificate summary (no key material)
+     * @throws CoordException if the CA is not initialized or the serial is unknown
+     */
+    PkiCertSummary getCertBySerial(String serialNumber);
+
+    /**
      * Verify a certificate against the CA: validity window, issuer, and the CA
      * public-key signature. Malformed PEM is rejected as an invalid argument.
+
      *
      * @param certPem the PEM-encoded certificate to verify
      * @return true only if the certificate is in its validity window and signed by this CA

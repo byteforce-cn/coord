@@ -604,7 +604,7 @@ const BUILTIN_CAPABILITY_META: &[(&str, CapabilityType, &str)] = &[
     (
         "pki:cert:read",
         CapabilityType::Read,
-        "读取/校验证书（GetCaCert/GetCertByCN/ListCerts/VerifyCert）",
+        "读取/校验证书（GetCaCert/GetCertByCN/GetCertBySerial/ListCerts/VerifyCert）",
     ),
     (
         "pki:cert:rotate",

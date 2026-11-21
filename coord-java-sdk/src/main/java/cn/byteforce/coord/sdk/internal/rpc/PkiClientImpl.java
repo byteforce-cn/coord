@@ -7,6 +7,8 @@ import cn.byteforce.coord.contracts.pki.v1.PkiGetCaCertRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCaCertResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiGrpc;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaResponse;
@@ -219,6 +221,30 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
                 response.getCertPem(),
                 keyMaterialOf(response.getKeyMaterial()).getKeyName(),
                 keyMaterialOf(response.getKeyMaterial()).getKeyVersion(),
+                response.getNotBefore(),
+                response.getNotAfter(),
+                response.getSerial(),
+                response.getStatus(),
+                response.getParentSerial());
+    }
+
+    @Override
+    public PkiCertSummary getCertBySerial(String serialNumber) {
+        PkiGetCertBySerialRequest request = PkiGetCertBySerialRequest.newBuilder()
+                .setSerial(serialNumber)
+                .build();
+
+        PkiGetCertBySerialResponse response = callWithRetry(
+                (ch, r) -> PkiGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .getCertBySerial((PkiGetCertBySerialRequest) r),
+                request, "pki.getCertBySerial");
+
+        log.debug("PKI cert fetched by serial: cn={}, serial={}",
+                response.getCommonName(), response.getSerial());
+        return new PkiCertSummary(
+                response.getCommonName(),
+                response.getCertPem(),
                 response.getNotBefore(),
                 response.getNotAfter(),
                 response.getSerial(),
