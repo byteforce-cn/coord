@@ -58,7 +58,7 @@ http = "1"
 http-body-util = { workspace = true }
 bytes = "1"
 rcgen = { version = "0.14", features = ["x509-parser"] }
-x509-parser = "0.17"
+x509-parser = { version = "0.17", features = ["verify"] }
 time = "0.3"
 base64 = "0.22"
 regorus = "0.10.1"

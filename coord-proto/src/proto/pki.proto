@@ -29,6 +29,8 @@ service Pki {
   rpc InitCa(PkiInitCaRequest) returns (PkiInitCaResponse);
   rpc IssueCert(PkiIssueCertRequest) returns (PkiIssueCertResponse);
   rpc RenewCert(PkiRenewCertRequest) returns (PkiRenewCertResponse);
+  // 判据：有效期窗口 + issuer 与本 CA 一致 + CA 公钥验签。
+  // PEM 无法解析 ⇒ INVALID_ARGUMENT；签名/有效期不通过 ⇒ valid=false。
   rpc VerifyCert(PkiVerifyCertRequest) returns (PkiVerifyCertResponse);
   rpc GetCaCert(PkiGetCaCertRequest) returns (PkiGetCaCertResponse);
   // ISSUE-000 Phase 2: 平滑轮换（按 CN 轮换 + 列表 + 幂等取回）

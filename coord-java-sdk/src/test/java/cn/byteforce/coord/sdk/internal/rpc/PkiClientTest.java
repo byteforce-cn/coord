@@ -144,7 +144,15 @@ class PkiClientTest {
     }
 
     @Test
-    void getCertByCNReturnsActiveWithPrivateKey() {
+    void verifyCertReturnsServerDecision() {
+        assertThat(pki.verifyCert("pem")).isTrue();
+
+        fake.verifyValid = false;
+        assertThat(pki.verifyCert("forged-pem")).isFalse();
+    }
+
+    @Test
+    void getCertByCNReturnsActiveCertificateWithoutKeyMaterial() {
         PkiCertInfo cert = pki.getCertByCN("svc-a.local");
         assertThat(cert.serial()).isEqualTo("0x2");
         assertThat(cert.keyName()).isNotEmpty();
@@ -157,6 +165,7 @@ class PkiClientTest {
     private static final class FakePkiService extends PkiGrpc.PkiImplBase {
         int issueCalls;
         int rotateCalls;
+        boolean verifyValid = true;
         PkiIssueCertRequest lastIssue;
         PkiRotateCertRequest lastRotate;
 
@@ -259,7 +268,7 @@ class PkiClientTest {
 
         @Override
         public void verifyCert(PkiVerifyCertRequest request, StreamObserver<PkiVerifyCertResponse> observer) {
-            observer.onNext(PkiVerifyCertResponse.newBuilder().setValid(true).build());
+            observer.onNext(PkiVerifyCertResponse.newBuilder().setValid(verifyValid).build());
             observer.onCompleted();
         }
 

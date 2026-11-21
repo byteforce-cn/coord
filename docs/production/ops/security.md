@@ -111,6 +111,10 @@ key_version}`。**私钥唯一出口**是 `Transit/ExportKey`（独立能力
 控制**谁能调 RPC**，消费侧的 CN 校验控制**签出来的身份被谁接受**——两侧分别配置，
 不互相替代。
 
+**`VerifyCert` 判据**：有效期窗口 + issuer 与本 CA 一致 + **CA 公钥验签**。
+同 issuer CN 的自签 CA 签出的证书不会通过；PEM 无法解析返回
+`INVALID_ARGUMENT`，验签失败返回 `valid=false`（不是内部错误）。
+
 **KV 面不得旁路 PKI**：`/_pki/`（证书/CA 记录与密钥引用）、`/_transit/`（KEK
 包裹的 CA/leaf 私钥材料与命名密钥档案）、`/_lease/`、`/_idgen/`、`/_pd/` 是内部
 保留命名空间。鉴权开启时，只有 agent 自身身份（`agent-self-role`）
