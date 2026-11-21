@@ -1416,6 +1416,10 @@ mod tests {
             Some("pki:cert:issue".into())
         );
         assert_eq!(
+            infer_capability("/coord.pki.v1.Pki/SignCsr"),
+            Some("pki:cert:issue".into())
+        );
+        assert_eq!(
             infer_capability("/coord.pki.v1.Pki/RotateCert"),
             Some("pki:cert:rotate".into())
         );

@@ -25,6 +25,18 @@ option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/pki/
 
 // ============================================================
 
+// 证书用途 → 精确的 KU/EKU（IssueCert / RotateCert / SignCsr）。
+// - SERVER: KU=digitalSignature|keyEncipherment, EKU=serverAuth
+// - CLIENT: KU=digitalSignature, EKU=clientAuth
+// - BOTH:   KU=digitalSignature|keyEncipherment, EKU=clientAuth+serverAuth
+enum PkiCertificateUsage {
+  // IssueCert / SignCsr: 按 BOTH；RotateCert: 继承当前证书的 usage（无记录时 BOTH）。
+  PKI_CERTIFICATE_USAGE_UNSPECIFIED = 0;
+  PKI_CERTIFICATE_USAGE_SERVER = 1;
+  PKI_CERTIFICATE_USAGE_CLIENT = 2;
+  PKI_CERTIFICATE_USAGE_BOTH = 3;
+}
+
 service Pki {
   rpc InitCa(PkiInitCaRequest) returns (PkiInitCaResponse);
   rpc IssueCert(PkiIssueCertRequest) returns (PkiIssueCertResponse);
@@ -40,6 +52,9 @@ service Pki {
   // 按 serial 只读查询（含 retired / expired；不含私钥；能力 pki:cert:read）。
   // 不存在 ⇒ NOT_FOUND。
   rpc GetCertBySerial(PkiGetCertBySerialRequest) returns (PkiGetCertBySerialResponse);
+  // 用调用方 CSR 的公钥签发（proof-of-possession 必须通过）。私钥不进入 coord；
+  // CN / SAN 取自 CSR；subject 的其他属性按 coord profile 固定。
+  rpc SignCsr(PkiSignCsrRequest) returns (PkiSignCsrResponse);
 }
 
 message PkiInitCaRequest {
@@ -55,9 +70,13 @@ message PkiIssueCertRequest {
   // DNS 名（非 ASCII 等）时返回 INVALID_ARGUMENT，不静默退回无 SAN。
   repeated string dns_names = 3;
   repeated string ip_addresses = 4;
+  // 证书用途；未指定 = BOTH（保持既有 profile）。
+  PkiCertificateUsage usage = 5;
 }
 
 // 私钥引用：材料本身留在 coord 的命名密钥档案中（ADR-0019 D6）。
+// kind: coord_managed（key_name/key_version 指向 transit 档案）或 external
+// （调用方自持私钥，key_name 为空、key_version=0）。
 message PkiKeyMaterial {
   // 目前只有 "coord_managed"（Vault 形态的「密钥交付持有方」已删除）。
   string kind = 1;
@@ -104,6 +123,8 @@ message PkiRotateCertRequest {
   // 避免「轮换后丢 SAN」。
   repeated string dns_names = 3;
   repeated string ip_addresses = 4;
+  // 证书用途；未指定 = 继承当前证书（无既有记录时 BOTH）。
+  PkiCertificateUsage usage = 5;
 }
 
 message PkiRotateCertResponse {
@@ -169,6 +190,24 @@ message PkiGetCertBySerialResponse {
   // active / retired / expired。expired 由服务端按 not_after 与当前时间判定，
   // 覆盖 active/retired 存储态。
   string status = 6;
+  string parent_serial = 7;
+}
+
+// 用调用方 CSR 的公钥签发；CN / SAN 取自 CSR，私钥留在调用方。
+message PkiSignCsrRequest {
+  bytes csr_der = 1; // PKCS#10 DER
+  int64 ttl_seconds = 2; // 0 使用默认 24h
+  // 未指定 = BOTH。
+  PkiCertificateUsage usage = 3;
+}
+
+message PkiSignCsrResponse {
+  string common_name = 1;
+  string cert_pem = 2;
+  int64 not_before = 3; // UNIX epoch seconds
+  int64 not_after = 4; // UNIX epoch seconds
+  string serial = 5; // hex-encoded
+  string status = 6; // active / retired / expired
   string parent_serial = 7;
 }
 

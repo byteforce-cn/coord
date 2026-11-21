@@ -10,6 +10,7 @@ import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiCertificateUsage;
 import cn.byteforce.coord.contracts.pki.v1.PkiGrpc;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaResponse;
@@ -21,10 +22,13 @@ import cn.byteforce.coord.contracts.pki.v1.PkiRenewCertRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiRenewCertResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiRotateCertRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiRotateCertResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiSignCsrRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiSignCsrResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiVerifyCertRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiVerifyCertResponse;
 import cn.byteforce.coord.sdk.pki.PkiCertInfo;
 import cn.byteforce.coord.sdk.pki.PkiCertSummary;
+import cn.byteforce.coord.sdk.pki.PkiCertUsage;
 import cn.byteforce.coord.sdk.pki.PkiClient;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import io.grpc.ManagedChannel;
@@ -36,6 +40,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -92,6 +97,48 @@ class PkiClientTest {
         assertThat(cert.keyVersion()).isEqualTo(1);
         assertThat(cert.status()).isEqualTo("active");
         assertThat(fake.issueCalls).isEqualTo(1);
+    }
+
+    @Test
+    void issueCertSendsUsageProfile() {
+        pki.issueCert("svc-a.local", 3600, List.of("svc-a.local"), List.of(),
+                PkiCertUsage.SERVER);
+
+        assertThat(fake.lastIssue.getUsage())
+                .isEqualTo(PkiCertificateUsage.PKI_CERTIFICATE_USAGE_SERVER);
+    }
+
+    @Test
+    void rotateCertWithoutUsageAsksServerToInherit() {
+        pki.rotateCert("svc-a.local", 3600, List.of(), List.of());
+
+        assertThat(fake.lastRotate.getUsage())
+                .isEqualTo(PkiCertificateUsage.PKI_CERTIFICATE_USAGE_UNSPECIFIED);
+    }
+
+    @Test
+    void signCsrReturnsExternalCertWithoutKeyReference() {
+        byte[] csr = "fake-csr".getBytes(StandardCharsets.UTF_8);
+        PkiCertInfo cert = pki.signCsr(csr, 3600, PkiCertUsage.CLIENT);
+
+        assertThat(cert.commonName()).isEqualTo("svc-csr.local");
+        assertThat(cert.serial()).isEqualTo("0x3");
+        assertThat(cert.status()).isEqualTo("active");
+        assertThat(cert.keyName()).isEmpty();
+        assertThat(cert.keyVersion()).isZero();
+        assertThat(fake.lastSignCsr.getCsrDer().toByteArray()).isEqualTo(csr);
+        assertThat(fake.lastSignCsr.getUsage())
+                .isEqualTo(PkiCertificateUsage.PKI_CERTIFICATE_USAGE_CLIENT);
+    }
+
+    @Test
+    void signCsrInvalidCsrPropagatesInvalidArgument() {
+        fake.signCsrValid = false;
+
+        assertThatThrownBy(() -> pki.signCsr("bad".getBytes(StandardCharsets.UTF_8)))
+                .isInstanceOf(CoordException.class)
+                .extracting(e -> ((CoordException) e).getErrorCode())
+                .isEqualTo(ErrorCode.INVALID_ARGUMENT);
     }
 
     @Test
@@ -190,8 +237,10 @@ class PkiClientTest {
         int issueCalls;
         int rotateCalls;
         boolean verifyValid = true;
+        boolean signCsrValid = true;
         PkiIssueCertRequest lastIssue;
         PkiRotateCertRequest lastRotate;
+        PkiSignCsrRequest lastSignCsr;
 
         @Override
         public void initCa(PkiInitCaRequest request, StreamObserver<PkiInitCaResponse> observer) {
@@ -286,6 +335,27 @@ class PkiClientTest {
                     .setSerial("0x2")
                     .setStatus("active")
                     .setParentSerial("0x1")
+                    .build());
+            observer.onCompleted();
+        }
+
+        @Override
+        public void signCsr(PkiSignCsrRequest request, StreamObserver<PkiSignCsrResponse> observer) {
+            lastSignCsr = request;
+            if (!signCsrValid) {
+                observer.onError(io.grpc.Status.INVALID_ARGUMENT
+                        .withDescription("CSR proof-of-possession signature is invalid")
+                        .asRuntimeException());
+                return;
+            }
+            observer.onNext(PkiSignCsrResponse.newBuilder()
+                    .setCommonName("svc-csr.local")
+                    .setCertPem("-----BEGIN CERTIFICATE-----\ncsr\n-----END CERTIFICATE-----")
+                    .setNotBefore(1_700_000_000L)
+                    .setNotAfter(1_700_086_400L)
+                    .setSerial("0x3")
+                    .setStatus("active")
+                    .setParentSerial("")
                     .build());
             observer.onCompleted();
         }

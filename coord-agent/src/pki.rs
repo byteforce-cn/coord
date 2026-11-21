@@ -26,7 +26,9 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsage
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
-use crate::pki_store::{CaRecord, CertRecord, CertStatus, MemoryPkiStore, PkiStore, PkiStoreError};
+use crate::pki_store::{
+    CaRecord, CertRecord, CertStatus, CertUsage, MemoryPkiStore, PkiStore, PkiStoreError,
+};
 use crate::services::transit_key::{
     CreateKeySpec, ImportKeySpec, KeyError, KeyType, MaterialFormat, TransitKeyRegistry,
 };
@@ -96,6 +98,8 @@ pub struct CertInfo {
     pub status: CertStatus,
     /// 轮换链：本证书由哪个 serial 轮换而来（None = 首次签发）
     pub parent_serial: Option<String>,
+    /// 证书用途（KU/EKU profile）
+    pub usage: CertUsage,
 }
 
 impl From<CertRecord> for CertInfo {
@@ -110,6 +114,7 @@ impl From<CertRecord> for CertInfo {
             serial: r.serial,
             status: r.status,
             parent_serial: r.parent_serial,
+            usage: r.usage,
         }
     }
 }
@@ -443,11 +448,16 @@ impl PkiService {
         common_name: &str,
         ttl_seconds: u64,
     ) -> Result<CertInfo, PkiError> {
-        self.issue_cert_with_san(common_name, ttl_seconds, SanSpec::default())
-            .await
+        self.issue_cert_with_profile(
+            common_name,
+            ttl_seconds,
+            SanSpec::default(),
+            CertUsage::Both,
+        )
+        .await
     }
 
-    /// 同 [`Self::issue_cert`]，显式指定 SAN。
+    /// 同 [`Self::issue_cert`]，显式指定 SAN；usage 默认 `Both`。
     ///
     /// SAN 两者皆空 ⇒ 将 CN 派生为 DNS SAN；CN 不是合法 DNS 名时返回
     /// `InvalidArgument`（不静默签出无 SAN 证书）。
@@ -457,8 +467,27 @@ impl PkiService {
         ttl_seconds: u64,
         san: SanSpec,
     ) -> Result<CertInfo, PkiError> {
-        self.ensure_cert(common_name, ttl_seconds, false, san.normalized()?, false)
+        self.issue_cert_with_profile(common_name, ttl_seconds, san, CertUsage::Both)
             .await
+    }
+
+    /// 显式指定 SAN 与证书用途（KU/EKU 精确写入）。
+    pub async fn issue_cert_with_profile(
+        &self,
+        common_name: &str,
+        ttl_seconds: u64,
+        san: SanSpec,
+        usage: CertUsage,
+    ) -> Result<CertInfo, PkiError> {
+        self.ensure_cert(
+            common_name,
+            ttl_seconds,
+            false,
+            san.normalized()?,
+            false,
+            Some(usage),
+        )
+        .await
     }
 
     /// 续期证书：**按 serial 查回真实 CN**，再替换出一个新证书（新密钥 + 新 serial）
@@ -472,13 +501,19 @@ impl PkiService {
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?
             .ok_or_else(|| PkiError::CertNotFound(serial.to_string()))?;
-        // RenewCert 无 SAN 入参：继承旧记录 SAN（无 SAN 的旧记录由 CN 派生）。
+        if old.is_external() {
+            return Err(PkiError::FailedPrecondition(format!(
+                "certificate {serial} uses a caller-held key; renew requires a new CSR via Pki/SignCsr"
+            )));
+        }
+        // RenewCert 无 SAN / usage 入参：继承旧记录（无 SAN 的旧记录由 CN 派生）。
         self.ensure_cert(
             &old.common_name,
             ttl_seconds,
             true,
             SanSpec::default(),
             true,
+            None,
         )
         .await
     }
@@ -503,8 +538,27 @@ impl PkiService {
         ttl_seconds: u64,
         san: SanSpec,
     ) -> Result<CertInfo, PkiError> {
-        self.ensure_cert(common_name, ttl_seconds, true, san.normalized()?, true)
+        self.rotate_cert_with_profile(common_name, ttl_seconds, san, None)
             .await
+    }
+
+    /// 显式轮换；`usage = None` 继承当前记录的用途（无记录时 `Both`）。
+    pub async fn rotate_cert_with_profile(
+        &self,
+        common_name: &str,
+        ttl_seconds: u64,
+        san: SanSpec,
+        usage: Option<CertUsage>,
+    ) -> Result<CertInfo, PkiError> {
+        self.ensure_cert(
+            common_name,
+            ttl_seconds,
+            true,
+            san.normalized()?,
+            true,
+            usage,
+        )
+        .await
     }
 
     /// 统一的签发/轮换实现。
@@ -525,6 +579,7 @@ impl PkiService {
         force_rotate: bool,
         requested_san: SanSpec,
         inherit_existing_san: bool,
+        usage: Option<CertUsage>,
     ) -> Result<CertInfo, PkiError> {
         let want_ttl = effective_ttl_seconds(ttl_seconds, self.config.cert_ttl_hours);
         for _ in 0..Self::MAX_REPLACE_ATTEMPTS {
@@ -535,12 +590,22 @@ impl PkiService {
                 .map_err(|e| PkiError::Store(e.to_string()))?
             {
                 Some((record, version)) => {
-                    // 幂等快路径：未过期 + 非强制轮换 + SAN/TTL 与请求一致
-                    if !force_rotate && !record.is_expired(now_unix()) {
+                    // 外部密钥证书没有 coord 侧私钥可轮换：Renew/Rotate 必须改走 SignCsr。
+                    if force_rotate && record.is_external() {
+                        return Err(PkiError::FailedPrecondition(format!(
+                            "certificate for CN {common_name} uses a caller-held key; \
+                             renew/rotate requires a new CSR via Pki/SignCsr"
+                        )));
+                    }
+                    let want_usage = usage.unwrap_or(record.usage);
+                    // 幂等快路径：未过期 + 非强制轮换 + 同一密钥归属 + SAN/TTL/usage 一致。
+                    // 外部密钥记录不能作为 managed 签发的幂等命中。
+                    if !force_rotate && !record.is_expired(now_unix()) && !record.is_external() {
                         let san = effective_san(common_name, &requested_san, false, Some(&record))?;
                         if san.dns_names == record.dns_names
                             && san.ip_addresses == record.ip_addresses
                             && record_ttl_seconds(&record) == want_ttl
+                            && record.usage == want_usage
                         {
                             return Ok(record.into());
                         }
@@ -558,6 +623,7 @@ impl PkiService {
                             common_name,
                             ttl_seconds,
                             san,
+                            want_usage,
                             CertStatus::Active,
                             Some(record.serial.clone()),
                             key_name,
@@ -581,12 +647,14 @@ impl PkiService {
                 None => {
                     let san =
                         effective_san(common_name, &requested_san, inherit_existing_san, None)?;
+                    let want_usage = usage.unwrap_or(CertUsage::Both);
                     let (key_name, key_version) = self.ensure_leaf_key(common_name, true).await?;
                     let new_record = self
                         .sign_new_cert_blocking(
                             common_name,
                             ttl_seconds,
                             san,
+                            want_usage,
                             CertStatus::Active,
                             None,
                             key_name,
@@ -642,6 +710,83 @@ impl PkiService {
         Ok(record.map(Into::into))
     }
 
+    /// 用调用方 CSR 的公钥签发（PoP 必须通过；私钥不进入 coord）。
+    ///
+    /// 幂等：同 CN + 同 SPKI + SAN/TTL/usage 一致 ⇒ 返回既有证书；否则替换出新证书，
+    /// 旧记录 retired。CN / SAN 取自 CSR；CSR 无 SAN 时由 CN 派生。
+    pub async fn sign_csr(
+        &self,
+        csr_der: &[u8],
+        ttl_seconds: u64,
+        usage: CertUsage,
+    ) -> Result<CertInfo, PkiError> {
+        let csr = parse_csr(csr_der)?;
+        let common_name = csr.common_name.clone();
+        let want_ttl = effective_ttl_seconds(ttl_seconds, self.config.cert_ttl_hours);
+        for _ in 0..Self::MAX_REPLACE_ATTEMPTS {
+            match self
+                .store
+                .get_cert_with_version(&common_name)
+                .await
+                .map_err(|e| PkiError::Store(e.to_string()))?
+            {
+                Some((record, version)) => {
+                    if !record.is_expired(now_unix())
+                        && record.is_external()
+                        && record.spki_sha256 == csr.spki_sha256
+                        && record.dns_names == csr.san.dns_names
+                        && record.ip_addresses == csr.san.ip_addresses
+                        && record_ttl_seconds(&record) == want_ttl
+                        && record.usage == usage
+                    {
+                        return Ok(record.into());
+                    }
+                    let new_record = self
+                        .sign_external_cert_blocking(
+                            &common_name,
+                            ttl_seconds,
+                            &csr,
+                            usage,
+                            CertStatus::Active,
+                            Some(record.serial.clone()),
+                        )
+                        .await?;
+                    let mut retired = record.clone();
+                    retired.status = CertStatus::Retired;
+                    match self
+                        .store
+                        .replace_active_cert_cas(&common_name, version, &new_record, &retired)
+                        .await
+                    {
+                        Ok(()) => return Ok(new_record.into()),
+                        Err(PkiStoreError::VersionConflict(_)) => continue,
+                        Err(e) => return Err(PkiError::Store(e.to_string())),
+                    }
+                }
+                None => {
+                    let new_record = self
+                        .sign_external_cert_blocking(
+                            &common_name,
+                            ttl_seconds,
+                            &csr,
+                            usage,
+                            CertStatus::Active,
+                            None,
+                        )
+                        .await?;
+                    match self.store.create_cert(&common_name, &new_record).await {
+                        Ok(()) => return Ok(new_record.into()),
+                        Err(PkiStoreError::AlreadyExists(_)) => continue,
+                        Err(e) => return Err(PkiError::Store(e.to_string())),
+                    }
+                }
+            }
+        }
+        Err(PkiError::Store(format!(
+            "replace attempts exhausted for CN {common_name} (persistent concurrent replace)"
+        )))
+    }
+
     /// 取得 leaf 密钥版本：首次创建（version 1）或轮换代次（latest + 1）。
     ///
     /// PKI leaf key 走 transit 命名密钥档案（`pki/leaf/{cn}`），与 CA 共用同一 KEK；
@@ -689,6 +834,7 @@ impl PkiService {
         common_name: &str,
         ttl_seconds: u64,
         san: SanSpec,
+        usage: CertUsage,
         status: CertStatus,
         parent_serial: Option<String>,
         key_name: String,
@@ -723,6 +869,51 @@ impl PkiService {
                 ttl_seconds,
                 default_ttl_hours,
                 &san,
+                usage,
+                status,
+                parent_serial,
+            )
+        })
+        .await
+        .map_err(|e| PkiError::CertGen(format!("sign blocking task join: {e}")))?
+    }
+    /// 异步签发外部密钥证书：CA 私钥解出后放进阻塞线程池；调用方私钥不参与。
+    async fn sign_external_cert_blocking(
+        &self,
+        common_name: &str,
+        ttl_seconds: u64,
+        csr: &CsrSpec,
+        usage: CertUsage,
+        status: CertStatus,
+        parent_serial: Option<String>,
+    ) -> Result<CertRecord, PkiError> {
+        let ca = {
+            let guard = self.ca.read();
+            guard.as_ref().cloned().ok_or(PkiError::CaNotInitialized)?
+        };
+        let ca_key_pem = self
+            .keys
+            .private_key_pem(&ca.key_name, ca.key_version)
+            .await
+            .map_err(|e| PkiError::Key(e.to_string()))?;
+        let default_ttl_hours = self.config.cert_ttl_hours;
+        let cn = common_name.to_string();
+        let ca_cert_pem = ca.cert_pem;
+        let spki_der = csr.spki_der.clone();
+        let san = csr.san.clone();
+        let spki_sha256 = csr.spki_sha256.clone();
+
+        tokio::task::spawn_blocking(move || {
+            sign_external_cert_with_ca(
+                &ca_cert_pem,
+                &ca_key_pem,
+                &spki_der,
+                &cn,
+                ttl_seconds,
+                default_ttl_hours,
+                &san,
+                &spki_sha256,
+                usage,
                 status,
                 parent_serial,
             )
@@ -746,6 +937,7 @@ fn sign_cert_with_ca(
     ttl_seconds: u64,
     default_ttl_hours: u32,
     san: &SanSpec,
+    usage: CertUsage,
     status: CertStatus,
     parent_serial: Option<String>,
 ) -> Result<CertRecord, PkiError> {
@@ -760,14 +952,8 @@ fn sign_cert_with_ca(
         .distinguished_name
         .push(DnType::OrganizationName, "Coord Agent");
     params.is_ca = IsCa::NoCa;
-    params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyEncipherment,
-    ];
-    params.extended_key_usages = vec![
-        rcgen::ExtendedKeyUsagePurpose::ClientAuth,
-        rcgen::ExtendedKeyUsagePurpose::ServerAuth,
-    ];
+    params.key_usages = key_usages(usage);
+    params.extended_key_usages = extended_key_usages(usage);
 
     // rcgen 不会把 CN 自动写入 SAN；只认 SAN 的校验方（Go ≥1.15 / rustls /
     // 浏览器 / Envoy）会拒绝无 SAN 证书，故 SAN 必须显式写入。
@@ -798,6 +984,8 @@ fn sign_cert_with_ca(
     let cert = params
         .signed_by(&key_pair, &issuer)
         .map_err(|e| PkiError::CertGen(e.to_string()))?;
+    let cert_pem = cert.pem();
+    let spki_sha256 = cert_spki_sha256(&cert_pem)?;
 
     let not_before = now.unix_timestamp();
     let not_after = (now + ttl).unix_timestamp();
@@ -805,7 +993,7 @@ fn sign_cert_with_ca(
 
     Ok(CertRecord {
         common_name: common_name.to_string(),
-        cert_pem: cert.pem(),
+        cert_pem,
         key_name: leaf_key_name.to_string(),
         key_version: leaf_key_version,
         not_before,
@@ -815,6 +1003,199 @@ fn sign_cert_with_ca(
         parent_serial,
         dns_names: san.dns_names.clone(),
         ip_addresses: san.ip_addresses.clone(),
+        spki_sha256,
+        usage,
+    })
+}
+
+/// KU 按 usage 精确写入（与 seedj `CertificateUsage` 对齐）。
+fn key_usages(usage: CertUsage) -> Vec<KeyUsagePurpose> {
+    match usage {
+        CertUsage::Client => vec![KeyUsagePurpose::DigitalSignature],
+        CertUsage::Server | CertUsage::Both => vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ],
+    }
+}
+
+/// EKU 按 usage 精确写入；BOTH 保留既有「双 EKU」行为。
+fn extended_key_usages(usage: CertUsage) -> Vec<rcgen::ExtendedKeyUsagePurpose> {
+    match usage {
+        CertUsage::Server => vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth],
+        CertUsage::Client => vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth],
+        CertUsage::Both => vec![
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+        ],
+    }
+}
+
+/// 证书公钥 SPKI DER 的 SHA-256（小写 hex），作为 CSR 幂等口径。
+fn cert_spki_sha256(cert_pem: &str) -> Result<String, PkiError> {
+    let der = pem_to_der(cert_pem)?;
+    let (_rest, cert) = x509_parser::parse_x509_certificate(&der)
+        .map_err(|e| PkiError::CertParse(e.to_string()))?;
+    Ok(hex::encode(Sha256::digest(cert.public_key().raw)))
+}
+
+/// CSR 解析结果（PoP 已通过；私钥从未出现）。
+struct CsrSpec {
+    common_name: String,
+    san: SanSpec,
+    /// PKIX SubjectPublicKeyInfo DER（用于 rcgen 签证书）
+    spki_der: Vec<u8>,
+    /// SPKI DER 的 SHA-256（小写 hex，幂等判据）
+    spki_sha256: String,
+}
+
+/// 解析并验证 CSR：签名（PoP）+ CN + DNS/IP SAN。
+///
+/// 不支持的 SAN 类型（email/URI/DirectoryName 等）显式拒绝，避免静默丢弃身份。
+fn parse_csr(csr_der: &[u8]) -> Result<CsrSpec, PkiError> {
+    use x509_parser::certification_request::X509CertificationRequest;
+    use x509_parser::extensions::{GeneralName, ParsedExtension};
+    use x509_parser::prelude::FromDer;
+
+    let (rest, csr) = X509CertificationRequest::from_der(csr_der)
+        .map_err(|e| PkiError::InvalidArgument(format!("invalid CSR: {e}")))?;
+    if !rest.is_empty() {
+        return Err(PkiError::InvalidArgument(
+            "trailing bytes after CSR".to_string(),
+        ));
+    }
+    csr.verify_signature().map_err(|_| {
+        PkiError::InvalidArgument("CSR proof-of-possession signature is invalid".to_string())
+    })?;
+
+    let common_name = csr
+        .certification_request_info
+        .subject
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .filter(|cn| !cn.is_empty())
+        .ok_or_else(|| {
+            PkiError::InvalidArgument("CSR must contain a non-empty subject CN".to_string())
+        })?
+        .to_string();
+
+    let mut san = SanSpec::default();
+    if let Some(extensions) = csr.requested_extensions() {
+        for extension in extensions {
+            let ParsedExtension::SubjectAlternativeName(san_ext) = extension else {
+                continue;
+            };
+            for name in &san_ext.general_names {
+                match name {
+                    GeneralName::DNSName(dns) => san.dns_names.push((*dns).to_string()),
+                    GeneralName::IPAddress(bytes) => {
+                        let ip = ip_from_bytes(bytes).ok_or_else(|| {
+                            PkiError::InvalidArgument(format!("invalid IP SAN in CSR: {bytes:?}"))
+                        })?;
+                        san.ip_addresses.push(ip.to_string());
+                    }
+                    other => {
+                        return Err(PkiError::InvalidArgument(format!(
+                            "unsupported CSR SAN type: {other:?}"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    let san = if san.is_empty() {
+        derive_san_from_cn(&common_name)?
+    } else {
+        san.normalized()?
+    };
+    let spki_der = csr.certification_request_info.subject_pki.raw.to_vec();
+    let spki_sha256 = hex::encode(Sha256::digest(&spki_der));
+    Ok(CsrSpec {
+        common_name,
+        san,
+        spki_der,
+        spki_sha256,
+    })
+}
+
+fn ip_from_bytes(bytes: &[u8]) -> Option<IpAddr> {
+    match bytes.len() {
+        4 => <[u8; 4]>::try_from(bytes).ok().map(IpAddr::from),
+        16 => <[u8; 16]>::try_from(bytes).ok().map(IpAddr::from),
+        _ => None,
+    }
+}
+
+/// 纯函数：用 CA 材料给 CSR 的公钥签证书（私钥不参与）。
+#[allow(clippy::too_many_arguments)]
+fn sign_external_cert_with_ca(
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+    spki_der: &[u8],
+    common_name: &str,
+    ttl_seconds: u64,
+    default_ttl_hours: u32,
+    san: &SanSpec,
+    spki_sha256: &str,
+    usage: CertUsage,
+    status: CertStatus,
+    parent_serial: Option<String>,
+) -> Result<CertRecord, PkiError> {
+    let subject_spki = rcgen::SubjectPublicKeyInfo::from_der(spki_der)
+        .map_err(|e| PkiError::InvalidArgument(format!("unsupported CSR public key: {e}")))?;
+
+    let mut params = CertificateParams::default();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    params
+        .distinguished_name
+        .push(DnType::OrganizationName, "Coord Agent");
+    params.is_ca = IsCa::NoCa;
+    params.key_usages = key_usages(usage);
+    params.extended_key_usages = extended_key_usages(usage);
+
+    let mut subject_alt_names = Vec::with_capacity(san.dns_names.len() + san.ip_addresses.len());
+    for name in &san.dns_names {
+        let ia5 = Ia5String::try_from(name.as_str())
+            .map_err(|_| PkiError::InvalidArgument(format!("invalid DNS name: {name:?}")))?;
+        subject_alt_names.push(SanType::DnsName(ia5));
+    }
+    for ip in &san.ip_addresses {
+        let addr = IpAddr::from_str(ip)
+            .map_err(|_| PkiError::InvalidArgument(format!("invalid IP address: {ip:?}")))?;
+        subject_alt_names.push(SanType::IpAddress(addr));
+    }
+    params.subject_alt_names = subject_alt_names;
+
+    let now = OffsetDateTime::now_utc();
+    let ttl = time::Duration::seconds(effective_ttl_seconds(ttl_seconds, default_ttl_hours) as i64);
+    params.not_before = now;
+    params.not_after = now + ttl;
+
+    let ca_key = KeyPair::from_pem(ca_key_pem).map_err(|e| PkiError::KeyGen(e.to_string()))?;
+    let issuer = rcgen::Issuer::from_ca_cert_pem(ca_cert_pem, ca_key)
+        .map_err(|e| PkiError::CertGen(e.to_string()))?;
+    let cert = params
+        .signed_by(&subject_spki, &issuer)
+        .map_err(|e| PkiError::CertGen(e.to_string()))?;
+
+    Ok(CertRecord {
+        common_name: common_name.to_string(),
+        cert_pem: cert.pem(),
+        // 外部密钥：私钥从未进入 coord，没有 key archive 引用。
+        key_name: String::new(),
+        key_version: 0,
+        not_before: now.unix_timestamp(),
+        not_after: (now + ttl).unix_timestamp(),
+        serial: format!("{:x}", rand::random::<u64>()),
+        status,
+        parent_serial,
+        dns_names: san.dns_names.clone(),
+        ip_addresses: san.ip_addresses.clone(),
+        spki_sha256: spki_sha256.to_string(),
+        usage,
     })
 }
 
@@ -960,6 +1341,8 @@ pub enum PkiError {
     Io(std::io::Error),
     /// renew 按 serial 查不到证书
     CertNotFound(String),
+    /// 状态不允许该操作（如外部密钥证书的 Renew/Rotate）
+    FailedPrecondition(String),
     /// get-or-create 冲突后重读不到胜者
     CertMissing,
     /// CA 持久化记录加载失败
@@ -979,6 +1362,7 @@ impl std::fmt::Display for PkiError {
             Self::CertParse(msg) => write!(f, "certificate parse failed: {msg}"),
             Self::Io(e) => write!(f, "IO error: {e}"),
             Self::CertNotFound(s) => write!(f, "certificate not found by serial: {s}"),
+            Self::FailedPrecondition(msg) => write!(f, "failed precondition: {msg}"),
             Self::CertMissing => write!(f, "certificate missing in store"),
             Self::CaLoadFailed => write!(f, "failed to load CA from store"),
             Self::Store(msg) => write!(f, "pki store error: {msg}"),
@@ -997,12 +1381,12 @@ impl From<std::io::Error> for PkiError {
 // ──── gRPC trait impl ────
 
 use coord_proto::agent::{
-    pki_server::Pki, PkiCertSummary, PkiGetCaCertRequest, PkiGetCaCertResponse,
-    PkiGetCertByCnRequest, PkiGetCertByCnResponse, PkiGetCertBySerialRequest,
+    pki_server::Pki, PkiCertSummary, PkiCertificateUsage, PkiGetCaCertRequest,
+    PkiGetCaCertResponse, PkiGetCertByCnRequest, PkiGetCertByCnResponse, PkiGetCertBySerialRequest,
     PkiGetCertBySerialResponse, PkiInitCaRequest, PkiInitCaResponse, PkiIssueCertRequest,
     PkiIssueCertResponse, PkiKeyMaterial, PkiListCertsRequest, PkiListCertsResponse,
     PkiRenewCertRequest, PkiRenewCertResponse, PkiRotateCertRequest, PkiRotateCertResponse,
-    PkiVerifyCertRequest, PkiVerifyCertResponse,
+    PkiSignCsrRequest, PkiSignCsrResponse, PkiVerifyCertRequest, PkiVerifyCertResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -1018,6 +1402,7 @@ fn status_from_pki_error(e: PkiError) -> Status {
         PkiError::CertNotFound(serial) => {
             Status::not_found(format!("certificate not found by serial: {serial}"))
         }
+        PkiError::FailedPrecondition(msg) => Status::failed_precondition(msg),
         other => Status::internal(other.to_string()),
     }
 }
@@ -1038,13 +1423,45 @@ fn status_to_str_at(status: CertStatus, not_after: i64) -> &'static str {
     }
 }
 
-/// 私钥引用（材料在 coord 内；调用方拿不到材料本身）
+/// 私钥引用（材料在 coord 内；外部密钥证书没有引用）
 fn key_material_of(cert: &CertInfo) -> Option<PkiKeyMaterial> {
+    if cert.key_name.is_empty() {
+        return Some(PkiKeyMaterial {
+            kind: "external".into(),
+            key_name: String::new(),
+            key_version: 0,
+        });
+    }
     Some(PkiKeyMaterial {
         kind: "coord_managed".into(),
         key_name: cert.key_name.clone(),
         key_version: cert.key_version,
     })
+}
+
+/// proto usage → 生效 profile；`UNSPECIFIED` 按 BOTH（IssueCert / SignCsr）。
+fn cert_usage_from_proto(value: i32) -> Result<CertUsage, Status> {
+    match PkiCertificateUsage::try_from(value) {
+        Ok(PkiCertificateUsage::Unspecified) | Ok(PkiCertificateUsage::Both) => Ok(CertUsage::Both),
+        Ok(PkiCertificateUsage::Server) => Ok(CertUsage::Server),
+        Ok(PkiCertificateUsage::Client) => Ok(CertUsage::Client),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown certificate usage: {value}"
+        ))),
+    }
+}
+
+/// proto usage → 可选 profile；`UNSPECIFIED` = 继承（RotateCert）。
+fn optional_cert_usage_from_proto(value: i32) -> Result<Option<CertUsage>, Status> {
+    match PkiCertificateUsage::try_from(value) {
+        Ok(PkiCertificateUsage::Unspecified) => Ok(None),
+        Ok(PkiCertificateUsage::Server) => Ok(Some(CertUsage::Server)),
+        Ok(PkiCertificateUsage::Client) => Ok(Some(CertUsage::Client)),
+        Ok(PkiCertificateUsage::Both) => Ok(Some(CertUsage::Both)),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown certificate usage: {value}"
+        ))),
+    }
 }
 
 fn cert_to_issue_response(cert_info: CertInfo) -> PkiIssueCertResponse {
@@ -1079,11 +1496,13 @@ impl Pki for PkiService {
         request: Request<PkiIssueCertRequest>,
     ) -> Result<Response<PkiIssueCertResponse>, Status> {
         let req = request.into_inner();
-        let cert_info = PkiService::issue_cert_with_san(
+        let usage = cert_usage_from_proto(req.usage)?;
+        let cert_info = PkiService::issue_cert_with_profile(
             self,
             &req.common_name,
             req.ttl_seconds as u64,
             SanSpec::new(req.dns_names, req.ip_addresses),
+            usage,
         )
         .await
         .map_err(status_from_pki_error)?;
@@ -1117,11 +1536,13 @@ impl Pki for PkiService {
         request: Request<PkiRotateCertRequest>,
     ) -> Result<Response<PkiRotateCertResponse>, Status> {
         let req = request.into_inner();
-        let cert_info = PkiService::rotate_cert_with_san(
+        let usage = optional_cert_usage_from_proto(req.usage)?;
+        let cert_info = PkiService::rotate_cert_with_profile(
             self,
             &req.common_name,
             req.ttl_seconds as u64,
             SanSpec::new(req.dns_names, req.ip_addresses),
+            usage,
         )
         .await
         .map_err(status_from_pki_error)?;
@@ -1197,6 +1618,26 @@ impl Pki for PkiService {
                 Status::not_found(format!("certificate not found by serial: {}", req.serial))
             })?;
         Ok(Response::new(PkiGetCertBySerialResponse {
+            common_name: cert_info.common_name,
+            cert_pem: cert_info.cert_pem,
+            not_before: cert_info.not_before,
+            not_after: cert_info.not_after,
+            serial: cert_info.serial,
+            status: status_to_str_at(cert_info.status, cert_info.not_after).into(),
+            parent_serial: cert_info.parent_serial.unwrap_or_default(),
+        }))
+    }
+
+    async fn sign_csr(
+        &self,
+        request: Request<PkiSignCsrRequest>,
+    ) -> Result<Response<PkiSignCsrResponse>, Status> {
+        let req = request.into_inner();
+        let usage = cert_usage_from_proto(req.usage)?;
+        let cert_info = PkiService::sign_csr(self, &req.csr_der, req.ttl_seconds as u64, usage)
+            .await
+            .map_err(status_from_pki_error)?;
+        Ok(Response::new(PkiSignCsrResponse {
             common_name: cert_info.common_name,
             cert_pem: cert_info.cert_pem,
             not_before: cert_info.not_before,
@@ -1458,6 +1899,8 @@ mod tests {
             parent_serial: None,
             dns_names: Vec::new(),
             ip_addresses: Vec::new(),
+            spki_sha256: String::new(),
+            usage: CertUsage::Both,
         }
     }
 
@@ -1998,6 +2441,8 @@ mod tests {
             parent_serial: None,
             dns_names: Vec::new(),
             ip_addresses: Vec::new(),
+            spki_sha256: String::new(),
+            usage: CertUsage::Both,
         };
         store
             .create_cert("legacy-svc", &legacy)

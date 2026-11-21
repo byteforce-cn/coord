@@ -752,7 +752,8 @@ async fn exercise_transit(channel: tonic::transport::Channel) {
 async fn exercise_pki(channel: tonic::transport::Channel) {
     use coord_proto::pki::v1::pki_client::PkiClient;
     use coord_proto::pki::v1::{
-        PkiGetCaCertRequest, PkiGetCertBySerialRequest, PkiIssueCertRequest,
+        PkiCertificateUsage, PkiGetCaCertRequest, PkiGetCertBySerialRequest, PkiIssueCertRequest,
+        PkiSignCsrRequest,
     };
 
     let mut pki = PkiClient::new(channel);
@@ -771,6 +772,7 @@ async fn exercise_pki(channel: tonic::transport::Channel) {
             ttl_seconds: 3600,
             dns_names: vec!["v2-smoke.local".into()],
             ip_addresses: Vec::new(),
+            usage: 0,
         })
         .await
         .expect("Pki.IssueCert must succeed on the v2 data plane")
@@ -801,6 +803,51 @@ async fn exercise_pki(channel: tonic::transport::Channel) {
         .await
         .expect_err("unknown serial must be NOT_FOUND");
     assert_eq!(missing.code(), tonic::Code::NotFound, "{missing:?}");
+
+    // 外部密钥：coord 只签 CSR，私钥留在调用方。
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("csr key");
+    let mut params = rcgen::CertificateParams::default();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "v2-csr.local");
+    params.subject_alt_names = vec![rcgen::SanType::DnsName(
+        "v2-csr.local".try_into().expect("dns"),
+    )];
+    let csr = params
+        .serialize_request(&leaf_key)
+        .expect("csr")
+        .der()
+        .to_vec();
+    let signed = pki
+        .sign_csr(PkiSignCsrRequest {
+            csr_der: csr,
+            ttl_seconds: 3600,
+            usage: PkiCertificateUsage::Server as i32,
+        })
+        .await
+        .expect("Pki.SignCsr must succeed")
+        .into_inner();
+    assert_eq!(signed.common_name, "v2-csr.local");
+    assert_eq!(signed.status, "active");
+    let external = pki
+        .get_cert_by_serial(PkiGetCertBySerialRequest {
+            serial: signed.serial.clone(),
+        })
+        .await
+        .expect("GetCertBySerial after SignCsr")
+        .into_inner();
+    assert_eq!(external.common_name, "v2-csr.local");
+    assert_eq!(external.status, "active");
+
+    let bad_csr = pki
+        .sign_csr(PkiSignCsrRequest {
+            csr_der: vec![0x30, 0x00],
+            ttl_seconds: 0,
+            usage: PkiCertificateUsage::Both as i32,
+        })
+        .await
+        .expect_err("invalid CSR must be rejected");
+    assert_eq!(bad_csr.code(), tonic::Code::InvalidArgument, "{bad_csr:?}");
 }
 
 /// 夹具自查：数据目录必须落在临时目录（不污染仓库工作区）。

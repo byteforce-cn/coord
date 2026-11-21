@@ -9,6 +9,9 @@ import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiCertificateUsage;
+import cn.byteforce.coord.contracts.pki.v1.PkiSignCsrRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiSignCsrResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiGrpc;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaResponse;
@@ -24,8 +27,10 @@ import cn.byteforce.coord.contracts.pki.v1.PkiVerifyCertRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiVerifyCertResponse;
 import cn.byteforce.coord.sdk.pki.PkiCertInfo;
 import cn.byteforce.coord.sdk.pki.PkiCertSummary;
+import cn.byteforce.coord.sdk.pki.PkiCertUsage;
 import cn.byteforce.coord.sdk.pki.PkiClient;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
+import com.google.protobuf.ByteString;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,6 +52,17 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
                          CoordConfig config) {
         super(channelManager, errorMapper, retryTemplate, observability);
         this.config = config;
+    }
+
+    private static PkiCertificateUsage toProtoUsage(PkiCertUsage usage) {
+        if (usage == null) {
+            return PkiCertificateUsage.PKI_CERTIFICATE_USAGE_UNSPECIFIED;
+        }
+        return switch (usage) {
+            case BOTH -> PkiCertificateUsage.PKI_CERTIFICATE_USAGE_BOTH;
+            case SERVER -> PkiCertificateUsage.PKI_CERTIFICATE_USAGE_SERVER;
+            case CLIENT -> PkiCertificateUsage.PKI_CERTIFICATE_USAGE_CLIENT;
+        };
     }
 
     private static cn.byteforce.coord.contracts.pki.v1.PkiKeyMaterial keyMaterialOf(
@@ -84,11 +100,18 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
     @Override
     public PkiCertInfo issueCert(String commonName, long ttlSeconds, List<String> dnsNames,
                                  List<String> ipAddresses) {
+        return issueCert(commonName, ttlSeconds, dnsNames, ipAddresses, null);
+    }
+
+    @Override
+    public PkiCertInfo issueCert(String commonName, long ttlSeconds, List<String> dnsNames,
+                                 List<String> ipAddresses, PkiCertUsage usage) {
         PkiIssueCertRequest request = PkiIssueCertRequest.newBuilder()
                 .setCommonName(commonName)
                 .setTtlSeconds(ttlSeconds)
                 .addAllDnsNames(dnsNames == null ? List.of() : dnsNames)
                 .addAllIpAddresses(ipAddresses == null ? List.of() : ipAddresses)
+                .setUsage(toProtoUsage(usage))
                 .build();
 
         PkiIssueCertResponse response = callWithRetry(
@@ -149,11 +172,18 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
     @Override
     public PkiCertInfo rotateCert(String commonName, long ttlSeconds, List<String> dnsNames,
                                   List<String> ipAddresses) {
+        return rotateCert(commonName, ttlSeconds, dnsNames, ipAddresses, null);
+    }
+
+    @Override
+    public PkiCertInfo rotateCert(String commonName, long ttlSeconds, List<String> dnsNames,
+                                  List<String> ipAddresses, PkiCertUsage usage) {
         PkiRotateCertRequest request = PkiRotateCertRequest.newBuilder()
                 .setCommonName(commonName)
                 .setTtlSeconds(ttlSeconds)
                 .addAllDnsNames(dnsNames == null ? List.of() : dnsNames)
                 .addAllIpAddresses(ipAddresses == null ? List.of() : ipAddresses)
+                .setUsage(toProtoUsage(usage))
                 .build();
 
         PkiRotateCertResponse response = callWithRetry(
@@ -245,6 +275,39 @@ public final class PkiClientImpl extends AgentRpcClient implements PkiClient {
         return new PkiCertSummary(
                 response.getCommonName(),
                 response.getCertPem(),
+                response.getNotBefore(),
+                response.getNotAfter(),
+                response.getSerial(),
+                response.getStatus(),
+                response.getParentSerial());
+    }
+
+    @Override
+    public PkiCertInfo signCsr(byte[] csrDer) {
+        return signCsr(csrDer, 0, null);
+    }
+
+    @Override
+    public PkiCertInfo signCsr(byte[] csrDer, long ttlSeconds, PkiCertUsage usage) {
+        PkiSignCsrRequest request = PkiSignCsrRequest.newBuilder()
+                .setCsrDer(ByteString.copyFrom(csrDer))
+                .setTtlSeconds(ttlSeconds)
+                .setUsage(toProtoUsage(usage))
+                .build();
+
+        PkiSignCsrResponse response = callWithRetry(
+                (ch, r) -> PkiGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .signCsr((PkiSignCsrRequest) r),
+                request, "pki.signCsr");
+
+        log.debug("PKI CSR signed: cn={}, serial={}", response.getCommonName(), response.getSerial());
+        // 外部密钥：没有 coord 侧 key archive 引用。
+        return new PkiCertInfo(
+                response.getCommonName(),
+                response.getCertPem(),
+                "",
+                0,
                 response.getNotBefore(),
                 response.getNotAfter(),
                 response.getSerial(),

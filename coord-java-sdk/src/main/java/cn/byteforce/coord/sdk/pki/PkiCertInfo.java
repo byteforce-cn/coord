@@ -7,14 +7,14 @@ public final class PkiCertInfo {
 
     private final String commonName;
     private final String certPem;
-    /** 托管私钥的命名密钥名（材料在 coord，ADR-0019 D6） */
+    /** 托管私钥的命名密钥名（材料在 coord，ADR-0019 D6）；外部密钥证书为空 */
     private final String keyName;
     /** 签名使用的密钥版本 */
     private final int keyVersion;
     private final long notBeforeEpochSec;
     private final long notAfterEpochSec;
     private final String serial;
-    /** active / retired */
+    /** active / retired / expired */
     private final String status;
     /** rotation chain: serial this cert was rotated from (empty if first issued) */
     private final String parentSerial;

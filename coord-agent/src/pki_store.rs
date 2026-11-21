@@ -38,7 +38,23 @@ pub enum CertStatus {
     Retired,
 }
 
+/// 证书用途（决定 KU/EKU profile）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CertUsage {
+    /// KU=ds|ke，EKU=clientAuth+serverAuth（默认，保持既有行为）
+    #[default]
+    Both,
+    /// KU=ds|ke，EKU=serverAuth
+    Server,
+    /// KU=ds，EKU=clientAuth
+    Client,
+}
+
 /// 持久化的证书记录（**不含私钥材料**；只存 transit 密钥名/版本，ADR-0019 D6）
+///
+/// 外部密钥（CSR 签发）的 `key_name` 为空、`key_version = 0`：私钥从未进入 coord；
+/// 幂等判据用 `spki_sha256`（SPKI DER 的 SHA-256）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertRecord {
     /// 通用名称（CN）
@@ -70,12 +86,23 @@ pub struct CertRecord {
     /// 签发时生效的 IP SAN（同上）
     #[serde(default)]
     pub ip_addresses: Vec<String>,
+    /// 证书公钥 SPKI DER 的 SHA-256（小写 hex）；空 = 升级前的旧记录。
+    #[serde(default)]
+    pub spki_sha256: String,
+    /// 证书用途（KU/EKU profile）
+    #[serde(default)]
+    pub usage: CertUsage,
 }
 
 impl CertRecord {
     /// 是否已过期
     pub fn is_expired(&self, now_unix: i64) -> bool {
         now_unix > self.not_after
+    }
+
+    /// 外部密钥证书（私钥由调用方持有，coord 只有公钥）
+    pub fn is_external(&self) -> bool {
+        self.key_name.is_empty()
     }
 }
 
@@ -655,6 +682,8 @@ mod tests {
             parent_serial: None,
             dns_names: Vec::new(),
             ip_addresses: Vec::new(),
+            spki_sha256: String::new(),
+            usage: CertUsage::Both,
         }
     }
 
