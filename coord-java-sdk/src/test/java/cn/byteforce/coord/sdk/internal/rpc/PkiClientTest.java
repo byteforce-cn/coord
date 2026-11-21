@@ -10,6 +10,18 @@ import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCertStatusRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCertStatusResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCrlRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCrlResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiCrlFormat;
+import cn.byteforce.coord.contracts.pki.v1.PkiRevocationReason;
+import cn.byteforce.coord.contracts.pki.v1.PkiRevokeCertRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiRevokeCertResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiRotateCrlRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiRotateCrlResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiTidyRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiTidyResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiCertificateUsage;
 import cn.byteforce.coord.contracts.pki.v1.PkiGrpc;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaRequest;
@@ -27,7 +39,11 @@ import cn.byteforce.coord.contracts.pki.v1.PkiSignCsrResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiVerifyCertRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiVerifyCertResponse;
 import cn.byteforce.coord.sdk.pki.PkiCertInfo;
+import cn.byteforce.coord.sdk.pki.PkiCertStatus;
 import cn.byteforce.coord.sdk.pki.PkiCertSummary;
+import cn.byteforce.coord.sdk.pki.PkiCrl;
+import cn.byteforce.coord.sdk.pki.PkiRevocationInfo;
+import cn.byteforce.coord.sdk.pki.PkiTidyResult;
 import cn.byteforce.coord.sdk.pki.PkiCertUsage;
 import cn.byteforce.coord.sdk.pki.PkiClient;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
@@ -231,6 +247,70 @@ class PkiClientTest {
         assertThat(cert.status()).isEqualTo("active");
     }
 
+    @Test
+    void revokeCertMapsReasonAndReturnsRecord() {
+        PkiRevocationInfo revoked = pki.revokeCert("0x2", cn.byteforce.coord.sdk.pki.PkiRevocationReason.KEY_COMPROMISE);
+
+        assertThat(fake.lastRevoke.getSerial()).isEqualTo("0x2");
+        assertThat(fake.lastRevoke.getReason())
+                .isEqualTo(PkiRevocationReason.PKI_REVOCATION_REASON_KEY_COMPROMISE);
+        assertThat(revoked.serial()).isEqualTo("0x2");
+        assertThat(revoked.certSerial()).isEqualTo("0x2");
+        assertThat(revoked.commonName()).isEqualTo("svc-a.local");
+        assertThat(revoked.status()).isEqualTo("revoked");
+        assertThat(revoked.reason()).isEqualTo(cn.byteforce.coord.sdk.pki.PkiRevocationReason.KEY_COMPROMISE);
+        assertThat(revoked.by()).isEqualTo("ops@example");
+        assertThat(revoked.revokedAtEpochSec()).isEqualTo(1_700_000_100L);
+    }
+
+    @Test
+    void revokeCertDefaultsToUnspecifiedReason() {
+        pki.revokeCert("0x2");
+        assertThat(fake.lastRevoke.getReason())
+                .isEqualTo(PkiRevocationReason.PKI_REVOCATION_REASON_UNSPECIFIED);
+    }
+
+    @Test
+    void revokeCertUnknownSerialPropagatesNotFound() {
+        assertThatThrownBy(() -> pki.revokeCert("missing"))
+                .isInstanceOf(CoordException.class)
+                .extracting(e -> ((CoordException) e).getErrorCode())
+                .isEqualTo(ErrorCode.NOT_FOUND);
+    }
+
+    @Test
+    void getCertStatusExposesRevocation() {
+        PkiCertStatus status = pki.getCertStatus("0x2");
+        assertThat(status.status()).isEqualTo("revoked");
+        assertThat(status.revoked()).isTrue();
+        assertThat(status.reason()).isEqualTo(cn.byteforce.coord.sdk.pki.PkiRevocationReason.KEY_COMPROMISE);
+        assertThat(status.by()).isEqualTo("ops@example");
+        assertThat(status.revokedAtEpochSec()).isEqualTo(1_700_000_100L);
+    }
+
+    @Test
+    void getCrlDefaultsToPemAndRotateForcesNewNumber() {
+        PkiCrl crl = pki.getCrl();
+        assertThat(fake.lastGetCrl.getFormat()).isEqualTo(PkiCrlFormat.PKI_CRL_FORMAT_PEM);
+        assertThat(crl.format()).isEqualTo(cn.byteforce.coord.sdk.pki.PkiCrlFormat.PEM);
+        assertThat(crl.pem()).startsWith("-----BEGIN X509 CRL-----");
+        assertThat(crl.crlNumber()).isEqualTo(1);
+
+        PkiCrl rotated = pki.rotateCrl(cn.byteforce.coord.sdk.pki.PkiCrlFormat.DER);
+        assertThat(fake.lastRotateCrl.getFormat()).isEqualTo(PkiCrlFormat.PKI_CRL_FORMAT_DER);
+        assertThat(rotated.format()).isEqualTo(cn.byteforce.coord.sdk.pki.PkiCrlFormat.DER);
+        assertThat(rotated.pem()).isNull();
+        assertThat(rotated.crlNumber()).isEqualTo(2);
+    }
+
+    @Test
+    void tidyPropagatesRetentionAndRemovedCount() {
+        PkiTidyResult result = pki.tidy(3600);
+        assertThat(fake.lastTidy.getRetentionSeconds()).isEqualTo(3600);
+        assertThat(result.retentionSeconds()).isEqualTo(3600);
+        assertThat(result.removedCerts()).isEqualTo(3);
+    }
+
     // ──── Stub 实现 ────
 
     private static final class FakePkiService extends PkiGrpc.PkiImplBase {
@@ -241,6 +321,10 @@ class PkiClientTest {
         PkiIssueCertRequest lastIssue;
         PkiRotateCertRequest lastRotate;
         PkiSignCsrRequest lastSignCsr;
+        PkiRevokeCertRequest lastRevoke;
+        PkiGetCrlRequest lastGetCrl;
+        PkiRotateCrlRequest lastRotateCrl;
+        PkiTidyRequest lastTidy;
 
         @Override
         public void initCa(PkiInitCaRequest request, StreamObserver<PkiInitCaResponse> observer) {
@@ -377,6 +461,95 @@ class PkiClientTest {
                     .setSerial("0x2")
                     .setStatus("active")
                     .setParentSerial("0x1")
+                    .build());
+            observer.onCompleted();
+        }
+
+        @Override
+        public void revokeCert(PkiRevokeCertRequest request,
+                               StreamObserver<PkiRevokeCertResponse> observer) {
+            lastRevoke = request;
+            if (!"0x2".equals(request.getSerial())) {
+                observer.onError(io.grpc.Status.NOT_FOUND
+                        .withDescription("certificate not found by serial: " + request.getSerial())
+                        .asRuntimeException());
+                return;
+            }
+            observer.onNext(PkiRevokeCertResponse.newBuilder()
+                    .setSerial(request.getSerial())
+                    .setCertSerial(request.getSerial())
+                    .setCommonName("svc-a.local")
+                    .setStatus("revoked")
+                    .setRevokedAt(1_700_000_100L)
+                    .setReason(request.getReason())
+                    .setBy("ops@example")
+                    .build());
+            observer.onCompleted();
+        }
+
+        @Override
+        public void getCertStatus(PkiGetCertStatusRequest request,
+                                  StreamObserver<PkiGetCertStatusResponse> observer) {
+            if (!"0x2".equals(request.getSerial())) {
+                observer.onError(io.grpc.Status.NOT_FOUND
+                        .withDescription("certificate not found by serial: " + request.getSerial())
+                        .asRuntimeException());
+                return;
+            }
+            observer.onNext(PkiGetCertStatusResponse.newBuilder()
+                    .setSerial(request.getSerial())
+                    .setCertSerial(request.getSerial())
+                    .setCommonName("svc-a.local")
+                    .setStatus("revoked")
+                    .setNotBefore(1_700_000_000L)
+                    .setNotAfter(1_700_086_400L)
+                    .setRevokedAt(1_700_000_100L)
+                    .setReason(PkiRevocationReason.PKI_REVOCATION_REASON_KEY_COMPROMISE)
+                    .setBy("ops@example")
+                    .build());
+            observer.onCompleted();
+        }
+
+        @Override
+        public void getCrl(PkiGetCrlRequest request, StreamObserver<PkiGetCrlResponse> observer) {
+            lastGetCrl = request;
+            byte[] body = request.getFormat() == PkiCrlFormat.PKI_CRL_FORMAT_DER
+                    ? new byte[] {1, 2, 3}
+                    : "-----BEGIN X509 CRL-----\ncrl\n-----END X509 CRL-----".getBytes(StandardCharsets.UTF_8);
+            observer.onNext(PkiGetCrlResponse.newBuilder()
+                    .setCrl(com.google.protobuf.ByteString.copyFrom(body))
+                    .setFormat(request.getFormat())
+                    .setCrlNumber(1)
+                    .setThisUpdate(1_700_000_000L)
+                    .setNextUpdate(1_700_086_400L)
+                    .build());
+            observer.onCompleted();
+        }
+
+        @Override
+        public void rotateCrl(PkiRotateCrlRequest request,
+                              StreamObserver<PkiRotateCrlResponse> observer) {
+            lastRotateCrl = request;
+            byte[] body = request.getFormat() == PkiCrlFormat.PKI_CRL_FORMAT_DER
+                    ? new byte[] {4, 5, 6}
+                    : "-----BEGIN X509 CRL-----\nnew\n-----END X509 CRL-----".getBytes(StandardCharsets.UTF_8);
+            observer.onNext(PkiRotateCrlResponse.newBuilder()
+                    .setCrl(com.google.protobuf.ByteString.copyFrom(body))
+                    .setFormat(request.getFormat())
+                    .setCrlNumber(2)
+                    .setThisUpdate(1_700_000_100L)
+                    .setNextUpdate(1_700_086_400L)
+                    .build());
+            observer.onCompleted();
+        }
+
+        @Override
+        public void tidy(PkiTidyRequest request, StreamObserver<PkiTidyResponse> observer) {
+            lastTidy = request;
+            long retention = request.getRetentionSeconds() == 0 ? 86_400 : request.getRetentionSeconds();
+            observer.onNext(PkiTidyResponse.newBuilder()
+                    .setRetentionSeconds(retention)
+                    .setRemovedCerts(3)
                     .build());
             observer.onCompleted();
         }

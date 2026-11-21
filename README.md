@@ -231,8 +231,11 @@ openssl verify -CAfile ca.pem -verify_hostname orders-api orders-api.pem
 SAN (Go ≥1.15, rustls/webpki, browsers, Envoy) need the extension. Full walkthrough:
 [`docs/pki-quickstart.md`](docs/pki-quickstart.md).
 
-Boundary: dev/test/internal verification only — no revocation (CRL/OCSP), no HSM, not a
-production trust root (`docs/production/ops/boundaries.md`, B-PKI-1). Certificate/CA records
+Boundary: dev/test/internal verification only — revocation exists as a CA-side fact
+(`RevokeCert` / `GetCertStatus` / CA-signed CRL via RPC), but there is no OCSP, no HTTP CRL
+endpoint and no background CRL publisher; consumers that never call `VerifyCert` or refresh
+the CRL still accept revoked certificates. No HSM, not a production trust root
+(`docs/production/ops/boundaries.md`, B-PKI-1; ADR-0020). Certificate/CA records
 live in the reserved KV namespace `/_pki/`; private keys are KEK-wrapped under `/_transit/`
 (only the agent identity or root may read either via KV). A snapshot contains the wrapped
 material but not the KEK, so the snapshot alone cannot decrypt it.

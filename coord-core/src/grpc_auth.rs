@@ -348,6 +348,11 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.pki.v1.Pki/GetCertBySerial" => Some("pki:cert:read"),
         "/coord.pki.v1.Pki/GetCaCert" => Some("pki:cert:read"),
         "/coord.pki.v1.Pki/VerifyCert" => Some("pki:cert:read"),
+        "/coord.pki.v1.Pki/GetCertStatus" => Some("pki:cert:read"),
+        "/coord.pki.v1.Pki/GetCrl" => Some("pki:cert:read"),
+        "/coord.pki.v1.Pki/RevokeCert" => Some("pki:cert:revoke"),
+        "/coord.pki.v1.Pki/RotateCrl" => Some("pki:cert:revoke"),
+        "/coord.pki.v1.Pki/Tidy" => Some("pki:cert:revoke"),
 
         // 未知 RPC —— 调用方必须按 fail-closed 处理（拒绝）。
         _ => None,

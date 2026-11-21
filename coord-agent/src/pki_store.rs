@@ -9,6 +9,11 @@
 //   /_pki/v1/ca                     → CaRecord（CA 证书 + 私钥的 key 引用）
 //   /_pki/v1/certs/{CN}             → CertRecord（当前 active；只含 key_name/version）
 //   /_pki/v1/history/{CN}/{serial}  → CertRecord（轮换后的 retired 历史，保留至 not_after）
+//   /_pki/v1/revoked/{cert_serial}  → RevocationRecord（权威吊销账本，永久保留）
+//   /_pki/v1/crl                    → CrlState（CRL number 与内容指纹）
+//
+// 吊销状态不在 CertRecord 上落盘：账本是单一事实源，证书状态由它覆盖推导
+// （见 ADR-0020）。这样「吊销 + 轮换」不会产生两份需要互相同步的副本。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,6 +41,8 @@ pub enum CertStatus {
     Active,
     /// 已轮换退役，保留至 not_after 供验签方按 kid 取用
     Retired,
+    /// 已吊销：只在对外状态里由吊销账本推导，`CertRecord` 永不持久化该值
+    Revoked,
 }
 
 /// 证书用途（决定 KU/EKU profile）。
@@ -104,6 +111,85 @@ impl CertRecord {
     pub fn is_external(&self) -> bool {
         self.key_name.is_empty()
     }
+}
+
+/// RFC 5280 §5.3.1 CRLReason（只含可用于主动吊销的取值；7 未定义、8 只用于 delta CRL）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationReason {
+    #[default]
+    Unspecified,
+    KeyCompromise,
+    CaCompromise,
+    AffiliationChanged,
+    Superseded,
+    CessationOfOperation,
+    CertificateHold,
+    PrivilegeWithdrawn,
+    AaCompromise,
+}
+
+impl RevocationReason {
+    /// RFC 5280 CRLReason 数值（写入 CRL 条目）。
+    pub fn rfc_code(self) -> u8 {
+        match self {
+            Self::Unspecified => 0,
+            Self::KeyCompromise => 1,
+            Self::CaCompromise => 2,
+            Self::AffiliationChanged => 3,
+            Self::Superseded => 4,
+            Self::CessationOfOperation => 5,
+            Self::CertificateHold => 6,
+            Self::PrivilegeWithdrawn => 9,
+            Self::AaCompromise => 10,
+        }
+    }
+
+    pub fn from_rfc_code(code: i32) -> Option<Self> {
+        Some(match code {
+            0 => Self::Unspecified,
+            1 => Self::KeyCompromise,
+            2 => Self::CaCompromise,
+            3 => Self::AffiliationChanged,
+            4 => Self::Superseded,
+            5 => Self::CessationOfOperation,
+            6 => Self::CertificateHold,
+            9 => Self::PrivilegeWithdrawn,
+            10 => Self::AaCompromise,
+            _ => return None,
+        })
+    }
+}
+
+/// 吊销账本记录（键 = 证书内嵌的 X.509 serial）。
+///
+/// 吊销是**永久事实**：记录不随证书过期或 Tidy 回收；`RevokeCert` 重复调用
+/// 保留首次的 reason / revoked_at / by。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationRecord {
+    /// 证书内嵌的 X.509 serial（小写 hex；账本键与 CRL 条目口径）
+    pub cert_serial: String,
+    /// 签发记录里的 serial（可能为旧记录，与内嵌值不同；仅用于回显）
+    pub record_serial: String,
+    pub common_name: String,
+    pub reason: RevocationReason,
+    /// 吊销时间（UNIX 秒）
+    pub revoked_at: i64,
+    /// 执行者（服务端从鉴权主体取，非调用方自报）
+    pub by: String,
+}
+
+/// 当前 CRL 的编号与内容指纹。
+///
+/// `content_hash` 是生成该编号时吊销集合的 SHA-256：`GetCrl` 只在内容变化时
+/// 分配新编号，保证「编号 ↔ 内容」一致且单调（RFC 5280 §5.2.3）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrlState {
+    pub crl_number: u64,
+    /// 吊销集合（排序后 cert_serial + reason）的 SHA-256（小写 hex）
+    pub content_hash: String,
+    pub this_update: i64,
+    pub next_update: i64,
 }
 
 /// CA 持久化记录（证书 + 私钥引用；材料在 transit 档案里，ADR-0019 D6）
@@ -196,6 +282,41 @@ pub trait PkiStore: Send + Sync {
         active: &CertRecord,
         retired: &CertRecord,
     ) -> Result<(), PkiStoreError>;
+
+    /// 原子创建吊销记录（CAS Version==0）；已吊销返回 AlreadyExists（幂等判据）
+    async fn create_revocation(&self, record: &RevocationRecord) -> Result<(), PkiStoreError>;
+
+    /// 按证书内嵌 serial 读取吊销记录
+    async fn get_revocation(
+        &self,
+        cert_serial: &str,
+    ) -> Result<Option<RevocationRecord>, PkiStoreError>;
+
+    /// 列出全部吊销记录（CRL 生成用）
+    async fn list_revocations(&self) -> Result<Vec<RevocationRecord>, PkiStoreError>;
+
+    /// 读取 CRL 状态及 key version（无 CRL 时 Ok(None)）
+    async fn get_crl_state(&self) -> Result<Option<(CrlState, i64)>, PkiStoreError>;
+
+    /// CAS 写入 CRL 状态：expected_version=0 表示创建；版本不符返回 VersionConflict
+    async fn cas_crl_state(
+        &self,
+        expected_version: i64,
+        state: &CrlState,
+    ) -> Result<(), PkiStoreError>;
+
+    /// 列出全部历史证书记录（Tidy 扫描用；不区分 CN）
+    async fn list_history_certs(&self) -> Result<Vec<CertRecord>, PkiStoreError>;
+
+    /// 删除一条历史记录（Tidy；不存在视为成功）
+    async fn delete_history_cert(&self, cn: &str, serial: &str) -> Result<(), PkiStoreError>;
+
+    /// 版本化 CAS 删除 active 记录（Tidy 回收过期记录；不写历史）
+    async fn delete_active_cert_cas(
+        &self,
+        cn: &str,
+        expected_version: i64,
+    ) -> Result<(), PkiStoreError>;
 }
 
 // ──── Key 构造（纯函数，可单测）────
@@ -230,6 +351,21 @@ pub fn history_key(cn: &str, serial: &str) -> Vec<u8> {
     format!("/_pki/v1/history/{cn}/{serial}").into_bytes()
 }
 
+/// 吊销记录键（按证书内嵌 serial；统一小写 hex）
+pub fn revocation_key(cert_serial: &str) -> Vec<u8> {
+    format!("/_pki/v1/revoked/{}", cert_serial.to_lowercase()).into_bytes()
+}
+
+/// 吊销记录前缀（全量扫描 / CRL 生成）
+pub fn revocation_prefix() -> Vec<u8> {
+    b"/_pki/v1/revoked/".to_vec()
+}
+
+/// CRL 状态键
+pub fn crl_key() -> Vec<u8> {
+    b"/_pki/v1/crl".to_vec()
+}
+
 // ──── 序列化（纯函数，可单测）────
 
 pub fn serialize_ca(record: &CaRecord) -> Result<Vec<u8>, PkiStoreError> {
@@ -245,6 +381,22 @@ pub fn serialize_cert(record: &CertRecord) -> Result<Vec<u8>, PkiStoreError> {
 }
 
 pub fn deserialize_cert(bytes: &[u8]) -> Result<CertRecord, PkiStoreError> {
+    serde_json::from_slice(bytes).map_err(|e| PkiStoreError::Serialization(e.to_string()))
+}
+
+pub fn serialize_revocation(record: &RevocationRecord) -> Result<Vec<u8>, PkiStoreError> {
+    serde_json::to_vec(record).map_err(|e| PkiStoreError::Serialization(e.to_string()))
+}
+
+pub fn deserialize_revocation(bytes: &[u8]) -> Result<RevocationRecord, PkiStoreError> {
+    serde_json::from_slice(bytes).map_err(|e| PkiStoreError::Serialization(e.to_string()))
+}
+
+pub fn serialize_crl_state(state: &CrlState) -> Result<Vec<u8>, PkiStoreError> {
+    serde_json::to_vec(state).map_err(|e| PkiStoreError::Serialization(e.to_string()))
+}
+
+pub fn deserialize_crl_state(bytes: &[u8]) -> Result<CrlState, PkiStoreError> {
     serde_json::from_slice(bytes).map_err(|e| PkiStoreError::Serialization(e.to_string()))
 }
 
@@ -283,6 +435,10 @@ pub struct MemoryPkiStore {
     active_versions: Mutex<HashMap<String, i64>>,
     /// cn -> retired 历史（按 serial）
     history: Mutex<HashMap<String, HashMap<String, CertRecord>>>,
+    /// cert_serial -> 吊销记录
+    revocations: Mutex<HashMap<String, RevocationRecord>>,
+    /// CRL 状态及版本（与 Kv key version 同口径；创建=1）
+    crl_state: Mutex<Option<(CrlState, i64)>>,
 }
 
 impl MemoryPkiStore {
@@ -397,6 +553,88 @@ impl PkiStore for MemoryPkiStore {
             .insert(retired.serial.clone(), retired.clone());
         act.insert(cn.to_string(), active.clone());
         vers.insert(cn.to_string(), expected_version + 1);
+        Ok(())
+    }
+
+    async fn create_revocation(&self, record: &RevocationRecord) -> Result<(), PkiStoreError> {
+        let mut revocations = self.revocations.lock();
+        let key = record.cert_serial.to_lowercase();
+        if revocations.contains_key(&key) {
+            return Err(PkiStoreError::AlreadyExists(
+                String::from_utf8_lossy(&revocation_key(&key)).into_owned(),
+            ));
+        }
+        revocations.insert(key, record.clone());
+        Ok(())
+    }
+
+    async fn get_revocation(
+        &self,
+        cert_serial: &str,
+    ) -> Result<Option<RevocationRecord>, PkiStoreError> {
+        Ok(self
+            .revocations
+            .lock()
+            .get(&cert_serial.to_lowercase())
+            .cloned())
+    }
+
+    async fn list_revocations(&self) -> Result<Vec<RevocationRecord>, PkiStoreError> {
+        Ok(self.revocations.lock().values().cloned().collect())
+    }
+
+    async fn get_crl_state(&self) -> Result<Option<(CrlState, i64)>, PkiStoreError> {
+        Ok(self.crl_state.lock().clone())
+    }
+
+    async fn cas_crl_state(
+        &self,
+        expected_version: i64,
+        state: &CrlState,
+    ) -> Result<(), PkiStoreError> {
+        let mut current = self.crl_state.lock();
+        let version = current.as_ref().map(|(_, v)| *v).unwrap_or(0);
+        if version != expected_version {
+            return Err(PkiStoreError::VersionConflict(
+                String::from_utf8_lossy(&crl_key()).into_owned(),
+            ));
+        }
+        *current = Some((state.clone(), expected_version + 1));
+        Ok(())
+    }
+
+    async fn list_history_certs(&self) -> Result<Vec<CertRecord>, PkiStoreError> {
+        Ok(self
+            .history
+            .lock()
+            .values()
+            .flat_map(|by_serial| by_serial.values().cloned())
+            .collect())
+    }
+
+    async fn delete_history_cert(&self, cn: &str, serial: &str) -> Result<(), PkiStoreError> {
+        if let Some(by_serial) = self.history.lock().get_mut(cn) {
+            by_serial.remove(serial);
+        }
+        Ok(())
+    }
+
+    async fn delete_active_cert_cas(
+        &self,
+        cn: &str,
+        expected_version: i64,
+    ) -> Result<(), PkiStoreError> {
+        let mut active = self.active.lock();
+        let mut versions = self.active_versions.lock();
+        let current = versions.get(cn).copied().unwrap_or(0);
+        if current != expected_version {
+            return Err(PkiStoreError::VersionConflict(
+                String::from_utf8_lossy(&active_key(cn)).into_owned(),
+            ));
+        }
+        active.remove(cn);
+        // 删除后下一位创建者应能用 Version==0 CAS：版本条目一并清掉。
+        versions.remove(cn);
         Ok(())
     }
 }
@@ -656,6 +894,182 @@ impl PkiStore for KvPkiStore {
         } else {
             Err(PkiStoreError::VersionConflict(
                 String::from_utf8_lossy(&active_key(cn)).into_owned(),
+            ))
+        }
+    }
+
+    async fn create_revocation(&self, record: &RevocationRecord) -> Result<(), PkiStoreError> {
+        let key = revocation_key(&record.cert_serial);
+        let value = serialize_revocation(record)?;
+        let (compares, ops) = create_cas_ops(key.clone(), value);
+        let resp = self
+            .inner
+            .client
+            .txn()
+            .txn(compares, ops, vec![])
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        if resp.succeeded {
+            Ok(())
+        } else {
+            Err(PkiStoreError::AlreadyExists(
+                String::from_utf8_lossy(&key).into_owned(),
+            ))
+        }
+    }
+
+    async fn get_revocation(
+        &self,
+        cert_serial: &str,
+    ) -> Result<Option<RevocationRecord>, PkiStoreError> {
+        let key = revocation_key(cert_serial);
+        let pairs = self
+            .inner
+            .client
+            .kv()
+            .range(&key, &[], 1, 0)
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        match pairs.first() {
+            Some((_k, v)) => deserialize_revocation(v).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn list_revocations(&self) -> Result<Vec<RevocationRecord>, PkiStoreError> {
+        let prefix = revocation_prefix();
+        let range_end = prefix_end(&prefix);
+        let pairs = self
+            .inner
+            .client
+            .kv()
+            .range(&prefix, &range_end, 0, 0)
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        let mut out = Vec::with_capacity(pairs.len());
+        for (_k, v) in pairs {
+            out.push(deserialize_revocation(&v)?);
+        }
+        Ok(out)
+    }
+
+    async fn get_crl_state(&self) -> Result<Option<(CrlState, i64)>, PkiStoreError> {
+        let (kvs, _count, _rev) = self
+            .inner
+            .client
+            .kv()
+            .range_with_lease_full(&crl_key(), &[], 1, 0, false, false)
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        match kvs.first() {
+            Some((_k, v, _lease, version)) => Ok(Some((deserialize_crl_state(v)?, *version))),
+            None => Ok(None),
+        }
+    }
+
+    async fn cas_crl_state(
+        &self,
+        expected_version: i64,
+        state: &CrlState,
+    ) -> Result<(), PkiStoreError> {
+        let key = crl_key();
+        let value = serialize_crl_state(state)?;
+        let (compares, ops) = if expected_version == 0 {
+            create_cas_ops(key.clone(), value)
+        } else {
+            (
+                vec![Compare {
+                    result: CompareResult::Equal as i32,
+                    target: Target::Version as i32,
+                    key: key.clone(),
+                    target_value: Some(TargetValue::Version(expected_version)),
+                }],
+                vec![RequestOp {
+                    op: Some(Op::RequestPut(PutRequest {
+                        key: key.clone(),
+                        value,
+                        lease_id: 0,
+                        prev_kv: false,
+                        request_id: vec![],
+                    })),
+                }],
+            )
+        };
+        let resp = self
+            .inner
+            .client
+            .txn()
+            .txn(compares, ops, vec![])
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        if resp.succeeded {
+            Ok(())
+        } else {
+            Err(PkiStoreError::VersionConflict(
+                String::from_utf8_lossy(&key).into_owned(),
+            ))
+        }
+    }
+
+    async fn list_history_certs(&self) -> Result<Vec<CertRecord>, PkiStoreError> {
+        let prefix = history_root_prefix();
+        let range_end = prefix_end(&prefix);
+        let pairs = self
+            .inner
+            .client
+            .kv()
+            .range(&prefix, &range_end, 0, 0)
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        let mut out = Vec::with_capacity(pairs.len());
+        for (_k, v) in pairs {
+            out.push(deserialize_cert(&v)?);
+        }
+        Ok(out)
+    }
+
+    async fn delete_history_cert(&self, cn: &str, serial: &str) -> Result<(), PkiStoreError> {
+        self.inner
+            .client
+            .kv()
+            .delete(&history_key(cn, serial))
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_active_cert_cas(
+        &self,
+        cn: &str,
+        expected_version: i64,
+    ) -> Result<(), PkiStoreError> {
+        let key = active_key(cn);
+        let compare = Compare {
+            result: CompareResult::Equal as i32,
+            target: Target::Version as i32,
+            key: key.clone(),
+            target_value: Some(TargetValue::Version(expected_version)),
+        };
+        let delete = RequestOp {
+            op: Some(Op::RequestDelete(coord_proto::kv::DeleteRequest {
+                key: key.clone(),
+                range_end: vec![],
+                prev_kv: false,
+                request_id: vec![],
+            })),
+        };
+        let resp = self
+            .inner
+            .client
+            .txn()
+            .txn(vec![compare], vec![delete], vec![])
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        if resp.succeeded {
+            Ok(())
+        } else {
+            Err(PkiStoreError::VersionConflict(
+                String::from_utf8_lossy(&key).into_owned(),
             ))
         }
     }

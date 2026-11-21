@@ -41,3 +41,4 @@
 | [ADR-0017](0017-kv-t-default-on.md) | KV-T GA 后默认启用：`[kv_t].enabled` 改为三态 | accepted |
 | [ADR-0018](0018-data-plane-convergence.md) | 数据面收敛：单一数据面（v2）、`coord dev` 跑 v2 与 v1 退场 | accepted |
 | [ADR-0019](0019-kms-key-custody.md) | KMS 化：coord 托管密钥材料与远程签名（取代 B-TR-1 / B-PKI-1 的定位） | accepted |
+| [ADR-0020](0020-pki-revocation.md) | PKI 吊销面：RevokeCert / GetCertStatus / CRL / Tidy（取代 B-PKI-1 的「无吊销」口径） | accepted |

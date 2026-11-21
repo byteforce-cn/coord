@@ -319,8 +319,9 @@ HMAC 与 DEK 共用材料集合，但**不参与 `Rewrap`**；迁移 = 业务按
 ### 4.5 PKI 证书轮换与泄露应急（G-PKI-3）
 
 > 适用 `coord.pki.v1`。CA 材料存 server KV（多 agent 共享同一根），agent 只是签发面。
-> **没有** CRL/OCSP、也**没有** revoke RPC——泄露收口 = CN 轮换 + 消费侧剔除
-> （口径与优先级见 `security.md` §3）。
+> 吊销是 CA 侧权威事实（ADR-0020）：`RevokeCert` / `GetCertStatus` / `GetCrl` /
+> `RotateCrl` / `Tidy`；没有 OCSP、没有 HTTP CRL 端点，CRL 缓存/刷新由消费方负责
+> （口径与优先级见 `security.md` §3.2）。
 
 **常规轮换（到期前处理 `CoordPkiCertExpiringSoon`，窗口默认 6h）**：
 
@@ -347,17 +348,42 @@ TLS/mTLS 集群把 `-plaintext` 换成 `-cacert <ca.pem>`（必要时 `-cert/-ke
 （不再有私钥材料），`VerifyCert` `valid=true`；`ListCerts` 可见 active（新）+
 retired（旧）并存（滚动验签窗口）。
 
+**保留期回收**：`Tidy(retention_seconds)` 回收 `not_after + retention` 之前到期的
+历史/过期 active 记录（0 = 服务端默认，默认 24h）。吊销账本不回收。
+
 **泄露应急（严格按此顺序）**：
 
-1. **先剔除信任**：把受影响 CN 从**消费侧** mTLS 授权 / 校验白名单移除——
-   即刻生效，不依赖 CA（CA 侧无法阻止不校验本 store 的消费方继续接受旧
-   证书）；
-2. **再作废材料**：`RotateCert`（同 CN）或换新 CN `IssueCert`；若需按序列号
-   恢复签名能力用 `RenewCert(serial)`。私钥在 coord 内，**不需要**（也不应该）
-   把旧 leaf key 导出后继续使用；确需受控恢复时走 `Transit/ExportKey`
+1. **CA 侧吊销**：`RevokeCert` 受影响 serial（reason = RFC 5280 CRLReason，如
+   `KEY_COMPROMISE`）。`VerifyCert` 立即返回 `valid=false`，`GetCertStatus` 立即为
+   `revoked`；吊销账本跨实例/重启共享，重复吊销幂等：
+
+   ```bash
+   grpcurl -plaintext -H "authorization: Bearer $COORD_TOKEN" \
+     -d '{"serial":"<旧 serial>","reason":"PKI_REVOCATION_REASON_KEY_COMPROMISE"}' \
+     <agent>:<port> coord.pki.v1.Pki/RevokeCert
+   ```
+
+2. **分发 CRL**（第三方验签方）：`GetCrl` / `RotateCrl` 取新 CRL 并让所有 TrustManager
+   重新拉取——**吊销生效延迟 = 消费方的 CRL/KV 缓存窗口**；没有后台发布任务，也不会
+   主动推送。
+
+   ```bash
+   grpcurl -plaintext -H "authorization: Bearer $COORD_TOKEN" \
+     -d '{"format":"PKI_CRL_FORMAT_PEM"}' \
+     <agent>:<port> coord.pki.v1.Pki/RotateCrl
+   ```
+
+3. **并行剔除信任**：把受影响 CN 从**消费侧** mTLS 授权 / 校验白名单移除。
+   不查 CRL、也不调 `VerifyCert` 的消费方**不会**因为 CA 侧吊销而拒绝旧证书——
+   这一步仍然必要。
+4. **恢复身份**：`RotateCert`（同 CN，显式换新身份；旧 serial 永久 revoked）；
+   **不要**指望 `IssueCert` 自动重签——它对已吊销 CN 返回 `FAILED_PRECONDITION`。
+   外部密钥（CSR 签发）身份被吊销是终态，必须换新 CN。私钥在 coord 内，**不需要**
+   （也不应该）把旧 leaf key 导出后继续使用；确需受控恢复时走 `Transit/ExportKey`
    （`coord:transit:key_export`），并把该动作按私钥读取事件审计；
-3. **负控制验证**：用旧证书做一次验证/连接——**必须失败**；
-4. **归档**：CN / 旧 serial / 新 serial / 时间 / 执行人（演练记录按 §7）。
+5. **负控制验证**：旧证书 `VerifyCert` **必须** `valid=false`，`GetCrl` 的条目必须包含
+   该 serial；
+6. **归档**：CN / 旧 serial / 新 serial / reason / 时间 / 执行人（演练记录按 §7）。
 
 **内部键空间与升级**：证书记录与 CA **引用**落在 `/_pki/`；私钥材料（KEK 包裹）
 落在 `/_transit/keys` + `/_transit/keymat`。鉴权开启时 `/_pki/`、`/_transit/` 与

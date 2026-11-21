@@ -1,3 +1,27 @@
+## [contracts/v2.3.0] — 2026-11-21（Minor：PKI 吊销面）
+
+**发布口径**：**Minor**（`coord.pki.v1` 纯新增 5 个 RPC、`PkiRevocationReason` /
+`PkiCrlFormat` 枚举与对应消息；不改既有字段号/类型、不删 RPC，`buf breaking` 基线不变）。
+行为收紧：`VerifyCert` 多一条「serial 未被吊销」判据。
+
+- 新增 `Pki/RevokeCert(PkiRevokeCertRequest) -> PkiRevokeCertResponse`：按记录 serial 或
+  证书内嵌 X.509 serial 写吊销账本（RFC 5280 CRLReason）；重复吊销幂等（保留首次
+  reason/revoked_at/by）；未知 serial ⇒ `NOT_FOUND`；`by` 取自鉴权主体，不接受自报。
+- 新增 `Pki/GetCertStatus(PkiGetCertStatusRequest) -> PkiGetCertStatusResponse`：
+  `status ∈ {active, retired, expired, revoked}`；`revoked` 覆盖 `expired`。
+- 新增 `Pki/GetCrl` / `Pki/RotateCrl`：CA 签名 CRL（PEM/DER），编号持久化且单调——
+  吊销集合变化（或 `next_update` 已过）时 `GetCrl` 分配新编号，否则复用编号，
+  `RotateCrl` 强制换号；
+  `next_update = this_update + crl_ttl_hours`。仅 RPC 分发，无 HTTP 端点。
+- 新增 `Pki/Tidy(PkiTidyRequest) -> PkiTidyResponse`：回收 `not_after + retention` 之前
+  到期的历史/过期 active 记录；吊销账本与已吊销记录**不回收**。
+- 状态域与口径：`status` 增加 `revoked`；记录 serial 与证书内嵌 X.509 serial 一致
+  （此前记录 serial 与证书内嵌值无关，CRL/第三方验签无法引用）。
+- 不静默复活：`IssueCert` / `SignCsr` 对已吊销的当前身份、`RenewCert(已吊销 serial)`
+  返回 `FAILED_PRECONDITION`；`RotateCert` 是显式换新身份路径（旧 serial 永久 revoked）。
+- 能力：新增 `pki:cert:revoke`（RevokeCert / RotateCrl / Tidy）；`GetCertStatus` / `GetCrl`
+  沿用 `pki:cert:read`。
+
 ## [contracts/v2.2.0] — 2026-11-20（Minor：PKI CSR 签发与 usage → KU/EKU）
 
 **发布口径**：**Minor**（`coord.pki.v1` 纯新增 `SignCsr` RPC / 消息与

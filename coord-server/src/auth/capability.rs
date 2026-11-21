@@ -611,6 +611,11 @@ const BUILTIN_CAPABILITY_META: &[(&str, CapabilityType, &str)] = &[
         CapabilityType::Write,
         "轮换证书（Pki/RotateCert）",
     ),
+    (
+        "pki:cert:revoke",
+        CapabilityType::Write,
+        "吊销证书 / 轮换 CRL / 回收证书历史（RevokeCert/RotateCrl/Tidy）",
+    ),
     // ──── admin ────
     (
         "admin:auth:bootstrap_token",
@@ -803,7 +808,12 @@ const DEPRECATED_CAPABILITIES: &[(&str, CapabilityType, &str, &str)] = &[
         "查询证书",
         "pki:cert:read",
     ),
-    ("coord:pki:revoke", CapabilityType::Write, "吊销证书", ""),
+    (
+        "coord:pki:revoke",
+        CapabilityType::Write,
+        "吊销证书",
+        "pki:cert:revoke",
+    ),
     (
         "coord:resilience:circuit_breaker",
         CapabilityType::Write,
@@ -1269,8 +1279,8 @@ mod tests {
         registry.bootstrap_builtin();
         assert_eq!(
             registry.count(),
-            125,
-            "should have all 125 built-in capabilities (94 live: data 12 / coord 52 / pki 4 / admin 26; \
+            126,
+            "should have all 126 built-in capabilities (95 live: data 12 / coord 52 / pki 5 / admin 26; \
              31 deprecated: data 7 / coord 23 / admin 1)"
         );
     }
@@ -1368,19 +1378,19 @@ mod tests {
         let registry = CapabilityRegistry::new();
         registry.bootstrap_builtin();
         let all_caps = registry.list();
-        assert_eq!(all_caps.len(), 125);
+        assert_eq!(all_caps.len(), 126);
 
-        // Encrypt all 120 capabilities
+        // Encrypt all 126 capabilities
         let encrypted_all = store
             .encrypt_all(&all_caps)
             .expect("encrypt all should succeed");
-        assert_eq!(encrypted_all.len(), 125);
+        assert_eq!(encrypted_all.len(), 126);
 
         // Decrypt all
         let decrypted_all = store
             .decrypt_all(&encrypted_all)
             .expect("decrypt all should succeed");
-        assert_eq!(decrypted_all.len(), 125);
+        assert_eq!(decrypted_all.len(), 126);
 
         // Verify round-trip for each
         for (orig, dec) in all_caps.iter().zip(decrypted_all.iter()) {

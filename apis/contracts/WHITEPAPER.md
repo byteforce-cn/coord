@@ -71,7 +71,7 @@ COMMITTED 服务带公开的目标日期（§13）：目标日期逾期而未落
 | 熔断器 | `coord.circuitbreaker.v1` | `GetState` / `ReportSuccess` / `ReportFailure` / `Reset` | 2026-12-31 |
 | 限流器 | `coord.ratelimiter.v1` | `Allow` | 2026-12-31 |
 | 安全传输（信封加密） | `coord.transit.v1` | `Encrypt` / `Decrypt` / `HmacSign` / `HmacVerify` / `Rewrap` | 2026-12-31 |
-| PKI 证书签发 | `coord.pki.v1` | `InitCa` / `IssueCert` / `RenewCert` / `SignCsr` / `VerifyCert` / `GetCaCert` / `RotateCert` / `ListCerts` / `GetCertByCN` / `GetCertBySerial` | 2026-12-31 |
+| PKI 证书签发 | `coord.pki.v1` | `InitCa` / `IssueCert` / `RenewCert` / `SignCsr` / `VerifyCert` / `GetCaCert` / `RotateCert` / `ListCerts` / `GetCertByCN` / `GetCertBySerial` / `RevokeCert` / `GetCertStatus` / `GetCrl` / `RotateCrl` / `Tidy` | 2026-12-31 |
 | 缓存 | `coord.cache.v1` | `Get` / `Set` / `Delete` / `HGet` / `HSet` / `HGetAll` / `LPush` / `LRange` / `RPop` / `LLen` / `SAdd` / `SMembers` | 2026-12-31 |
 | 消息队列 | `coord.mq.v1` | `CreateTopic` / `Publish` / `Subscribe` / `Poll` / `Ack` / `PollDlq` / `GetTopicLeader` / `MoveToDlq` / `DeleteTopic` | 2026-12-31 |
 | 特性开关 | `coord.featureflags.v1` | `IsEnabled` / `Evaluate` | 2026-12-31 |

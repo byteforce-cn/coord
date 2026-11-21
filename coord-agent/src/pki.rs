@@ -27,7 +27,8 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::pki_store::{
-    CaRecord, CertRecord, CertStatus, CertUsage, MemoryPkiStore, PkiStore, PkiStoreError,
+    CaRecord, CertRecord, CertStatus, CertUsage, CrlState, MemoryPkiStore, PkiStore, PkiStoreError,
+    RevocationReason, RevocationRecord,
 };
 use crate::services::transit_key::{
     CreateKeySpec, ImportKeySpec, KeyError, KeyType, MaterialFormat, TransitKeyRegistry,
@@ -47,6 +48,16 @@ pub struct PkiConfig {
     #[serde(default = "default_expiry_warn_hours")]
     pub expiry_warn_hours: i64,
 
+    /// CRL 的 next_update 窗口（小时，默认 24）：`GetCrl` 返回的 CRL 只承诺到
+    /// this_update + 该值；消费方须在此之前重新拉取。
+    #[serde(default = "default_crl_ttl_hours")]
+    pub crl_ttl_hours: u32,
+
+    /// 证书到期后的历史保留期（小时，默认 24）：`Tidy` 回收更早的记录；
+    /// 吊销记录不回收（见 ADR-0020）。
+    #[serde(default = "default_history_retention_hours")]
+    pub history_retention_hours: u32,
+
     /// CA 证书路径（用于持久化）
     #[serde(default)]
     pub ca_cert_path: Option<PathBuf>,
@@ -64,11 +75,21 @@ fn default_expiry_warn_hours() -> i64 {
     6
 }
 
+fn default_crl_ttl_hours() -> u32 {
+    24
+}
+
+fn default_history_retention_hours() -> u32 {
+    24
+}
+
 impl Default for PkiConfig {
     fn default() -> Self {
         Self {
             cert_ttl_hours: 24,
             expiry_warn_hours: 6,
+            crl_ttl_hours: 24,
+            history_retention_hours: 24,
             ca_cert_path: None,
             ca_key_path: None,
         }
@@ -117,6 +138,39 @@ impl From<CertRecord> for CertInfo {
             usage: r.usage,
         }
     }
+}
+
+/// 按 serial 的状态查询结果（`GetCertStatus`）。
+#[derive(Debug, Clone)]
+pub struct CertStatusInfo {
+    /// 请求的 serial（原样回显）
+    pub serial: String,
+    /// 证书内嵌的 X.509 serial
+    pub cert_serial: String,
+    pub common_name: String,
+    /// active / retired / expired / revoked
+    pub status: String,
+    pub not_before: i64,
+    pub not_after: i64,
+    /// 吊销记录（未吊销为 None）
+    pub revocation: Option<RevocationRecord>,
+}
+
+/// 生成好的 CRL 及编号/时间窗口。
+#[derive(Debug, Clone)]
+pub struct CrlMaterial {
+    pub der: Vec<u8>,
+    pub pem: String,
+    pub crl_number: u64,
+    pub this_update: i64,
+    pub next_update: i64,
+}
+
+/// `Tidy` 的执行结果。
+#[derive(Debug, Clone)]
+pub struct TidyResult {
+    pub retention_seconds: i64,
+    pub removed_certs: u64,
 }
 
 // ──── SanSpec ────
@@ -506,6 +560,29 @@ impl PkiService {
                 "certificate {serial} uses a caller-held key; renew requires a new CSR via Pki/SignCsr"
             )));
         }
+        // 吊销是永久事实：按已吊销 serial 续期等于复活该身份。
+        if self.is_record_revoked(&old).await? {
+            return Err(PkiError::FailedPrecondition(format!(
+                "certificate {serial} is revoked; renew would resurrect it — RotateCert issues a \
+                 new identity explicitly"
+            )));
+        }
+        // 同一个 CN 的「当前身份」已吊销时，续期任意历史 serial 也会隐式换新身份；
+        // 必须走显式 RotateCert。
+        if let Some(current) = self
+            .store
+            .get_cert(&old.common_name)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            if self.is_record_revoked(&current).await? {
+                return Err(PkiError::FailedPrecondition(format!(
+                    "current certificate for CN {} is revoked (serial {}); renew would resurrect \
+                     the identity — use RotateCert",
+                    current.common_name, current.serial
+                )));
+            }
+        }
         // RenewCert 无 SAN / usage 入参：继承旧记录（无 SAN 的旧记录由 CN 派生）。
         self.ensure_cert(
             &old.common_name,
@@ -597,6 +674,16 @@ impl PkiService {
                              renew/rotate requires a new CSR via Pki/SignCsr"
                         )));
                     }
+                    // 已吊销的当前身份不得被 get-or-create 隐式重签（ADR-0020）；
+                    // RotateCert（force_rotate=true）是显式换新身份的路径。
+                    if !force_rotate && self.is_record_revoked(&record).await? {
+                        return Err(PkiError::FailedPrecondition(format!(
+                            "certificate for CN {common_name} is revoked (serial {}); \
+                             IssueCert will not re-issue implicitly — use RotateCert for a new \
+                             identity or SignCsr with a new CN",
+                            record.serial
+                        )));
+                    }
                     let want_usage = usage.unwrap_or(record.usage);
                     // 幂等快路径：未过期 + 非强制轮换 + 同一密钥归属 + SAN/TTL/usage 一致。
                     // 外部密钥记录不能作为 managed 签发的幂等命中。
@@ -682,10 +769,30 @@ impl PkiService {
             .list_certs(common_name)
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?;
-        Ok(records.into_iter().map(Into::into).collect())
+        let revoked: std::collections::HashSet<String> = self
+            .store
+            .list_revocations()
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+            .into_iter()
+            .map(|r| r.cert_serial)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(records.len());
+        for record in records {
+            if !seen.insert(record.serial.clone()) {
+                continue;
+            }
+            let mut info: CertInfo = record.clone().into();
+            if revoked.contains(&record_cert_serial(&record)) {
+                info.status = CertStatus::Revoked;
+            }
+            out.push(info);
+        }
+        Ok(out)
     }
 
-    /// 按 CN 幂等取回当前有效证书（含私钥；无或已过期返回 Ok(None)）
+    /// 按 CN 幂等取回当前有效证书（无 / 已过期 / 已吊销 ⇒ Ok(None)）
     pub async fn get_cert_by_cn(&self, common_name: &str) -> Result<Option<CertInfo>, PkiError> {
         match self
             .store
@@ -693,7 +800,12 @@ impl PkiService {
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?
         {
-            Some(record) if !record.is_expired(now_unix()) => Ok(Some(record.into())),
+            Some(record) if !record.is_expired(now_unix()) => {
+                if self.is_record_revoked(&record).await? {
+                    return Ok(None);
+                }
+                Ok(Some(record.into()))
+            }
             _ => Ok(None),
         }
     }
@@ -707,7 +819,302 @@ impl PkiService {
             .get_cert_by_serial(serial)
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?;
-        Ok(record.map(Into::into))
+        match record {
+            Some(record) => {
+                let mut info: CertInfo = record.clone().into();
+                if self.is_record_revoked(&record).await? {
+                    info.status = CertStatus::Revoked;
+                }
+                Ok(Some(info))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 证书当前是否已被吊销（吊销账本按证书内嵌 serial 索引）。
+    async fn is_record_revoked(&self, record: &CertRecord) -> Result<bool, PkiError> {
+        let cert_serial = record_cert_serial(record);
+        Ok(self
+            .store
+            .get_revocation(&cert_serial)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+            .is_some())
+    }
+
+    /// 吊销证书（幂等）。
+    ///
+    /// `serial` 接受签发记录里的 serial（IssueCert 响应）或证书内嵌的 X.509 serial。
+    /// 账本以**证书内嵌 serial** 为键：CRL 与第三方验签方看到的是同一个值。
+    /// 重复吊销返回首次记录（保留原 reason / revoked_at / by）。
+    pub async fn revoke_cert(
+        &self,
+        serial: &str,
+        reason: RevocationReason,
+        by: &str,
+    ) -> Result<RevocationRecord, PkiError> {
+        let normalized = serial.trim().to_lowercase();
+        if normalized.is_empty() {
+            return Err(PkiError::InvalidArgument("serial is empty".to_string()));
+        }
+        // 传入的就是证书 serial（或已吊销）：幂等返回首次记录。
+        if let Some(existing) = self
+            .store
+            .get_revocation(&normalized)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            return Ok(existing);
+        }
+        let record = self
+            .store
+            .get_cert_by_serial(&normalized)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+            .ok_or_else(|| PkiError::CertNotFound(serial.to_string()))?;
+        let cert_serial = record_cert_serial(&record);
+        if let Some(existing) = self
+            .store
+            .get_revocation(&cert_serial)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            return Ok(existing);
+        }
+        let by = by.trim();
+        let revocation = RevocationRecord {
+            cert_serial: cert_serial.clone(),
+            record_serial: record.serial.clone(),
+            common_name: record.common_name.clone(),
+            reason,
+            revoked_at: now_unix(),
+            by: if by.is_empty() {
+                "anonymous".to_string()
+            } else {
+                by.to_string()
+            },
+        };
+        match self.store.create_revocation(&revocation).await {
+            Ok(()) => Ok(revocation),
+            // 并发吊销：返回胜者（幂等）
+            Err(PkiStoreError::AlreadyExists(_)) => self
+                .store
+                .get_revocation(&cert_serial)
+                .await
+                .map_err(|e| PkiError::Store(e.to_string()))?
+                .ok_or_else(|| PkiError::Store("revocation vanished after CAS conflict".into())),
+            Err(e) => Err(PkiError::Store(e.to_string())),
+        }
+    }
+
+    /// 按 serial 查状态（active / retired / expired / revoked）。
+    ///
+    /// 吊销优先于过期：过期且已吊销的 serial 返回 revoked。
+    pub async fn get_cert_status(&self, serial: &str) -> Result<CertStatusInfo, PkiError> {
+        let normalized = serial.trim().to_lowercase();
+        if normalized.is_empty() {
+            return Err(PkiError::InvalidArgument("serial is empty".to_string()));
+        }
+        let record = self
+            .store
+            .get_cert_by_serial(&normalized)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?;
+        let cert_serial = record
+            .as_ref()
+            .map(record_cert_serial)
+            .unwrap_or_else(|| normalized.clone());
+        let mut revocation = self
+            .store
+            .get_revocation(&normalized)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?;
+        if revocation.is_none() && cert_serial != normalized {
+            revocation = self
+                .store
+                .get_revocation(&cert_serial)
+                .await
+                .map_err(|e| PkiError::Store(e.to_string()))?;
+        }
+        if let Some(revocation) = revocation {
+            return Ok(CertStatusInfo {
+                serial: serial.to_string(),
+                cert_serial: revocation.cert_serial.clone(),
+                common_name: revocation.common_name.clone(),
+                status: status_to_str(CertStatus::Revoked).to_string(),
+                not_before: record.as_ref().map(|r| r.not_before).unwrap_or(0),
+                not_after: record.as_ref().map(|r| r.not_after).unwrap_or(0),
+                revocation: Some(revocation),
+            });
+        }
+        let record = record.ok_or_else(|| PkiError::CertNotFound(serial.to_string()))?;
+        Ok(CertStatusInfo {
+            serial: serial.to_string(),
+            cert_serial,
+            common_name: record.common_name.clone(),
+            status: status_to_str_at(record.status, record.not_after).to_string(),
+            not_before: record.not_before,
+            not_after: record.not_after,
+            revocation: None,
+        })
+    }
+
+    /// 当前 CRL（内容未变化时复用已持久化的 CRL number）。
+    pub async fn get_crl(&self) -> Result<CrlMaterial, PkiError> {
+        self.crl_material(false).await
+    }
+
+    /// 强制分配新 CRL number 并重签（即使吊销集合未变）。
+    pub async fn rotate_crl(&self) -> Result<CrlMaterial, PkiError> {
+        self.crl_material(true).await
+    }
+
+    async fn crl_material(&self, force_new: bool) -> Result<CrlMaterial, PkiError> {
+        let (state, revocations) = self.ensure_crl_state(force_new).await?;
+        let ca = {
+            let guard = self.ca.read();
+            guard.as_ref().cloned().ok_or(PkiError::CaNotInitialized)?
+        };
+        let ca_key_pem = self
+            .keys
+            .private_key_pem(&ca.key_name, ca.key_version)
+            .await
+            .map_err(|e| PkiError::Key(e.to_string()))?;
+        let crl_state = state.clone();
+        let crl_cert_pem = ca.cert_pem;
+        let (der, pem) = tokio::task::spawn_blocking(move || {
+            build_crl(&crl_cert_pem, &ca_key_pem, &crl_state, &revocations)
+        })
+        .await
+        .map_err(|e| PkiError::CertGen(format!("crl blocking task join: {e}")))??;
+        Ok(CrlMaterial {
+            der,
+            pem,
+            crl_number: state.crl_number,
+            this_update: state.this_update,
+            next_update: state.next_update,
+        })
+    }
+
+    /// 决定本次 CRL 的编号与时间窗口。
+    ///
+    /// - 内容（吊销集合）未变且不强制轮换 → 复用持久化状态（编号稳定）；
+    /// - 否则分配 `number + 1` 并 CAS 持久化（并发冲突重读重试）。
+    async fn ensure_crl_state(
+        &self,
+        force_new: bool,
+    ) -> Result<(CrlState, Vec<RevocationRecord>), PkiError> {
+        let revocations = self
+            .store
+            .list_revocations()
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?;
+        let content_hash = revocation_content_hash(&revocations);
+        for _ in 0..Self::MAX_REPLACE_ATTEMPTS {
+            let current = self
+                .store
+                .get_crl_state()
+                .await
+                .map_err(|e| PkiError::Store(e.to_string()))?;
+            let version = current.as_ref().map(|(_, v)| *v).unwrap_or(0);
+            if let Some((state, _)) = &current {
+                // 内容未变且仍在承诺窗口内才复用；next_update 已过必须换号重签，
+                // 否则消费方拿到的是过期 CRL（没有后台发布任务可依赖）。
+                if !force_new
+                    && state.content_hash == content_hash
+                    && now_unix() < state.next_update
+                {
+                    return Ok((state.clone(), revocations));
+                }
+            }
+            let crl_number = current
+                .as_ref()
+                .map(|(state, _)| state.crl_number + 1)
+                .unwrap_or(1);
+            let this_update = now_unix();
+            let state = CrlState {
+                crl_number,
+                content_hash: content_hash.clone(),
+                this_update,
+                next_update: this_update + self.config.crl_ttl_hours as i64 * 3600,
+            };
+            match self.store.cas_crl_state(version, &state).await {
+                Ok(()) => return Ok((state, revocations)),
+                Err(PkiStoreError::VersionConflict(_)) => continue,
+                Err(e) => return Err(PkiError::Store(e.to_string())),
+            }
+        }
+        Err(PkiError::Store(
+            "crl number allocation attempts exhausted (persistent concurrent rotate)".to_string(),
+        ))
+    }
+
+    /// 回收历史证书记录（`not_after + retention` 之前到期）。
+    ///
+    /// 吊销账本**不回收**：serial 的 revoked 状态是永久事实。被吊销的证书记录
+    /// 也保留（active 槽位上的吊销记录同时承担「同 CN 不得静默重签」的阻断职责）。
+    pub async fn tidy(&self, retention_seconds: i64) -> Result<TidyResult, PkiError> {
+        let retention = if retention_seconds > 0 {
+            retention_seconds
+        } else {
+            self.config.history_retention_hours as i64 * 3600
+        };
+        let cutoff = now_unix() - retention;
+        let revoked: std::collections::HashSet<String> = self
+            .store
+            .list_revocations()
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+            .into_iter()
+            .map(|r| r.cert_serial)
+            .collect();
+        let mut removed_certs = 0u64;
+        for record in self
+            .store
+            .list_history_certs()
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            if record.not_after < cutoff && !revoked.contains(&record_cert_serial(&record)) {
+                self.store
+                    .delete_history_cert(&record.common_name, &record.serial)
+                    .await
+                    .map_err(|e| PkiError::Store(e.to_string()))?;
+                removed_certs += 1;
+            }
+        }
+        for record in self
+            .store
+            .list_active_certs()
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            if record.not_after >= cutoff || revoked.contains(&record_cert_serial(&record)) {
+                continue;
+            }
+            // 读版本后 CAS 删除：并发轮换（已写入新记录）时跳过，不误删新证书。
+            let Some((_current, version)) = self
+                .store
+                .get_cert_with_version(&record.common_name)
+                .await
+                .map_err(|e| PkiError::Store(e.to_string()))?
+            else {
+                continue;
+            };
+            match self
+                .store
+                .delete_active_cert_cas(&record.common_name, version)
+                .await
+            {
+                Ok(()) => removed_certs += 1,
+                Err(PkiStoreError::VersionConflict(_)) => {}
+                Err(e) => return Err(PkiError::Store(e.to_string())),
+            }
+        }
+        Ok(TidyResult {
+            retention_seconds: retention,
+            removed_certs,
+        })
     }
 
     /// 用调用方 CSR 的公钥签发（PoP 必须通过；私钥不进入 coord）。
@@ -731,6 +1138,14 @@ impl PkiService {
                 .map_err(|e| PkiError::Store(e.to_string()))?
             {
                 Some((record, version)) => {
+                    // 当前身份已吊销：CSR 签发会隐式复活同一 CN（ADR-0020）。
+                    if self.is_record_revoked(&record).await? {
+                        return Err(PkiError::FailedPrecondition(format!(
+                            "certificate for CN {common_name} is revoked (serial {}); sign with a \
+                             new CN instead of resurrecting the revoked identity",
+                            record.serial
+                        )));
+                    }
                     if !record.is_expired(now_unix())
                         && record.is_external()
                         && record.spki_sha256 == csr.spki_sha256
@@ -974,6 +1389,8 @@ fn sign_cert_with_ca(
     let ttl = time::Duration::seconds(effective_ttl_seconds(ttl_seconds, default_ttl_hours) as i64);
     params.not_before = now;
     params.not_after = now + ttl;
+    let (serial, serial_number) = new_serial();
+    params.serial_number = Some(serial_number);
 
     let ca_key = KeyPair::from_pem(ca_key_pem).map_err(|e| PkiError::KeyGen(e.to_string()))?;
 
@@ -989,7 +1406,6 @@ fn sign_cert_with_ca(
 
     let not_before = now.unix_timestamp();
     let not_after = (now + ttl).unix_timestamp();
-    let serial = format!("{:x}", rand::random::<u64>());
 
     Ok(CertRecord {
         common_name: common_name.to_string(),
@@ -1173,6 +1589,8 @@ fn sign_external_cert_with_ca(
     let ttl = time::Duration::seconds(effective_ttl_seconds(ttl_seconds, default_ttl_hours) as i64);
     params.not_before = now;
     params.not_after = now + ttl;
+    let (serial, serial_number) = new_serial();
+    params.serial_number = Some(serial_number);
 
     let ca_key = KeyPair::from_pem(ca_key_pem).map_err(|e| PkiError::KeyGen(e.to_string()))?;
     let issuer = rcgen::Issuer::from_ca_cert_pem(ca_cert_pem, ca_key)
@@ -1189,7 +1607,7 @@ fn sign_external_cert_with_ca(
         key_version: 0,
         not_before: now.unix_timestamp(),
         not_after: (now + ttl).unix_timestamp(),
-        serial: format!("{:x}", rand::random::<u64>()),
+        serial,
         status,
         parent_serial,
         dns_names: san.dns_names.clone(),
@@ -1206,6 +1624,120 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+/// 新证书的 X.509 serial：16 字节随机、首字节非零（无前导零）、最高位清零（正数）。
+///
+/// 记录 serial 与证书内嵌 serial 逐字一致：吊销账本与 CRL 条目都按这个值定位
+/// （旧记录两者可能不一致，读取时以证书内嵌值为准）。
+fn new_serial() -> (String, rcgen::SerialNumber) {
+    let mut bytes: [u8; 16] = rand::random();
+    bytes[0] = (bytes[0] & 0x7f) | 0x01;
+    (
+        hex::encode(bytes),
+        rcgen::SerialNumber::from(bytes.to_vec()),
+    )
+}
+
+/// 证书内嵌的 X.509 serial（小写 hex）；PEM 无法解析时返回 None。
+fn cert_serial_hex(cert_pem: &str) -> Option<String> {
+    let der = pem_to_der(cert_pem).ok()?;
+    let (_rest, cert) = x509_parser::parse_x509_certificate(&der).ok()?;
+    Some(hex::encode(cert.raw_serial()))
+}
+
+/// 记录对应的证书 serial：以证书内嵌值为准，解析失败回退记录字段。
+fn record_cert_serial(record: &CertRecord) -> String {
+    cert_serial_hex(&record.cert_pem).unwrap_or_else(|| record.serial.to_lowercase())
+}
+
+/// 吊销集合的内容指纹（排序后的 cert_serial + RFC reason）。
+///
+/// CRL 只在内容变化时分配新编号：同一编号必须对应同一份条目集。
+fn revocation_content_hash(revocations: &[RevocationRecord]) -> String {
+    let mut entries: Vec<&RevocationRecord> = revocations.iter().collect();
+    entries.sort_by(|a, b| a.cert_serial.cmp(&b.cert_serial));
+    let mut hasher = Sha256::new();
+    for entry in entries {
+        hasher.update(entry.cert_serial.as_bytes());
+        hasher.update([entry.reason.rfc_code()]);
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// CRL number 的最小大端字节（去掉前导零；`0` 不会出现）。
+fn u64_serial_number(value: u64) -> rcgen::SerialNumber {
+    let bytes = value.max(1).to_be_bytes();
+    let start = bytes
+        .iter()
+        .position(|b| *b != 0)
+        .unwrap_or(bytes.len() - 1);
+    rcgen::SerialNumber::from(bytes[start..].to_vec())
+}
+
+fn rcgen_revocation_reason(reason: RevocationReason) -> rcgen::RevocationReason {
+    match reason {
+        RevocationReason::Unspecified => rcgen::RevocationReason::Unspecified,
+        RevocationReason::KeyCompromise => rcgen::RevocationReason::KeyCompromise,
+        RevocationReason::CaCompromise => rcgen::RevocationReason::CaCompromise,
+        RevocationReason::AffiliationChanged => rcgen::RevocationReason::AffiliationChanged,
+        RevocationReason::Superseded => rcgen::RevocationReason::Superseded,
+        RevocationReason::CessationOfOperation => rcgen::RevocationReason::CessationOfOperation,
+        RevocationReason::CertificateHold => rcgen::RevocationReason::CertificateHold,
+        RevocationReason::PrivilegeWithdrawn => rcgen::RevocationReason::PrivilegeWithdrawn,
+        RevocationReason::AaCompromise => rcgen::RevocationReason::AaCompromise,
+    }
+}
+
+/// 用 CA 材料签发 CRL（阻塞线程池内执行；纯函数）。
+fn build_crl(
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+    state: &CrlState,
+    revocations: &[RevocationRecord],
+) -> Result<(Vec<u8>, String), PkiError> {
+    let ca_key = KeyPair::from_pem(ca_key_pem).map_err(|e| PkiError::KeyGen(e.to_string()))?;
+    let issuer = rcgen::Issuer::from_ca_cert_pem(ca_cert_pem, ca_key)
+        .map_err(|e| PkiError::CertGen(e.to_string()))?;
+
+    let mut entries: Vec<&RevocationRecord> = revocations.iter().collect();
+    entries.sort_by(|a, b| a.cert_serial.cmp(&b.cert_serial));
+    let mut revoked_certs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let serial = hex::decode(&entry.cert_serial).map_err(|e| {
+            PkiError::Store(format!(
+                "revocation record serial {} is not hex: {e}",
+                entry.cert_serial
+            ))
+        })?;
+        revoked_certs.push(rcgen::RevokedCertParams {
+            serial_number: rcgen::SerialNumber::from(serial),
+            revocation_time: OffsetDateTime::from_unix_timestamp(entry.revoked_at)
+                .unwrap_or_else(|_| OffsetDateTime::now_utc()),
+            reason_code: Some(rcgen_revocation_reason(entry.reason)),
+            invalidity_date: None,
+        });
+    }
+
+    let this_update = OffsetDateTime::from_unix_timestamp(state.this_update)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc());
+    let next_update = OffsetDateTime::from_unix_timestamp(state.next_update)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc() + time::Duration::hours(24));
+    let params = rcgen::CertificateRevocationListParams {
+        this_update,
+        next_update,
+        crl_number: u64_serial_number(state.crl_number),
+        issuing_distribution_point: None,
+        revoked_certs,
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    };
+    let crl = params
+        .signed_by(&issuer)
+        .map_err(|e| PkiError::CertGen(format!("crl signing failed: {e}")))?;
+    let pem = crl
+        .pem()
+        .map_err(|e| PkiError::CertGen(format!("crl pem encode failed: {e}")))?;
+    Ok((crl.der().to_vec(), pem))
+}
+
 /// 将 PEM 证书转换为 DER 字节
 fn pem_to_der(pem: &str) -> Result<Vec<u8>, PkiError> {
     let pem = pem.trim();
@@ -1220,13 +1752,20 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>, PkiError> {
 }
 
 impl PkiService {
-    /// 验证证书：有效期窗口 + issuer CN + **CA 公钥验签**。
+    /// 验证证书：有效期窗口 + issuer CN + **CA 公钥验签** + **未被吊销**。
     ///
-    /// 签名不匹配（含同 issuer CN 的伪造 CA）或不在有效期内 ⇒ `Ok(false)`；
-    /// PEM 非法 ⇒ `CertParse`（gRPC 映射为 `INVALID_ARGUMENT`）。
-    pub fn verify_cert(&self, cert_pem: &str) -> Result<bool, PkiError> {
-        let ca_guard = self.ca.read();
-        let ca = ca_guard.as_ref().ok_or(PkiError::CaNotInitialized)?;
+    /// 签名不匹配（含同 issuer CN 的伪造 CA）、不在有效期内或 serial 已在吊销账本
+    /// 中 ⇒ `Ok(false)`；PEM 非法 ⇒ `CertParse`（gRPC 映射为 `INVALID_ARGUMENT`）。
+    pub async fn verify_cert(&self, cert_pem: &str) -> Result<bool, PkiError> {
+        // 不在 await 上持有锁：先取 CA 证书 PEM 再释放 guard。
+        let ca_cert_pem = {
+            let ca_guard = self.ca.read();
+            ca_guard
+                .as_ref()
+                .ok_or(PkiError::CaNotInitialized)?
+                .cert_pem
+                .clone()
+        };
 
         // PEM → DER 转换后解析
         let cert_der = pem_to_der(cert_pem)?;
@@ -1249,7 +1788,7 @@ impl PkiService {
             .map(|cn| cn.as_str().unwrap_or(""))
             .unwrap_or("");
 
-        let ca_der = pem_to_der(&ca.cert_pem)?;
+        let ca_der = pem_to_der(&ca_cert_pem)?;
         let (_ca_remainder, ca_cert) = x509_parser::parse_x509_certificate(&ca_der)
             .map_err(|e| PkiError::CertParse(e.to_string()))?;
 
@@ -1266,7 +1805,19 @@ impl PkiService {
 
         // 只有 issuer 名字匹配不够：必须用 CA 公钥验证签名，否则任何知道 CA CN
         // 的主体都能用自签证书通过。验签失败（含不支持的算法）一律按「不通过」处理。
-        Ok(cert.verify_signature(Some(ca_cert.public_key())).is_ok())
+        if cert.verify_signature(Some(ca_cert.public_key())).is_err() {
+            return Ok(false);
+        }
+
+        // 吊销账本按证书内嵌 serial 索引（与 CRL 条目同一口径）。
+        let serial = hex::encode(cert.raw_serial());
+        let revoked = self
+            .store
+            .get_revocation(&serial)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+            .is_some();
+        Ok(!revoked)
     }
 
     /// 导出 CA 证书 PEM
@@ -1309,6 +1860,19 @@ impl PkiService {
             .list_active_certs()
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?;
+        // 吊销账本里的 active 记录不是「在用证书」，不计入到期观测。
+        let revoked: std::collections::HashSet<String> = self
+            .store
+            .list_revocations()
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+            .into_iter()
+            .map(|r| r.cert_serial)
+            .collect();
+        let records: Vec<_> = records
+            .into_iter()
+            .filter(|r| !revoked.contains(&record_cert_serial(r)))
+            .collect();
         let now = now_unix();
         let window = self.config.expiry_warn_hours;
         let total = records.len() as u64;
@@ -1381,14 +1945,19 @@ impl From<std::io::Error> for PkiError {
 // ──── gRPC trait impl ────
 
 use coord_proto::agent::{
-    pki_server::Pki, PkiCertSummary, PkiCertificateUsage, PkiGetCaCertRequest,
+    pki_server::Pki, PkiCertSummary, PkiCertificateUsage, PkiCrlFormat, PkiGetCaCertRequest,
     PkiGetCaCertResponse, PkiGetCertByCnRequest, PkiGetCertByCnResponse, PkiGetCertBySerialRequest,
-    PkiGetCertBySerialResponse, PkiInitCaRequest, PkiInitCaResponse, PkiIssueCertRequest,
+    PkiGetCertBySerialResponse, PkiGetCertStatusRequest, PkiGetCertStatusResponse,
+    PkiGetCrlRequest, PkiGetCrlResponse, PkiInitCaRequest, PkiInitCaResponse, PkiIssueCertRequest,
     PkiIssueCertResponse, PkiKeyMaterial, PkiListCertsRequest, PkiListCertsResponse,
-    PkiRenewCertRequest, PkiRenewCertResponse, PkiRotateCertRequest, PkiRotateCertResponse,
-    PkiSignCsrRequest, PkiSignCsrResponse, PkiVerifyCertRequest, PkiVerifyCertResponse,
+    PkiRenewCertRequest, PkiRenewCertResponse, PkiRevocationReason, PkiRevokeCertRequest,
+    PkiRevokeCertResponse, PkiRotateCertRequest, PkiRotateCertResponse, PkiRotateCrlRequest,
+    PkiRotateCrlResponse, PkiSignCsrRequest, PkiSignCsrResponse, PkiTidyRequest, PkiTidyResponse,
+    PkiVerifyCertRequest, PkiVerifyCertResponse,
 };
 use tonic::{Request, Response, Status};
+
+use crate::plugin::GatewayIdentity;
 
 /// `PkiError → tonic::Status` 的单一映射点。
 ///
@@ -1411,12 +1980,15 @@ fn status_to_str(status: CertStatus) -> &'static str {
     match status {
         CertStatus::Active => "active",
         CertStatus::Retired => "retired",
+        CertStatus::Revoked => "revoked",
     }
 }
 
-/// 对外状态：过期优先于存储态 active/retired（服务端单一判定点）。
+/// 对外状态：吊销优先于过期，过期优先于存储态 active/retired（服务端单一判定点）。
 fn status_to_str_at(status: CertStatus, not_after: i64) -> &'static str {
-    if now_unix() > not_after {
+    if status == CertStatus::Revoked {
+        "revoked"
+    } else if now_unix() > not_after {
         "expired"
     } else {
         status_to_str(status)
@@ -1461,6 +2033,47 @@ fn optional_cert_usage_from_proto(value: i32) -> Result<Option<CertUsage>, Statu
         Err(_) => Err(Status::invalid_argument(format!(
             "unknown certificate usage: {value}"
         ))),
+    }
+}
+
+/// proto 吊销原因 → RFC 5280 CRLReason；未知数值 fail-closed。
+fn revocation_reason_from_proto(value: i32) -> Result<RevocationReason, Status> {
+    RevocationReason::from_rfc_code(value).ok_or_else(|| {
+        Status::invalid_argument(format!(
+            "unknown revocation reason (RFC 5280 CRLReason): {value}"
+        ))
+    })
+}
+
+fn revocation_reason_to_proto(reason: RevocationReason) -> PkiRevocationReason {
+    match reason {
+        RevocationReason::Unspecified => PkiRevocationReason::Unspecified,
+        RevocationReason::KeyCompromise => PkiRevocationReason::KeyCompromise,
+        RevocationReason::CaCompromise => PkiRevocationReason::CaCompromise,
+        RevocationReason::AffiliationChanged => PkiRevocationReason::AffiliationChanged,
+        RevocationReason::Superseded => PkiRevocationReason::Superseded,
+        RevocationReason::CessationOfOperation => PkiRevocationReason::CessationOfOperation,
+        RevocationReason::CertificateHold => PkiRevocationReason::CertificateHold,
+        RevocationReason::PrivilegeWithdrawn => PkiRevocationReason::PrivilegeWithdrawn,
+        RevocationReason::AaCompromise => PkiRevocationReason::AaCompromise,
+    }
+}
+
+/// proto CRL 格式 → 响应编码；UNSPECIFIED = PEM。
+fn crl_format_from_proto(value: i32) -> Result<PkiCrlFormat, Status> {
+    match PkiCrlFormat::try_from(value) {
+        Ok(PkiCrlFormat::Unspecified) | Ok(PkiCrlFormat::Pem) => Ok(PkiCrlFormat::Pem),
+        Ok(PkiCrlFormat::Der) => Ok(PkiCrlFormat::Der),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown CRL format: {value}"
+        ))),
+    }
+}
+
+fn crl_bytes(format: PkiCrlFormat, material: &CrlMaterial) -> Vec<u8> {
+    match format {
+        PkiCrlFormat::Der => material.der.clone(),
+        _ => material.pem.as_bytes().to_vec(),
     }
 }
 
@@ -1653,7 +2266,9 @@ impl Pki for PkiService {
         request: Request<PkiVerifyCertRequest>,
     ) -> Result<Response<PkiVerifyCertResponse>, Status> {
         let req = request.into_inner();
-        let valid = PkiService::verify_cert(self, &req.cert_pem).map_err(status_from_pki_error)?;
+        let valid = PkiService::verify_cert(self, &req.cert_pem)
+            .await
+            .map_err(status_from_pki_error)?;
         Ok(Response::new(PkiVerifyCertResponse { valid }))
     }
 
@@ -1663,6 +2278,112 @@ impl Pki for PkiService {
     ) -> Result<Response<PkiGetCaCertResponse>, Status> {
         let ca_cert_pem = PkiService::ca_cert_pem(self).map_err(status_from_pki_error)?;
         Ok(Response::new(PkiGetCaCertResponse { ca_cert_pem }))
+    }
+
+    async fn revoke_cert(
+        &self,
+        request: Request<PkiRevokeCertRequest>,
+    ) -> Result<Response<PkiRevokeCertResponse>, Status> {
+        // `by` 是审计事实，取自鉴权主体（CCT sub），不接受调用方自报。
+        let by = request
+            .extensions()
+            .get::<GatewayIdentity>()
+            .map(|identity| identity.subject.clone())
+            .filter(|subject| !subject.is_empty())
+            .unwrap_or_else(|| "anonymous".to_string());
+        let req = request.into_inner();
+        let reason = revocation_reason_from_proto(req.reason)?;
+        let revocation = PkiService::revoke_cert(self, &req.serial, reason, &by)
+            .await
+            .map_err(status_from_pki_error)?;
+        Ok(Response::new(PkiRevokeCertResponse {
+            serial: req.serial,
+            cert_serial: revocation.cert_serial,
+            common_name: revocation.common_name,
+            status: status_to_str(CertStatus::Revoked).to_string(),
+            revoked_at: revocation.revoked_at,
+            reason: revocation_reason_to_proto(revocation.reason) as i32,
+            by: revocation.by,
+        }))
+    }
+
+    async fn get_cert_status(
+        &self,
+        request: Request<PkiGetCertStatusRequest>,
+    ) -> Result<Response<PkiGetCertStatusResponse>, Status> {
+        let req = request.into_inner();
+        let status = PkiService::get_cert_status(self, &req.serial)
+            .await
+            .map_err(status_from_pki_error)?;
+        let (revoked_at, reason, by) = match &status.revocation {
+            Some(revocation) => (
+                revocation.revoked_at,
+                revocation_reason_to_proto(revocation.reason) as i32,
+                revocation.by.clone(),
+            ),
+            None => (0, PkiRevocationReason::Unspecified as i32, String::new()),
+        };
+        Ok(Response::new(PkiGetCertStatusResponse {
+            serial: status.serial,
+            cert_serial: status.cert_serial,
+            common_name: status.common_name,
+            status: status.status,
+            not_before: status.not_before,
+            not_after: status.not_after,
+            revoked_at,
+            reason,
+            by,
+        }))
+    }
+
+    async fn get_crl(
+        &self,
+        request: Request<PkiGetCrlRequest>,
+    ) -> Result<Response<PkiGetCrlResponse>, Status> {
+        let req = request.into_inner();
+        let format = crl_format_from_proto(req.format)?;
+        let material = PkiService::get_crl(self)
+            .await
+            .map_err(status_from_pki_error)?;
+        Ok(Response::new(PkiGetCrlResponse {
+            crl: crl_bytes(format, &material),
+            format: format as i32,
+            crl_number: material.crl_number,
+            this_update: material.this_update,
+            next_update: material.next_update,
+        }))
+    }
+
+    async fn rotate_crl(
+        &self,
+        request: Request<PkiRotateCrlRequest>,
+    ) -> Result<Response<PkiRotateCrlResponse>, Status> {
+        let req = request.into_inner();
+        let format = crl_format_from_proto(req.format)?;
+        let material = PkiService::rotate_crl(self)
+            .await
+            .map_err(status_from_pki_error)?;
+        Ok(Response::new(PkiRotateCrlResponse {
+            crl: crl_bytes(format, &material),
+            format: format as i32,
+            crl_number: material.crl_number,
+            this_update: material.this_update,
+            next_update: material.next_update,
+        }))
+    }
+
+    async fn tidy(
+        &self,
+        request: Request<PkiTidyRequest>,
+    ) -> Result<Response<PkiTidyResponse>, Status> {
+        let req = request.into_inner();
+        let result = PkiService::tidy(self, req.retention_seconds)
+            .await
+            .map_err(status_from_pki_error)?;
+        Ok(Response::new(PkiTidyResponse {
+            retention_seconds: result.retention_seconds,
+            removed_certs: result.removed_certs,
+        }))
     }
 }
 
@@ -1803,7 +2524,7 @@ mod tests {
         .expect("join");
 
         assert!(
-            !pki.verify_cert(&cert_pem).expect("verify"),
+            !pki.verify_cert(&cert_pem).await.expect("verify"),
             "过期证书必须被拒绝"
         );
     }
@@ -1823,7 +2544,7 @@ mod tests {
         pki.init_ca("Verify CA").await.expect("init");
 
         let cert = pki.issue_cert("verify.local", 0).await.expect("issue");
-        assert!(pki.verify_cert(&cert.cert_pem).expect("verify"));
+        assert!(pki.verify_cert(&cert.cert_pem).await.expect("verify"));
     }
 
     #[tokio::test]
@@ -1925,7 +2646,7 @@ mod tests {
         assert_ne!(cert.serial, expired.serial, "必须换新 serial");
         assert!(cert.key_version >= 1);
         assert!(
-            pki.verify_cert(&cert.cert_pem).expect("verify"),
+            pki.verify_cert(&cert.cert_pem).await.expect("verify"),
             "换新后的证书必须可验签"
         );
         assert_eq!(
@@ -1971,7 +2692,7 @@ mod tests {
             .expect("rotate over expired");
         assert_ne!(cert.serial, "expired-0x2");
         assert!(cert.key_name.starts_with("pki/"));
-        assert!(pki.verify_cert(&cert.cert_pem).expect("verify"));
+        assert!(pki.verify_cert(&cert.cert_pem).await.expect("verify"));
     }
 
     /// G-PKI-1：RenewCert(serial) 为按序列号恢复入口——过期 serial 也能恢复出新证书
@@ -1995,7 +2716,7 @@ mod tests {
             .expect("renew by expired serial");
         assert_eq!(recovered.common_name, "svc-recover.local");
         assert_ne!(recovered.serial, "expired-0x3");
-        assert!(pki.verify_cert(&recovered.cert_pem).expect("verify"));
+        assert!(pki.verify_cert(&recovered.cert_pem).await.expect("verify"));
 
         // 恢复后旧 serial 已入历史，再次按同一 serial 恢复仍可用（恢复到最新）
         let again = pki
@@ -2029,7 +2750,7 @@ mod tests {
             .expect("issue after expiry");
         assert_ne!(renewed.serial, first.serial, "过期后必须换新 serial");
         assert!(renewed.key_version >= 1);
-        assert!(pki.verify_cert(&renewed.cert_pem).expect("verify"));
+        assert!(pki.verify_cert(&renewed.cert_pem).await.expect("verify"));
     }
 
     /// G-PKI-1：并发替换（版本化 CAS）——双 agent 同时 rotate：都成功、无丢更新
@@ -2453,5 +3174,395 @@ mod tests {
         assert_ne!(upgraded.serial, legacy.serial, "无 SAN 旧记录必须被替换");
         let (dns, _) = cert_sans(&upgraded.cert_pem);
         assert_eq!(dns, vec!["legacy-svc"], "替换后必须带 CN 派生 SAN");
+    }
+
+    // ──── 吊销面（ADR-0020）────
+
+    fn parse_crl(
+        material: &CrlMaterial,
+    ) -> x509_parser::revocation_list::CertificateRevocationList<'_> {
+        let (_rest, crl) = x509_parser::parse_x509_crl(&material.der).expect("parse generated CRL");
+        crl
+    }
+
+    fn crl_serials(material: &CrlMaterial) -> Vec<String> {
+        parse_crl(material)
+            .iter_revoked_certificates()
+            .map(|entry| hex::encode(entry.serial().to_bytes_be()))
+            .collect()
+    }
+
+    async fn csr_for(common_name: &str) -> Vec<u8> {
+        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("csr key");
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        params
+            .serialize_request(&key)
+            .expect("serialize CSR")
+            .der()
+            .to_vec()
+    }
+
+    /// 记录 serial = 证书内嵌 serial（CRL / 第三方验签的同一口径）
+    #[tokio::test]
+    async fn test_record_serial_matches_certificate_embedded_serial() {
+        let pki = make_pki();
+        pki.init_ca("Serial CA").await.expect("init");
+        let cert = pki.issue_cert("serial.local", 0).await.expect("issue");
+        let embedded = cert_serial_hex(&cert.cert_pem).expect("parse cert");
+        assert_eq!(embedded, cert.serial, "记录 serial 必须可写入 CRL");
+    }
+
+    /// 吊销阻断隐式重签（IssueCert/SignCsr/Renew），显式 RotateCert 仍可用
+    #[tokio::test]
+    async fn test_revoke_blocks_implicit_reissue_and_allows_explicit_rotate() {
+        let pki = make_pki();
+        pki.init_ca("Revoke CA").await.expect("init");
+        let cert = pki.issue_cert("revoke.local", 0).await.expect("issue");
+        assert!(pki.verify_cert(&cert.cert_pem).await.expect("verify"));
+
+        let revocation = pki
+            .revoke_cert(&cert.serial, RevocationReason::KeyCompromise, "ops@example")
+            .await
+            .expect("revoke");
+        assert_eq!(revocation.cert_serial, cert.serial);
+        assert_eq!(revocation.reason, RevocationReason::KeyCompromise);
+        assert_eq!(revocation.by, "ops@example");
+
+        // 幂等：重复吊销保留首次的 reason / revoked_at / by
+        let again = pki
+            .revoke_cert(&cert.serial, RevocationReason::Superseded, "another")
+            .await
+            .expect("revoke again");
+        assert_eq!(again.reason, RevocationReason::KeyCompromise);
+        assert_eq!(again.by, "ops@example");
+        assert_eq!(again.revoked_at, revocation.revoked_at);
+
+        // 读面与验签
+        let status = pki.get_cert_status(&cert.serial).await.expect("status");
+        assert_eq!(status.status, "revoked");
+        assert_eq!(status.cert_serial, cert.serial);
+        assert_eq!(
+            status.revocation.as_ref().expect("revocation").by,
+            "ops@example"
+        );
+        assert!(
+            pki.get_cert_by_cn("revoke.local")
+                .await
+                .expect("by cn")
+                .is_none(),
+            "已吊销的 active 证书不是「当前有效证书」"
+        );
+        let listed = pki.list_certs("revoke.local").await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, CertStatus::Revoked);
+        assert_eq!(
+            pki.get_cert_by_serial(&cert.serial)
+                .await
+                .expect("by serial")
+                .expect("record")
+                .status,
+            CertStatus::Revoked
+        );
+        assert!(
+            !pki.verify_cert(&cert.cert_pem)
+                .await
+                .expect("verify revoked"),
+            "VerifyCert 必须拒绝已吊销证书"
+        );
+
+        // 负控制：IssueCert 不得静默重签
+        match pki.issue_cert("revoke.local", 0).await {
+            Err(PkiError::FailedPrecondition(msg)) => {
+                assert!(msg.contains("revoked"), "错误必须点名吊销: {msg}");
+            }
+            other => panic!("expected FailedPrecondition, got {other:?}"),
+        }
+        // 负控制：SignCsr 不得复活同一 CN
+        let csr = csr_for("revoke.local").await;
+        assert!(matches!(
+            pki.sign_csr(&csr, 0, CertUsage::Both).await,
+            Err(PkiError::FailedPrecondition(_))
+        ));
+        // 负控制：RenewCert 不得复活已吊销 serial
+        assert!(matches!(
+            pki.renew_cert(&cert.serial, 0).await,
+            Err(PkiError::FailedPrecondition(_))
+        ));
+
+        // 显式路径：RotateCert 换新身份，旧 serial 仍永久 revoked
+        let rotated = pki
+            .rotate_cert("revoke.local", 0)
+            .await
+            .expect("explicit rotate");
+        assert_ne!(rotated.serial, cert.serial);
+        assert!(pki
+            .verify_cert(&rotated.cert_pem)
+            .await
+            .expect("new cert verifies"));
+        assert_eq!(
+            pki.get_cert_status(&cert.serial)
+                .await
+                .expect("old status")
+                .status,
+            "revoked"
+        );
+        assert_eq!(
+            pki.get_cert_status(&rotated.serial)
+                .await
+                .expect("new status")
+                .status,
+            "active"
+        );
+        // 轮换后 get-or-create 恢复幂等
+        let same = pki
+            .issue_cert("revoke.local", 0)
+            .await
+            .expect("issue after rotate");
+        assert_eq!(same.serial, rotated.serial);
+    }
+
+    /// 续期任意历史 serial 也不能绕过「当前身份已吊销」
+    #[tokio::test]
+    async fn test_renew_history_serial_cannot_bypass_revoked_current_identity() {
+        let pki = make_pki();
+        pki.init_ca("Renew Bypass CA").await.expect("init");
+        let first = pki.issue_cert("bypass.local", 0).await.expect("issue");
+        let second = pki.rotate_cert("bypass.local", 0).await.expect("rotate");
+        pki.revoke_cert(&second.serial, RevocationReason::KeyCompromise, "ops")
+            .await
+            .expect("revoke");
+
+        // 续期历史 serial 会替换掉已吊销的当前身份 ⇒ 必须拒绝
+        assert!(
+            matches!(
+                pki.renew_cert(&first.serial, 0).await,
+                Err(PkiError::FailedPrecondition(_))
+            ),
+            "续期历史 serial 不得隐式复活已吊销的当前身份"
+        );
+
+        // 显式轮换仍可用
+        let third = pki
+            .rotate_cert("bypass.local", 0)
+            .await
+            .expect("explicit rotate");
+        assert_ne!(third.serial, second.serial);
+        assert_eq!(
+            pki.get_cert_status(&second.serial)
+                .await
+                .expect("status")
+                .status,
+            "revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revoke_unknown_serial_is_not_found() {
+        let pki = make_pki();
+        pki.init_ca("Revoke Unknown CA").await.expect("init");
+        assert!(matches!(
+            pki.revoke_cert("deadbeef", RevocationReason::Unspecified, "ops")
+                .await,
+            Err(PkiError::CertNotFound(_))
+        ));
+        assert!(matches!(
+            pki.get_cert_status("deadbeef").await,
+            Err(PkiError::CertNotFound(_))
+        ));
+    }
+
+    /// 双实例共享 store + 密钥档案：A 吊销 ⇒ B 的 VerifyCert 与 CRL 立即生效
+    #[tokio::test]
+    async fn test_dual_instance_revocation_visible_across_agents() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let keys = shared_keys();
+        let pki_a = make_pki_shared(store.clone(), &keys);
+        let pki_b = make_pki_shared(store.clone(), &keys);
+        pki_a.init_ca("Shared Revoke CA").await.expect("init A");
+        pki_b.init_ca("Shared Revoke CA").await.expect("init B");
+
+        let cert = pki_a.issue_cert("shared.local", 0).await.expect("issue");
+        assert!(pki_b.verify_cert(&cert.cert_pem).await.expect("B verify"));
+
+        pki_a
+            .revoke_cert(&cert.serial, RevocationReason::KeyCompromise, "ops-a")
+            .await
+            .expect("A revoke");
+
+        assert!(
+            !pki_b.verify_cert(&cert.cert_pem).await.expect("B verify"),
+            "B 必须拒绝 A 吊销的 serial"
+        );
+        assert_eq!(
+            pki_b
+                .get_cert_status(&cert.serial)
+                .await
+                .expect("B status")
+                .status,
+            "revoked"
+        );
+        let crl = pki_b.get_crl().await.expect("B crl");
+        assert!(crl_serials(&crl).contains(&cert.serial));
+
+        // 重启（同 store + 同密钥档案）后吊销事实仍在
+        let pki_restart = make_pki_shared(store.clone(), &keys);
+        pki_restart
+            .init_ca("Shared Revoke CA")
+            .await
+            .expect("restart init");
+        assert!(!pki_restart
+            .verify_cert(&cert.cert_pem)
+            .await
+            .expect("restart verify"));
+        assert_eq!(
+            pki_restart
+                .get_cert_status(&cert.serial)
+                .await
+                .expect("restart status")
+                .status,
+            "revoked"
+        );
+    }
+
+    /// CRL：CA 签名、条目与 reason 正确、编号单调且「编号 ↔ 内容」一致
+    #[tokio::test]
+    async fn test_crl_entries_signature_and_monotonic_numbers() {
+        let pki = make_pki();
+        pki.init_ca("CRL CA").await.expect("init");
+        let a = pki.issue_cert("crl-a.local", 0).await.expect("issue a");
+        let b = pki.issue_cert("crl-b.local", 0).await.expect("issue b");
+
+        let empty = pki.get_crl().await.expect("crl");
+        assert_eq!(empty.crl_number, 1);
+        assert!(empty.pem.contains("BEGIN X509 CRL"));
+        assert_eq!(crl_serials(&empty).len(), 0);
+        let second = pki.get_crl().await.expect("same crl");
+        assert_eq!(
+            (second.crl_number, second.this_update, second.next_update),
+            (empty.crl_number, empty.this_update, empty.next_update),
+            "内容未变 ⇒ 复用同一编号与时间窗口（ECDSA 签名每次不同，不比较字节）"
+        );
+        assert_eq!(crl_serials(&second), crl_serials(&empty));
+        assert!(empty.next_update > empty.this_update);
+
+        // CRL 由本 CA 公钥验签
+        let ca_der = pem_to_der(&pki.ca_cert_pem().expect("ca")).expect("ca der");
+        let (_rest, ca) = x509_parser::parse_x509_certificate(&ca_der).expect("parse ca");
+        parse_crl(&empty)
+            .verify_signature(ca.public_key())
+            .expect("CRL signature must verify with the CA key");
+
+        pki.revoke_cert(&a.serial, RevocationReason::CessationOfOperation, "ops")
+            .await
+            .expect("revoke");
+        let after = pki.get_crl().await.expect("crl after revoke");
+        assert_eq!(after.crl_number, 2, "吊销集合变化 ⇒ 新编号");
+        let serials = crl_serials(&after);
+        assert!(serials.contains(&a.serial));
+        assert!(!serials.contains(&b.serial));
+        let crl_after = parse_crl(&after);
+        let entry = crl_after
+            .iter_revoked_certificates()
+            .find(|entry| hex::encode(entry.serial().to_bytes_be()) == a.serial)
+            .expect("entry for revoked serial");
+        let (_critical, reason) = entry.reason_code().expect("reason code");
+        assert_eq!(
+            reason.0,
+            RevocationReason::CessationOfOperation.rfc_code(),
+            "CRL 条目 reason 必须是 RFC 5280 数值"
+        );
+
+        let rotated = pki.rotate_crl().await.expect("rotate crl");
+        assert_eq!(rotated.crl_number, 3, "强制轮换必增编号");
+        assert_eq!(
+            pki.get_crl().await.expect("after rotate").crl_number,
+            3,
+            "无变化 ⇒ 复用最新编号"
+        );
+    }
+
+    /// Tidy：回收过期历史/active 记录，但保留吊销记录与已吊销证书
+    #[tokio::test]
+    async fn test_tidy_reclaims_expired_records_but_keeps_revocations() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = PkiService::with_store(PkiConfig::default(), store.clone()).expect("pki");
+        pki.init_ca("Tidy CA").await.expect("init");
+
+        let live = pki.issue_cert("live.local", 0).await.expect("issue live");
+
+        // 已吊销的过期记录：Tidy 必须保留它（同 CN 的隐式重签阻断依赖它）
+        let mut revoked = expired_record("revoked.local", "0a0b0c");
+        revoked.not_after = now_unix() - 86_400 * 2;
+        store
+            .create_cert("revoked.local", &revoked)
+            .await
+            .expect("seed revoked");
+        pki.revoke_cert(&revoked.serial, RevocationReason::KeyCompromise, "ops")
+            .await
+            .expect("revoke");
+
+        // 过期历史记录（未吊销）：seed 一条过期 active，再替换出新 active ⇒ 旧记录进历史
+        let mut old_history = expired_record("gone-history.local", "gone-history");
+        old_history.not_after = now_unix() - 86_400 * 2;
+        store
+            .create_cert("gone-history.local", &old_history)
+            .await
+            .expect("seed history source");
+        let mut fresh = expired_record("gone-history.local", "fresh-active");
+        fresh.not_after = now_unix() + 86_400;
+        store
+            .replace_active_cert_cas("gone-history.local", 1, &fresh, &old_history)
+            .await
+            .expect("seed history");
+
+        // 过期 active 记录（未吊销）：Tidy 直接回收
+        let mut old_active = expired_record("gone-active.local", "gone-active");
+        old_active.not_after = now_unix() - 86_400 * 2;
+        store
+            .create_cert("gone-active.local", &old_active)
+            .await
+            .expect("seed expired active");
+
+        let result = pki.tidy(3600).await.expect("tidy");
+        assert_eq!(result.retention_seconds, 3600);
+        assert_eq!(result.removed_certs, 2, "过期历史 + 过期 active 各一条");
+        assert!(
+            store
+                .get_cert_by_serial("gone-history")
+                .await
+                .expect("by serial")
+                .is_none(),
+            "过期历史必须被回收"
+        );
+        assert!(
+            store
+                .get_cert("gone-active.local")
+                .await
+                .expect("active")
+                .is_none(),
+            "过期 active 必须被回收"
+        );
+        // 吊销记录与已吊销证书跨 Tidy 保留（永久事实）
+        assert_eq!(
+            pki.get_cert_status(&revoked.serial)
+                .await
+                .expect("status after tidy")
+                .status,
+            "revoked"
+        );
+        assert!(
+            store
+                .get_cert("revoked.local")
+                .await
+                .expect("revoked active")
+                .is_some(),
+            "已吊销记录必须保留（阻断隐式重签）"
+        );
+        assert!(crl_serials(&pki.get_crl().await.expect("crl")).contains(&revoked.serial));
+        // 未过期证书不受影响
+        assert!(pki.verify_cert(&live.cert_pem).await.expect("verify live"));
     }
 }

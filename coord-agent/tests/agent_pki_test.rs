@@ -92,6 +92,14 @@ fn test_pki_config_defaults() {
         config.expiry_warn_hours, 6,
         "到期告警窗口默认 6h（G-PKI-2）"
     );
+    assert_eq!(
+        config.crl_ttl_hours, 24,
+        "CRL next_update 窗口默认 24h（ADR-0020）"
+    );
+    assert_eq!(
+        config.history_retention_hours, 24,
+        "Tidy 证书历史保留期默认 24h"
+    );
     assert_eq!(config.ca_cert_path, None);
 }
 
@@ -141,7 +149,7 @@ async fn test_pki_service_cert_chain_validation() {
         .await
         .expect("签发证书失败");
 
-    let valid = pki.verify_cert(&cert.cert_pem).expect("验证失败");
+    let valid = pki.verify_cert(&cert.cert_pem).await.expect("验证失败");
     assert!(valid, "CA 应能验证自己签发的证书");
 }
 
@@ -190,7 +198,7 @@ async fn test_pki_service_verify_rejects_forged_issuer_cn() {
 
     let forged = forged_cert_with_issuer_cn("Coord Chain CA");
     assert!(
-        !pki.verify_cert(&forged).expect("验证失败"),
+        !pki.verify_cert(&forged).await.expect("验证失败"),
         "issuer CN 相同但签名不是本 CA 的证书必须被拒绝"
     );
 }
@@ -204,6 +212,7 @@ async fn test_pki_service_verify_rejects_malformed_pem() {
 
     let err = pki
         .verify_cert("not a certificate")
+        .await
         .expect_err("非法 PEM 必须返回错误");
     assert!(matches!(err, PkiError::CertParse(_)), "unexpected: {err}");
 }
@@ -334,7 +343,7 @@ async fn test_cross_agent_verify_same_ca() {
         .await
         .expect("A 签发");
     assert!(
-        pki_b.verify_cert(&cert.cert_pem).expect("B 验签"),
+        pki_b.verify_cert(&cert.cert_pem).await.expect("B 验签"),
         "A 签发的证书必须在 B 下可验签（同一 CA 根）"
     );
 }
@@ -370,10 +379,13 @@ async fn test_renew_cert_returns_original_cn() {
     );
 
     assert!(
-        pki.verify_cert(&old.cert_pem).expect("验签旧证书"),
+        pki.verify_cert(&old.cert_pem).await.expect("验签旧证书"),
         "旧证书保留期内应可验签"
     );
-    assert!(pki.verify_cert(&renewed.cert_pem).expect("验签新证书"));
+    assert!(pki
+        .verify_cert(&renewed.cert_pem)
+        .await
+        .expect("验签新证书"));
 }
 
 /// 验收 6: rotateCert(CN) 后 listCerts(CN) → active + retired 两份（多 kid 验签）
@@ -408,8 +420,11 @@ async fn test_rotate_then_list_returns_active_and_retired() {
     );
     assert!(serials.contains(&rotated.serial.as_str()), "新证书应在列表");
 
-    assert!(pki.verify_cert(&first.cert_pem).expect("旧证书可验"));
-    assert!(pki.verify_cert(&rotated.cert_pem).expect("新证书可验"));
+    assert!(pki.verify_cert(&first.cert_pem).await.expect("旧证书可验"));
+    assert!(pki
+        .verify_cert(&rotated.cert_pem)
+        .await
+        .expect("新证书可验"));
 
     let again = pki
         .issue_cert("svc-rotate.coord.local", 0)
@@ -967,11 +982,11 @@ async fn test_expired_current_record_is_reissued_not_returned() {
 
     let issued = pki.issue_cert(cn, 0).await.expect("issue over expired");
     assert_ne!(issued.serial, expired.serial, "IssueCert 必须换新 serial");
-    assert!(pki.verify_cert(&issued.cert_pem).expect("verify"));
+    assert!(pki.verify_cert(&issued.cert_pem).await.expect("verify"));
 
     let rotated = pki.rotate_cert(cn, 0).await.expect("rotate");
     assert_ne!(rotated.serial, issued.serial, "RotateCert 必须换新 serial");
-    assert!(pki.verify_cert(&rotated.cert_pem).expect("verify"));
+    assert!(pki.verify_cert(&rotated.cert_pem).await.expect("verify"));
 
     let recovered = pki
         .renew_cert("expired-0x1", 0)
@@ -979,10 +994,80 @@ async fn test_expired_current_record_is_reissued_not_returned() {
         .expect("renew via expired serial");
     assert_eq!(recovered.common_name, cn);
     assert_ne!(recovered.serial, "expired-0x1");
-    assert!(pki.verify_cert(&recovered.cert_pem).expect("verify"));
+    assert!(pki.verify_cert(&recovered.cert_pem).await.expect("verify"));
 
     assert_eq!(
         recovered.parent_serial.as_deref(),
         Some(rotated.serial.as_str())
+    );
+}
+
+// ──── 吊销面（ADR-0020）────
+
+/// 验收：A 吊销 ⇒ B 的 VerifyCert 拒绝、状态与 CRL 同步；IssueCert 不静默重签；
+/// 重启（同 store + 同密钥档案）后吊销事实仍在。
+#[tokio::test]
+async fn test_revocation_visible_across_agents_and_across_restart() {
+    let store = Arc::new(MemoryPkiStore::new());
+    let keys = new_keys();
+    let pki_a = make_pki_with_store(store.clone(), &keys);
+    let pki_b = make_pki_with_store(store.clone(), &keys);
+    pki_a.init_ca("Revocation CA").await.expect("init A");
+    pki_b.init_ca("Revocation CA").await.expect("init B");
+
+    let cert = pki_a
+        .issue_cert("revoked.coord.local", 0)
+        .await
+        .expect("issue");
+    assert!(pki_b.verify_cert(&cert.cert_pem).await.expect("B verify"));
+
+    pki_a
+        .revoke_cert(
+            &cert.serial,
+            coord_agent::pki_store::RevocationReason::KeyCompromise,
+            "ops-a",
+        )
+        .await
+        .expect("A revoke");
+
+    assert!(
+        !pki_b
+            .verify_cert(&cert.cert_pem)
+            .await
+            .expect("B verify revoked"),
+        "B 必须拒绝 A 吊销的 serial"
+    );
+    let status = pki_b.get_cert_status(&cert.serial).await.expect("B status");
+    assert_eq!(status.status, "revoked");
+    assert_eq!(status.revocation.expect("revocation").by, "ops-a");
+
+    // 负控制：revoke 后 IssueCert(同 CN) 不返回新证书
+    assert!(
+        matches!(
+            pki_b.issue_cert("revoked.coord.local", 0).await,
+            Err(PkiError::FailedPrecondition(_))
+        ),
+        "已吊销 CN 的 IssueCert 必须显式失败"
+    );
+
+    // 重启：store + 密钥档案保留 ⇒ 吊销事实与 CRL 都不丢
+    let pki_restart = make_pki_with_store(store.clone(), &keys);
+    pki_restart
+        .init_ca("Revocation CA")
+        .await
+        .expect("restart init");
+    assert!(!pki_restart
+        .verify_cert(&cert.cert_pem)
+        .await
+        .expect("restart verify"));
+    let crl = pki_restart.get_crl().await.expect("restart CRL");
+    let (_rest, parsed) = x509_parser::parse_x509_crl(&crl.der).expect("parse CRL");
+    let serials: Vec<String> = parsed
+        .iter_revoked_certificates()
+        .map(|entry| hex::encode(entry.serial().to_bytes_be()))
+        .collect();
+    assert!(
+        serials.contains(&cert.serial),
+        "CRL 必须包含被吊销的 serial: {serials:?}"
     );
 }

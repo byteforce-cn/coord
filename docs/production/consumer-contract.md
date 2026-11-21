@@ -505,14 +505,15 @@ trigger:
 （双 agent：A `PutBundle` 本地生效、B ≤10s 收敛；重启 A 后重加载；版本单调、
 并发 Put 无丢更新）。
 
-## 9. PKI（证书，G-PKI-1 / G-PKI-2 / G-PKI-3）
+## 9. PKI（证书，G-PKI-1 / G-PKI-2 / G-PKI-3；吊销面 ADR-0020）
 
 | RPC（组） | 能力 |
 |:--|:--|
 | `Pki/InitCa` | `pki:ca:init` |
 | `Pki/IssueCert` / `RenewCert` / `SignCsr` | `pki:cert:issue` |
 | `Pki/RotateCert` | `pki:cert:rotate` |
-| `Pki/ListCerts` / `GetCertByCN` / `GetCertBySerial` / `GetCaCert` / `VerifyCert` | `pki:cert:read` |
+| `Pki/ListCerts` / `GetCertByCN` / `GetCertBySerial` / `GetCertStatus` / `GetCrl` / `GetCaCert` / `VerifyCert` | `pki:cert:read` |
+| `Pki/RevokeCert` / `RotateCrl` / `Tidy` | `pki:cert:revoke` |
 
 - **私钥留库（ADR-0019 D6）**：`IssueCert` / `RenewCert` / `RotateCert` /
   `GetCertByCN` **都不返回私钥**，只返回 `key_material = {kind: coord_managed,
@@ -528,7 +529,9 @@ trigger:
   `GetCertByCN` 仅未过期返回，否则 `NOT_FOUND`。`GetCertBySerial` 按 serial
   只读查询（active / retired / expired 都可查，未知 serial ⇒ `NOT_FOUND`），
   不返回任何私钥材料；`status` 的 `expired` 由服务端按 `not_after` 判定。
-  列表中 `status ∈ {active, retired, expired}`，`expired` 覆盖存储态。
+  列表中 `status ∈ {active, retired, expired, revoked}`，`expired`/`revoked` 覆盖存储态
+  （`revoked` 优先于 `expired`）。记录 `serial` 与证书内嵌 X.509 serial 一致
+  （CRL / 第三方验签的同一口径）。
 - **usage → KU/EKU 精确**：`IssueCert` / `SignCsr` 的 `usage`（`SERVER` /
   `CLIENT` / `BOTH`）按 `PkiCertificateUsage` 精确写 KU/EKU；未指定 = `BOTH`
   （既有行为）。`RotateCert` 未指定 = 继承当前证书的 usage。
@@ -548,9 +551,24 @@ trigger:
   `agent_port+1/metrics` 可见这些 gauge（≤1 个 30s 采样周期），但**不等于**告警会
   触发——dev 默认没有 Prometheus 抓取；告警判据需要真实抓取链路。
 - 开发态取证书（不依赖 grpcurl）：`docs/pki-quickstart.md`（`coord pki ca/issue/list`）。
-- **无吊销（CRL/OCSP 不在本轮）**：泄露应急 = 消费侧剔除 + CN 轮换
-  （playbook：`security.md` §3.2 / runbook §4.5）；非 HSM 边界与重估触发见
-  `boundaries.md` B-PKI-1。
+- **吊销（ADR-0020）**：`RevokeCert(serial, reason)`（reason = RFC 5280 CRLReason）、
+  `GetCertStatus(serial) = {status, revoked_at, reason, by}`、`GetCrl(format)` /
+  `RotateCrl(format)`（PEM / DER）。吊销账本与 CA 同存储（跨实例/重启共享），serial 的
+  `revoked` 是永久事实（重复吊销幂等，保留首次 reason/time/by；`by` 取自鉴权主体，
+  不接受自报）。`VerifyCert` 拒绝已吊销 serial；`GetCertByCN` 对已吊销的当前证书返回
+  `NOT_FOUND`。**不静默复活**：`IssueCert` / `SignCsr` 对已吊销的当前身份返回
+  `FAILED_PRECONDITION`，`RenewCert(已吊销 serial)` 同样拒绝；`RotateCert` 是显式换新
+  身份的路径（旧 serial 仍 revoked）。外部密钥（CSR）身份的吊销是终态——同 CN 恢复须换
+  新 CN。
+- **CRL 分发与生效延迟**：CRL 只经 RPC 分发，**没有 HTTP 端点**，也没有后台发布任务——
+  编号在 `GetCrl` 检测到吊销集合变化 / `next_update` 已过、或显式 `RotateCrl` 时分配
+  （单调递增，窗口内且内容未变时复用编号）；`next_update = this_update + crl_ttl_hours`（默认 24h）。缓存与刷新由消费方
+  负责：**吊销对第三方 TrustManager 的生效延迟 = 它的 CRL / KV 缓存窗口**；只有调
+  `VerifyCert` 的路径即时生效。不查 CRL 也不调 `VerifyCert` 的消费方仍会接受旧证书。
+- **保留期回收**：`Tidy(retention_seconds)` 回收 `not_after + retention` 之前到期的历史/
+  过期 active 证书记录（默认 24h）；**吊销账本与已吊销证书记录不回收**。
+- 非 HSM 边界与重估触发见 `boundaries.md` B-PKI-1；泄露应急 playbook 见
+  `security.md` §3.2 / runbook §4.5。
 
 ## 10. Transit（命名密钥 / KMS 面与 HMAC，ADR-0019 / G-TR-3）
 
@@ -650,7 +668,7 @@ trigger:
 | B-RG-1 / B-RG-2 | v1 静态 Region 拓扑（`[kv_t]` 的表驱动生命周期已接线，但 split/merge 数据搬迁未交付）；region 模式 watch 拒绝跨 region | 静态拓扑规划；watch 前缀受限 |
 | B-CX-1 / B-CX-2 | 连接数上限但无寿命回收；客户端连接池机会式回收 | 容量规划考虑长连接占坑 |
 | B-SE-1..B-SE-8 | TLS fail-closed / KEK 注入 / dev 例外等安全边界 | 生产接入按 TLS+注入材料配置 |
-| B-PKI-1 | 非 HSM + 无吊销；私钥留库（`GetCertByCN` 不含材料） | 授权口径 + 轮换应急（§9） |
+| B-PKI-1 | 非 HSM + 吊销只覆盖本 CA 的校验面（无 OCSP / 无 HTTP CRL / 无后台发布；不查 CRL 的第三方仍接受旧证书）；私钥留库（`GetCertByCN` 不含材料） | 授权口径 + 吊销与缓存窗口（§9） |
 | B-TR-1 | KMS 面：软件 KEK（非 HSM）；无 convergent/hash/random/离线缓存 | ADR-0019；边界见 boundaries.md |
 | B-PL-3 | 缓存容量周期收敛、非真 LRU、ISR 本地回收 | 缓存不作为配额硬边界依赖 |
 | B-PL-5 | 缓存 `Keys` 为有界/本节点视角枚举；`Clear` 批式、与并发写按到达顺序 | 运维清理窗口内暂停并发写；键不得含 NUL |

@@ -159,7 +159,7 @@ is terminal.
 | MQ v2 | `client.mqV2()` | `coord.mq.v2` (18/19 RPCs — no `Subscribe`); at-least-once `poll`+`ack`; `MqV2Consumer` handles rejoin, topic epoch and offset reset; DLQ + topic lifecycle included |
 | Scheduler / Workflow | `client.scheduler()`, `client.workflow()` | claim-based jobs; completion results persist (first result wins) and read back via `getJob`; workflow retention via `deleteInstance` / `deleteDefinition` |
 | Policy | `client.policy()` | `checkPermission` is agent-local RBAC; production path is OPA bundle + `evaluate` |
-| PKI | `client.pki()` | `getCertByCN` returns the **private key** — treat "read" as private-key read |
+| PKI | `client.pki()` | private keys stay in Coord (`key_material` reference only); revocation: `revokeCert` / `getCertStatus` / `getCrl` / `rotateCrl` / `tidy` — revoked serials never resurrect (`issueCert` / `signCsr` reject the CN) |
 | Transit | `client.transit()` | envelope encryption + purpose-bound HMAC (`hmacSignWithPurpose` / `hmacVerifyWithPurpose`; persist the returned `keyId`); `rewrap` migrates DEKs during KEK rotation |
 | CircuitBreaker / RateLimiter / FeatureFlags | `client.circuitBreaker()`, `client.rateLimiter()`, `client.featureFlags()` | breaker/limiter are local (per-agent); feature flags live in the shared KV — `putFlag` / `putPercentageFlag` / `deleteFlag` / `listFlags` (management plane; takes effect immediately) |
 | ObjectStore | `client.objectStore()` | see `docs/production/volume-object-storage.md` |
