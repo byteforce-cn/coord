@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use coord_agent::pki::{PkiConfig, PkiService};
+use coord_agent::pki::{PkiConfig, PkiError, PkiService};
 use coord_agent::pki_store::{MemoryPkiStore, PkiStore};
 use coord_agent::{KeyType, SignSpec, TransitKeyRegistry, VerifySpec};
 
@@ -103,6 +103,69 @@ async fn test_pki_service_cert_chain_validation() {
 
     let valid = pki.verify_cert(&cert.cert_pem).expect("验证失败");
     assert!(valid, "CA 应能验证自己签发的证书");
+}
+
+/// 与真实 CA 同 issuer CN、但由另一把私钥签出的叶子证书。
+///
+/// `VerifyCert` 只比较 issuer CN 时这条会被误判为有效；验签实现必须以
+/// CA 公钥验证签名后才返回 true。
+fn forged_cert_with_issuer_cn(issuer_cn: &str) -> String {
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
+
+    let now = time::OffsetDateTime::now_utc();
+    let forged_ca_key =
+        KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("forged CA key");
+    let mut ca_params = CertificateParams::default();
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, issuer_cn);
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    ca_params.not_before = now - time::Duration::hours(1);
+    ca_params.not_after = now + time::Duration::hours(1);
+    let forged_ca = ca_params
+        .self_signed(&forged_ca_key)
+        .expect("forged CA cert");
+    let issuer = rcgen::Issuer::from_ca_cert_pem(&forged_ca.pem(), forged_ca_key).expect("issuer");
+
+    let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+    let mut leaf_params = CertificateParams::default();
+    leaf_params
+        .distinguished_name
+        .push(DnType::CommonName, "forged.coord.local");
+    leaf_params.not_before = now - time::Duration::hours(1);
+    leaf_params.not_after = now + time::Duration::hours(1);
+    leaf_params
+        .signed_by(&leaf_key, &issuer)
+        .expect("forged leaf cert")
+        .pem()
+}
+
+/// `VerifyCert` 必须用 CA 公钥验签：同 issuer CN 的伪造证书 ⇒ false。
+#[tokio::test]
+async fn test_pki_service_verify_rejects_forged_issuer_cn() {
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("Coord Chain CA").await.expect("初始化 CA 失败");
+
+    let forged = forged_cert_with_issuer_cn("Coord Chain CA");
+    assert!(
+        !pki.verify_cert(&forged).expect("验证失败"),
+        "issuer CN 相同但签名不是本 CA 的证书必须被拒绝"
+    );
+}
+
+/// 非法 PEM 是调用方参数错误，不能与「验签不过」混成 false。
+#[tokio::test]
+async fn test_pki_service_verify_rejects_malformed_pem() {
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("Coord Chain CA").await.expect("初始化 CA 失败");
+
+    let err = pki
+        .verify_cert("not a certificate")
+        .expect_err("非法 PEM 必须返回错误");
+    assert!(matches!(err, PkiError::CertParse(_)), "unexpected: {err}");
 }
 
 /// 验收 1: 同一 CN 连续 issueCert → 相同 serial / 相同证书

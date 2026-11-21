@@ -827,7 +827,10 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>, PkiError> {
 }
 
 impl PkiService {
-    /// 验证证书链
+    /// 验证证书：有效期窗口 + issuer CN + **CA 公钥验签**。
+    ///
+    /// 签名不匹配（含同 issuer CN 的伪造 CA）或不在有效期内 ⇒ `Ok(false)`；
+    /// PEM 非法 ⇒ `CertParse`（gRPC 映射为 `INVALID_ARGUMENT`）。
     pub fn verify_cert(&self, cert_pem: &str) -> Result<bool, PkiError> {
         let ca_guard = self.ca.read();
         let ca = ca_guard.as_ref().ok_or(PkiError::CaNotInitialized)?;
@@ -864,7 +867,13 @@ impl PkiService {
             .map(|cn| cn.as_str().unwrap_or(""))
             .unwrap_or("");
 
-        Ok(issuer_cn == ca_cn)
+        if issuer_cn != ca_cn {
+            return Ok(false);
+        }
+
+        // 只有 issuer 名字匹配不够：必须用 CA 公钥验证签名，否则任何知道 CA CN
+        // 的主体都能用自签证书通过。验签失败（含不支持的算法）一律按「不通过」处理。
+        Ok(cert.verify_signature(Some(ca_cert.public_key())).is_ok())
     }
 
     /// 导出 CA 证书 PEM
@@ -991,6 +1000,8 @@ use tonic::{Request, Response, Status};
 fn status_from_pki_error(e: PkiError) -> Status {
     match e {
         PkiError::InvalidArgument(msg) => Status::invalid_argument(msg),
+        // 调用方给的 PEM 无法解析：参数错误，不是服务端内部错误。
+        PkiError::CertParse(msg) => Status::invalid_argument(msg),
         PkiError::CertNotFound(serial) => {
             Status::not_found(format!("certificate not found by serial: {serial}"))
         }
@@ -1263,6 +1274,53 @@ mod tests {
         assert!(cert.key_name.starts_with("pki/"));
         assert!(cert.key_version >= 1);
         assert_eq!(cert.status, CertStatus::Active);
+    }
+
+    /// 非法 PEM 必须映射 `INVALID_ARGUMENT`（调用方可修正），不能是 `INTERNAL`。
+    #[test]
+    fn test_cert_parse_error_maps_to_invalid_argument() {
+        let status = status_from_pki_error(PkiError::CertParse("bad pem".into()));
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    }
+
+    /// 由本 CA 真实签名、但已过期的证书 ⇒ false。
+    #[tokio::test]
+    async fn test_verify_rejects_expired_ca_signed_cert() {
+        let pki = make_pki();
+        pki.init_ca("Expired Verify CA").await.expect("init");
+        let (ca_key_name, ca_key_version, ca_cert_pem) = {
+            let ca = pki.ca.read();
+            let ca = ca.as_ref().expect("ca loaded");
+            (ca.key_name.clone(), ca.key_version, ca.cert_pem.clone())
+        };
+        let ca_key_pem = pki
+            .keys
+            .private_key_pem(&ca_key_name, ca_key_version)
+            .await
+            .expect("ca key");
+        let cert_pem = tokio::task::spawn_blocking(move || {
+            let ca_key = KeyPair::from_pem(&ca_key_pem).expect("ca key pair");
+            let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key).expect("issuer");
+            let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+            let now = OffsetDateTime::now_utc();
+            let mut params = CertificateParams::default();
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "expired.verify.local");
+            params.not_before = now - time::Duration::hours(2);
+            params.not_after = now - time::Duration::hours(1);
+            params
+                .signed_by(&leaf_key, &issuer)
+                .expect("sign expired cert")
+                .pem()
+        })
+        .await
+        .expect("join");
+
+        assert!(
+            !pki.verify_cert(&cert_pem).expect("verify"),
+            "过期证书必须被拒绝"
+        );
     }
 
     #[tokio::test]

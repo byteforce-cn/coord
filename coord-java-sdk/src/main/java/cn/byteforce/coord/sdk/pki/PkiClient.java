@@ -152,20 +152,21 @@ public interface PkiClient {
     List<PkiCertSummary> listCerts(String commonName);
 
     /**
-     * Get the current active certificate of a CN including its private key
-     * (recovery path after restart for the key holder).
+     * Get the current active certificate of a CN (certificate + key reference,
+     * no private key material; ADR-0019 D6 keeps the key in Coord's transit archive).
      *
      * @param commonName the Common Name (CN) to fetch
-     * @return current active certificate (with private key)
+     * @return current active certificate and its {@code keyName} / {@code keyVersion}
      * @throws CoordException if no active certificate exists for the CN
      */
     PkiCertInfo getCertByCN(String commonName);
 
     /**
-     * Verify a certificate against the CA.
+     * Verify a certificate against the CA: validity window, issuer, and the CA
+     * public-key signature. Malformed PEM is rejected as an invalid argument.
      *
      * @param certPem the PEM-encoded certificate to verify
-     * @return true if the certificate is valid and signed by this CA
+     * @return true only if the certificate is in its validity window and signed by this CA
      * @throws CoordException on communication or verification failure
      */
     boolean verifyCert(String certPem);
