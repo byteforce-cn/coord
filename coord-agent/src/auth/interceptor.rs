@@ -1428,6 +1428,10 @@ mod tests {
             Some("pki:cert:read".into())
         );
         assert_eq!(
+            infer_capability("/coord.pki.v1.Pki/GetCertBySerial"),
+            Some("pki:cert:read".into())
+        );
+        assert_eq!(
             infer_capability("/coord.pki.v1.Pki/GetCaCert"),
             Some("pki:cert:read".into())
         );

@@ -344,6 +344,7 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.pki.v1.Pki/RotateCert" => Some("pki:cert:rotate"),
         "/coord.pki.v1.Pki/ListCerts" => Some("pki:cert:read"),
         "/coord.pki.v1.Pki/GetCertByCN" => Some("pki:cert:read"),
+        "/coord.pki.v1.Pki/GetCertBySerial" => Some("pki:cert:read"),
         "/coord.pki.v1.Pki/GetCaCert" => Some("pki:cert:read"),
         "/coord.pki.v1.Pki/VerifyCert" => Some("pki:cert:read"),
 

@@ -98,6 +98,7 @@ key_version}`。**私钥唯一出口**是 `Transit/ExportKey`（独立能力
 |:--|:--|:--|
 | `ListCerts` | 证书摘要（不含私钥；供验签方构建 JWKS） | `pki:cert:read`（元数据只读） |
 | `GetCertByCN` | 当前有效证书 + `key_material` 引用（**无材料**） | `pki:cert:read`；拿到引用不等于能签名/导出 |
+| `GetCertBySerial` | 按 serial 的证书摘要（active / retired / expired；**无材料**） | `pki:cert:read` |
 | `Transit/ExportKey` | 私钥材料（仅 `exportable=true` 的 leaf key） | `coord:transit:key_export`（等价私钥读取权） |
 
 **授权矩阵口径**：`pki:cert:read` 只给证书/元数据；需要「恢复私钥」的主体必须

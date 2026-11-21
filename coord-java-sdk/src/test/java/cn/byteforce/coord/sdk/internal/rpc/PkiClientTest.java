@@ -1,11 +1,15 @@
 package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.sdk.CoordConfig;
+import cn.byteforce.coord.sdk.CoordException;
+import cn.byteforce.coord.sdk.ErrorCode;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCaCertRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCaCertResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCertBySerialResponse;
 import cn.byteforce.coord.contracts.pki.v1.PkiGrpc;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaRequest;
 import cn.byteforce.coord.contracts.pki.v1.PkiInitCaResponse;
@@ -35,6 +39,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -152,7 +157,26 @@ class PkiClientTest {
     }
 
     @Test
+    void getCertBySerialReturnsSummary() {
+        PkiCertSummary cert = pki.getCertBySerial("0x2");
+        assertThat(cert.commonName()).isEqualTo("svc-a.local");
+        assertThat(cert.serial()).isEqualTo("0x2");
+        assertThat(cert.status()).isEqualTo("active");
+        assertThat(cert.parentSerial()).isEqualTo("0x1");
+        assertThat(cert.certPem()).contains("BEGIN CERTIFICATE");
+    }
+
+    @Test
+    void getCertBySerialUnknownSerialPropagatesNotFound() {
+        assertThatThrownBy(() -> pki.getCertBySerial("missing"))
+                .isInstanceOf(CoordException.class)
+                .extracting(e -> ((CoordException) e).getErrorCode())
+                .isEqualTo(ErrorCode.NOT_FOUND);
+    }
+
+    @Test
     void getCertByCNReturnsActiveCertificateWithoutKeyMaterial() {
+
         PkiCertInfo cert = pki.getCertByCN("svc-a.local");
         assertThat(cert.serial()).isEqualTo("0x2");
         assertThat(cert.keyName()).isNotEmpty();
@@ -257,6 +281,27 @@ class PkiClientTest {
                             .setKind("coord_managed")
                             .setKeyName("pki/leaf/svc-a.local")
                             .setKeyVersion(2))
+                    .setNotBefore(1_700_000_000L)
+                    .setNotAfter(1_700_086_400L)
+                    .setSerial("0x2")
+                    .setStatus("active")
+                    .setParentSerial("0x1")
+                    .build());
+            observer.onCompleted();
+        }
+
+        @Override
+        public void getCertBySerial(PkiGetCertBySerialRequest request,
+                                    StreamObserver<PkiGetCertBySerialResponse> observer) {
+            if (!"0x2".equals(request.getSerial())) {
+                observer.onError(io.grpc.Status.NOT_FOUND
+                        .withDescription("certificate not found by serial: " + request.getSerial())
+                        .asRuntimeException());
+                return;
+            }
+            observer.onNext(PkiGetCertBySerialResponse.newBuilder()
+                    .setCommonName("svc-a.local")
+                    .setCertPem("-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----")
                     .setNotBefore(1_700_000_000L)
                     .setNotAfter(1_700_086_400L)
                     .setSerial("0x2")

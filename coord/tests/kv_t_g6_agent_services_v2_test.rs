@@ -751,7 +751,9 @@ async fn exercise_transit(channel: tonic::transport::Channel) {
 
 async fn exercise_pki(channel: tonic::transport::Channel) {
     use coord_proto::pki::v1::pki_client::PkiClient;
-    use coord_proto::pki::v1::{PkiGetCaCertRequest, PkiIssueCertRequest};
+    use coord_proto::pki::v1::{
+        PkiGetCaCertRequest, PkiGetCertBySerialRequest, PkiIssueCertRequest,
+    };
 
     let mut pki = PkiClient::new(channel);
     let ca = pki
@@ -777,6 +779,28 @@ async fn exercise_pki(channel: tonic::transport::Channel) {
         !issued.cert_pem.is_empty() && !issued.serial.is_empty(),
         "issued cert must carry pem + serial"
     );
+
+    let by_serial = pki
+        .get_cert_by_serial(PkiGetCertBySerialRequest {
+            serial: issued.serial.clone(),
+        })
+        .await
+        .expect("Pki.GetCertBySerial must succeed")
+        .into_inner();
+    assert_eq!(by_serial.common_name, "v2-smoke.local");
+    assert_eq!(by_serial.serial, issued.serial);
+    assert_eq!(by_serial.status, "active");
+    assert!(by_serial.cert_pem.contains("BEGIN CERTIFICATE"));
+    assert_eq!(by_serial.not_before, issued.not_before);
+    assert_eq!(by_serial.not_after, issued.not_after);
+
+    let missing = pki
+        .get_cert_by_serial(PkiGetCertBySerialRequest {
+            serial: "deadbeef".into(),
+        })
+        .await
+        .expect_err("unknown serial must be NOT_FOUND");
+    assert_eq!(missing.code(), tonic::Code::NotFound, "{missing:?}");
 }
 
 /// 夹具自查：数据目录必须落在临时目录（不污染仓库工作区）。

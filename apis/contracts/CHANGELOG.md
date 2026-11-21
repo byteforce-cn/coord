@@ -1,3 +1,15 @@
+## [contracts/v2.1.0] — 2026-11-20（Minor：PKI 按 serial 只读查询）
+
+**发布口径**：**Minor**（`coord.pki.v1` 纯新增 `GetCertBySerial` RPC 与请求/响应消息；
+不改既有字段号/类型、不删 RPC，`buf breaking` 基线不变）。
+
+- 新增 `Pki/GetCertBySerial(PkiGetCertBySerialRequest) -> PkiGetCertBySerialResponse`：
+  按 hex serial 查询 active / retired / expired 证书，未知 serial ⇒ `NOT_FOUND`；
+  响应**不含私钥材料**，能力 `pki:cert:read`。
+- `status` 对外值域统一为 `active | retired | expired`；`expired` 由服务端按
+  `not_after` 与当前时间判定，覆盖存储态（`IssueCert` / `RenewCert` / `RotateCert` /
+  `ListCerts` / `GetCertByCN` / `GetCertBySerial` 同口径）。
+
 ## [contracts/v2.0.0] — 2026-11-20（Major：ADR-0019 KMS 化——transit 命名密钥 / 非对称签名 / CCT3；PKI 私钥留库）
 
 **发布口径**：**Major**（`coord.transit.v1` 与 `coord.pki.v1` 的 wire 形状按目标形状改写：

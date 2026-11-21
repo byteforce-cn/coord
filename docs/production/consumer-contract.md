@@ -512,7 +512,7 @@ trigger:
 | `Pki/InitCa` | `pki:ca:init` |
 | `Pki/IssueCert` / `RenewCert` | `pki:cert:issue` |
 | `Pki/RotateCert` | `pki:cert:rotate` |
-| `Pki/ListCerts` / `GetCertByCN` / `GetCaCert` / `VerifyCert` | `pki:cert:read` |
+| `Pki/ListCerts` / `GetCertByCN` / `GetCertBySerial` / `GetCaCert` / `VerifyCert` | `pki:cert:read` |
 
 - **私钥留库（ADR-0019 D6）**：`IssueCert` / `RenewCert` / `RotateCert` /
   `GetCertByCN` **都不返回私钥**，只返回 `key_material = {kind: coord_managed,
@@ -522,7 +522,10 @@ trigger:
   `security.md` §3.1。
 - **到期 = 换新触发**（G-PKI-1）：`IssueCert` / `RotateCert` 对过期记录走替换
   路径重签（新 serial / 新密钥）；`RenewCert(serial)` 为按序列号恢复入口；
-  `GetCertByCN` 仅未过期返回，否则 `NOT_FOUND`。
+  `GetCertByCN` 仅未过期返回，否则 `NOT_FOUND`。`GetCertBySerial` 按 serial
+  只读查询（active / retired / expired 都可查，未知 serial ⇒ `NOT_FOUND`），
+  不返回任何私钥材料；`status` 的 `expired` 由服务端按 `not_after` 判定。
+  列表中 `status ∈ {active, retired, expired}`，`expired` 覆盖存储态。
 - **证书 profile**：密钥 ECDSA P-256；KU = `digitalSignature` + `keyEncipherment`；
   EKU = `clientAuth` + `serverAuth`；有效期由请求 TTL（缺省 24h）决定。
   **身份以 SAN 为准**，CN 仅作 subject（OpenSSL 的 CN 回退不是契约）：`IssueCert`
