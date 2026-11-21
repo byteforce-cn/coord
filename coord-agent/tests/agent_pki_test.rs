@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use coord_agent::pki::{PkiConfig, PkiError, PkiService};
-use coord_agent::pki_store::{MemoryPkiStore, PkiStore};
+use coord_agent::pki_store::{CertUsage, MemoryPkiStore, PkiStore};
 use coord_agent::{KeyType, SignSpec, TransitKeyRegistry, VerifySpec};
 
 fn new_keys() -> Arc<TransitKeyRegistry> {
@@ -41,6 +41,46 @@ fn cert_public_key(cert_pem: &str) -> Vec<u8> {
         .expect("certificate base64");
     let (_, cert) = x509_parser::parse_x509_certificate(&der).expect("parse certificate");
     cert.public_key().subject_public_key.data.to_vec()
+}
+
+/// 生成 CSR（DER）：CN + DNS/IP SAN；私钥由调用方持有。
+fn csr_der(
+    common_name: &str,
+    dns_names: &[&str],
+    ip_addresses: &[&str],
+    key: &rcgen::KeyPair,
+) -> Vec<u8> {
+    use rcgen::{CertificateParams, DnType, SanType};
+
+    let mut params = CertificateParams::default();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    params.subject_alt_names = dns_names
+        .iter()
+        .map(|dns| SanType::DnsName((*dns).try_into().expect("dns ia5")))
+        .chain(
+            ip_addresses
+                .iter()
+                .map(|ip| SanType::IpAddress(ip.parse().expect("ip san"))),
+        )
+        .collect();
+    params
+        .serialize_request(key)
+        .expect("serialize CSR")
+        .der()
+        .to_vec()
+}
+
+fn cert_der(cert_pem: &str) -> Vec<u8> {
+    let der_b64: String = cert_pem
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(der_b64)
+        .expect("certificate base64")
 }
 
 /// 验证 PKI 配置默认值
@@ -600,6 +640,8 @@ async fn test_get_cert_by_serial_rpc_reports_expired_and_not_found() {
         parent_serial: None,
         dns_names: Vec::new(),
         ip_addresses: Vec::new(),
+        spki_sha256: String::new(),
+        usage: coord_agent::pki_store::CertUsage::Both,
     };
     store.create_cert(cn, &expired).await.expect("seed expired");
 
@@ -628,6 +670,266 @@ async fn test_get_cert_by_serial_rpc_reports_expired_and_not_found() {
     assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
 }
 
+/// CSR 签发：私钥留在调用方；记录只有公钥指纹；usage=SERVER 的 KU/EKU 精确。
+#[tokio::test]
+async fn test_sign_csr_external_key_and_server_profile() {
+    let store = Arc::new(MemoryPkiStore::new());
+    let keys = new_keys();
+    let pki = make_pki_with_store(store.clone(), &keys);
+    pki.init_ca("CSR CA").await.expect("初始化 CA 失败");
+
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+    let csr = csr_der(
+        "svc-csr.coord.local",
+        &["svc-csr.coord.local"],
+        &[],
+        &leaf_key,
+    );
+    let cert = pki
+        .sign_csr(&csr, 0, CertUsage::Server)
+        .await
+        .expect("sign CSR");
+
+    assert_eq!(cert.common_name, "svc-csr.coord.local");
+    assert!(cert.key_name.is_empty(), "外部密钥不得有 coord key 引用");
+    assert_eq!(cert.key_version, 0);
+    assert_eq!(cert.usage, CertUsage::Server);
+    assert!(cert.cert_pem.contains("BEGIN CERTIFICATE"));
+
+    let record = store
+        .get_cert("svc-csr.coord.local")
+        .await
+        .expect("read record")
+        .expect("active record");
+    assert!(record.is_external());
+    assert!(!record.spki_sha256.is_empty(), "必须记录公钥指纹");
+    assert_eq!(record.usage, CertUsage::Server);
+    assert!(
+        record.cert_pem.contains("BEGIN CERTIFICATE"),
+        "store 只存证书，不存私钥"
+    );
+
+    let der = cert_der(&cert.cert_pem);
+    let (_, parsed) = x509_parser::parse_x509_certificate(&der).expect("parse cert");
+    let ku = parsed.key_usage().expect("ku extension").expect("ku value");
+    assert!(ku.value.digital_signature());
+    assert!(ku.value.key_encipherment());
+    let eku = parsed
+        .extended_key_usage()
+        .expect("eku extension")
+        .expect("eku value");
+    assert!(eku.value.server_auth, "SERVER 必须含 serverAuth");
+    assert!(!eku.value.client_auth, "SERVER 不得含 clientAuth");
+
+    let ca_der = cert_der(&pki.ca_cert_pem().expect("ca pem"));
+    let (_, ca_cert) = x509_parser::parse_x509_certificate(&ca_der).expect("parse CA");
+    parsed
+        .verify_signature(Some(ca_cert.public_key()))
+        .expect("CSR cert must carry a real CA signature");
+}
+
+/// usage=CLIENT ⇒ KU 仅 digitalSignature、EKU 仅 clientAuth。
+#[tokio::test]
+async fn test_sign_csr_client_profile_is_exact() {
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("CSR Client CA").await.expect("初始化 CA 失败");
+
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+    let csr = csr_der("svc-client.coord.local", &[], &["10.1.2.3"], &leaf_key);
+    let cert = pki
+        .sign_csr(&csr, 0, CertUsage::Client)
+        .await
+        .expect("sign CSR");
+    let der = cert_der(&cert.cert_pem);
+    let (_, parsed) = x509_parser::parse_x509_certificate(&der).expect("parse cert");
+    let ku = parsed.key_usage().expect("ku").expect("ku value");
+    assert!(ku.value.digital_signature());
+    assert!(
+        !ku.value.key_encipherment(),
+        "CLIENT 不得含 keyEncipherment"
+    );
+    let eku = parsed
+        .extended_key_usage()
+        .expect("eku")
+        .expect("eku value");
+    assert!(eku.value.client_auth);
+    assert!(!eku.value.server_auth);
+}
+
+/// PoP 失败（CSR 签名被篡改）⇒ INVALID_ARGUMENT，不签发。
+#[tokio::test]
+async fn test_sign_csr_rejects_invalid_proof_of_possession() {
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("CSR PoP CA").await.expect("初始化 CA 失败");
+
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+    let mut csr = csr_der(
+        "svc-pop.coord.local",
+        &["svc-pop.coord.local"],
+        &[],
+        &leaf_key,
+    );
+    let last = csr.len() - 1;
+    csr[last] ^= 0xff;
+
+    let err = pki
+        .sign_csr(&csr, 0, CertUsage::Both)
+        .await
+        .expect_err("tampered CSR must be rejected");
+    assert!(
+        matches!(err, PkiError::InvalidArgument(_)),
+        "unexpected: {err}"
+    );
+}
+
+/// 同一 CSR 幂等；同 CN 新公钥 ⇒ 新 serial，旧证书 retired。
+#[tokio::test]
+async fn test_sign_csr_idempotent_and_new_key_rotates() {
+    use coord_agent::pki_store::CertStatus;
+
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("CSR Idem CA").await.expect("初始化 CA 失败");
+
+    let key1 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key1");
+    let csr1 = csr_der(
+        "svc-idem.coord.local",
+        &["svc-idem.coord.local"],
+        &[],
+        &key1,
+    );
+    let first = pki
+        .sign_csr(&csr1, 0, CertUsage::Both)
+        .await
+        .expect("first");
+    let again = pki
+        .sign_csr(&csr1, 0, CertUsage::Both)
+        .await
+        .expect("idempotent");
+    assert_eq!(first.serial, again.serial);
+
+    let key2 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key2");
+    let csr2 = csr_der(
+        "svc-idem.coord.local",
+        &["svc-idem.coord.local"],
+        &[],
+        &key2,
+    );
+    let rotated = pki
+        .sign_csr(&csr2, 0, CertUsage::Both)
+        .await
+        .expect("new key");
+    assert_ne!(rotated.serial, first.serial);
+    let old = pki
+        .get_cert_by_serial(&first.serial)
+        .await
+        .expect("query")
+        .expect("old");
+    assert_eq!(old.status, CertStatus::Retired);
+}
+
+/// 外部密钥证书没有 coord 侧私钥：Renew/Rotate 必须要求新 CSR。
+#[tokio::test]
+async fn test_external_cert_renew_and_rotate_require_csr() {
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("CSR Renew CA").await.expect("初始化 CA 失败");
+
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+    let csr = csr_der(
+        "svc-external.coord.local",
+        &["svc-external.coord.local"],
+        &[],
+        &leaf_key,
+    );
+    let cert = pki
+        .sign_csr(&csr, 0, CertUsage::Both)
+        .await
+        .expect("sign CSR");
+
+    let err = pki
+        .renew_cert(&cert.serial, 0)
+        .await
+        .expect_err("renew external must fail");
+    assert!(
+        matches!(err, PkiError::FailedPrecondition(_)),
+        "unexpected: {err}"
+    );
+
+    let err = pki
+        .rotate_cert("svc-external.coord.local", 0)
+        .await
+        .expect_err("rotate external must fail");
+    assert!(
+        matches!(err, PkiError::FailedPrecondition(_)),
+        "unexpected: {err}"
+    );
+}
+
+/// managed IssueCert 的 usage 精确生效；Rotation 未指定 usage 时继承；usage 变化触发换新。
+#[tokio::test]
+async fn test_issue_cert_usage_profile_and_rotate_inherits() {
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("Usage CA").await.expect("初始化 CA 失败");
+    let cn = "svc-server.coord.local";
+
+    let server = pki
+        .issue_cert_with_profile(
+            cn,
+            0,
+            coord_agent::pki::SanSpec::default(),
+            CertUsage::Server,
+        )
+        .await
+        .expect("issue server");
+    assert_eq!(server.usage, CertUsage::Server);
+    let der = cert_der(&server.cert_pem);
+    let (_, parsed) = x509_parser::parse_x509_certificate(&der).expect("parse cert");
+    let eku = parsed
+        .extended_key_usage()
+        .expect("eku")
+        .expect("eku value");
+    assert!(eku.value.server_auth);
+    assert!(!eku.value.client_auth);
+
+    let rotated = pki.rotate_cert(cn, 0).await.expect("rotate");
+    assert_eq!(rotated.usage, CertUsage::Server, "Rotate 必须继承 usage");
+
+    let both = pki.issue_cert(cn, 0).await.expect("issue both");
+    assert_ne!(both.serial, rotated.serial, "usage 变化必须换新");
+    assert_eq!(both.usage, CertUsage::Both);
+}
+
+/// 外部证书存在时，managed IssueCert 不得把它当作幂等命中。
+#[tokio::test]
+async fn test_issue_cert_after_external_replaces_with_managed() {
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("CSR Issue CA").await.expect("初始化 CA 失败");
+
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+    let csr = csr_der(
+        "svc-switch.coord.local",
+        &["svc-switch.coord.local"],
+        &[],
+        &leaf_key,
+    );
+    let external = pki
+        .sign_csr(&csr, 0, CertUsage::Both)
+        .await
+        .expect("external");
+
+    let managed = pki
+        .issue_cert("svc-switch.coord.local", 0)
+        .await
+        .expect("managed issue");
+    assert!(managed.key_name.starts_with("pki/leaf/"));
+    assert_ne!(managed.serial, external.serial);
+}
+
 /// G-PKI-1 验收：到期 = 换新触发
 #[tokio::test]
 async fn test_expired_current_record_is_reissued_not_returned() {
@@ -653,6 +955,8 @@ async fn test_expired_current_record_is_reissued_not_returned() {
         parent_serial: None,
         dns_names: Vec::new(),
         ip_addresses: Vec::new(),
+        spki_sha256: String::new(),
+        usage: coord_agent::pki_store::CertUsage::Both,
     };
     store.create_cert(cn, &expired).await.expect("seed expired");
 

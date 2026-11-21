@@ -599,7 +599,7 @@ const BUILTIN_CAPABILITY_META: &[(&str, CapabilityType, &str)] = &[
     (
         "pki:cert:issue",
         CapabilityType::Write,
-        "签发/续期证书（IssueCert/RenewCert）",
+        "签发/续期证书（IssueCert/RenewCert/SignCsr）",
     ),
     (
         "pki:cert:read",

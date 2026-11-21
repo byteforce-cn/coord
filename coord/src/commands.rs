@@ -1948,6 +1948,7 @@ pub async fn cmd_pki_issue(
             ttl_seconds: ttl_seconds as i64,
             dns_names: dns_names.clone(),
             ip_addresses: ip_addresses.clone(),
+            usage: 0,
         })
         .await?
         .into_inner();

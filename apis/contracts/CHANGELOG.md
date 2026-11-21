@@ -1,3 +1,18 @@
+## [contracts/v2.2.0] — 2026-11-20（Minor：PKI CSR 签发与 usage → KU/EKU）
+
+**发布口径**：**Minor**（`coord.pki.v1` 纯新增 `SignCsr` RPC / 消息与
+`PkiCertificateUsage` 枚举；`IssueCert` / `RotateCert` 追加 `usage` 字段（新字段号），
+不改既有字段号/类型、不删 RPC，`buf breaking` 基线不变）。
+
+- 新增 `Pki/SignCsr(PkiSignCsrRequest) -> PkiSignCsrResponse`：用 CSR 公钥签发，
+  proof-of-possession 必须通过；CN / DNS / IP SAN 取自 CSR，私钥不进入 coord。
+  外部密钥证书不含 `key_material` 引用（`key_name` 为空），`RenewCert` /
+  `RotateCert` 返回 `FAILED_PRECONDITION`（必须重新提交 CSR）。
+- 新增 `PkiCertificateUsage`：`SERVER` / `CLIENT` / `BOTH` 精确写 KU/EKU；
+  `IssueCert` / `SignCsr` 未指定 = `BOTH`，`RotateCert` 未指定 = 继承当前证书。
+- 幂等口径：同 CN + 同公钥指纹（SPKI SHA-256）+ SAN/TTL/usage ⇒ 同证书；
+  新公钥或 profile 变化 ⇒ 新 serial，旧记录 retired。
+
 ## [contracts/v2.1.0] — 2026-11-20（Minor：PKI 按 serial 只读查询）
 
 **发布口径**：**Minor**（`coord.pki.v1` 纯新增 `GetCertBySerial` RPC 与请求/响应消息；

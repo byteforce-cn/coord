@@ -89,6 +89,23 @@ public interface PkiClient {
                           List<String> ipAddresses);
 
     /**
+     * Issue a certificate with an explicit usage profile (exact KU/EKU).
+     * <p>
+     * {@code usage == null} means {@link PkiCertUsage#BOTH}. The idempotency key
+     * includes the usage, so changing it re-issues (old certificate becomes retired).
+     *
+     * @param commonName    the Common Name (CN) for the certificate
+     * @param ttlSeconds    TTL for the certificate in seconds (0 for default 24h)
+     * @param dnsNames      DNS SANs; empty ⇒ derived from {@code commonName}
+     * @param ipAddresses   IP SANs; empty ⇒ no IP SAN
+     * @param usage         certificate usage; null ⇒ BOTH
+     * @return issued certificate information
+     * @throws CoordException if the CA is not initialized or issuance fails
+     */
+    PkiCertInfo issueCert(String commonName, long ttlSeconds, List<String> dnsNames,
+                          List<String> ipAddresses, PkiCertUsage usage);
+
+    /**
      * Renew an existing certificate by serial number, issuing a new certificate
      * with a fresh key pair under the <b>original CN</b> (looked up by serial).
      * The old certificate stays valid until {@code notAfter}.
@@ -140,6 +157,21 @@ public interface PkiClient {
                            List<String> ipAddresses);
 
     /**
+     * Rotate with an explicit usage profile. {@code usage == null} inherits the
+     * current certificate's usage (or BOTH when no certificate exists).
+     *
+     * @param commonName    the Common Name (CN) to rotate
+     * @param ttlSeconds    TTL for the certificate in seconds (0 for default 24h)
+     * @param dnsNames      DNS SANs; empty ⇒ inherited from the current active cert
+     * @param ipAddresses   IP SANs; empty ⇒ inherited from the current active cert
+     * @param usage         certificate usage; null ⇒ inherit
+     * @return the new active certificate information
+     * @throws CoordException on rotation failure
+     */
+    PkiCertInfo rotateCert(String commonName, long ttlSeconds, List<String> dnsNames,
+                           List<String> ipAddresses, PkiCertUsage usage);
+
+    /**
      * List the current (active) and not-yet-expired retired certificates of a CN.
      * <p>
      * Verification parties use the returned {@code serial} as the JWKS {@code kid}
@@ -172,9 +204,36 @@ public interface PkiClient {
     PkiCertSummary getCertBySerial(String serialNumber);
 
     /**
+     * Sign a PKCS#10 CSR with this CA (proof-of-possession is verified server-side).
+     * <p>
+     * The private key never leaves the caller; the returned {@link PkiCertInfo}
+     * therefore has an empty {@code keyName} and {@code keyVersion == 0}. CN and
+     * SANs come from the CSR subject / extension request. A CSR without SANs
+     * derives a DNS SAN from its CN.
+     * <p>
+     * Idempotent per CN + public key + profile: the same CSR returns the same
+     * certificate; a new key for the same CN retires the old certificate.
+     *
+     * @param csrDer      PKCS#10 CSR in DER form
+     * @param ttlSeconds  TTL for the certificate in seconds (0 for default 24h)
+     * @param usage       certificate usage; null ⇒ BOTH
+     * @return signed certificate (no key material)
+     * @throws CoordException on invalid CSR (including PoP failure) or signing failure
+     */
+    PkiCertInfo signCsr(byte[] csrDer, long ttlSeconds, PkiCertUsage usage);
+
+    /**
+     * Sign a PKCS#10 CSR with the default TTL and {@link PkiCertUsage#BOTH}.
+     *
+     * @param csrDer PKCS#10 CSR in DER form
+     * @return signed certificate (no key material)
+     * @throws CoordException on invalid CSR (including PoP failure) or signing failure
+     */
+    PkiCertInfo signCsr(byte[] csrDer);
+
+    /**
      * Verify a certificate against the CA: validity window, issuer, and the CA
      * public-key signature. Malformed PEM is rejected as an invalid argument.
-
      *
      * @param certPem the PEM-encoded certificate to verify
      * @return true only if the certificate is in its validity window and signed by this CA

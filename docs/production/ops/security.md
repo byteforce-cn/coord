@@ -105,6 +105,11 @@ key_version}`。**私钥唯一出口**是 `Transit/ExportKey`（独立能力
 单独获得 `coord:transit:key_export`。给某主体导出 leaf key ＝ 允许其冒用该 CN
 身份——这条定级没有变，只是授权点从 `GetCertByCN` 移到了 `ExportKey`。
 
+**CSR 签发（外部密钥）**：`SignCsr` 只接受 CSR 内的公钥并要求 proof-of-possession；
+私钥从不进入 coord，证书记录用 `key_material = {kind: external}` 表示（无
+`key_name` / 材料）。外部密钥证书的 `RenewCert` / `RotateCert` 返回
+`FAILED_PRECONDITION`，必须由持有方重新提交 CSR。
+
 **用途 scope（CN 命名约定）**：建议 `<服务>-<用途>`（如 `orders-api` /
 `orders-signer`），让同一服务的不同用途落到不同 CN、可分别轮换/撤销。
 **能力名与 CN 是两层**：gRPC 能力（`pki:ca:init` / `pki:cert:issue` /

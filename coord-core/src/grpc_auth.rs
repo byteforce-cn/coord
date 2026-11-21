@@ -340,6 +340,7 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         // PKI：私钥集中存储前必须上鉴权
         "/coord.pki.v1.Pki/InitCa" => Some("pki:ca:init"),
         "/coord.pki.v1.Pki/IssueCert" => Some("pki:cert:issue"),
+        "/coord.pki.v1.Pki/SignCsr" => Some("pki:cert:issue"),
         "/coord.pki.v1.Pki/RenewCert" => Some("pki:cert:issue"),
         "/coord.pki.v1.Pki/RotateCert" => Some("pki:cert:rotate"),
         "/coord.pki.v1.Pki/ListCerts" => Some("pki:cert:read"),

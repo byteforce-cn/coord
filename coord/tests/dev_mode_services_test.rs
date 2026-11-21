@@ -511,6 +511,7 @@ async fn dev_mode_metrics_share_one_registry() {
             ttl_seconds: 3600,
             dns_names: vec!["metrics-e2e".into()],
             ip_addresses: vec![],
+            usage: 0,
         })
         .await
         .expect("IssueCert must succeed in dev mode");

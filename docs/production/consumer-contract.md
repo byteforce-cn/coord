@@ -510,7 +510,7 @@ trigger:
 | RPC（组） | 能力 |
 |:--|:--|
 | `Pki/InitCa` | `pki:ca:init` |
-| `Pki/IssueCert` / `RenewCert` | `pki:cert:issue` |
+| `Pki/IssueCert` / `RenewCert` / `SignCsr` | `pki:cert:issue` |
 | `Pki/RotateCert` | `pki:cert:rotate` |
 | `Pki/ListCerts` / `GetCertByCN` / `GetCertBySerial` / `GetCaCert` / `VerifyCert` | `pki:cert:read` |
 
@@ -519,13 +519,19 @@ trigger:
   key_name, key_version}`；CA 与 leaf 私钥在 transit 命名密钥档案里（KEK 包裹）。
   私钥唯一出口是 `Transit/ExportKey`（`coord:transit:key_export`）；leaf key
   `exportable=true`（受控恢复），CA key `never_exportable`。授权矩阵口径见
-  `security.md` §3.1。
+  `security.md` §3.1。`SignCsr` 走另一条路：只接受调用方 CSR 的公钥（PoP 必须
+  通过），私钥从不进入 coord；记录以 `key_material = {kind: external}` 表示，
+  没有 `key_name` / 私钥材料。外部密钥证书的 `RenewCert` / `RotateCert` 会返回
+  `FAILED_PRECONDITION`，必须用新 CSR 调 `SignCsr`。
 - **到期 = 换新触发**（G-PKI-1）：`IssueCert` / `RotateCert` 对过期记录走替换
   路径重签（新 serial / 新密钥）；`RenewCert(serial)` 为按序列号恢复入口；
   `GetCertByCN` 仅未过期返回，否则 `NOT_FOUND`。`GetCertBySerial` 按 serial
   只读查询（active / retired / expired 都可查，未知 serial ⇒ `NOT_FOUND`），
   不返回任何私钥材料；`status` 的 `expired` 由服务端按 `not_after` 判定。
   列表中 `status ∈ {active, retired, expired}`，`expired` 覆盖存储态。
+- **usage → KU/EKU 精确**：`IssueCert` / `SignCsr` 的 `usage`（`SERVER` /
+  `CLIENT` / `BOTH`）按 `PkiCertificateUsage` 精确写 KU/EKU；未指定 = `BOTH`
+  （既有行为）。`RotateCert` 未指定 = 继承当前证书的 usage。
 - **证书 profile**：密钥 ECDSA P-256；KU = `digitalSignature` + `keyEncipherment`；
   EKU = `clientAuth` + `serverAuth`；有效期由请求 TTL（缺省 24h）决定。
   **身份以 SAN 为准**，CN 仅作 subject（OpenSSL 的 CN 回退不是契约）：`IssueCert`
