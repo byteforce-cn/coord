@@ -80,6 +80,41 @@ async fn create_topic(
     }
 }
 
+/// 等 topic 元数据在**每个节点**上可见。
+///
+/// `CreateTopic` 由 region 0 的 Raft 提交，各节点从 apply 到本地 topic 表存在收敛
+/// 窗口；而 `Publish` / `GetTopicLeader` 只读本节点表。若只等「某个节点」看到
+/// topic，接下来的写请求可能落到还没 apply 的 shard Leader 上，被误判成
+/// `TOPIC_NOT_FOUND`（服务端拒绝，不是产品语义错误）。
+async fn wait_topic_visible(addrs: &[String], topic: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let mut pending = Vec::new();
+        for addr in addrs {
+            let mut client = MqClient::new(connect(addr).await);
+            if let Err(status) = client
+                .describe_topic(mq_v2::DescribeTopicRequest {
+                    topic: topic.to_string(),
+                })
+                .await
+            {
+                pending.push(format!("{addr}: {status}"));
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "topic {topic} not visible on every node after {attempts} attempts; \
+             pending: {pending:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// 等分区 Leader 就绪（分片 raft 组的选举比 region 0 稍慢）。
 async fn wait_partition_leader(addrs: &[String], topic: &str, partition: i32) -> String {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -191,6 +226,9 @@ fn mq_v2_publish_on_a_three_node_cluster() {
         let created = create_topic(&addrs, "orders", 2).await;
         assert_eq!(created.partition_count, 2);
         assert!(created.topic_id > 0);
+        // 写路径读的是「本节点已 apply 的 topic 表」：先等全部节点可见，
+        // 否则 shard Leader 可能尚未 apply 而被误判成 TOPIC_NOT_FOUND。
+        wait_topic_visible(&addrs, "orders").await;
 
         // 2. 分片 Leader 可见。
         let leader = wait_partition_leader(&addrs, "orders", 0).await;
@@ -288,6 +326,7 @@ fn mq_v2_publish_on_a_three_node_cluster() {
             .await
             .expect("CreateTopic through the agent")
             .into_inner();
+        wait_topic_visible(&addrs, "agent-orders").await;
         let published = via_agent
             .publish(mq_v2::PublishRequest {
                 topic: "agent-orders".to_string(),
