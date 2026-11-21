@@ -1443,6 +1443,26 @@ mod tests {
             infer_capability("/coord.pki.v1.Pki/VerifyCert"),
             Some("pki:cert:read".into())
         );
+        assert_eq!(
+            infer_capability("/coord.pki.v1.Pki/GetCertStatus"),
+            Some("pki:cert:read".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.pki.v1.Pki/GetCrl"),
+            Some("pki:cert:read".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.pki.v1.Pki/RevokeCert"),
+            Some("pki:cert:revoke".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.pki.v1.Pki/RotateCrl"),
+            Some("pki:cert:revoke".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.pki.v1.Pki/Tidy"),
+            Some("pki:cert:revoke".into())
+        );
         // 未知 PKI RPC 默认 deny（fail-closed）
         assert_eq!(infer_capability("/coord.pki.v1.Pki/UnknownRpc"), None);
     }

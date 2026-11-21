@@ -212,8 +212,10 @@ openssl verify -CAfile ca.pem -verify_hostname orders-api orders-api.pem
 rustls/webpki、浏览器、Envoy）必须有该扩展。完整步骤见
 [`docs/pki-quickstart.md`](docs/pki-quickstart.md)。
 
-边界：仅 dev / test / 内部验证——无吊销（CRL/OCSP）、非 HSM、不是生产信任根
-（`docs/production/ops/boundaries.md` B-PKI-1）。证书/CA 记录在保留 KV 命名空间
+边界：仅 dev / test / 内部验证——吊销是 CA 侧事实（`RevokeCert` / `GetCertStatus` /
+经 RPC 分发的 CA 签名 CRL），但没有 OCSP、没有 HTTP CRL 端点、也没有后台 CRL 发布任务；
+不调 `VerifyCert` 也不刷新 CRL 的消费方仍会接受已吊销证书。非 HSM、不是生产信任根
+（`docs/production/ops/boundaries.md` B-PKI-1；ADR-0020）。证书/CA 记录在保留 KV 命名空间
 `/_pki/`，私钥材料以 KEK 包裹形态存于 `/_transit/`（鉴权开启时仅 agent 自身身份或
 root 可经 KV 读取）；快照只含包裹后的材料，不含 KEK。
 

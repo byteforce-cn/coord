@@ -98,7 +98,9 @@ key_version}`。**私钥唯一出口**是 `Transit/ExportKey`（独立能力
 |:--|:--|:--|
 | `ListCerts` | 证书摘要（不含私钥；供验签方构建 JWKS） | `pki:cert:read`（元数据只读） |
 | `GetCertByCN` | 当前有效证书 + `key_material` 引用（**无材料**） | `pki:cert:read`；拿到引用不等于能签名/导出 |
-| `GetCertBySerial` | 按 serial 的证书摘要（active / retired / expired；**无材料**） | `pki:cert:read` |
+| `GetCertBySerial` / `GetCertStatus` | 按 serial 的证书摘要与状态（active / retired / expired / revoked；**无材料**） | `pki:cert:read` |
+| `GetCrl` | CA 签名 CRL（PEM / DER） | `pki:cert:read` |
+| `RevokeCert` / `RotateCrl` / `Tidy` | 吊销记录 / 强制换 CRL 编号 / 回收过期证书历史 | `pki:cert:revoke`（写能力；`by` 取自鉴权主体） |
 | `Transit/ExportKey` | 私钥材料（仅 `exportable=true` 的 leaf key） | `coord:transit:key_export`（等价私钥读取权） |
 
 **授权矩阵口径**：`pki:cert:read` 只给证书/元数据；需要「恢复私钥」的主体必须
@@ -113,13 +115,15 @@ key_version}`。**私钥唯一出口**是 `Transit/ExportKey`（独立能力
 **用途 scope（CN 命名约定）**：建议 `<服务>-<用途>`（如 `orders-api` /
 `orders-signer`），让同一服务的不同用途落到不同 CN、可分别轮换/撤销。
 **能力名与 CN 是两层**：gRPC 能力（`pki:ca:init` / `pki:cert:issue` /
-`pki:cert:rotate` / `pki:cert:read`，见 `coord-core/src/grpc_auth.rs::rpc_capability`）
+`pki:cert:rotate` / `pki:cert:read` / `pki:cert:revoke`，见
+`coord-core/src/grpc_auth.rs::rpc_capability`）
 控制**谁能调 RPC**，消费侧的 CN 校验控制**签出来的身份被谁接受**——两侧分别配置，
 不互相替代。
 
-**`VerifyCert` 判据**：有效期窗口 + issuer 与本 CA 一致 + **CA 公钥验签**。
-同 issuer CN 的自签 CA 签出的证书不会通过；PEM 无法解析返回
-`INVALID_ARGUMENT`，验签失败返回 `valid=false`（不是内部错误）。
+**`VerifyCert` 判据**：有效期窗口 + issuer 与本 CA 一致 + **CA 公钥验签** +
+**serial 未被吊销**（ADR-0020）。同 issuer CN 的自签 CA 签出的证书不会通过；
+PEM 无法解析返回 `INVALID_ARGUMENT`，验签失败或已吊销返回 `valid=false`
+（不是内部错误）。
 
 **KV 面不得旁路 PKI**：`/_pki/`（证书/CA 记录与密钥引用）、`/_transit/`（KEK
 包裹的 CA/leaf 私钥材料与命名密钥档案）、`/_lease/`、`/_idgen/`、`/_pd/` 是内部
@@ -128,22 +132,24 @@ key_version}`。**私钥唯一出口**是 `Transit/ExportKey`（独立能力
 区间读/点查一律 `PERMISSION_DENIED`（`Watch` 同样拒绝订阅）。负控制：
 `coord/tests/auth_enforcement_test.rs::test_auth_enforcement_full_matrix`。
 
-### 3.2 吊销 / 泄露应急：CN 轮换 playbook（revocation 实现不在本轮）
+### 3.2 吊销 / 泄露应急：CA 侧吊销 + 消费侧剔除
 
-**现状（显式边界，见 `boundaries.md` B-PKI-1）**：无 CRL/OCSP、无 revoke
-RPC。证书泄露后的收口靠 **CN 轮换 + 消费侧剔除**。操作步骤见 `runbook.md`
-§4.5；摘要：
+**现状（ADR-0020；`boundaries.md` B-PKI-1）**：吊销是 CA 侧的**权威事实**。
+`RevokeCert(serial, reason)` 写吊销账本（与 CA 同存储、跨实例/重启共享、永久保留）；
+`VerifyCert` 拒绝已吊销 serial；`GetCertStatus` 返回 `revoked`；`GetCrl` / `RotateCrl`
+给第三方验签方提供 CA 签名的 CRL。操作步骤见 `runbook.md` §4.5；摘要：
 
-1. **剔除信任（第一优先）**：把受影响 CN 从**消费侧**（mTLS 授权配置 /
-   校验白名单）移除——即刻生效，不依赖 CA；
-2. **作废旧材料**：`RotateCert`（同 CN 换新材料、旧序列作废）或换新 CN
-   `IssueCert`；`VerifyCert` 确认新链；
-3. **验证旧材料被拒**：用旧证书发起验证/连接**必须**被拒（负控制）；
-4. **归档**：CN / 序列号 / 轮换时间 / 执行人。
-
-**关键理解**：`RotateCert` 只在本 agent 的 store 内使旧序列失效；**无法**阻止旧
-证书在「不校验本 store」的消费方继续通过链验证——所以第 1 步（消费侧剔除）
-是应急的**主要**手段，CA 侧动作只是收口。
+1. **CA 侧吊销（第一优先）**：`RevokeCert` 受影响 serial（reason 用 RFC 5280 CRLReason）；
+   `VerifyCert` 立即拒绝、`GetCertStatus` 立即为 `revoked`；
+2. **分发 CRL**：`GetCrl` / `RotateCrl` 取新 CRL；第三方 TrustManager 必须**重新拉取**
+   才会看到吊销——**吊销生效延迟 = 消费方 CRL/KV 缓存窗口**（跨组织共享同一 CA 时尤其
+   要写明这个窗口）；
+3. **消费侧剔除（并行，仍然必要）**：把受影响 CN 从 mTLS 授权 / 校验白名单移除。
+   不查 CRL、不调 `VerifyCert` 的消费方**不会**因为 CA 侧吊销而拒绝旧证书；
+4. **恢复身份**：`RotateCert`（同 CN，显式换新身份；旧 serial 永久 revoked，`IssueCert` /
+   `SignCsr` 不会静默重签）；外部密钥身份被吊销是终态，必须换新 CN；
+5. **负控制与归档**：旧证书调用 `VerifyCert` 必须返回 `valid=false`、CRL 必须包含该
+   serial；归档 CN / serial / reason / 时间 / 执行人。
 
 ### 3.3 KMS / HSM 路线：维持「非 HSM」显式边界
 

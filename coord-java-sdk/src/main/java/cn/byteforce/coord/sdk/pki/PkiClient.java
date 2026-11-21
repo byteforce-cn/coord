@@ -29,6 +29,13 @@ import java.util.List;
  *     // Verify a certificate
  *     boolean valid = pki.verifyCert(cert.certPem());
  *
+ *     // Revoke by serial and read the authoritative status
+ *     pki.revokeCert(cert.serial(), PkiRevocationReason.KEY_COMPROMISE);
+ *     PkiCertStatus status = pki.getCertStatus(cert.serial());
+ *
+ *     // Fetch the CA-signed CRL (no HTTP endpoint: caching is the caller's job)
+ *     PkiCrl crl = pki.getCrl(PkiCrlFormat.PEM);
+ *
  *     // Get CA certificate for trust store
  *     String caPem = pki.getCaCert();
  * }
@@ -248,4 +255,112 @@ public interface PkiClient {
      * @throws CoordException if the CA is not initialized
      */
     String getCaCert();
+
+    // ──── Revocation surface (ADR-0020) ────
+
+    /**
+     * Revoke a certificate with an unspecified reason (RFC 5280 CRLReason 0).
+     *
+     * @param serialNumber record serial (as returned by issue/rotate) or the
+     *                     X.509 serial embedded in the certificate
+     * @return the (possibly pre-existing) revocation record
+     * @throws CoordException if the serial is unknown ({@code NOT_FOUND}) or revocation fails
+     */
+    default PkiRevocationInfo revokeCert(String serialNumber) {
+        return revokeCert(serialNumber, PkiRevocationReason.UNSPECIFIED);
+    }
+
+    /**
+     * Revoke a certificate. Idempotent: revoking an already revoked serial returns
+     * the first record (original reason/time/by are preserved).
+     * <p>
+     * After revocation the certificate fails {@link #verifyCert} and its CN can no
+     * longer be re-issued implicitly: {@code issueCert} / {@code signCsr} return
+     * {@code FAILED_PRECONDITION}. {@code rotateCert} is the explicit path to a new
+     * identity for the same CN — the revoked serial stays revoked forever.
+     *
+     * @param serialNumber record serial or the X.509 serial embedded in the certificate
+     * @param reason       RFC 5280 CRLReason; null ⇒ {@link PkiRevocationReason#UNSPECIFIED}
+     * @return the (possibly pre-existing) revocation record
+     * @throws CoordException if the serial is unknown ({@code NOT_FOUND}) or revocation fails
+     */
+    PkiRevocationInfo revokeCert(String serialNumber, PkiRevocationReason reason);
+
+    /**
+     * Read the authoritative status of a serial.
+     * <p>
+     * {@code status ∈ {active, retired, expired, revoked}}. Expiry is computed server-side;
+     * a serial that is both expired and explicitly revoked reports {@code revoked}.
+     *
+     * @param serialNumber hex-encoded serial
+     * @return status plus the revocation record when revoked
+     * @throws CoordException if the serial is unknown ({@code NOT_FOUND})
+     */
+    PkiCertStatus getCertStatus(String serialNumber);
+
+    /**
+     * Fetch the current CRL in PEM format.
+     *
+     * @return CA-signed CRL plus its number and refresh window
+     * @throws CoordException on communication or signing failure
+     */
+    default PkiCrl getCrl() {
+        return getCrl(PkiCrlFormat.PEM);
+    }
+
+    /**
+     * Fetch the current CRL.
+     * <p>
+     * The CRL number is monotonically increasing and changes only when the revocation
+     * set changes (or on {@link #rotateCrl}); an unchanged set reuses the same number.
+     * Coord exposes no HTTP CRL endpoint — consumers must cache and refresh before
+     * {@code nextUpdateEpochSec}. Revocation takes effect for parties that check the CRL
+     * only after their next fetch (the CRL/KV cache window is the caller's).
+     *
+     * @param format desired encoding; null ⇒ {@link PkiCrlFormat#PEM}
+     * @return CA-signed CRL
+     * @throws CoordException on communication or signing failure
+     */
+    PkiCrl getCrl(PkiCrlFormat format);
+
+    /**
+     * Force a new CRL number and re-sign, even when the revocation set is unchanged.
+     *
+     * @return the newly numbered CRL (PEM)
+     * @throws CoordException on communication or signing failure
+     */
+    default PkiCrl rotateCrl() {
+        return rotateCrl(PkiCrlFormat.PEM);
+    }
+
+    /**
+     * Force a new CRL number and re-sign, even when the revocation set is unchanged.
+     *
+     * @param format desired encoding; null ⇒ {@link PkiCrlFormat#PEM}
+     * @return the newly numbered CRL
+     * @throws CoordException on communication or signing failure
+     */
+    PkiCrl rotateCrl(PkiCrlFormat format);
+
+    /**
+     * Reclaim certificate history using the server default retention.
+     *
+     * @return the applied retention and reclaimed record count
+     * @throws CoordException on communication or storage failure
+     */
+    default PkiTidyResult tidy() {
+        return tidy(0);
+    }
+
+    /**
+     * Reclaim certificate records whose {@code not_after + retention} is in the past.
+     * <p>
+     * Revocation records are <b>never</b> reclaimed: a serial's {@code revoked} status is
+     * permanent, and revoked records keep blocking implicit re-issue for their CN.
+     *
+     * @param retentionSeconds grace period after expiry; 0 ⇒ server default
+     * @return the applied retention and reclaimed record count
+     * @throws CoordException on communication or storage failure
+     */
+    PkiTidyResult tidy(long retentionSeconds);
 }

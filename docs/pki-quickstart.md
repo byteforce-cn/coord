@@ -99,14 +99,35 @@ curl -s http://127.0.0.1:19528/metrics | grep pki
   「参数一致才幂等」自动替换。也可直接 `--fresh` 或换 CN。
 - 旧的 dev 数据目录若想保留：无需手工迁移，重签即可。
 
+### 5.1 吊销与 CRL（ADR-0020）
+
+```bash
+# 吊销（serial 取 issue 输出；reason 用 RFC 5280 CRLReason）
+grpcurl -plaintext -d '{"serial":"<serial>","reason":"PKI_REVOCATION_REASON_KEY_COMPROMISE"}' \
+  127.0.0.1:19527 coord.pki.v1.Pki/RevokeCert
+
+# 状态：revoked（过期 + 吊销仍返回 revoked）
+grpcurl -plaintext -d '{"serial":"<serial>"}' \
+  127.0.0.1:19527 coord.pki.v1.Pki/GetCertStatus
+
+# CRL（PEM / DER；编号单调，内容未变时复用）
+grpcurl -plaintext -d '{}' 127.0.0.1:19527 coord.pki.v1.Pki/GetCrl
+```
+
+- `VerifyCert` 对已吊销证书返回 `valid=false`；`GetCertByCN` 返回 `NOT_FOUND`。
+- **不静默复活**：`IssueCert` / `SignCsr` 对已吊销的当前 CN 返回
+  `FAILED_PRECONDITION`；`RotateCert` 是显式换新身份的路径（旧 serial 永久 revoked）。
+- CRL 只经 RPC 分发（没有 HTTP 端点）；缓存/刷新由消费方负责，**吊销生效延迟 =
+  消费方 CRL 缓存窗口**。
+
 ## 6. 清理
 
 终端 1 `Ctrl+C`，然后 `rm -rf /tmp/coord-dev /tmp/coord-dev-certs`。
 
 ## 边界与相关文档
 
-- 无吊销（CRL/OCSP）、非 HSM、CN 只是软身份（身份校验以 SAN 为准）：
-  `docs/production/ops/boundaries.md` B-PKI-1。
+- 无 OCSP、无 HTTP CRL 端点、非 HSM、CN 只是软身份（身份校验以 SAN 为准）：
+  `docs/production/ops/boundaries.md` B-PKI-1（吊销面见 ADR-0020）。
 - 泄露应急 / CN 轮换：`docs/production/ops/security.md` §3 /
   `docs/production/ops/runbook.md` §4.5。
 - 能力与契约：`docs/production/consumer-contract.md` §9。

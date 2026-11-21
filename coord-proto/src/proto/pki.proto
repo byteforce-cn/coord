@@ -14,6 +14,14 @@ syntax = "proto3";
 // `coord:transit:key_export` 约束，CA 密钥恒不可导出）。
 // `GetCertByCN` 的私钥读取路径已删除——本响应只含证书与密钥引用，不含材料。
 //
+// 吊销面（ADR-0020）：`RevokeCert` / `GetCertStatus` / `GetCrl` / `RotateCrl` / `Tidy`。
+// - 吊销是 CA 侧的**权威事实**：serial 一旦吊销永久保持 revoked（不因过期/重启/双实例而复活）；
+//   `VerifyCert` 会查吊销账本，第三方验签方用 `GetCrl` 自己校验；
+// - `IssueCert` / `SignCsr` 对「当前证书已吊销」的 CN 显式 `FAILED_PRECONDITION`，
+//   不静默重签；`RotateCert` 是**显式**换新身份的路径（旧 serial 仍保持 revoked）；
+// - CRL 只经 RPC 分发，coord 不提供 HTTP 端点；缓存与刷新节奏由消费方负责
+//   （吊销生效延迟 = 消费方 TrustManager 的 CRL/KV 缓存窗口）。
+//
 // 验收口径与目标日期约定见 WHITEPAPER.md。
 // ============================================================
 
@@ -37,24 +45,61 @@ enum PkiCertificateUsage {
   PKI_CERTIFICATE_USAGE_BOTH = 3;
 }
 
+// RFC 5280 §5.3.1 CRLReason（数值与 RFC 逐项一致）。
+// 与 seedj `PkiProvider.RevocationReason` 的子集对齐：UNSPECIFIED / KEY_COMPROMISE /
+// CA_COMPROMISE / SUPERSEDED / CESSATION 是双方共有的取值。
+enum PkiRevocationReason {
+  PKI_REVOCATION_REASON_UNSPECIFIED = 0;
+  PKI_REVOCATION_REASON_KEY_COMPROMISE = 1;
+  PKI_REVOCATION_REASON_CA_COMPROMISE = 2;
+  PKI_REVOCATION_REASON_AFFILIATION_CHANGED = 3;
+  PKI_REVOCATION_REASON_SUPERSEDED = 4;
+  PKI_REVOCATION_REASON_CESSATION_OF_OPERATION = 5;
+  PKI_REVOCATION_REASON_CERTIFICATE_HOLD = 6;
+  PKI_REVOCATION_REASON_PRIVILEGE_WITHDRAWN = 9;
+  PKI_REVOCATION_REASON_AA_COMPROMISE = 10;
+}
+
+// CRL 编码：UNSPECIFIED = PEM。
+enum PkiCrlFormat {
+  PKI_CRL_FORMAT_UNSPECIFIED = 0;
+  PKI_CRL_FORMAT_PEM = 1;
+  PKI_CRL_FORMAT_DER = 2;
+}
+
 service Pki {
   rpc InitCa(PkiInitCaRequest) returns (PkiInitCaResponse);
   rpc IssueCert(PkiIssueCertRequest) returns (PkiIssueCertResponse);
   rpc RenewCert(PkiRenewCertRequest) returns (PkiRenewCertResponse);
-  // 判据：有效期窗口 + issuer 与本 CA 一致 + CA 公钥验签。
-  // PEM 无法解析 ⇒ INVALID_ARGUMENT；签名/有效期不通过 ⇒ valid=false。
+  // 判据：有效期窗口 + issuer 与本 CA 一致 + CA 公钥验签 + **serial 未被吊销**。
+  // PEM 无法解析 ⇒ INVALID_ARGUMENT；签名/有效期/吊销任一不通过 ⇒ valid=false。
   rpc VerifyCert(PkiVerifyCertRequest) returns (PkiVerifyCertResponse);
   rpc GetCaCert(PkiGetCaCertRequest) returns (PkiGetCaCertResponse);
   // ISSUE-000 Phase 2: 平滑轮换（按 CN 轮换 + 列表 + 幂等取回）
   rpc RotateCert(PkiRotateCertRequest) returns (PkiRotateCertResponse);
   rpc ListCerts(PkiListCertsRequest) returns (PkiListCertsResponse);
   rpc GetCertByCN(PkiGetCertByCNRequest) returns (PkiGetCertByCNResponse);
-  // 按 serial 只读查询（含 retired / expired；不含私钥；能力 pki:cert:read）。
+  // 按 serial 只读查询（含 retired / expired / revoked；不含私钥；能力 pki:cert:read）。
   // 不存在 ⇒ NOT_FOUND。
   rpc GetCertBySerial(PkiGetCertBySerialRequest) returns (PkiGetCertBySerialResponse);
   // 用调用方 CSR 的公钥签发（proof-of-possession 必须通过）。私钥不进入 coord；
   // CN / SAN 取自 CSR；subject 的其他属性按 coord profile 固定。
   rpc SignCsr(PkiSignCsrRequest) returns (PkiSignCsrResponse);
+  // 吊销（ADR-0020）：serial 接受 IssueCert/GetCertBySerial 返回的记录 serial，
+  // 也接受证书内嵌的 X.509 serial。重复吊销幂等（保留首次的 reason/revoked_at/by）。
+  // 未知 serial ⇒ NOT_FOUND。能力 pki:cert:revoke。
+  rpc RevokeCert(PkiRevokeCertRequest) returns (PkiRevokeCertResponse);
+  // 按 serial 查状态（active / retired / expired / revoked；未知 ⇒ NOT_FOUND）。
+  // 能力 pki:cert:read。
+  rpc GetCertStatus(PkiGetCertStatusRequest) returns (PkiGetCertStatusResponse);
+  // 当前 CRL（CA 签名）。吊销集合变化、或 next_update 已过时分配新 CRL number
+  // 并持久化；否则复用当前编号与时间窗口。能力 pki:cert:read。
+  rpc GetCrl(PkiGetCrlRequest) returns (PkiGetCrlResponse);
+  // 强制分配新 CRL number 并重签（即使吊销集合未变）。能力 pki:cert:revoke。
+  rpc RotateCrl(PkiRotateCrlRequest) returns (PkiRotateCrlResponse);
+  // 回收 `not_after + retention` 之前到期的证书历史/过期 active 记录。
+  // **吊销记录不回收**（serial 的 revoked 状态是永久事实）。能力 pki:cert:revoke。
+  rpc Tidy(PkiTidyRequest) returns (PkiTidyResponse);
 }
 
 message PkiInitCaRequest {
@@ -92,8 +137,8 @@ message PkiIssueCertResponse {
   reserved 3; // 原 key_pem：ADR-0019 D6 删除（私钥不出 coord）
   int64 not_before = 4; // UNIX epoch seconds
   int64 not_after = 5; // UNIX epoch seconds
-  string serial = 6; // hex-encoded
-  string status = 7; // active / retired / expired
+  string serial = 6; // hex-encoded（= 证书内嵌 serial）
+  string status = 7; // active / retired / expired / revoked
   string parent_serial = 8; // 轮换链（首次签发为空）
   PkiKeyMaterial key_material = 9;
 }
@@ -110,7 +155,7 @@ message PkiRenewCertResponse {
   int64 not_before = 4;
   int64 not_after = 5;
   string serial = 6;
-  string status = 7; // active / retired / expired
+  string status = 7; // active / retired / expired / revoked
   string parent_serial = 8;
   PkiKeyMaterial key_material = 9;
 }
@@ -134,7 +179,7 @@ message PkiRotateCertResponse {
   int64 not_before = 4;
   int64 not_after = 5;
   string serial = 6;
-  string status = 7; // active / retired / expired
+  string status = 7; // active / retired / expired / revoked
   string parent_serial = 8;
   PkiKeyMaterial key_material = 9;
 }
@@ -155,7 +200,7 @@ message PkiCertSummary {
   int64 not_before = 3; // UNIX epoch seconds
   int64 not_after = 4; // UNIX epoch seconds
   string serial = 5; // hex-encoded
-  string status = 6; // active / retired / expired
+  string status = 6; // active / retired / expired / revoked
   string parent_serial = 7;
 }
 
@@ -171,12 +216,12 @@ message PkiGetCertByCNResponse {
   int64 not_before = 4;
   int64 not_after = 5;
   string serial = 6;
-  string status = 7; // active / retired / expired
+  string status = 7; // active / retired / expired / revoked
   string parent_serial = 8;
   PkiKeyMaterial key_material = 9;
 }
 
-// 按 serial 只读查询（含 retired / expired；不含私钥）
+// 按 serial 只读查询（含 retired / expired / revoked；不含私钥）
 message PkiGetCertBySerialRequest {
   string serial = 1; // hex-encoded（与 IssueCert 响应的 serial 同一口径）
 }
@@ -187,8 +232,8 @@ message PkiGetCertBySerialResponse {
   int64 not_before = 3; // UNIX epoch seconds
   int64 not_after = 4; // UNIX epoch seconds
   string serial = 5; // hex-encoded
-  // active / retired / expired。expired 由服务端按 not_after 与当前时间判定，
-  // 覆盖 active/retired 存储态。
+  // active / retired / expired / revoked。expired 由服务端按 not_after 与当前时间
+  // 判定，覆盖 active/retired 存储态；revoked 覆盖其余存储态（吊销是永久事实）。
   string status = 6;
   string parent_serial = 7;
 }
@@ -207,7 +252,7 @@ message PkiSignCsrResponse {
   int64 not_before = 3; // UNIX epoch seconds
   int64 not_after = 4; // UNIX epoch seconds
   string serial = 5; // hex-encoded
-  string status = 6; // active / retired / expired
+  string status = 6; // active / retired / expired / revoked
   string parent_serial = 7;
 }
 
@@ -223,4 +268,79 @@ message PkiGetCaCertRequest {}
 
 message PkiGetCaCertResponse {
   string ca_cert_pem = 1;
+}
+
+// ──── 吊销面（ADR-0020）────
+
+message PkiRevokeCertRequest {
+  // 记录 serial（IssueCert 等响应）或证书内嵌的 X.509 serial，hex-encoded。
+  string serial = 1;
+  // RFC 5280 CRLReason；未指定 = 0（unspecified）。
+  PkiRevocationReason reason = 2;
+}
+
+message PkiRevokeCertResponse {
+  // 请求时的 serial（原样回显）。
+  string serial = 1;
+  // 证书内嵌的 X.509 serial（CRL 条目口径）；无法解析时为记录 serial。
+  string cert_serial = 2;
+  string common_name = 3;
+  string status = 4; // 恒为 revoked
+  int64 revoked_at = 5; // UNIX epoch seconds
+  PkiRevocationReason reason = 6;
+  // 吊销执行者：服务端从鉴权主体取（CCT `sub`；无身份上下文时 `anonymous`），
+  // 不接受调用方自报。
+  string by = 7;
+}
+
+message PkiGetCertStatusRequest {
+  string serial = 1; // hex-encoded
+}
+
+message PkiGetCertStatusResponse {
+  string serial = 1; // 请求的 serial（原样回显）
+  string cert_serial = 2; // 证书内嵌的 X.509 serial（无法解析时为空）
+  string common_name = 3;
+  // active / retired / expired / revoked。被吊销时恒为 revoked（覆盖 expired）。
+  string status = 4;
+  int64 not_before = 5; // UNIX epoch seconds；仅吊销账本命中时为 0
+  int64 not_after = 6; // UNIX epoch seconds；仅吊销账本命中时为 0
+  // 以下字段仅 status=revoked 时非零/非空。
+  int64 revoked_at = 7; // UNIX epoch seconds
+  PkiRevocationReason reason = 8;
+  string by = 9;
+}
+
+message PkiGetCrlRequest {
+  PkiCrlFormat format = 1; // 未指定 = PEM
+}
+
+message PkiGetCrlResponse {
+  bytes crl = 1; // 按 format 编码的 CRL
+  PkiCrlFormat format = 2;
+  uint64 crl_number = 3; // 单调递增（RFC 5280 §5.2.3）
+  int64 this_update = 4; // UNIX epoch seconds
+  int64 next_update = 5; // UNIX epoch seconds（消费方须在此之前刷新）
+}
+
+message PkiRotateCrlRequest {
+  PkiCrlFormat format = 1; // 未指定 = PEM
+}
+
+message PkiRotateCrlResponse {
+  bytes crl = 1;
+  PkiCrlFormat format = 2;
+  uint64 crl_number = 3;
+  int64 this_update = 4;
+  int64 next_update = 5;
+}
+
+message PkiTidyRequest {
+  // 到期后保留多久（秒）；0 = 服务端默认（history_retention_hours）。
+  int64 retention_seconds = 1;
+}
+
+message PkiTidyResponse {
+  int64 retention_seconds = 1; // 本次生效的保留期
+  uint64 removed_certs = 2; // 被回收的证书记录数（active + history）
 }
