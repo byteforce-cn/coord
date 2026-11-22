@@ -268,7 +268,9 @@ pub trait PkiStore: Send + Sync {
     /// 列出 CN 的 active + 未过期历史证书（验签方按 serial/kid 取用）
     async fn list_certs(&self, cn: &str) -> Result<Vec<CertRecord>, PkiStoreError>;
 
-    /// 按 serial 全量查找（active + 历史），用于 renew 按 serial 还原真实 CN
+    /// 按 serial 全量查找（active + 历史），用于 renew 按 serial 还原真实 CN。
+    ///
+    /// serial 按 X.509 INTEGER 数值口径匹配：忽略大小写与前导零。
     async fn get_cert_by_serial(&self, serial: &str) -> Result<Option<CertRecord>, PkiStoreError>;
 
     /// 版本化 CAS 替换 active：仅当 key version == expected_version 时成功。
@@ -286,7 +288,7 @@ pub trait PkiStore: Send + Sync {
     /// 原子创建吊销记录（CAS Version==0）；已吊销返回 AlreadyExists（幂等判据）
     async fn create_revocation(&self, record: &RevocationRecord) -> Result<(), PkiStoreError>;
 
-    /// 按证书内嵌 serial 读取吊销记录
+    /// 按证书内嵌 serial 读取吊销记录（同样按数值口径匹配：忽略大小写与前导零）
     async fn get_revocation(
         &self,
         cert_serial: &str,
@@ -364,6 +366,47 @@ pub fn revocation_prefix() -> Vec<u8> {
 /// CRL 状态键
 pub fn crl_key() -> Vec<u8> {
     b"/_pki/v1/crl".to_vec()
+}
+
+// ──── serial 数值口径（纯函数，可单测）────
+
+/// serial 的数值比较键：X.509 serial 是 INTEGER，`0abc…` 与 `abc…` 是同一个值。
+///
+/// `trim` → 小写 → 去前导零（全零保留 `"0"`）。coord 签发的 serial 恒为 hex；
+/// 非 hex 输入按小写原样返回（只与同一字符串相等，不与任何数值口径串混）。
+pub fn serial_key(raw: &str) -> String {
+    let lowered = raw.trim().to_ascii_lowercase();
+    if lowered.is_empty() || !lowered.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return lowered;
+    }
+    let significant = lowered.trim_start_matches('0');
+    if significant.is_empty() {
+        "0".to_string()
+    } else {
+        significant.to_string()
+    }
+}
+
+/// 按 serial 的数值口径在记录集合里查找（active / 历史同一判据）。
+fn find_cert_by_serial<'a, I>(records: I, serial: &str) -> Option<&'a CertRecord>
+where
+    I: IntoIterator<Item = &'a CertRecord>,
+{
+    let key = serial_key(serial);
+    records
+        .into_iter()
+        .find(|record| serial_key(&record.serial) == key)
+}
+
+/// 按 serial 的数值口径在吊销记录集合里查找（账本键仍为定长证书内嵌 serial）。
+fn find_revocation<'a, I>(records: I, cert_serial: &str) -> Option<&'a RevocationRecord>
+where
+    I: IntoIterator<Item = &'a RevocationRecord>,
+{
+    let key = serial_key(cert_serial);
+    records
+        .into_iter()
+        .find(|record| serial_key(&record.cert_serial) == key)
 }
 
 // ──── 序列化（纯函数，可单测）────
@@ -518,17 +561,18 @@ impl PkiStore for MemoryPkiStore {
     }
 
     async fn get_cert_by_serial(&self, serial: &str) -> Result<Option<CertRecord>, PkiStoreError> {
-        for record in self.active.lock().values() {
-            if record.serial == serial {
+        {
+            let active = self.active.lock();
+            if let Some(record) = find_cert_by_serial(active.values(), serial) {
                 return Ok(Some(record.clone()));
             }
         }
-        for hist in self.history.lock().values() {
-            if let Some(record) = hist.get(serial) {
-                return Ok(Some(record.clone()));
-            }
-        }
-        Ok(None)
+        let history = self.history.lock();
+        Ok(find_cert_by_serial(
+            history.values().flat_map(|by_serial| by_serial.values()),
+            serial,
+        )
+        .cloned())
     }
 
     async fn replace_active_cert_cas(
@@ -572,11 +616,11 @@ impl PkiStore for MemoryPkiStore {
         &self,
         cert_serial: &str,
     ) -> Result<Option<RevocationRecord>, PkiStoreError> {
-        Ok(self
-            .revocations
-            .lock()
-            .get(&cert_serial.to_lowercase())
-            .cloned())
+        let revocations = self.revocations.lock();
+        if let Some(hit) = revocations.get(&cert_serial.to_lowercase()) {
+            return Ok(Some(hit.clone()));
+        }
+        Ok(find_revocation(revocations.values(), cert_serial).cloned())
     }
 
     async fn list_revocations(&self) -> Result<Vec<RevocationRecord>, PkiStoreError> {
@@ -805,43 +849,24 @@ impl PkiStore for KvPkiStore {
     }
 
     async fn get_cert_by_serial(&self, serial: &str) -> Result<Option<CertRecord>, PkiStoreError> {
-        // active 全量扫描
-        let active_pfx = active_prefix();
-        let active_end = prefix_end(&active_pfx);
-        let pairs = self
-            .inner
-            .client
-            .kv()
-            .range(&active_pfx, &active_end, 0, 0)
-            .await
-            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
-        for (_k, v) in pairs {
-            if let Ok(record) = deserialize_cert(&v) {
-                if record.serial == serial {
-                    return Ok(Some(record));
+        // active 全量扫描 + 历史全量扫描（同一数值判据）
+        let mut records = Vec::new();
+        for prefix in [active_prefix(), history_root_prefix()] {
+            let range_end = prefix_end(&prefix);
+            let pairs = self
+                .inner
+                .client
+                .kv()
+                .range(&prefix, &range_end, 0, 0)
+                .await
+                .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+            for (_k, v) in pairs {
+                if let Ok(record) = deserialize_cert(&v) {
+                    records.push(record);
                 }
             }
         }
-
-        // 历史全量扫描
-        let hist_pfx = history_root_prefix();
-        let hist_end = prefix_end(&hist_pfx);
-        let pairs = self
-            .inner
-            .client
-            .kv()
-            .range(&hist_pfx, &hist_end, 0, 0)
-            .await
-            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
-        for (_k, v) in pairs {
-            if let Ok(record) = deserialize_cert(&v) {
-                if record.serial == serial {
-                    return Ok(Some(record));
-                }
-            }
-        }
-
-        Ok(None)
+        Ok(find_cert_by_serial(records.iter(), serial).cloned())
     }
 
     async fn replace_active_cert_cas(
@@ -922,6 +947,7 @@ impl PkiStore for KvPkiStore {
         &self,
         cert_serial: &str,
     ) -> Result<Option<RevocationRecord>, PkiStoreError> {
+        // 账本键是定长证书内嵌 serial：精确命中是常态（内部调用方均传该值）
         let key = revocation_key(cert_serial);
         let pairs = self
             .inner
@@ -930,10 +956,24 @@ impl PkiStore for KvPkiStore {
             .range(&key, &[], 1, 0)
             .await
             .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
-        match pairs.first() {
-            Some((_k, v)) => deserialize_revocation(v).map(Some),
-            None => Ok(None),
+        if let Some((_k, v)) = pairs.first() {
+            return deserialize_revocation(v).map(Some);
         }
+        // 调用方给的另一种合法 hex 写法（去前导零/大写）⇒ 按数值口径扫账本
+        let prefix = revocation_prefix();
+        let range_end = prefix_end(&prefix);
+        let pairs = self
+            .inner
+            .client
+            .kv()
+            .range(&prefix, &range_end, 0, 0)
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        let records = pairs
+            .iter()
+            .map(|(_k, v)| deserialize_revocation(v))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(find_revocation(records.iter(), cert_serial).cloned())
     }
 
     async fn list_revocations(&self) -> Result<Vec<RevocationRecord>, PkiStoreError> {
@@ -1315,6 +1355,89 @@ mod tests {
         let found = store.get_cert_by_serial("0x2").await.unwrap().unwrap();
         assert_eq!(found.common_name, "svc-b");
         assert_eq!(store.get_cert_by_serial("0x99").await.unwrap(), None);
+    }
+
+    // ──── serial 数值口径（X.509 INTEGER）────
+
+    /// X.509 serial 是 INTEGER：同一 serial 的合法 hex 写法只差大小写与前导零。
+    #[test]
+    fn test_serial_key_is_numeric_form() {
+        assert_eq!(serial_key("09cbec3d"), "9cbec3d");
+        assert_eq!(serial_key("  09CBEC3D "), "9cbec3d");
+        assert_eq!(serial_key("9cbec3d"), "9cbec3d");
+        assert_eq!(serial_key("0000"), "0");
+        assert_eq!(serial_key("0"), "0");
+        // 非 hex 输入不是 serial 值：按小写原样比较，只与同一字符串相等。
+        assert_eq!(serial_key("legacy-serial"), "legacy-serial");
+        assert_eq!(serial_key(""), "");
+    }
+
+    /// 定长 / 去零 / 大写 / 带空白四种写法必须命中同一条记录（active 与历史同一判据）。
+    #[tokio::test]
+    async fn test_memory_get_cert_by_serial_ignores_case_and_leading_zeros() {
+        let store = MemoryPkiStore::new();
+        let padded = sample_cert(
+            "svc-a",
+            "09cbec3d4c85c54971dd268ac997fd1b",
+            CertStatus::Active,
+        );
+        store.create_cert("svc-a", &padded).await.unwrap();
+        for spelling in [
+            "09cbec3d4c85c54971dd268ac997fd1b",
+            "9cbec3d4c85c54971dd268ac997fd1b",
+            "09CBEC3D4C85C54971DD268AC997FD1B",
+            "  9cbec3d4c85c54971dd268ac997fd1b\t",
+        ] {
+            let found = store.get_cert_by_serial(spelling).await.unwrap();
+            assert_eq!(
+                found.map(|r| r.serial),
+                Some(padded.serial.clone()),
+                "{spelling:?}"
+            );
+        }
+
+        let new = sample_cert("svc-a", "0a1b", CertStatus::Active);
+        let mut retired = padded.clone();
+        retired.status = CertStatus::Retired;
+        store
+            .replace_active_cert_cas("svc-a", 1, &new, &retired)
+            .await
+            .expect("rotate");
+        let found = store
+            .get_cert_by_serial("09CBEC3D4C85C54971DD268AC997FD1B")
+            .await
+            .unwrap()
+            .expect("history hit");
+        assert_eq!(found.status, CertStatus::Retired);
+    }
+
+    /// 吊销账本以定长证书内嵌 serial 建键，查询同样按数值口径匹配。
+    #[tokio::test]
+    async fn test_memory_get_revocation_ignores_case_and_leading_zeros() {
+        let store = MemoryPkiStore::new();
+        let revocation = RevocationRecord {
+            cert_serial: "09cbec3d4c85c54971dd268ac997fd1b".into(),
+            record_serial: "09cbec3d4c85c54971dd268ac997fd1b".into(),
+            common_name: "svc-a".into(),
+            reason: RevocationReason::KeyCompromise,
+            revoked_at: 1_700_000_000,
+            by: "ops".into(),
+        };
+        store.create_revocation(&revocation).await.expect("create");
+        for spelling in [
+            "09cbec3d4c85c54971dd268ac997fd1b",
+            "9cbec3d4c85c54971dd268ac997fd1b",
+            "09CBEC3D4C85C54971DD268AC997FD1B",
+            " 9cbec3d4c85c54971dd268ac997fd1b ",
+        ] {
+            let found = store.get_revocation(spelling).await.unwrap();
+            assert_eq!(
+                found.as_ref().map(|r| r.cert_serial.as_str()),
+                Some("09cbec3d4c85c54971dd268ac997fd1b"),
+                "{spelling:?}"
+            );
+        }
+        assert!(store.get_revocation("deadbeef").await.unwrap().is_none());
     }
 
     /// RED→GREEN: 并发首次签发同 CN → 仅一份密钥（CAS 单写，无竞态双签发）

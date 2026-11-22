@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### Notes — PKI serial 按整数比较（coord issue #449）
+
+- `PkiClient` 的 serial 入参 javadoc 明确：`getCertBySerial` / `renewCert` / `revokeCert` /
+  `getCertStatus` 按 X.509 INTEGER 数值口径匹配（忽略大小写与前导零），
+  `BigInteger.toString(16)` 的去零写法与 `issueCert` 回显的定长 32 位写法等价；
+  非 hex ⇒ `INVALID_ARGUMENT`。无 API/签名变更。
+
 ### Added — workflow 任务读面与任务级命令（issue #401）
 
 - `WorkflowClient.listTasks(TaskQueryFilter, int, String)` → `TaskPage`：暴露 `ListTasks` 的
