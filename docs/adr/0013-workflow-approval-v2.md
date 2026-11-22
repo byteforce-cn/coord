@@ -12,7 +12,7 @@
 转办/委派/一票否决/或签/票签/阅签/撤回/终止），消费方（EIS/ICPS）不再在外围
 用 signal/listen/fork 拼装。
 
-### 现状缺口（单一归属：`spike/2026-10/` 评估与验证产出）
+### 现状缺口（评估结论见下文「先行验证」）
 
 | 缺口 | 现状 | 证据 |
 |:--|:--|:--|
@@ -32,26 +32,23 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 ### 先行验证（判据来源）
 
 - Spike 1（已完成）：P0 审批语义在 `Instance/Branch/Task/Round/三级作用域` 上
-  全部可表达（16/16）；裁定 Round 作用域=分支、分支通过≠实例收口。证据
-  `spike/2026-10/spike-1-state-model/`。
+  全部可表达（16/16）；裁定 Round 作用域=分支、分支通过≠实例收口。
 - Spike 4（已完成）：官方 SW 1.0.3 语料 24 份，语义可用 13/22；`run:*` 与
-  `use.extensions` 静默误读。证据 `spike/2026-10/spike-4-conformance/REPORT.md`。
+  `use.extensions` 静默误读。
 - Spike 2（已完成）：CAS + 租约 + fencing 在真实单节点 Raft 上验证（7/7）：
   `save_instance_atomic`（`Compare(ModRev)`）并发恰一胜；`LeaseGrant` + Txn
   create-if-absent 得互斥租约；Lease 无 fencing token 的处置为「租约 key 的
   `mod_revision` 作 epoch + 写回多重 compare」——旧驱动迟到写被拒。缺口：fencing
   只覆盖状态写回，外部副作用与部分保存点（resume/timeout/fail 等）未接线；
-  StepToken 必须用 CAS key（`request_id` 不可用）。证据
-  `spike/2026-10/spike-2-concurrency/`。
+  StepToken 必须用 CAS key（`request_id` 不可用）。
 - Spike 3（已完成）：状态 + outbox 同 Txn、relay at-least-once + `event_id` 去重、
   持久化定时器 + 重启扫描；进程级 kill -9 的 wait/listen/retry 三场景均恢复，
   事件不丢不重；`MqEventProvider` 两处缺陷已修。缺口：`drive` 的状态保存点与 outbox
   提交仍是两次写（外部可先见终态后见伴生事件）、listen 游标与实例状态不同事务、
-  outbox 无 TTL/清理。证据 `spike/2026-10/spike-3-recovery/`。
+  outbox 无 TTL/清理。
 - Spike 5（已完成，阈值未定稿）：安静机原始基准 —— KV 写 636–724 ops/s、
   P50 134–1331 ms；Watch 1000 路 0 丢失、P99 16.6 ms；Txn ≤128 操作；单值 ≤4 MiB
   （gRPC）；存储 2819.5 B/写。阈值（§3.3）与目标硬件缺失 ⇒ 不做达标判定。
-  证据 `spike/2026-10/spike-5-bench/REPORT.md`。
 
 ### 约束
 
@@ -161,15 +158,15 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   `id/source/specversion/type/dataschema/subject(instance_id)/partitionkey(instance_id)/
   sequence(每实例单调)`；消费者按 `(instance_id, sequence)` 去重；`event_schema_version`
   固定到实例。
-- outbox 保留 24h（TTL 由 Relay 清理；**Spike 未实现 TTL，属落地要求**，见
-  `spike-3-recovery/OUTBOX.md` §5.1/§7）；历史归档是外部消费者职责，coord 不承诺。
+- outbox 保留 24h（TTL 由 Relay 清理；**Spike 未实现 TTL，属落地要求**）；
+  历史归档是外部消费者职责，coord 不承诺。
 - 生产装配必须走 MQ/Event；`MemoryEventProvider` 仅 dev。接线前先修
   `MqEventProvider` 的两处缺陷（offset 重启归零、共享单游标）——**Spike 3 已修并
   带回归测试**。
 - **落地要求（Spike 3 集成发现）**：outbox 记录必须搭上状态写同一次 Txn
   （v2 写路径为 `commit_instance` 的 CAS Txn，注入租约时经 `fenced_commit` 做同一 Txn
   的三重比较），不得在状态写之后另行 append；否则外部观测者可先见终态、后见伴生事件
-  （证据与缺口见 `spike-3-recovery/OUTBOX.md` §2.1 / G1）。
+  （缺口 G1）。
 
 ### D5 崩溃恢复
 
@@ -179,7 +176,7 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   重建，事件消费位点持久化。
 - 「有 StepStarted 无 StepCompleted」由 StepToken 识别并重放；正确性依赖 D3 的
   幂等键，不承诺 exactly-once。
-- 验收判据见 `spike/2026-10/NEXT-SPIKES-NOTES.md` 的 Spike 3（杀进程 + 时间线日志）。
+- 验收判据：杀进程 + 时间线日志。
 
 ### D6 定义不可变与 SW 1.0.3 符合性
 
@@ -191,7 +188,7 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   `then` 等），**禁止静默误读**（Spike 4 的核心发现）。
 - 先以内置适配层处理流程形状差异（官方 `switch.then`、fork/for 形状等）；完整
   1.0.3 解析器/执行语义另立里程碑，不与本次审批交付绑定。
-- Spike 4 的 corpus + 脚本纳入回归（`spike-4-conformance/harness`）。
+- Spike 4 语料纳入回归：`coord/tests/workflow_conformance.rs`（`coord/tests/fixtures/workflow-conformance/`）。
 
 ### D7 审批契约与授权
 
@@ -271,8 +268,6 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 - carry（本期不接线、不在承诺内）：无 UI 审批面、无 REST facade（`coord-ui` 只做影响评估）；
   `roles` 的外部解析服务未接线（仅启动/命令路径注入的静态映射，见 D2）；审批实例**未实现**
   D8 的 watch 驱动按实例有界缓存（KV 实现按实例做线性一致单键读，无缓存/淘汰）。
-- **冻结证据只读**：本里程碑对 `spike/2026-10/**` 的改动仅为 harness 穷尽性补齐
-  （`Task::Approve` 分支与 `approval_roles` 配置字段），不改任何评估产出/证据。
 
 ### D10 验收门与治理动作
 
@@ -292,7 +287,7 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 
 | 手册判据 | 证据 | 结论 |
 |:--|:--|:--|
-| 现有状态模型可通过扩展满足五层状态要求，且改动不影响现有契约 | Spike 1（P0 语义 16/16，`spike-1-state-model/`）；Spike 2/3 均未新增/修改对外 RPC 或 proto 字段 | ✅ 满足（扩展路径） |
+| 现有状态模型可通过扩展满足五层状态要求，且改动不影响现有契约 | Spike 1（P0 语义 16/16）；Spike 2/3 均未新增/修改对外 RPC 或 proto 字段 | ✅ 满足（扩展路径） |
 | 现有状态模型无法扩展 / 扩展破坏契约兼容 | 无证据（Spike 1/2/3 均为增量） | ✅ 不触发 |
 | 现有引擎性能不达标（按 §3.3 阈值） | Spike 5 安静机 dev profile：KV 636–724 ops/s、P50 134–1331 ms；**阈值与目标硬件未定稿** | ⏸ 无法判定（待 10-18 阈值 + 目标硬件/release 复测） |
 | 性能不达标但新建可达标 / 性能达标但状态模型不达标 | 同上前提未定 | ⏸ 不适用 |
@@ -395,14 +390,13 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 | H2 | 状态+Outbox 同 Txn + 持久定时器可实现崩溃恢复且事件不丢不重 | Spike 3 | **成立**（kill -9 三场景 PASS，`missing/duplicate = 0`）。附带缺口：drive 保存点与 outbox 提交仍两次写、listen 游标窗口；落地面 D4/D5 |
 | H3 | 扩展路径的写延迟/吞吐/Txn 上限满足 10-18 定稿阈值 | Spike 5 | **未判定**（阈值/目标硬件缺失；安静机 dev profile 原始数据已备，重议触发：阈值定稿 + 目标硬件/release 复测） |
 | H4 | 审批规模下 v2 作用域缓存不触发内存/扫描问题 | Spike 5 | **部分**：1000 路 watch 0 丢失、RSS +60.6 MB；v2 作用域缓存未单独验证（Spike 1 为纯内存原型）→ 作为阶段二验收项 |
-| H5 | EIS/ICPS 对 run:script 等执行语义非 P0 | 10-18 需求清单 | 未变（清单未到位，临时口径见 `CHARTER-INPUTS.md`） |
+| H5 | EIS/ICPS 对 run:script 等执行语义非 P0 | 10-18 需求清单 | 未变（清单未到位） |
 
 ## 参考
 
-- 验证产出：`spike/2026-10/spike-1-state-model/`、`spike/2026-10/spike-2-concurrency/`、
-  `spike/2026-10/spike-3-recovery/`、`spike/2026-10/spike-4-conformance/`、
-  `spike/2026-10/spike-5-bench/REPORT.md`、`spike/2026-10/NEXT-SPIKES-NOTES.md`、
-  `spike/2026-10/spike-6-adr/`。
+- 验证产出：`coord/tests/workflow_conformance.rs`（语料回归）、
+  `coord/tests/workflow_concurrency.rs`（并发单写者）、
+  `coord/tests/workflow_durable_kv.rs`（持久化 outbox / 定时器）。
 - 契约与治理：`apis/contracts/WHITEPAPER.md`、`apis/contracts/STATUS.md`、
   `apis/contracts/proto/coord/workflow/v1/workflow.proto`、
   `docs/production/ops/boundaries.md`、`docs/production/workflow-semantics.md`、

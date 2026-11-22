@@ -1,10 +1,8 @@
 //! v2 审批引擎的场景：核心生命周期 / 席位 / 计票判定，以及管理命令（驳回至节点 / 转办 /
 //! 委派 / 撤回 / 终止）与变量作用域。
 //!
-//! 用例取自 Spike 1 的冻结场景文件（`spike/2026-10/spike-1-state-model/crate/tests/scenarios.rs`）：
-//! 用例名与断言逐字保留，只把 `Engine::start(ns, name, version, initiator, context, now)` 改为
-//! 调用方注入实例 id 与定义哈希的 `Engine::start(StartSpec { .. }, now)`。
-//! 判定顺序见 `spike/2026-10/spike-1-state-model/docs/TRANSITIONS.md` §3。
+//! 用例名与断言是回归锚点：`Engine::start` 由调用方注入实例 id 与定义哈希（`StartSpec`），
+//! 判定顺序见 `engine` 模块 rustdoc。
 
 use coord_core::workflow::approval::{engine::*, model::*};
 

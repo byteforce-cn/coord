@@ -1,8 +1,7 @@
 // coord-agent: Outbox 投递面（MQ Poll+Ack）
 //
 // 投递面选择：MQ（`MessageQueueService`，redb 持久化 + topic/partition/offset）
-// 而非 `coord.event.v1`，理由与边界见
-// `spike/2026-10/spike-3-recovery/OUTBOX.md`「投递面选择」：
+// 而非 `coord.event.v1`，理由（consumer-contract §5）：
 //
 // - 引擎所在进程（coord-agent）**本进程内**就能 `produce`，无需再起 agent gRPC
 //   面；`coord.event.v1` 的 `EventPublish` 只在 agent 面暴露，引擎侧没有直接

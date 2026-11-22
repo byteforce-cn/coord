@@ -251,7 +251,7 @@ def cmd_verify(args):
 
     # ③ workspace 成员目录下一层的 tests/*.rs 必须都能对上某个 test target。
     #    盯的是「枚举本身和 cargo 的视野不一致」：autotests = false、[[test]] 只在
-    #    子目录里、或新 crate 用了自定义 test 路径。只看成员目录（非成员的 spike crate
+    #    子目录里、或新 crate 用了自定义 test 路径。只看成员目录（非成员的辅助 crate
     #    不在 cargo 视野里，不该让门禁变红）。
     targets_by_pkg = {}
     for pkg in meta["packages"]:
