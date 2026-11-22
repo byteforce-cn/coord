@@ -117,7 +117,8 @@ public interface PkiClient {
      * with a fresh key pair under the <b>original CN</b> (looked up by serial).
      * The old certificate stays valid until {@code notAfter}.
      *
-     * @param serialNumber the serial number of the certificate to renew (hex-encoded)
+     * @param serialNumber the serial number of the certificate to renew (hex-encoded;
+     *                     matching is numeric: case and leading zeros are ignored)
      * @param ttlSeconds   TTL for the new certificate in seconds (0 for default 24h)
      * @return renewed certificate information (PEM-encoded, new key pair, original CN)
      * @throws CoordException if the CA is not initialized or renewal fails
@@ -203,8 +204,12 @@ public interface PkiClient {
     /**
      * Read a certificate by serial (active, retired, or expired) without any
      * private key material. Unknown serials surface as {@code NOT_FOUND}.
+     * <p>
+     * Matching is numeric: {@code 0abc…} and {@code abc…} are the same X.509
+     * serial, so case and leading zeros do not matter.
      *
-     * @param serialNumber the hex-encoded serial (as returned by issue/rotate)
+     * @param serialNumber the hex-encoded serial (as returned by issue/rotate, or
+     *                     {@code BigInteger.toString(16)} of the certificate serial)
      * @return certificate summary (no key material)
      * @throws CoordException if the CA is not initialized or the serial is unknown
      */
@@ -280,6 +285,7 @@ public interface PkiClient {
      * identity for the same CN — the revoked serial stays revoked forever.
      *
      * @param serialNumber record serial or the X.509 serial embedded in the certificate
+     *                     (numeric match: case and leading zeros are ignored)
      * @param reason       RFC 5280 CRLReason; null ⇒ {@link PkiRevocationReason#UNSPECIFIED}
      * @return the (possibly pre-existing) revocation record
      * @throws CoordException if the serial is unknown ({@code NOT_FOUND}) or revocation fails
@@ -292,7 +298,8 @@ public interface PkiClient {
      * {@code status ∈ {active, retired, expired, revoked}}. Expiry is computed server-side;
      * a serial that is both expired and explicitly revoked reports {@code revoked}.
      *
-     * @param serialNumber hex-encoded serial
+     * @param serialNumber hex-encoded serial (numeric match: case and leading zeros
+     *                     are ignored)
      * @return status plus the revocation record when revoked
      * @throws CoordException if the serial is unknown ({@code NOT_FOUND})
      */

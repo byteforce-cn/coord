@@ -549,9 +549,10 @@ impl PkiService {
     /// 按序列号恢复入口：serial 可来自 active 或历史（含已过期）记录。
     /// 旧证书保留至 not_after 供验签方按 serial/kid 取用。
     pub async fn renew_cert(&self, serial: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
+        let normalized = normalize_serial(serial)?;
         let old = self
             .store
-            .get_cert_by_serial(serial)
+            .get_cert_by_serial(&normalized)
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?
             .ok_or_else(|| PkiError::CertNotFound(serial.to_string()))?;
@@ -814,9 +815,10 @@ impl PkiService {
     ///
     /// 与 `RenewCert` 的「按 serial 还原真实 CN」共用同一存储查找；本方法没有副作用。
     pub async fn get_cert_by_serial(&self, serial: &str) -> Result<Option<CertInfo>, PkiError> {
+        let normalized = normalize_serial(serial)?;
         let record = self
             .store
-            .get_cert_by_serial(serial)
+            .get_cert_by_serial(&normalized)
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?;
         match record {
@@ -853,10 +855,7 @@ impl PkiService {
         reason: RevocationReason,
         by: &str,
     ) -> Result<RevocationRecord, PkiError> {
-        let normalized = serial.trim().to_lowercase();
-        if normalized.is_empty() {
-            return Err(PkiError::InvalidArgument("serial is empty".to_string()));
-        }
+        let normalized = normalize_serial(serial)?;
         // 传入的就是证书 serial（或已吊销）：幂等返回首次记录。
         if let Some(existing) = self
             .store
@@ -911,10 +910,7 @@ impl PkiService {
     ///
     /// 吊销优先于过期：过期且已吊销的 serial 返回 revoked。
     pub async fn get_cert_status(&self, serial: &str) -> Result<CertStatusInfo, PkiError> {
-        let normalized = serial.trim().to_lowercase();
-        if normalized.is_empty() {
-            return Err(PkiError::InvalidArgument("serial is empty".to_string()));
-        }
+        let normalized = normalize_serial(serial)?;
         let record = self
             .store
             .get_cert_by_serial(&normalized)
@@ -1649,6 +1645,32 @@ fn record_cert_serial(record: &CertRecord) -> String {
     cert_serial_hex(&record.cert_pem).unwrap_or_else(|| record.serial.to_lowercase())
 }
 
+/// 入参 serial 的规范形态（`trim` + 小写）；空 / 非 hex ⇒ `INVALID_ARGUMENT`。
+///
+/// X.509 serial 是 INTEGER：`0abc…` 与 `abc…` 是同一个值，两种写法都必须命中
+/// 同一记录。数值口径的比较在 store 层（`pki_store::serial_key`），这里只负责
+/// 校验与规范化，保留调用方的 padding 以便账本键精确命中。
+fn normalize_serial(raw: &str) -> Result<String, PkiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(PkiError::InvalidArgument("serial is empty".to_string()));
+    }
+    if !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(PkiError::InvalidArgument(format!(
+            "serial must be hex-encoded (case and leading zeros do not matter): {trimmed}"
+        )));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+/// `NOT_FOUND` 的单一文案：明确是 serial 未知，不暗示权限问题。
+fn not_found_status(serial: &str) -> Status {
+    Status::not_found(format!(
+        "unknown serial {serial}: no certificate or revocation record (hex, case and leading \
+         zeros ignored)"
+    ))
+}
+
 /// 吊销集合的内容指纹（排序后的 cert_serial + RFC reason）。
 ///
 /// CRL 只在内容变化时分配新编号：同一编号必须对应同一份条目集。
@@ -1925,7 +1947,7 @@ impl std::fmt::Display for PkiError {
             Self::CertGen(msg) => write!(f, "certificate generation failed: {msg}"),
             Self::CertParse(msg) => write!(f, "certificate parse failed: {msg}"),
             Self::Io(e) => write!(f, "IO error: {e}"),
-            Self::CertNotFound(s) => write!(f, "certificate not found by serial: {s}"),
+            Self::CertNotFound(s) => write!(f, "unknown serial: {s}"),
             Self::FailedPrecondition(msg) => write!(f, "failed precondition: {msg}"),
             Self::CertMissing => write!(f, "certificate missing in store"),
             Self::CaLoadFailed => write!(f, "failed to load CA from store"),
@@ -1968,9 +1990,7 @@ fn status_from_pki_error(e: PkiError) -> Status {
         PkiError::InvalidArgument(msg) => Status::invalid_argument(msg),
         // 调用方给的 PEM 无法解析：参数错误，不是服务端内部错误。
         PkiError::CertParse(msg) => Status::invalid_argument(msg),
-        PkiError::CertNotFound(serial) => {
-            Status::not_found(format!("certificate not found by serial: {serial}"))
-        }
+        PkiError::CertNotFound(serial) => not_found_status(&serial),
         PkiError::FailedPrecondition(msg) => Status::failed_precondition(msg),
         other => Status::internal(other.to_string()),
     }
@@ -2227,9 +2247,7 @@ impl Pki for PkiService {
         let cert_info = PkiService::get_cert_by_serial(self, &req.serial)
             .await
             .map_err(status_from_pki_error)?
-            .ok_or_else(|| {
-                Status::not_found(format!("certificate not found by serial: {}", req.serial))
-            })?;
+            .ok_or_else(|| not_found_status(&req.serial))?;
         Ok(Response::new(PkiGetCertBySerialResponse {
             common_name: cert_info.common_name,
             cert_pem: cert_info.cert_pem,
@@ -2705,22 +2723,22 @@ mod tests {
         store
             .create_cert(
                 "svc-recover.local",
-                &expired_record("svc-recover.local", "expired-0x3"),
+                &expired_record("svc-recover.local", "0e3"),
             )
             .await
             .expect("seed expired");
 
         let recovered = pki
-            .renew_cert("expired-0x3", 0)
+            .renew_cert("0e3", 0)
             .await
             .expect("renew by expired serial");
         assert_eq!(recovered.common_name, "svc-recover.local");
-        assert_ne!(recovered.serial, "expired-0x3");
+        assert_ne!(recovered.serial, "0e3");
         assert!(pki.verify_cert(&recovered.cert_pem).await.expect("verify"));
 
         // 恢复后旧 serial 已入历史，再次按同一 serial 恢复仍可用（恢复到最新）
         let again = pki
-            .renew_cert("expired-0x3", 0)
+            .renew_cert("0e3", 0)
             .await
             .expect("renew again from history");
         assert_ne!(again.serial, recovered.serial);
@@ -3564,5 +3582,175 @@ mod tests {
         assert!(crl_serials(&pki.get_crl().await.expect("crl")).contains(&revoked.serial));
         // 未过期证书不受影响
         assert!(pki.verify_cert(&live.cert_pem).await.expect("verify live"));
+    }
+
+    // ──── serial 入参按 X.509 INTEGER 数值口径匹配 ────
+
+    /// 自签一张 serial 首 nibble 为 `0` 的证书（DER INTEGER 无需补零字节）。
+    fn cert_with_leading_zero_serial() -> (String, String) {
+        let bytes = [0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71];
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "legacy.coord.local");
+        params.serial_number = Some(rcgen::SerialNumber::from(bytes.to_vec()));
+        params.not_after = OffsetDateTime::now_utc() + time::Duration::days(365);
+        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+        let cert = params.self_signed(&key).expect("leaf cert");
+        (cert.pem(), hex::encode(bytes))
+    }
+
+    fn serial_record(pem: String, serial: &str) -> CertRecord {
+        CertRecord {
+            common_name: "legacy.coord.local".into(),
+            cert_pem: pem,
+            key_name: "pki/leaf/legacy.coord.local".into(),
+            key_version: 1,
+            not_before: now_unix() - 60,
+            not_after: now_unix() + 86_400,
+            serial: serial.to_string(),
+            status: CertStatus::Active,
+            parent_serial: None,
+            dns_names: vec!["legacy.coord.local".into()],
+            ip_addresses: Vec::new(),
+            spki_sha256: String::new(),
+            usage: CertUsage::Both,
+        }
+    }
+
+    /// 首 nibble 为 `0` 的 serial：定长 / 去零 / 大写 / 带空白都能查、能吊、能续期。
+    #[tokio::test]
+    async fn test_serial_lookup_ignores_case_and_leading_zeros() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = make_pki_shared(store.clone(), &shared_keys());
+        pki.init_ca("Serial CA").await.expect("init");
+
+        let (pem, padded) = cert_with_leading_zero_serial();
+        assert!(padded.starts_with('0'), "夹具 serial 必须以 0 开头");
+        let record = serial_record(pem, &padded);
+        store
+            .create_cert("legacy.coord.local", &record)
+            .await
+            .expect("seed");
+
+        let unpadded = padded.trim_start_matches('0').to_string();
+        assert_eq!(unpadded.len(), padded.len() - 1, "仅省掉一个前导零 nibble");
+        let spellings = [
+            padded.clone(),
+            unpadded.clone(),
+            padded.to_uppercase(),
+            format!("  {unpadded}\t"),
+        ];
+        for spelling in &spellings {
+            let found = pki
+                .get_cert_by_serial(spelling)
+                .await
+                .expect("query")
+                .unwrap_or_else(|| panic!("GetCertBySerial 未命中 {spelling:?}"));
+            assert_eq!(found.serial, padded, "{spelling:?}");
+            assert_eq!(
+                pki.get_cert_status(spelling).await.expect("status").status,
+                "active",
+                "{spelling:?}"
+            );
+        }
+
+        // 去零写法吊销成功，账本回显仍是定长口径；再次吊销（定长写法）幂等
+        let revoked = pki
+            .revoke_cert(&unpadded, RevocationReason::KeyCompromise, "ops")
+            .await
+            .expect("revoke by unpadded serial");
+        assert_eq!(revoked.cert_serial, padded);
+        let again = pki
+            .revoke_cert(&padded, RevocationReason::Superseded, "another")
+            .await
+            .expect("idempotent revoke");
+        assert_eq!(again.cert_serial, padded);
+        assert_eq!(again.revoked_at, revoked.revoked_at, "保留首次记录");
+        assert_eq!(again.reason, RevocationReason::KeyCompromise);
+
+        let status = pki
+            .get_cert_status(&unpadded)
+            .await
+            .expect("status after revoke");
+        assert_eq!(status.status, "revoked");
+        assert_eq!(status.cert_serial, padded);
+
+        // 吊销后按去零写法续期：必须明确拒绝（命中同一记录），而不是静默 NOT_FOUND
+        assert!(
+            matches!(
+                pki.renew_cert(&unpadded, 0).await,
+                Err(PkiError::FailedPrecondition(_))
+            ),
+            "已吊销 serial 的续期必须按数值口径命中并拒绝复活"
+        );
+    }
+
+    /// 续期用去零写法能还原真实 CN（RenewCert 与按 serial 查共用同一数值判据）。
+    #[tokio::test]
+    async fn test_renew_accepts_unpadded_serial() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = make_pki_shared(store.clone(), &shared_keys());
+        pki.init_ca("Serial Renew CA").await.expect("init");
+
+        let (pem, padded) = cert_with_leading_zero_serial();
+        store
+            .create_cert("legacy.coord.local", &serial_record(pem, &padded))
+            .await
+            .expect("seed");
+
+        let unpadded = padded.trim_start_matches('0').to_string();
+        let renewed = pki
+            .renew_cert(&unpadded, 0)
+            .await
+            .expect("renew by unpadded serial");
+        assert_eq!(renewed.common_name, "legacy.coord.local");
+        assert_ne!(renewed.serial, padded);
+        assert!(pki.verify_cert(&renewed.cert_pem).await.expect("verify"));
+        // 旧 serial 仍可按去零写法取回（历史记录，同一判据）
+        let old = pki
+            .get_cert_by_serial(&unpadded)
+            .await
+            .expect("query")
+            .expect("history hit");
+        assert_eq!(old.serial, padded);
+        assert_eq!(old.status, CertStatus::Retired);
+    }
+
+    /// 非 hex / 空 serial ⇒ INVALID_ARGUMENT（调用方参数错，不是“不存在”）。
+    #[tokio::test]
+    async fn test_serial_must_be_hex() {
+        let pki = make_pki();
+        for bad in ["", "   ", "0x0a1b", "deadbeefg", "a b"] {
+            assert!(
+                matches!(
+                    pki.get_cert_by_serial(bad).await,
+                    Err(PkiError::InvalidArgument(_))
+                ),
+                "GetCertBySerial {bad:?}"
+            );
+            assert!(
+                matches!(
+                    pki.get_cert_status(bad).await,
+                    Err(PkiError::InvalidArgument(_))
+                ),
+                "GetCertStatus {bad:?}"
+            );
+            assert!(
+                matches!(
+                    pki.revoke_cert(bad, RevocationReason::Unspecified, "ops")
+                        .await,
+                    Err(PkiError::InvalidArgument(_))
+                ),
+                "RevokeCert {bad:?}"
+            );
+            assert!(
+                matches!(
+                    pki.renew_cert(bad, 0).await,
+                    Err(PkiError::InvalidArgument(_))
+                ),
+                "RenewCert {bad:?}"
+            );
+        }
     }
 }

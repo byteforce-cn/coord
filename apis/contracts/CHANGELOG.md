@@ -1,3 +1,17 @@
+## [contracts/v2.3.1] — 2026-11-22（Patch：PKI serial 按整数口径匹配）
+
+**发布口径**：**Patch**（wire 无改动：`coord.pki.v1` 仅注释；不改字段号/类型、不删 RPC，
+`buf breaking` 基线不变）。行为放宽 + 一处错误码收紧。
+
+- `GetCertBySerial` / `RevokeCert` / `GetCertStatus` / `RenewCert` 的 serial 入参按
+  X.509 INTEGER 数值口径匹配（忽略大小写与前导零）。此前签出时首 nibble 为 `0` 的
+  serial（`0abc…`）只接受定长写法，按 `BigInteger.toString(16)` 的去零写法一律
+  `NOT_FOUND`，`RevokeCert` 因此静默失败（调用方易当作已完成）。
+- 回显与存储不变：响应 `serial` / `cert_serial` 仍为定长 32 位 hex，吊销账本
+  `/_pki/v1/revoked/{cert_serial}` 键格式不变（无数据迁移）。
+- 非 hex / 空 serial ⇒ `INVALID_ARGUMENT`（此前落到 `NOT_FOUND`）。
+- `NOT_FOUND` 文案明确为「serial 未知」，不再暗示鉴权/能力问题。
+
 ## [contracts/v2.3.0] — 2026-11-21（Minor：PKI 吊销面）
 
 **发布口径**：**Minor**（`coord.pki.v1` 纯新增 5 个 RPC、`PkiRevocationReason` /

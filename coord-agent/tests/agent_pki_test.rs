@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use coord_agent::pki::{PkiConfig, PkiError, PkiService};
+use coord_agent::pki::{CertInfo, PkiConfig, PkiError, PkiService};
 use coord_agent::pki_store::{CertUsage, MemoryPkiStore, PkiStore};
 use coord_agent::{KeyType, SignSpec, TransitKeyRegistry, VerifySpec};
 
@@ -650,7 +650,7 @@ async fn test_get_cert_by_serial_rpc_reports_expired_and_not_found() {
         key_version: 1,
         not_before: 1_700_000_000,
         not_after: 1_700_000_001,
-        serial: "expired-serial-1".into(),
+        serial: "0e11ed5e71a1".into(),
         status: CertStatus::Active,
         parent_serial: None,
         dns_names: Vec::new(),
@@ -683,6 +683,117 @@ async fn test_get_cert_by_serial_rpc_reports_expired_and_not_found() {
     .await
     .expect_err("unknown serial");
     assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
+}
+
+/// 反复签发直到拿到首 nibble 为 `0` 的 serial（概率 12.5%）——
+/// coord 签出的 serial 恒为定长 32 hex，但首个 nibble 可以是 `0`。
+async fn issue_with_leading_zero_serial(pki: &PkiService) -> CertInfo {
+    for attempt in 0..200 {
+        let cn = format!("svc-serial-{attempt}.coord.local");
+        let cert = pki.issue_cert(&cn, 0).await.expect("issue");
+        if cert.serial.starts_with('0') {
+            assert_eq!(cert.serial.len(), 32, "coord 签发 serial 恒为定长 32 hex");
+            return cert;
+        }
+    }
+    panic!("200 次签发未出现首 nibble 为 0 的 serial（(7/8)^200 ≈ 3e-12）");
+}
+
+/// serial 入参按 X.509 INTEGER 数值口径匹配：忽略大小写与前导零，
+/// `GetCertBySerial` / `GetCertStatus` / `RevokeCert` / `RenewCert` 四个 RPC 同一判据。
+#[tokio::test]
+async fn test_serial_lookup_ignores_leading_zeros_across_rpcs() {
+    use coord_proto::pki::v1::pki_server::Pki as PkiRpc;
+    use coord_proto::pki::v1::{
+        PkiGetCertBySerialRequest, PkiGetCertStatusRequest, PkiRenewCertRequest,
+        PkiRevocationReason, PkiRevokeCertRequest,
+    };
+
+    let keys = new_keys();
+    let pki = make_pki_with_store(Arc::new(MemoryPkiStore::new()), &keys);
+    pki.init_ca("Serial Spelling CA")
+        .await
+        .expect("初始化 CA 失败");
+
+    let cert = issue_with_leading_zero_serial(&pki).await;
+    let padded = cert.serial.clone();
+    let unpadded = padded.trim_start_matches('0').to_string();
+    assert_eq!(unpadded.len(), padded.len() - 1);
+
+    let by_serial = PkiRpc::get_cert_by_serial(
+        &pki,
+        tonic::Request::new(PkiGetCertBySerialRequest {
+            serial: format!(" {} ", unpadded.to_uppercase()),
+        }),
+    )
+    .await
+    .expect("GetCertBySerial(去零 + 大写 + 空白)")
+    .into_inner();
+    assert_eq!(by_serial.serial, padded, "回显仍是定长 32 hex");
+    assert_eq!(by_serial.common_name, cert.common_name);
+
+    let status = PkiRpc::get_cert_status(
+        &pki,
+        tonic::Request::new(PkiGetCertStatusRequest {
+            serial: unpadded.clone(),
+        }),
+    )
+    .await
+    .expect("GetCertStatus(去零)")
+    .into_inner();
+    assert_eq!(status.status, "active");
+
+    // RenewCert(去零写法) 命中同一记录：新证书，旧记录转 retired
+    let renewed = pki.renew_cert(&unpadded, 0).await.expect("RenewCert(去零)");
+    assert_eq!(renewed.common_name, cert.common_name);
+    assert_ne!(renewed.serial, padded);
+
+    let revoked = PkiRpc::revoke_cert(
+        &pki,
+        tonic::Request::new(PkiRevokeCertRequest {
+            serial: unpadded.clone(),
+            reason: PkiRevocationReason::Unspecified as i32,
+        }),
+    )
+    .await
+    .expect("RevokeCert(去零)")
+    .into_inner();
+    assert_eq!(revoked.cert_serial, padded, "吊销账本键仍是定长口径");
+    assert_eq!(revoked.status, "revoked");
+
+    let status = PkiRpc::get_cert_status(
+        &pki,
+        tonic::Request::new(PkiGetCertStatusRequest {
+            serial: unpadded.clone(),
+        }),
+    )
+    .await
+    .expect("GetCertStatus(吊销后)")
+    .into_inner();
+    assert_eq!(status.status, "revoked");
+
+    // 已吊销 + 去零写法：必须明确 FAILED_PRECONDITION，而不是静默 NOT_FOUND
+    let err = PkiRpc::renew_cert(
+        &pki,
+        tonic::Request::new(PkiRenewCertRequest {
+            serial_number: unpadded,
+            ttl_seconds: 0,
+        }),
+    )
+    .await
+    .expect_err("renew revoked");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+
+    // 非 hex ⇒ INVALID_ARGUMENT（不是「不存在」）
+    let err = PkiRpc::get_cert_by_serial(
+        &pki,
+        tonic::Request::new(PkiGetCertBySerialRequest {
+            serial: "not-hex".into(),
+        }),
+    )
+    .await
+    .expect_err("non-hex serial");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
 }
 
 /// CSR 签发：私钥留在调用方；记录只有公钥指纹；usage=SERVER 的 KU/EKU 精确。
@@ -965,7 +1076,7 @@ async fn test_expired_current_record_is_reissued_not_returned() {
         key_version: 1,
         not_before: 1_700_000_000,
         not_after: 1_700_000_001,
-        serial: "expired-0x1".into(),
+        serial: "0e1".into(),
         status: CertStatus::Active,
         parent_serial: None,
         dns_names: Vec::new(),
@@ -989,11 +1100,11 @@ async fn test_expired_current_record_is_reissued_not_returned() {
     assert!(pki.verify_cert(&rotated.cert_pem).await.expect("verify"));
 
     let recovered = pki
-        .renew_cert("expired-0x1", 0)
+        .renew_cert("0e1", 0)
         .await
         .expect("renew via expired serial");
     assert_eq!(recovered.common_name, cn);
-    assert_ne!(recovered.serial, "expired-0x1");
+    assert_ne!(recovered.serial, "0e1");
     assert!(pki.verify_cert(&recovered.cert_pem).await.expect("verify"));
 
     assert_eq!(

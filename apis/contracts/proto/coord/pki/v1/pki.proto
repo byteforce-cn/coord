@@ -80,16 +80,19 @@ service Pki {
   rpc ListCerts(PkiListCertsRequest) returns (PkiListCertsResponse);
   rpc GetCertByCN(PkiGetCertByCNRequest) returns (PkiGetCertByCNResponse);
   // 按 serial 只读查询（含 retired / expired / revoked；不含私钥；能力 pki:cert:read）。
-  // 不存在 ⇒ NOT_FOUND。
+  // serial 按十六进制整数比较（`0abc…` 与 `abc…` 同一值：忽略大小写与前导零）。
+  // 不存在 ⇒ NOT_FOUND；非 hex ⇒ INVALID_ARGUMENT。
   rpc GetCertBySerial(PkiGetCertBySerialRequest) returns (PkiGetCertBySerialResponse);
   // 用调用方 CSR 的公钥签发（proof-of-possession 必须通过）。私钥不进入 coord；
   // CN / SAN 取自 CSR；subject 的其他属性按 coord profile 固定。
   rpc SignCsr(PkiSignCsrRequest) returns (PkiSignCsrResponse);
   // 吊销（ADR-0020）：serial 接受 IssueCert/GetCertBySerial 返回的记录 serial，
-  // 也接受证书内嵌的 X.509 serial。重复吊销幂等（保留首次的 reason/revoked_at/by）。
-  // 未知 serial ⇒ NOT_FOUND。能力 pki:cert:revoke。
+  // 也接受证书内嵌的 X.509 serial；按十六进制整数比较（忽略大小写与前导零）。
+  // 重复吊销幂等（保留首次的 reason/revoked_at/by）。
+  // 未知 serial ⇒ NOT_FOUND；非 hex ⇒ INVALID_ARGUMENT。能力 pki:cert:revoke。
   rpc RevokeCert(PkiRevokeCertRequest) returns (PkiRevokeCertResponse);
   // 按 serial 查状态（active / retired / expired / revoked；未知 ⇒ NOT_FOUND）。
+  // serial 按十六进制整数比较（忽略大小写与前导零）；非 hex ⇒ INVALID_ARGUMENT。
   // 能力 pki:cert:read。
   rpc GetCertStatus(PkiGetCertStatusRequest) returns (PkiGetCertStatusResponse);
   // 当前 CRL（CA 签名）。吊销集合变化、或 next_update 已过时分配新 CRL number
@@ -144,7 +147,8 @@ message PkiIssueCertResponse {
 }
 
 message PkiRenewCertRequest {
-  string serial_number = 1; // 要续期的证书序列号（hex-encoded）
+  // 要续期的证书序列号（hex-encoded；按整数比较，忽略大小写与前导零）
+  string serial_number = 1;
   int64 ttl_seconds = 2; // 新证书的 TTL（秒），0 使用默认 24h
 }
 
@@ -223,7 +227,8 @@ message PkiGetCertByCNResponse {
 
 // 按 serial 只读查询（含 retired / expired / revoked；不含私钥）
 message PkiGetCertBySerialRequest {
-  string serial = 1; // hex-encoded（与 IssueCert 响应的 serial 同一口径）
+  // hex-encoded；按整数比较（忽略大小写与前导零），响应回显定长 32 位。
+  string serial = 1;
 }
 
 message PkiGetCertBySerialResponse {
@@ -274,6 +279,7 @@ message PkiGetCaCertResponse {
 
 message PkiRevokeCertRequest {
   // 记录 serial（IssueCert 等响应）或证书内嵌的 X.509 serial，hex-encoded。
+  // 按整数比较：忽略大小写与前导零（`0abc…` 与 `abc…` 同一值）。
   string serial = 1;
   // RFC 5280 CRLReason；未指定 = 0（unspecified）。
   PkiRevocationReason reason = 2;
@@ -282,7 +288,7 @@ message PkiRevokeCertRequest {
 message PkiRevokeCertResponse {
   // 请求时的 serial（原样回显）。
   string serial = 1;
-  // 证书内嵌的 X.509 serial（CRL 条目口径）；无法解析时为记录 serial。
+  // 证书内嵌的 X.509 serial（CRL 条目口径）；无法解析时为记录 serial。定长 32 位 hex。
   string cert_serial = 2;
   string common_name = 3;
   string status = 4; // 恒为 revoked
@@ -294,12 +300,14 @@ message PkiRevokeCertResponse {
 }
 
 message PkiGetCertStatusRequest {
-  string serial = 1; // hex-encoded
+  // hex-encoded；按整数比较（忽略大小写与前导零）。
+  string serial = 1;
 }
 
 message PkiGetCertStatusResponse {
   string serial = 1; // 请求的 serial（原样回显）
-  string cert_serial = 2; // 证书内嵌的 X.509 serial（无法解析时为空）
+  // 证书内嵌的 X.509 serial（定长 32 位 hex；无法解析时为空）
+  string cert_serial = 2;
   string common_name = 3;
   // active / retired / expired / revoked。被吊销时恒为 revoked（覆盖 expired）。
   string status = 4;

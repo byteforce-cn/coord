@@ -532,6 +532,12 @@ trigger:
   列表中 `status ∈ {active, retired, expired, revoked}`，`expired`/`revoked` 覆盖存储态
   （`revoked` 优先于 `expired`）。记录 `serial` 与证书内嵌 X.509 serial 一致
   （CRL / 第三方验签的同一口径）。
+- **serial 按整数比较**：X.509 serial 是 INTEGER，`0abc…` 与 `abc…` 是同一个值。
+  所有收 serial 的 RPC（`GetCertBySerial` / `RevokeCert` / `GetCertStatus` /
+  `RenewCert`）都忽略大小写与前导零——按 `BigInteger.toString(16)` 得到的去零写法
+  与 coord 签出时的定长写法等价。响应回显的 `serial` / `cert_serial` 仍是定长
+  32 位 hex，吊销账本 `/_pki/v1/revoked/{cert_serial}` 键格式不变。
+  非 hex / 空 serial ⇒ `INVALID_ARGUMENT`（不是 `NOT_FOUND`）。
 - **usage → KU/EKU 精确**：`IssueCert` / `SignCsr` 的 `usage`（`SERVER` /
   `CLIENT` / `BOTH`）按 `PkiCertificateUsage` 精确写 KU/EKU；未指定 = `BOTH`
   （既有行为）。`RotateCert` 未指定 = 继承当前证书的 usage。
