@@ -47,7 +47,7 @@ leaks wire types into the public surface.
 
 ## Install
 
-Source version: `0.4.4`. **Maven Central stops at `0.4.1`** — `0.4.2` and later are not
+Source version: `0.4.5`. **Maven Central stops at `0.4.1`** — `0.4.2` and later are not
 published there (releases after `0.4.1` are source/local-install only). Going from
 `0.4.1` to the current source version also crosses a **breaking API rename**: the
 data-plane entry points lost their `V2` suffix and the client types moved out of the
@@ -55,13 +55,13 @@ data-plane entry points lost their `V2` suffix and the client types moved out of
 `cn.byteforce.coord.sdk.kv.KvClient`, …; see ADR-0018 D4). Pin `0.4.1` only if you are
 still on the old v1-era names *and* published artifacts.
 
-Build & install from source (repository root), then depend on `0.4.4`:
+Build & install from source (repository root), then depend on `0.4.5`:
 
 ```xml
 <dependency>
     <groupId>cn.byteforce</groupId>
     <artifactId>coord-java-sdk</artifactId>
-    <version>0.4.4</version>
+    <version>0.4.5</version>
 </dependency>
 ```
 
