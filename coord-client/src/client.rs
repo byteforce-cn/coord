@@ -2004,7 +2004,22 @@ impl ApprovalClient {
         comment: &str,
         idempotency_key: Option<&str>,
     ) -> Result<WorkflowWithdrawResponse> {
-        let request = withdraw_request(workflow_id, comment, idempotency_key);
+        self.withdraw_with_target(workflow_id, "", comment, idempotency_key)
+            .await
+    }
+
+    /// 实例撤回并记录回退目标（seedj `WithdrawInstanceAction.targetStep`）。
+    ///
+    /// 非空 `target_node` 随 `Cancellation` 持久化，History 投影
+    /// `INSTANCE_ROLLED_BACK{from_node,to_node}`；活动席位落 `WITHDRAWN`。
+    pub async fn withdraw_with_target(
+        &self,
+        workflow_id: &str,
+        target_node: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowWithdrawResponse> {
+        let request = withdraw_request(workflow_id, target_node, comment, idempotency_key);
         self.client
             .execute_write_with_retry(move |channel| {
                 let mut stub = WorkflowStub::new(channel);
@@ -2347,6 +2362,7 @@ fn delegate_request(
 
 fn withdraw_request(
     workflow_id: &str,
+    target_node: &str,
     comment: &str,
     idempotency_key: Option<&str>,
 ) -> WorkflowWithdrawRequest {
@@ -2355,6 +2371,7 @@ fn withdraw_request(
         comment: comment.to_string(),
         idempotency_key: optional_idempotency_key(idempotency_key),
         on_behalf_of: String::new(),
+        target_node: target_node.to_string(),
     }
 }
 
@@ -3263,8 +3280,9 @@ mod tests {
         assert_eq!(term.reason, "失联");
         assert_eq!(term.idempotency_key, "");
 
-        let wd = withdraw_request("wf-1", "撤回", Some("k3"));
+        let wd = withdraw_request("wf-1", "review", "撤回", Some("k3"));
         assert_eq!(wd.workflow_id, "wf-1");
+        assert_eq!(wd.target_node, "review");
         assert_eq!(wd.comment, "撤回");
         assert_eq!(wd.idempotency_key, "k3");
     }

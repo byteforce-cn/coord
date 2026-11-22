@@ -2858,6 +2858,49 @@ where
         }
     }
 
+    /// 管理终止（无审批聚合的实例）：非终态 → `Failed` + `terminated` fault +
+    /// `workflow.faulted`（同一次提交）。
+    ///
+    /// 与审批聚合路径的 `ApprovalBridge::terminate` 不同：本路径不要求存在审批聚合，
+    /// 也不需要 `sign_admins`（ACTIVITY / WAIT / LISTEN 定义没有审批节点）。若有残留
+    /// 聚合（审批节点已通过但聚合仍 `RUNNING`），先按内部权威收口，避免孤儿。
+    ///
+    /// 终态 ⇒ [`RuntimeError::AlreadyCompleted`]，实例不存在 ⇒ [`RuntimeError::NotFound`]。
+    pub async fn terminate_instance(
+        &self,
+        instance_id: &str,
+        reason: &str,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        if self.approval.is_some() {
+            self.finalize_approval_aggregate(instance_id, "workflow_terminated")
+                .await?;
+        }
+        let fault = WorkflowFault::terminated(reason);
+        let cp = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::WORKFLOW_FAULTED],
+                |inst| {
+                    if inst.status.is_terminal() {
+                        return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+                    }
+                    inst.status = InstanceStatus::Failed;
+                    inst.fault = Some(fault.clone());
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+        match cp {
+            ControlPlaneOutcome::Committed(inst) => Ok(*inst),
+            ControlPlaneOutcome::Skipped => {
+                Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
+            }
+        }
+    }
+
     /// 取消实例：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
     ///
     /// 非终态实例先经 [`Self::finalize_approval_aggregate`] 收口审批聚合（内部生命周期
@@ -4936,6 +4979,8 @@ mod tests {
                     backoff: None,
                     limit: 2,
                     jitter: None,
+                    max_delay: None,
+                    multiplier: None,
                 }),
                 ..Default::default()
             },
@@ -5801,6 +5846,8 @@ mod tests {
                     backoff: None,
                     limit: 5,
                     jitter: None,
+                    max_delay: None,
+                    multiplier: None,
                 }),
                 ..Default::default()
             },
@@ -5859,6 +5906,8 @@ mod tests {
                     backoff: None,
                     limit: 2,
                     jitter: None,
+                    max_delay: None,
+                    multiplier: None,
                 }),
                 ..Default::default()
             },

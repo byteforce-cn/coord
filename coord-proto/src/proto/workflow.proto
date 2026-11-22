@@ -301,6 +301,10 @@ message WorkflowListInstancesRequest {
   // 可选：按启动时间窗过滤（Unix ms，含边界）；0 = 不过滤。
   int64 started_after_ms = 7;
   int64 started_before_ms = 8;
+  // 可选：多值状态过滤（任一命中即算匹配，与 `status_filter` 叠加为 OR）。空 = 不过滤。
+  // 未知取值 INVALID_ARGUMENT。seedj 的 `RUNNING` 需要同时命中 coord 的
+  // `RUNNING` 与 `SUSPENDED`（审批挂起）时传 `["RUNNING", "SUSPENDED"]`。
+  repeated string status_in = 9;
 }
 
 message WorkflowListInstancesResponse {
@@ -472,6 +476,8 @@ message WorkflowReturnToNodeResponse {
 message WorkflowTransferRequest {
   string workflow_id = 1;
   string task_id = 2;
+  // 受让方：单个用户 principal。coord 不在动态动作上展开
+  // GROUP / ROLE / DEPARTMENT；这类受让方由适配器 fail-closed。
   string to = 3;
   string comment = 4;
   string idempotency_key = 5;
@@ -486,6 +492,8 @@ message WorkflowTransferResponse {
 message WorkflowDelegateRequest {
   string workflow_id = 1;
   string task_id = 2;
+  // 被委派人：单个用户 principal。coord 不在动态动作上展开
+  // GROUP / ROLE / DEPARTMENT；这类受让方由适配器 fail-closed。
   string to = 3;
   string comment = 4;
   string idempotency_key = 5;
@@ -507,6 +515,9 @@ message WorkflowWithdrawRequest {
   string comment = 2;
   string idempotency_key = 3;
   string on_behalf_of = 4; // 服务代终端用户执行时的被代表主体；空 = 直接以 CCT 主体执行
+  // 可选：seedj `WithdrawInstanceAction.targetStep`。非空时随 `Cancellation` 持久化，
+  // 并在 History 投影 `INSTANCE_ROLLED_BACK{from_node,to_node}`；空 = 不投影回退事件。
+  string target_node = 5;
 }
 
 message WorkflowWithdrawResponse {
@@ -618,7 +629,7 @@ message WorkflowListTasksRequest {
   string completed_by = 5; // 投过票的 actor（含代批的 actor）
   string candidate_group = 6; // 候选池包含该主体/组
   string node = 7; // 节点（步骤）名
-  // 席位状态：created|claimed|suspended|scheduled|completed|rejected|cancelled|expired；
+  // 席位状态：created|claimed|suspended|scheduled|completed|rejected|cancelled|withdrawn|expired；
   // 空 = 全部。未知取值返回 INVALID_ARGUMENT。
   string status = 8;
   int64 due_before_ms = 9; // 仅返回 deadline <= 该值（Unix ms）；0 = 不过滤
@@ -651,6 +662,8 @@ message ApprovalTaskSummary {
   string successor_task_id = 14;
   string spawned_by_action_id = 15;
   repeated ApprovalAssignment assignments = 16;
+  int64 updated_at_ms = 17; // 席位最近一次状态变更（Unix ms）
+  int64 completed_at_ms = 18; // 终态时刻（Unix ms）；未终态为 0
 }
 
 message WorkflowGetTaskRequest {
@@ -676,7 +689,7 @@ message WorkflowListTaskGroupsRequest {
   string completed_by = 5; // 该轮任一席位投过票的 actor
   repeated string candidate_groups = 6; // 该轮任一席位的候选池含其中任一主体
   string node = 7; // 节点（步骤）名
-  repeated string statuses = 8; // 席位状态多值（created|claimed|suspended|scheduled|...）
+  repeated string statuses = 8; // 席位状态多值（created|claimed|suspended|scheduled|completed|rejected|cancelled|withdrawn|expired）
   int64 due_before_ms = 9; // 该轮任一未决席位的 deadline <= 该值（Unix ms）；0 = 不过滤
 }
 
@@ -789,6 +802,9 @@ message ApprovalTask {
   string spawned_by_action_id = 13;
   // assignment 级读面（原责任人 / 代理人 / 转办来源）。
   repeated ApprovalAssignment assignments = 14;
+  int64 created_at_ms = 15; // 席位创建时间（Unix ms）
+  int64 updated_at_ms = 16; // 席位最近一次状态变更（Unix ms）
+  int64 completed_at_ms = 17; // 终态时刻（Unix ms）；未终态为 0
 }
 
 // assignment 读面：coord 的席位 + 委派/转办展开成 seedj 的 TaskAssignment。
@@ -796,8 +812,10 @@ message ApprovalAssignment {
   string principal = 1;
   // pending|scheduled|suspended|transferred|delegated|completed|rejected|cancelled|expired
   string status = 2;
-  string resolved_reason = 3; // 终态原因（RULE_SATISFIED / DELEGATION_EXPIRED / ...）
+  string resolved_reason = 3; // 终态原因（RULE_SATISFIED / DELEGATION_EXPIRED / WITHDRAWN / ...）
   ApprovalVote record = 4; // 该主体的投票记录（若有）
+  int64 assigned_at_ms = 5; // 该主体获得席位的时间（Unix ms）
+  int64 resolved_at_ms = 6; // 该主体 assignment 的终态时刻（Unix ms）；未终态为 0
 }
 
 // 投票记录：`actor` 是被代表用户（直接操作时即调用方）；`acting_service` 是代其执行的
@@ -833,6 +851,8 @@ message ApprovalRound {
   // 判不通过原因：`any_reject` / `reject_threshold_reached` /
   // `sign_completion_unsatisfiable` / `on_exhausted`；未判不通过为空。
   string reject_reason = 8;
+  int64 opened_at_ms = 9; // 轮次开启时间（Unix ms）
+  int64 closed_at_ms = 10; // 轮次关闭时间（Unix ms）；未关闭为 0
 }
 
 // ============================================================

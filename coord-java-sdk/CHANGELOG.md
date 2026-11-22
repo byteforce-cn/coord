@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Added — workflow seedj 适配器对齐（coord #451 / #452 / #453）
+
+- `WorkflowClient.listInstances(..., Collection<String> statuses, ...)`：多值状态过滤
+  （任一命中；seedj `RUNNING` 传 `RUNNING` + `SUSPENDED`）。原单值重载保留并委托到多值。
+- `WorkflowClient.withdraw(workflowId, targetNode, comment, idempotencyKey)` 与
+  `withdrawOnBehalfOf(..., targetNode, ...)`：撤回时记录 seedj
+  `WithdrawInstanceAction.targetStep`，服务端投影 `INSTANCE_ROLLED_BACK`。
+- `ApprovalTask` 增加 `updatedAtMs()` / `completedAtMs()`；`ApprovalRound` 增加
+  `openedAtMs()` / `closedAtMs()`；`ApprovalAssignment` 增加 `assignedAtMs()` /
+  `resolvedAtMs()`。既有构造器全部保留（新字段缺省 0）。
+
+
 ### Notes — PKI serial 按整数比较（coord issue #449）
 
 - `PkiClient` 的 serial 入参 javadoc 明确：`getCertBySerial` / `renewCert` / `revokeCert` /

@@ -657,6 +657,7 @@ impl Engine {
             if let Some(t) = self.tasks.get_mut(tid) {
                 t.status = TaskStatus::Cancelled;
                 t.updated_at = now;
+                t.completed_at = Some(now);
                 cancelled += 1;
                 out.push(Effect::TaskStatus {
                     id: tid.clone(),
@@ -789,6 +790,7 @@ impl Engine {
         let from = t.status;
         t.status = TaskStatus::Completed;
         t.updated_at = now;
+        t.completed_at = Some(now);
         Self::revoke_delegation(&mut t, "RULE_SATISFIED", now);
         let id = t.id.clone();
         self.tasks.insert(id.clone(), t);
@@ -1243,7 +1245,13 @@ impl Engine {
             )));
         }
         // 上游回退：丢弃全部待激活的后加签派生任务，并取消挂起/未决席位。
-        self.discard_scheduled_after(&branch.id, "UPSTREAM_ROLLBACK", now, out);
+        self.discard_scheduled_after(
+            &branch.id,
+            TaskStatus::Cancelled,
+            "UPSTREAM_ROLLBACK",
+            now,
+            out,
+        );
         self.cancel_live_tasks_of_branch(&branch.id, now, out);
         self.close_rounds_of_branch(&branch.id, RoundStatus::Superseded, now, out);
         if branch.status == BranchStatus::Open {
@@ -1265,7 +1273,13 @@ impl Engine {
                 ApprovalPolicy::default(),
             ));
         if let Some(tb) = &target_latest {
-            self.discard_scheduled_after(&tb.id, "UPSTREAM_ROLLBACK", now, out);
+            self.discard_scheduled_after(
+                &tb.id,
+                TaskStatus::Cancelled,
+                "UPSTREAM_ROLLBACK",
+                now,
+                out,
+            );
             self.cancel_live_tasks_of_branch(&tb.id, now, out);
             self.close_rounds_of_branch(&tb.id, RoundStatus::Superseded, now, out);
             self.set_branch_status(&tb.id, BranchStatus::Superseded, now, out);
@@ -1397,6 +1411,8 @@ impl Engine {
         &mut self,
         expected: u64,
         by: &str,
+        target_node: Option<&str>,
+        comment: Option<&str>,
         now: i64,
     ) -> Result<Vec<Effect>, ApprovalError> {
         self.guard(expected)?;
@@ -1405,16 +1421,47 @@ impl Engine {
                 "{by} is not the initiator"
             )));
         }
+        if self.instance.status.is_terminal() {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "instance {} is {:?}",
+                self.instance.id, self.instance.status
+            )));
+        }
+        // 回退事件的起点：撤回时仍 Open 的最晚分支；没有 Open 分支（已通过审批、运行到
+        // 下游）时退化为最近创建的分支。seedj 的 `WithdrawInstance` 要求 History 带
+        // `INSTANCE_ROLLED_BACK`，而 coord 的实例撤回本身不重开任何节点。
+        let from_node = self
+            .branches
+            .values()
+            .filter(|b| b.status == BranchStatus::Open)
+            .max_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)))
+            .or_else(|| {
+                self.branches
+                    .values()
+                    .max_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)))
+            })
+            .map(|b| b.node.clone());
+        let target_node = target_node.map(str::trim).filter(|n| !n.is_empty());
         let mut out = Vec::new();
-        self.cancel_open_branches(BranchStatus::Cancelled, &mut out, now);
+        self.withdraw_open_branches(&mut out, now);
         let from = self.instance.status;
         self.instance.status = InstanceStatus::Cancelled;
         self.instance.cancellation = Some(Cancellation {
             kind: "withdraw".into(),
             reason: None,
             compensate: false,
+            target_node: target_node.map(str::to_string),
             at: now,
         });
+        if let (Some(from_node), Some(to_node)) = (from_node, target_node) {
+            self.instance.returns.push(ReturnRecord {
+                from_node,
+                to_node: to_node.to_string(),
+                by: by.into(),
+                comment: comment.map(str::to_string),
+                at: now,
+            });
+        }
         out.push(Effect::InstanceStatus {
             from,
             to: InstanceStatus::Cancelled,
@@ -1424,7 +1471,7 @@ impl Engine {
             action: "withdraw".into(),
             branch: None,
             by: by.into(),
-            detail: String::new(),
+            detail: comment.unwrap_or_default().to_string(),
             task: None,
             acting_service: self.acting_service.clone(),
             action_id: self.action_id.clone(),
@@ -1432,7 +1479,10 @@ impl Engine {
         self.emit(
             &mut out,
             "com.china-workflow.instance.cancelled.v1",
-            json!({"instance_id": self.instance.id}),
+            json!({
+                "instance_id": self.instance.id,
+                "target_node": target_node.unwrap_or_default(),
+            }),
         );
         self.touch(now);
         Ok(out)
@@ -1466,6 +1516,7 @@ impl Engine {
             kind: "cancel".into(),
             reason: reason.map(str::to_string),
             compensate,
+            target_node: None,
             at: now,
         });
         out.push(Effect::InstanceStatus {
@@ -1619,6 +1670,7 @@ impl Engine {
                 .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
             expired.status = TaskStatus::Expired;
             expired.updated_at = now;
+            expired.completed_at = Some(now);
             Self::revoke_delegation(expired, "TASK_EXPIRED", now);
         }
         let mut out = vec![Effect::TaskStatus {
@@ -2060,6 +2112,7 @@ impl Engine {
                     scope: Scope::new(),
                     created_at: now,
                     updated_at: now,
+                    completed_at: None,
                 },
             );
             out.push(Effect::TaskCreated {
@@ -2300,6 +2353,7 @@ impl Engine {
     fn discard_scheduled_after(
         &mut self,
         branch_id: &str,
+        status: TaskStatus,
         reason: &str,
         now: i64,
         out: &mut Vec<Effect>,
@@ -2323,13 +2377,14 @@ impl Engine {
                 if let Some(t) = self.tasks.get_mut(tid) {
                     branch = t.branch_id.clone();
                     if t.status == TaskStatus::Scheduled {
-                        t.status = TaskStatus::Cancelled;
+                        t.status = status;
                         t.updated_at = now;
+                        t.completed_at = Some(now);
                         discarded = true;
                         out.push(Effect::TaskStatus {
                             id: tid.clone(),
                             from: TaskStatus::Scheduled,
-                            to: TaskStatus::Cancelled,
+                            to: status,
                         });
                     }
                 }
@@ -2450,6 +2505,7 @@ impl Engine {
         });
         t.status = to;
         t.updated_at = now;
+        t.completed_at = Some(now);
         Self::revoke_delegation(
             &mut t,
             match decision {
@@ -2502,6 +2558,7 @@ impl Engine {
                 !matches!(
                     t.status,
                     TaskStatus::Cancelled
+                        | TaskStatus::Withdrawn
                         | TaskStatus::Expired
                         | TaskStatus::Suspended
                         | TaskStatus::Scheduled
@@ -2630,7 +2687,13 @@ impl Engine {
                 } else {
                     "REJECTED"
                 };
-                self.discard_scheduled_after(&r.branch_id, discard_reason, now, out);
+                self.discard_scheduled_after(
+                    &r.branch_id,
+                    TaskStatus::Cancelled,
+                    discard_reason,
+                    now,
+                    out,
+                );
                 self.cancel_live_tasks_of_branch(&r.branch_id, now, out);
                 self.close_rounds_of_branch(&r.branch_id, RoundStatus::Cancelled, now, out);
                 self.close_branch(&r.branch_id, BranchStatus::Rejected, now, out);
@@ -2753,6 +2816,32 @@ impl Engine {
         self.cancel_tasks(&ids, now, out);
     }
 
+    fn withdraw_live_tasks_of_branch(&mut self, branch_id: &str, now: i64, out: &mut Vec<Effect>) {
+        let ids: Vec<Id> = self
+            .tasks
+            .values()
+            .filter(|t| t.branch_id == branch_id && t.status.is_live())
+            .map(|t| t.id.clone())
+            .collect();
+        self.close_tasks(&ids, TaskStatus::Withdrawn, now, out);
+    }
+
+    /// 实例撤回：与取消同形收口分支，但活动席位落 `Withdrawn`（读面 reason `WITHDRAWN`）。
+    fn withdraw_open_branches(&mut self, out: &mut Vec<Effect>, now: i64) {
+        let branch_ids: Vec<Id> = self
+            .branches
+            .values()
+            .filter(|b| b.status == BranchStatus::Open)
+            .map(|b| b.id.clone())
+            .collect();
+        for bid in &branch_ids {
+            self.discard_scheduled_after(bid, TaskStatus::Withdrawn, "WITHDRAWN", now, out);
+            self.withdraw_live_tasks_of_branch(bid, now, out);
+            self.close_rounds_of_branch(bid, RoundStatus::Cancelled, now, out);
+            self.set_branch_status(bid, BranchStatus::Cancelled, now, out);
+        }
+    }
+
     /// 取消一轮的全部未决席位：审批席与阅签席一并收口，轮次关闭后不残留 open 席位。
     fn cancel_pending_tasks(&mut self, round_id: &str, now: i64, out: &mut Vec<Effect>) {
         let ids: Vec<Id> = self
@@ -2765,17 +2854,27 @@ impl Engine {
     }
 
     fn cancel_tasks(&mut self, ids: &[Id], now: i64, out: &mut Vec<Effect>) {
+        self.close_tasks(ids, TaskStatus::Cancelled, now, out);
+    }
+
+    /// 席位收口：置终态并写 `completed_at`；撤回用 `Withdrawn` 以区分读面语义。
+    fn close_tasks(&mut self, ids: &[Id], status: TaskStatus, now: i64, out: &mut Vec<Effect>) {
+        let reason = match status {
+            TaskStatus::Withdrawn => "WITHDRAWN",
+            _ => "TASK_CANCELLED",
+        };
         for id in ids {
             if let Some(t) = self.tasks.get_mut(id) {
                 if t.status.is_live() {
                     let from = t.status;
-                    t.status = TaskStatus::Cancelled;
+                    t.status = status;
                     t.updated_at = now;
-                    Self::revoke_delegation(t, "TASK_CANCELLED", now);
+                    t.completed_at = Some(now);
+                    Self::revoke_delegation(t, reason, now);
                     out.push(Effect::TaskStatus {
                         id: id.clone(),
                         from,
-                        to: TaskStatus::Cancelled,
+                        to: status,
                     });
                 }
             }
@@ -2797,7 +2896,7 @@ impl Engine {
             .map(|b| b.id.clone())
             .collect();
         for bid in &branch_ids {
-            self.discard_scheduled_after(bid, "UPSTREAM_ROLLBACK", now, out);
+            self.discard_scheduled_after(bid, TaskStatus::Cancelled, "UPSTREAM_ROLLBACK", now, out);
             self.cancel_live_tasks_of_branch(bid, now, out);
             self.close_rounds_of_branch(bid, RoundStatus::Cancelled, now, out);
             self.set_branch_status(bid, branch_status, now, out);

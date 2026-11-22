@@ -77,6 +77,10 @@ pub struct Cancellation {
     /// 调用方要求做业务补偿（`Cancel.compensate`）；coord 只投影该标记。
     #[serde(default)]
     pub compensate: bool,
+    /// 实例级撤回的目标节点（seedj `WithdrawInstanceAction.targetStep`）；空 = 未指定。
+    /// 非空时 History 投影 `INSTANCE_ROLLED_BACK{from_node,to_node}`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_node: Option<String>,
     pub at: i64,
 }
 
@@ -259,8 +263,9 @@ pub enum TaskKind {
 
 /// 席位状态。
 ///
-/// `Completed` / `Rejected` / `Cancelled` / `Expired` 为终态，投票只允许在
-/// `Created` / `Claimed` 上发起（见 [`TaskStatus::is_open`]）。
+/// `Completed` / `Rejected` / `Cancelled` / `Withdrawn` / `Expired` 为终态，投票只允许在
+/// `Created` / `Claimed` 上发起（见 [`TaskStatus::is_open`]）。`Withdrawn` 与 `Cancelled`
+/// 语义不同：前者是发起人实例级撤回，读面须投影 `TASK_WITHDRAWN` / reason `WITHDRAWN`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -273,6 +278,7 @@ pub enum TaskStatus {
     Completed,
     Rejected,
     Cancelled,
+    Withdrawn,
     Expired,
 }
 
@@ -289,6 +295,7 @@ impl TaskStatus {
             TaskStatus::Completed
                 | TaskStatus::Rejected
                 | TaskStatus::Cancelled
+                | TaskStatus::Withdrawn
                 | TaskStatus::Expired
         )
     }
@@ -431,6 +438,9 @@ pub struct Task {
     pub scope: Scope,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 进入终态的时刻（Unix ms）；未终态为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
 }
 
 /// 席位级 assignment 状态（seedj `TaskAssignment.status` 的 coord 投影）。
@@ -458,15 +468,28 @@ pub struct AssignmentView {
     pub status: AssignmentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_reason: Option<String>,
+    /// 该主体获得席位的时间（Unix ms）。
+    pub assigned_at: i64,
+    /// 该主体 assignment 进入终态的时间（Unix ms）；未终态为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<i64>,
 }
 
 impl Task {
     /// 展开席位的 assignment 视图（`now` 用于判定委派是否到期）。
     pub fn assignments(&self, now: i64) -> Vec<AssignmentView> {
         let mut out = Vec::new();
+        let resolved_at = self
+            .completed_at
+            .or_else(|| self.status.is_terminal().then_some(self.updated_at));
         if let Some(d) = &self.delegation {
             let active = d.is_active(now);
             let reason = d.revoke_reason.clone();
+            let delegation_resolved = if active {
+                None
+            } else {
+                Some(d.revoked_at.or(d.expires_at).unwrap_or(self.updated_at))
+            };
             out.push(AssignmentView {
                 principal: d.from.clone(),
                 status: if active {
@@ -479,6 +502,8 @@ impl Task {
                 } else {
                     reason.clone().or_else(|| Some("DELEGATION_REVOKED".into()))
                 },
+                assigned_at: self.created_at,
+                resolved_at: delegation_resolved,
             });
             out.push(AssignmentView {
                 principal: d.to.clone(),
@@ -489,13 +514,17 @@ impl Task {
                         TaskStatus::Scheduled => AssignmentStatus::Scheduled,
                         TaskStatus::Completed => AssignmentStatus::Completed,
                         TaskStatus::Rejected => AssignmentStatus::Rejected,
-                        TaskStatus::Cancelled => AssignmentStatus::Cancelled,
+                        TaskStatus::Cancelled | TaskStatus::Withdrawn => {
+                            AssignmentStatus::Cancelled
+                        }
                         TaskStatus::Expired => AssignmentStatus::Expired,
                     }
                 } else {
                     AssignmentStatus::Cancelled
                 },
                 resolved_reason: if active { None } else { reason },
+                assigned_at: d.granted_at,
+                resolved_at: delegation_resolved,
             });
         }
         for from in &self.transferred_from {
@@ -503,6 +532,8 @@ impl Task {
                 principal: from.clone(),
                 status: AssignmentStatus::Transferred,
                 resolved_reason: None,
+                assigned_at: self.created_at,
+                resolved_at: None,
             });
         }
         let base = |principal: Principal| AssignmentView {
@@ -513,16 +544,19 @@ impl Task {
                 TaskStatus::Scheduled => AssignmentStatus::Scheduled,
                 TaskStatus::Completed => AssignmentStatus::Completed,
                 TaskStatus::Rejected => AssignmentStatus::Rejected,
-                TaskStatus::Cancelled => AssignmentStatus::Cancelled,
+                TaskStatus::Cancelled | TaskStatus::Withdrawn => AssignmentStatus::Cancelled,
                 TaskStatus::Expired => AssignmentStatus::Expired,
             },
             resolved_reason: match self.status {
                 TaskStatus::Completed => Some("RULE_SATISFIED".into()),
                 TaskStatus::Rejected => Some("REJECTED".into()),
                 TaskStatus::Cancelled => Some("TASK_CANCELLED".into()),
+                TaskStatus::Withdrawn => Some("WITHDRAWN".into()),
                 TaskStatus::Expired => Some("TASK_EXPIRED".into()),
                 _ => None,
             },
+            assigned_at: self.created_at,
+            resolved_at,
         };
         // 委派已展开 from/to 两条 assignment；当前 `assignee` 仍是原责任人，不能再追加
         // 一条重复的 Pending（否则 seedj 适配器会看到同一 principal 两条 assignment）。
@@ -889,6 +923,7 @@ mod tests {
             scope: BTreeMap::from([("urgent".to_string(), json!(true))]),
             created_at: 130,
             updated_at: 180,
+            completed_at: Some(180),
         }
     }
 
@@ -906,6 +941,39 @@ mod tests {
             reject_reason: Some("on_exhausted".into()),
             opened_at: 130,
             closed_at: Some(210),
+        }
+    }
+
+    /// 席位 assignment 的时间戳投影：未终态无 `resolved_at`；四种终态各自带时刻与原因。
+    #[test]
+    fn assignment_timestamps_follow_terminal_state() {
+        let mut task = full_task();
+        task.delegation = None;
+        task.transferred_from.clear();
+        task.votes.clear();
+        task.status = TaskStatus::Created;
+        task.completed_at = None;
+        let open = task.assignments(300);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].assigned_at, 130);
+        assert_eq!(open[0].resolved_at, None);
+
+        for (status, reason) in [
+            (TaskStatus::Completed, "RULE_SATISFIED"),
+            (TaskStatus::Cancelled, "TASK_CANCELLED"),
+            (TaskStatus::Withdrawn, "WITHDRAWN"),
+            (TaskStatus::Expired, "TASK_EXPIRED"),
+        ] {
+            task.status = status;
+            task.completed_at = Some(400);
+            let assignment = task.assignments(400);
+            assert_eq!(assignment.len(), 1, "{status:?}");
+            assert_eq!(assignment[0].resolved_at, Some(400), "{status:?}");
+            assert_eq!(
+                assignment[0].resolved_reason.as_deref(),
+                Some(reason),
+                "{status:?}"
+            );
         }
     }
 
@@ -990,6 +1058,7 @@ mod tests {
             TaskStatus::Completed,
             TaskStatus::Rejected,
             TaskStatus::Cancelled,
+            TaskStatus::Withdrawn,
             TaskStatus::Expired,
         ] {
             assert_eq!(roundtrip(status), status);

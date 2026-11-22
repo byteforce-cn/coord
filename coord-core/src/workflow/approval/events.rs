@@ -274,7 +274,7 @@ mod tests {
             )
             .unwrap();
             let out = e
-                .withdraw(e.instance.revision, "zhangsan", tick(&mut t))
+                .withdraw(e.instance.revision, "zhangsan", None, None, tick(&mut t))
                 .unwrap();
             push_names(&mut emitted, &out);
         }

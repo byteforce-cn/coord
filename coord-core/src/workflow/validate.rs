@@ -2532,6 +2532,8 @@ impl Validator {
                         factor: j.get("factor").and_then(|f| f.as_f64()).unwrap_or(0.1),
                     })
                 }),
+                max_delay: obj.get("maxDelay").and_then(parse_duration_value),
+                multiplier: obj.get("multiplier").and_then(|v| v.as_f64()),
             }
         } else {
             RetryPolicy {
@@ -2539,6 +2541,8 @@ impl Validator {
                 backoff: None,
                 limit: 3,
                 jitter: None,
+                max_delay: None,
+                multiplier: None,
             }
         }
     }
@@ -2642,6 +2646,8 @@ pub fn parse_retry_policy_value(v: &Value) -> Option<RetryPolicy> {
         backoff: None,
         limit: 3,
         jitter: None,
+        max_delay: None,
+        multiplier: None,
     };
 
     // delay: "PT3S" | { seconds: 3 } | { milliseconds: 3000 }
@@ -2697,7 +2703,32 @@ pub fn parse_retry_policy_value(v: &Value) -> Option<RetryPolicy> {
         }
     }
 
+    // maxDelay: "PT10S" | { seconds: 10 } | { milliseconds: 10000 }
+    if let Some(md) = obj.get("maxDelay") {
+        policy.max_delay = parse_duration_value(md);
+    }
+
+    // multiplier: 1.5（指数退避系数）
+    if let Some(m) = obj.get("multiplier").and_then(|x| x.as_f64()) {
+        policy.multiplier = Some(m);
+    }
+
     Some(policy)
+}
+
+/// 解析 ISO8601 duration 的两种 DSL 形状：字符串或 `{seconds|milliseconds}`。
+fn parse_duration_value(v: &Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    let obj = v.as_object()?;
+    if let Some(secs) = obj.get("seconds").and_then(Value::as_u64) {
+        return Some(format!("PT{secs}S"));
+    }
+    if let Some(ms) = obj.get("milliseconds").and_then(Value::as_u64) {
+        return Some(format!("PT{}S", ms as f64 / 1000.0));
+    }
+    None
 }
 
 /// 解析 timeout 值：`{ after: "PT5M" }` 或 `{ after: { seconds: 300 } }`
@@ -4405,6 +4436,8 @@ do:
         delay: "PT1S"
         backoff: exponential
         limit: 5
+        maxDelay: "PT10S"
+        multiplier: 1.5
       timeout:
         after: "PT1M"
       set:
@@ -4424,6 +4457,8 @@ do:
         let retry = meta.retry.as_ref().unwrap();
         assert_eq!(retry.limit, 5);
         assert_eq!(retry.backoff, Some(BackoffStrategy::Exponential));
+        assert_eq!(retry.max_delay.as_deref(), Some("PT10S"));
+        assert_eq!(retry.multiplier, Some(1.5));
         let timeout = meta.timeout.as_ref().unwrap();
         assert_eq!(timeout.after, "PT1M");
     }

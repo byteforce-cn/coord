@@ -200,7 +200,11 @@ pub enum ApprovalCommand<'a> {
         /// 委派时长（毫秒）；0 = 不自动到期。
         delegate_for_ms: i64,
     },
-    Withdraw,
+    Withdraw {
+        /// seedj `WithdrawInstanceAction.targetStep`；空 = 不投影回退事件。
+        target_node: Option<&'a str>,
+        comment: Option<&'a str>,
+    },
     Terminate {
         reason: &'a str,
     },
@@ -1180,7 +1184,10 @@ impl ApprovalBridge {
                 effects.extend(open_effects);
                 Ok(effects)
             }
-            ApprovalCommand::Withdraw => engine.withdraw(expected, actor, now),
+            ApprovalCommand::Withdraw {
+                target_node,
+                comment,
+            } => engine.withdraw(expected, actor, target_node, comment, now),
             ApprovalCommand::Terminate { reason } => {
                 self.guard_terminate(engine, actor)?;
                 engine.terminate(expected, actor, reason, now)
@@ -1310,7 +1317,7 @@ impl ApprovalBridge {
             ApprovalCommand::AddSign { branch_id, .. }
             | ApprovalCommand::ReturnToNode { branch_id, .. } => Some((*branch_id).to_string()),
             ApprovalCommand::RemoveSign { task_ids } => self.branch_of_tasks(engine, task_ids).ok(),
-            ApprovalCommand::Withdraw | ApprovalCommand::Terminate { .. } => None,
+            ApprovalCommand::Withdraw { .. } | ApprovalCommand::Terminate { .. } => None,
         }
     }
 
@@ -1407,6 +1414,8 @@ fn response_for(engine: &Engine, cmd: &ApprovalCommand<'_>, effects: &[Effect]) 
                     "completed_count": r.completed_count,
                     "rejected_count": r.rejected_count,
                     "reject_reason": r.reject_reason,
+                    "opened_at": r.opened_at,
+                    "closed_at": r.closed_at,
                 });
             }
         }

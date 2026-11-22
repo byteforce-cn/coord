@@ -26,7 +26,9 @@ use coord_agent::WorkflowDispatchConfig;
 use coord_client::config::Config;
 use coord_client::Client;
 use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError};
-use coord_core::workflow::approval::model::{BranchStatus, SeatSpec, TaskKind, TaskStatus};
+use coord_core::workflow::approval::model::{
+    AssignmentStatus, BranchStatus, SeatSpec, TaskKind, TaskStatus,
+};
 use coord_core::workflow::durable::OutboxStore;
 use coord_core::workflow::model::InstanceStatus;
 use serde_json::json;
@@ -658,7 +660,15 @@ async fn withdraw_and_terminate_authorization() {
 
     let denied = env
         .svc
-        .approval_command(&wf_id, "u1", ApprovalCommand::Withdraw, None)
+        .approval_command(
+            &wf_id,
+            "u1",
+            ApprovalCommand::Withdraw {
+                target_node: None,
+                comment: None,
+            },
+            None,
+        )
         .await
         .expect_err("non-initiator withdraw must be denied");
     assert!(
@@ -674,7 +684,15 @@ async fn withdraw_and_terminate_authorization() {
 
     let (_, status) = env
         .svc
-        .approval_command(&wf_id, "origin", ApprovalCommand::Withdraw, None)
+        .approval_command(
+            &wf_id,
+            "origin",
+            ApprovalCommand::Withdraw {
+                target_node: None,
+                comment: None,
+            },
+            None,
+        )
         .await
         .expect("initiator withdraw");
     assert_eq!(status, "CANCELLED");
@@ -711,6 +729,66 @@ async fn withdraw_and_terminate_authorization() {
         .expect("sign admin terminate");
     assert_eq!(status, "TERMINATED");
     env.await_status(&term_id, InstanceStatus::Failed).await;
+}
+
+/// #451：实例撤回在同一 CAS 内投影 `WITHDRAWN` 席位、assignment reason 与回退事件。
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_withdraw_projects_withdrawn_seat_and_rollback() {
+    let env = setup().await;
+    let wf_id = env.deploy_start("acceptance", AUTHZ_YAML, "origin").await;
+    env.await_status(&wf_id, InstanceStatus::Suspended).await;
+
+    let detail = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    let task_id = task_id_for(&detail, "u1");
+
+    let (_, status) = env
+        .svc
+        .approval_command(
+            &wf_id,
+            "origin",
+            ApprovalCommand::Withdraw {
+                target_node: Some("review"),
+                comment: Some("no longer needed"),
+            },
+            None,
+        )
+        .await
+        .expect("initiator withdraw");
+    assert_eq!(status, "CANCELLED");
+    env.await_status(&wf_id, InstanceStatus::Failed).await;
+
+    let task = env.svc.get_task(&task_id).await.expect("get task");
+    assert_eq!(task.task.status, TaskStatus::Withdrawn);
+    assert!(task.task.completed_at.is_some(), "撤回必须写终态时刻");
+    let assignments = task.task.assignments(task.task.updated_at);
+    assert!(!assignments.is_empty());
+    for assignment in &assignments {
+        assert_eq!(assignment.status, AssignmentStatus::Cancelled);
+        assert_eq!(assignment.resolved_reason.as_deref(), Some("WITHDRAWN"));
+        assert!(assignment.resolved_at.is_some());
+    }
+
+    let events = env.svc.history(&wf_id).await.expect("history");
+    let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+    let task_at = types
+        .iter()
+        .position(|t| *t == "TASK_WITHDRAWN")
+        .expect("TASK_WITHDRAWN");
+    let instance_at = types
+        .iter()
+        .position(|t| *t == "INSTANCE_WITHDRAWN")
+        .expect("INSTANCE_WITHDRAWN");
+    assert!(task_at < instance_at, "{types:?}");
+    assert!(types.contains(&"INSTANCE_ROLLED_BACK"), "{types:?}");
+    let rollback = events
+        .iter()
+        .find(|e| e.event_type == "INSTANCE_ROLLED_BACK")
+        .unwrap();
+    assert_eq!(
+        rollback.attributes["from_node"],
+        serde_json::json!("review")
+    );
+    assert_eq!(rollback.attributes["to_node"], serde_json::json!("review"));
 }
 
 // ──────────────────────────────────────────────────────── 判据 5：幂等键重放

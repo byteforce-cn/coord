@@ -206,6 +206,7 @@ async fn list_instances(
             definition: String::new(),
             started_after_ms: 0,
             started_before_ms: 0,
+            status_in: Vec::new(),
         })
         .await
         .expect("Workflow.ListInstances")

@@ -1,3 +1,33 @@
+## [contracts/v1.27.0] — 2026-11-22（Minor：Workflow 时间戳 / 多值状态过滤 / 撤回回退投影 / 终止回退）
+
+**发布口径**：**Minor**（`coord.workflow.v1` 追加字段与行为；不改既有字段号/类型、不删
+RPC；`buf breaking` 基线不变）。
+
+- `WorkflowListInstancesRequest` 追加 `repeated string status_in = 9`：任一命中即匹配，与
+  `status_filter` 叠加为 OR；空 = 不过滤，未知取值 `INVALID_ARGUMENT`。seedj 的 `RUNNING`
+  需要同时命中 coord `RUNNING` 与审批挂起 `SUSPENDED` 时传 `["RUNNING","SUSPENDED"]`。
+- `WorkflowWithdrawRequest` 追加 `target_node = 5`（seedj
+  `WithdrawInstanceAction.targetStep`）：非空时随 `Cancellation` 持久化，并在 History
+  投影 `INSTANCE_ROLLED_BACK{from_node,to_node}`；活动席位落 `withdrawn`
+  （`ApprovalTaskSummary.status` / `ApprovalTask.status`），assignment reason 为
+  `WITHDRAWN`。空 = 不投影回退事件（维持旧语义）。
+- 任务读面补时间戳：`ApprovalTaskSummary.updated_at_ms`(17) / `completed_at_ms`(18)、
+  `ApprovalTask.created_at_ms`(15) / `updated_at_ms`(16) / `completed_at_ms`(17)、
+  `ApprovalRound.opened_at_ms`(9) / `closed_at_ms`(10)、
+  `ApprovalAssignment.assigned_at_ms`(5) / `resolved_at_ms`(6)。未终态为 0。
+- `WorkflowTransferRequest.to` / `WorkflowDelegateRequest.to` 注释收窄为**单一 USER
+  principal**；`ROLE/GROUP/DEPARTMENT/EXPRESSION` 由适配器 fail-closed（wire 无变化）。
+- `Terminate` 在审批聚合缺失时回退到工作流 runtime：实例置 `FAILED` +
+  `terminated` fault，`GetStatus.status=FAULTED`、`approval_status` 为空、History 投影
+  `INSTANCE_STARTED` + `INSTANCE_TERMINATED`；有聚合时保持 `sign_admins` 守卫与聚合收口。
+
+**影响范围**：旧客户端不受影响（新增字段/事件类型为增量；`status_filter` 保持可用，
+两者叠加为 OR）。撤回由 `CANCELLED` 席位改为 `WITHDRAWN` 是**行为修正**，只影响
+实例级 `Withdraw` 的活动席位；普通 `Cancel` 仍是 `CANCELLED`。
+
+**回滚预案**：回滚本分支即回到无 `status_in` / `target_node` / 时间戳读面的版本；
+`Cancellation.target_node` 与 `Task.completed_at` 均为 `serde(default)`，无落盘迁移。
+
 ## [contracts/v2.3.1] — 2026-11-22（Patch：PKI serial 按整数口径匹配）
 
 **发布口径**：**Patch**（wire 无改动：`coord.pki.v1` 仅注释；不改字段号/类型、不删 RPC，

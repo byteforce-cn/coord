@@ -138,6 +138,12 @@ pub struct RetryPolicy {
     pub limit: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<JitterConfig>,
+    /// 单次退避延迟上限（ISO 8601 duration）；缺省 = 不封顶。
+    #[serde(rename = "maxDelay", default, skip_serializing_if = "Option::is_none")]
+    pub max_delay: Option<String>,
+    /// 指数退避系数；缺省 2.0（仅 `backoff: exponential` 生效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<f64>,
 }
 
 fn default_retry_delay() -> String {
