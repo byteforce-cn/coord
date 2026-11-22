@@ -2259,6 +2259,8 @@ fn task_summary(
         successor_task_id: view.task.successor.clone().unwrap_or_default(),
         spawned_by_action_id: view.task.spawned_by.clone().unwrap_or_default(),
         assignments: map_assignments(&view.task.assignments(now), &view.task.votes),
+        updated_at_ms: view.task.updated_at,
+        completed_at_ms: view.task.completed_at.unwrap_or(0),
     }
 }
 
@@ -2276,6 +2278,8 @@ fn map_assignments(
                 .iter()
                 .find(|v| v.actor == a.principal || v.on_behalf_of.as_deref() == Some(&a.principal))
                 .map(map_vote),
+            assigned_at_ms: a.assigned_at,
+            resolved_at_ms: a.resolved_at.unwrap_or(0),
         })
         .collect()
 }
@@ -2332,6 +2336,14 @@ fn round_from_json(value: &serde_json::Value) -> ApprovalRound {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        opened_at_ms: value
+            .get("opened_at")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        closed_at_ms: value
+            .get("closed_at")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
     }
 }
 
@@ -2706,8 +2718,17 @@ impl Workflow for WorkflowEngineService {
         let namespace = (!req.namespace.is_empty()).then_some(req.namespace.as_str());
         // `definition` 是新增的显式字段；`workflow_id` 保留为历史别名。
         let definition = non_empty(&req.definition).or(non_empty(&req.workflow_id));
-        let status = non_empty(&req.status_filter);
-        if let Some(raw) = status {
+        let mut statuses: Vec<&str> = Vec::new();
+        if let Some(raw) = non_empty(&req.status_filter) {
+            statuses.push(raw);
+        }
+        statuses.extend(
+            req.status_in
+                .iter()
+                .map(String::as_str)
+                .filter(|s| !s.is_empty()),
+        );
+        for raw in &statuses {
             crate::services::workflow::phase4::parse_instance_status(raw)
                 .map_err(Status::invalid_argument)?;
         }
@@ -2716,7 +2737,7 @@ impl Workflow for WorkflowEngineService {
         let query = crate::services::workflow::phase4::InstanceQuery {
             namespace,
             definition,
-            status,
+            statuses,
             started_after_ms: req.started_after_ms,
             started_before_ms: req.started_before_ms,
         };
@@ -2837,6 +2858,8 @@ impl Workflow for WorkflowEngineService {
                 completed_count: r.completed_count as i32,
                 rejected_count: r.rejected_count as i32,
                 reject_reason: r.reject_reason.unwrap_or_default(),
+                opened_at_ms: r.opened_at,
+                closed_at_ms: r.closed_at.unwrap_or(0),
             }),
         }))
     }
@@ -3322,7 +3345,10 @@ impl Workflow for WorkflowEngineService {
                 &req.workflow_id,
                 &actor,
                 acting.as_deref(),
-                ApprovalCommand::Withdraw,
+                ApprovalCommand::Withdraw {
+                    target_node: non_empty(&req.target_node),
+                    comment: non_empty(&req.comment),
+                },
                 non_empty(&req.idempotency_key),
             )
             .await
@@ -3344,13 +3370,11 @@ impl Workflow for WorkflowEngineService {
         // `approval_target` 已拒绝 caller / 被代表主体为 `system` 的请求。
         let (actor, acting) = approval_target(self, &identity, &req.on_behalf_of)?;
         let (instance_id, status) = self
-            .approval_command_with(
+            .terminate_workflow(
                 &req.workflow_id,
                 &actor,
                 acting.as_deref(),
-                ApprovalCommand::Terminate {
-                    reason: &req.reason,
-                },
+                &req.reason,
                 non_empty(&req.idempotency_key),
             )
             .await
@@ -3539,6 +3563,9 @@ impl Workflow for WorkflowEngineService {
                     successor_task_id: t.successor.clone().unwrap_or_default(),
                     spawned_by_action_id: t.spawned_by.clone().unwrap_or_default(),
                     assignments: map_assignments(&t.assignments(now), &t.votes),
+                    created_at_ms: t.created_at,
+                    updated_at_ms: t.updated_at,
+                    completed_at_ms: t.completed_at.unwrap_or(0),
                 })
                 .collect(),
             rounds: detail
@@ -3553,6 +3580,8 @@ impl Workflow for WorkflowEngineService {
                     completed_count: r.completed_count as i32,
                     rejected_count: r.rejected_count as i32,
                     reject_reason: r.reject_reason.clone().unwrap_or_default(),
+                    opened_at_ms: r.opened_at,
+                    closed_at_ms: r.closed_at.unwrap_or(0),
                 })
                 .collect(),
             audit: detail
@@ -4608,6 +4637,7 @@ do:
             definition: String::new(),
             started_after_ms: 0,
             started_before_ms: 0,
+            status_in: Vec::new(),
         }
     }
 
@@ -5074,6 +5104,7 @@ do:
             comment: "撤回".into(),
             idempotency_key: String::new(),
             on_behalf_of: "alice".into(),
+            target_node: String::new(),
         });
         withdraw_req.extensions_mut().insert(GatewayIdentity {
             subject: "svc-seedj".into(),

@@ -769,7 +769,8 @@ class WorkflowClientContractTest {
 
         assertThat(fake.lastListInstances.getNamespace()).isEqualTo("icps");
         assertThat(fake.lastListInstances.getDefinition()).isEqualTo("order-approval");
-        assertThat(fake.lastListInstances.getStatusFilter()).isEqualTo("RUNNING");
+        assertThat(fake.lastListInstances.getStatusInList()).containsExactly("RUNNING");
+        assertThat(fake.lastListInstances.getStatusFilter()).isEmpty();
         assertThat(fake.lastListInstances.getStartedAfterMs()).isEqualTo(1_754_000_000_000L);
         assertThat(fake.lastListInstances.getStartedBeforeMs()).isEqualTo(1_756_000_000_000L);
         assertThat(fake.lastListInstances.getPageSize()).isEqualTo(200);
@@ -786,6 +787,21 @@ class WorkflowClientContractTest {
         assertThat(s.definitionVersion()).isEqualTo("1.2");
         assertThat(s.initiator()).isEqualTo("alice");
         assertThat(s.completedAt()).isEqualTo(1_755_000_100_000L);
+    }
+
+    @Test
+    @DisplayName("listInstances 多值状态过滤写入 status_in（任一命中）")
+    void listInstancesWithMultipleStatuses() {
+        fake.nextInstances = WorkflowListInstancesResponse.newBuilder()
+                .setNextPageToken("")
+                .build();
+
+        wf.listInstances("icps", "order-approval",
+                java.util.List.of("RUNNING", "SUSPENDED"), 0L, 0L, 10, "");
+
+        assertThat(fake.lastListInstances.getStatusInList())
+                .containsExactly("RUNNING", "SUSPENDED");
+        assertThat(fake.lastListInstances.getStatusFilter()).isEmpty();
     }
 
     @Test

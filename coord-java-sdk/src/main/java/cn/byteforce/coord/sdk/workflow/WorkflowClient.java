@@ -309,6 +309,25 @@ public interface WorkflowClient {
             String namespace, String workflowId, String statusFilter, int pageSize, String pageToken);
 
     /**
+     * List workflow instances with a multi-value status filter.
+     *
+     * <p>Any listed status matches (server-side OR); an empty/null collection means "all".
+     * seedj's {@code RUNNING} maps to coord {@code RUNNING} + {@code SUSPENDED} (approval
+     * suspension), so adapters pass both.</p>
+     *
+     * @param namespace  optional namespace filter (null or empty for all namespaces)
+     * @param workflowId optional workflow ID filter (null or empty for all definitions)
+     * @param statuses   optional uppercase status filters (null/empty for all)
+     * @param pageSize   max results per page (1-200; server caps at 200)
+     * @param pageToken  pagination token from previous response (empty for first page)
+     * @return list of workflow instance summaries
+     * @throws CoordException on communication failure
+     */
+    java.util.List<WorkflowInstanceSummary> listInstances(
+            String namespace, String workflowId, java.util.Collection<String> statuses,
+            int pageSize, String pageToken);
+
+    /**
      * List workflow instances filtered by definition and start-time window, keeping the
      * server's next-page token.
      *
@@ -326,6 +345,15 @@ public interface WorkflowClient {
      * @throws CoordException on communication failure
      */
     InstancePage listInstances(String namespace, String definition, String status,
+                               long startedAfterMs, long startedBeforeMs,
+                               int pageSize, String pageToken);
+
+    /**
+     * Same as {@link #listInstances(String, String, String, long, long, int, String)} but with
+     * a multi-value status filter (any listed status matches; null/empty = all).
+     */
+    InstancePage listInstances(String namespace, String definition,
+                               java.util.Collection<String> statuses,
                                long startedAfterMs, long startedBeforeMs,
                                int pageSize, String pageToken);
 
@@ -533,6 +561,22 @@ public interface WorkflowClient {
     String withdraw(String workflowId, String comment, String idempotencyKey);
 
     /**
+     * Withdraw the whole approval instance and record the seedj rollback target.
+     *
+     * <p>A non-empty {@code targetNode} is persisted with the cancellation and projected as
+     * {@code INSTANCE_ROLLED_BACK{from_node,to_node}} in History; seats become
+     * {@code WITHDRAWN} (assignment reason {@code WITHDRAWN}).</p>
+     *
+     * @param workflowId     the workflow instance ID
+     * @param targetNode     seedj {@code WithdrawInstanceAction.targetStep}; empty for none
+     * @param comment        optional comment (may be null)
+     * @param idempotencyKey unique key so retries do not apply the withdrawal twice
+     * @return the instance status after the command (uppercase, e.g. {@code CANCELLED})
+     * @throws CoordException on communication or guard violation
+     */
+    String withdraw(String workflowId, String targetNode, String comment, String idempotencyKey);
+
+    /**
      * Terminate the whole approval instance.
      *
      * @param workflowId     the workflow instance ID
@@ -680,6 +724,10 @@ public interface WorkflowClient {
     /** Withdraw as a service acting on behalf of the initiator. */
     String withdrawOnBehalfOf(String workflowId, String comment, String idempotencyKey,
                               String onBehalfOf);
+
+    /** Withdraw with a seedj rollback target, acting on behalf of the initiator. */
+    String withdrawOnBehalfOf(String workflowId, String targetNode, String comment,
+                              String idempotencyKey, String onBehalfOf);
 
     /** Resume a waiting instance as a service acting on behalf of the initiator / sign admin. */
     String resumeWorkflowOnBehalfOf(String workflowId, long newDueInMs, String reason,

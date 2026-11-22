@@ -101,6 +101,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -481,12 +482,21 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public List<WorkflowInstanceSummary> listInstances(String workflowId) {
-        return listInstances(null, workflowId, null, 50, "");
+        return listInstances(null, workflowId, (String) null, 50, "");
     }
 
     @Override
     public List<WorkflowInstanceSummary> listInstances(
             String namespace, String workflowId, String statusFilter, int pageSize, String pageToken) {
+        return listInstances(namespace, workflowId,
+                statusFilter == null || statusFilter.isEmpty() ? List.of() : List.of(statusFilter),
+                pageSize, pageToken);
+    }
+
+    @Override
+    public List<WorkflowInstanceSummary> listInstances(
+            String namespace, String workflowId, Collection<String> statuses,
+            int pageSize, String pageToken) {
         WorkflowListInstancesRequest.Builder req = WorkflowListInstancesRequest.newBuilder()
                 .setPageSize(Math.max(1, Math.min(pageSize, 200)));
         if (namespace != null && !namespace.isEmpty()) {
@@ -495,9 +505,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         if (workflowId != null && !workflowId.isEmpty()) {
             req.setWorkflowId(workflowId);
         }
-        if (statusFilter != null && !statusFilter.isEmpty()) {
-            req.setStatusFilter(statusFilter);
-        }
+        addStatuses(req, statuses);
         if (pageToken != null && !pageToken.isEmpty()) {
             req.setPageToken(pageToken);
         }
@@ -512,8 +520,8 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         for (cn.byteforce.coord.contracts.workflow.v1.WorkflowInstanceSummary s : response.getInstancesList()) {
             result.add(toInstanceSummary(s));
         }
-        log.debug("Workflow listInstances: namespace={}, workflowId={}, statusFilter={}, count={}",
-                namespace, workflowId, statusFilter, result.size());
+        log.debug("Workflow listInstances: namespace={}, workflowId={}, statuses={}, count={}",
+                namespace, workflowId, statuses, result.size());
         return result;
     }
 
@@ -521,11 +529,21 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     public InstancePage listInstances(String namespace, String definition, String status,
                                       long startedAfterMs, long startedBeforeMs,
                                       int pageSize, String pageToken) {
+        return listInstances(namespace, definition,
+                status == null || status.isEmpty() ? List.of() : List.of(status),
+                startedAfterMs, startedBeforeMs, pageSize, pageToken);
+    }
+
+    @Override
+    public InstancePage listInstances(String namespace, String definition,
+                                      Collection<String> statuses,
+                                      long startedAfterMs, long startedBeforeMs,
+                                      int pageSize, String pageToken) {
         WorkflowListInstancesRequest.Builder req = WorkflowListInstancesRequest.newBuilder()
                 .setPageSize(Math.max(1, Math.min(pageSize, 200)));
         setOptional(req::setNamespace, namespace);
         setOptional(req::setDefinition, definition);
-        setOptional(req::setStatusFilter, status);
+        addStatuses(req, statuses);
         if (startedAfterMs > 0) {
             req.setStartedAfterMs(startedAfterMs);
         }
@@ -544,9 +562,22 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         for (cn.byteforce.coord.contracts.workflow.v1.WorkflowInstanceSummary s : response.getInstancesList()) {
             instances.add(toInstanceSummary(s));
         }
-        log.debug("Workflow listInstances: namespace={}, definition={}, status={}, window=[{}, {}], count={}",
-                namespace, definition, status, startedAfterMs, startedBeforeMs, instances.size());
+        log.debug("Workflow listInstances: namespace={}, definition={}, statuses={}, window=[{}, {}], count={}",
+                namespace, definition, statuses, startedAfterMs, startedBeforeMs, instances.size());
         return new InstancePage(instances, response.getNextPageToken());
+    }
+
+    /** 多值状态过滤写入 wire；空值跳过（proto 默认值 = 不过滤）。 */
+    private static void addStatuses(WorkflowListInstancesRequest.Builder req,
+                                    Collection<String> statuses) {
+        if (statuses == null) {
+            return;
+        }
+        for (String status : statuses) {
+            if (status != null && !status.isEmpty()) {
+                req.addStatusIn(status);
+            }
+        }
     }
 
     private static WorkflowInstanceSummary toInstanceSummary(
@@ -889,14 +920,27 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String withdraw(String workflowId, String comment, String idempotencyKey) {
-        return withdrawOnBehalfOf(workflowId, comment, idempotencyKey, null);
+        return withdraw(workflowId, null, comment, idempotencyKey);
+    }
+
+    @Override
+    public String withdraw(String workflowId, String targetNode, String comment,
+                           String idempotencyKey) {
+        return withdrawOnBehalfOf(workflowId, targetNode, comment, idempotencyKey, null);
     }
 
     @Override
     public String withdrawOnBehalfOf(String workflowId, String comment, String idempotencyKey,
                                      String onBehalfOf) {
+        return withdrawOnBehalfOf(workflowId, null, comment, idempotencyKey, onBehalfOf);
+    }
+
+    @Override
+    public String withdrawOnBehalfOf(String workflowId, String targetNode, String comment,
+                                     String idempotencyKey, String onBehalfOf) {
         WorkflowWithdrawRequest.Builder req = WorkflowWithdrawRequest.newBuilder()
                 .setWorkflowId(workflowId);
+        setOptional(req::setTargetNode, targetNode);
         setOptional(req::setComment, comment);
         setOptional(req::setIdempotencyKey, idempotencyKey);
         setOptional(req::setOnBehalfOf, onBehalfOf);
@@ -1099,12 +1143,16 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         for (cn.byteforce.coord.contracts.workflow.v1.ApprovalTask t : response.getTasksList()) {
             tasks.add(new ApprovalTask(t.getId(), t.getBranchId(), t.getRoundId(), t.getKind(),
                     t.getStatus(), t.getAssignee(), t.getCandidatesList(), t.getDeadlineMs(),
-                    mapVotes(t.getVotesList())));
+                    mapVotes(t.getVotesList()), "", "", "", t.getCreatedAtMs(),
+                    t.getPredecessorTaskId(), t.getSuccessorTaskId(), t.getSpawnedByActionId(),
+                    mapAssignments(t.getAssignmentsList()),
+                    t.getUpdatedAtMs(), t.getCompletedAtMs()));
         }
         List<ApprovalRound> rounds = new ArrayList<>();
         for (cn.byteforce.coord.contracts.workflow.v1.ApprovalRound r : response.getRoundsList()) {
             rounds.add(new ApprovalRound(r.getId(), r.getBranchId(), r.getNumber(), r.getStatus(),
-                    r.getTotalCount(), r.getCompletedCount(), r.getRejectedCount()));
+                    r.getTotalCount(), r.getCompletedCount(), r.getRejectedCount(),
+                    r.getRejectReason(), r.getOpenedAtMs(), r.getClosedAtMs()));
         }
         List<ApprovalAudit> audit = new ArrayList<>();
         for (cn.byteforce.coord.contracts.workflow.v1.ApprovalAudit a : response.getAuditList()) {
@@ -1182,7 +1230,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
             cn.byteforce.coord.contracts.workflow.v1.ApprovalRound r = response.getRound();
             round = new ApprovalRound(r.getId(), r.getBranchId(), r.getNumber(), r.getStatus(),
                     r.getTotalCount(), r.getCompletedCount(), r.getRejectedCount(),
-                    r.getRejectReason());
+                    r.getRejectReason(), r.getOpenedAtMs(), r.getClosedAtMs());
         }
         log.debug("Workflow getTask: taskId={}, status={}, votes={}, roundTasks={}, instanceStatus={}",
                 taskId, task.status(), task.votes().size(), roundTasks.size(),
@@ -1227,7 +1275,8 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
             for (cn.byteforce.coord.contracts.workflow.v1.ApprovalAssignment a : g.getAssignmentsList()) {
                 assignments.add(new ApprovalAssignment(a.getPrincipal(), a.getStatus(),
                         a.getResolvedReason(),
-                        a.hasRecord() ? toApprovalVote(a.getRecord()) : null));
+                        a.hasRecord() ? toApprovalVote(a.getRecord()) : null,
+                        a.getAssignedAtMs(), a.getResolvedAtMs()));
             }
             groups.add(new TaskGroup(g.getId(), g.getInstanceId(), g.getBranchId(), g.getRoundId(),
                     g.getNode(), g.getStatus(), g.getKind(), seats, assignments,
@@ -1282,7 +1331,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         for (cn.byteforce.coord.contracts.workflow.v1.ApprovalAssignment a : assignments) {
             ApprovalVote vote = a.hasRecord() ? toApprovalVote(a.getRecord()) : null;
             result.add(new ApprovalAssignment(a.getPrincipal(), a.getStatus(),
-                    a.getResolvedReason(), vote));
+                    a.getResolvedReason(), vote, a.getAssignedAtMs(), a.getResolvedAtMs()));
         }
         return result;
     }
@@ -1294,7 +1343,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 s.getStatus(), s.getAssignee(), s.getCandidatesList(), s.getDeadlineMs(), votes,
                 s.getInstanceId(), s.getNode(), s.getOrigin(), s.getCreatedAtMs(),
                 s.getPredecessorTaskId(), s.getSuccessorTaskId(), s.getSpawnedByActionId(),
-                mapAssignments(s.getAssignmentsList()));
+                mapAssignments(s.getAssignmentsList()), s.getUpdatedAtMs(), s.getCompletedAtMs());
     }
 
     /** 仅在值非空时写入可选字段（空值保持 proto3 默认，wire 上不出现）。 */

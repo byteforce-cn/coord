@@ -1,6 +1,6 @@
 # seedj WorkflowProvider → coord workflow v2 映射
 
-Owner: coord workflow ｜ Last verified: 2026-11-16
+Owner: coord workflow ｜ Last verified: 2026-11-22
 
 本文件是 `seedj-workflow-coord` 适配器的字段映射口径。coord 的承诺面以
 `workflow-semantics.md` 与 `coord-proto/src/proto/workflow.proto` 为准；**本文件未列出的
@@ -16,6 +16,10 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | `StepKind.COMPENSATION` | `compensatedBy` + 逆序状态链 | 引擎**不内置**自动逆序栈，逆序由 DSL 连线表达（见 `workflow-semantics.md` §1）。 |
 | `dependsOn` DAG | `do[]` 顺序 + `switch.transition`；并行用 `fork` / `join` | coord 没有通用 DAG 调度器。菱形/跨层依赖必须展开为 fork/join + transition；无法保持语义时**拒绝注册**。 |
 
+- 步骤级 `RetryPolicy(maxAttempts, initialBackoff, maxBackoff, multiplier)` → 任务级
+  `retry{limit, delay, backoff: exponential, maxDelay, multiplier}`：四字段 1:1
+  （`maxAttempts→limit`、`initialBackoff→delay`，两者都含首次；`maxBackoff→maxDelay` 封顶；
+  `multiplier` 为指数底数，缺省 2.0）。`maxDelay` / `multiplier` 为 additive DSL 字段。
 - `register` → `Deploy`：接受 JSON 或 YAML；同 `(namespace, name, version)` 同内容幂等、
   不同内容 `ALREADY_EXISTS`（定义不可变；变更请提升 version）。
 - `findDefinition(id, version)` → `GetDefinition(namespace, name, version)`；响应带
@@ -48,10 +52,10 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 |:--|:--|:--|
 | `Approve` | `Approve` | ✅（`formData` 按 D9 不支持，由 seedj 侧存储；时间戳取 coord 服务端时钟） |
 | `Reject(targetStep)` | `Reject` + `target_node` | ✅（原子投票 + 回退） |
-| `Transfer` | `Transfer` | ✅（原责任人进 `transferred_from`，不携带投票记录） |
-| `Delegate(delegateFor)` | `Delegate` + `delegate_for_ms` | ✅ 到期由审批 deadline 定时器撤销代理权（`DELEGATION_EXPIRED`）；终态撤销代理 assignment。 |
+| `Transfer` | `Transfer` | ✅ 受让方仅支持**单一 USER principal**（原责任人进 `transferred_from`，不携带投票记录）。`ParticipantSpec(ROLE/GROUP/DEPARTMENT/EXPRESSION)` 由适配器 fail-closed——coord 不在动态动作上展开参与者组。 |
+| `Delegate(delegateFor)` | `Delegate` + `delegate_for_ms` | ✅ 被委派人仅支持单一 USER principal；组/部门/角色由适配器 fail-closed。到期由审批 deadline 定时器撤销代理权（`DELEGATION_EXPIRED`）；终态撤销代理 assignment。 |
 | `Withdraw(任务级)` | `WithdrawTask` + `target_node` | ✅（仅原审批人；保留通过记录；带否决票的席位拒绝撤回） |
-| `WithdrawInstance` | `Withdraw` | ✅（仅发起人；级联取消实例） |
+| `WithdrawInstance` | `Withdraw` + `target_node` | ✅（仅发起人；级联收口实例）。`target_node` 非空时随 `Cancellation` 持久化并投影 `INSTANCE_ROLLED_BACK{from_node,to_node}`；活动席位落 `withdrawn`、assignment reason `WITHDRAWN`。目标为空 = 不投影回退事件。 |
 | `Urge` | `Urge` | ✅（只写审计/通知；`History` 投影 `TASK_URGED`） |
 | `Cc` | `Cc` | ✅（任务级要求节点 `allowCc: true`；实例级限发起人/`sign_admins`） |
 | `AddAssignee(position)` | `AddSign` + `position`/`task_id`/`action_id` | ✅ `CURRENT` / `BEFORE` / `AFTER`；响应 `derived_task_ids`；BEFORE 挂起原席位、完成后恢复；AFTER 原轮次通过后执行、否决/回退时丢弃（`TASK_AFTER_SPAWN_DISCARDED`）。 |
@@ -65,10 +69,10 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | seedj | coord |
 |:--|:--|
 | `describe(instanceId)` / `status` | `GetStatus` + `GetInstanceDetail`（`revision` 为 CAS 守卫） |
-| `describeTask(taskId)` | `GetTask`（席位 + votes + 实例状态 + `origin`/`predecessor`/`successor`/`spawned_by`/`assignments`） |
+| `describeTask(taskId)` | `GetTask`（席位 + votes + 实例状态 + `origin`/`predecessor`/`successor`/`spawned_by`/`assignments` + 时间戳）。task 带 `updated_at_ms` / `completed_at_ms`，round 带 `opened_at_ms` / `closed_at_ms`，assignment 带 `assigned_at_ms` / `resolved_at_ms`（未终态为 0）——适配器 1:1 填 seedj `HumanTask` / `TaskAssignment` |
 | `listTasks(TaskQuery)` | `ListTasks`：`instance_id` / `assignee` / `completed_by` / `candidate_group` / `node` / `status` / `due_before_ms` |
 | `pendingFor` | `ListTasks{assignee, status=created|claimed}`（或 `ListPendingTasks`） |
-| `search(WorkflowSearchQuery)` | `ListInstances`：`definition` / `status_filter` / `started_after_ms` / `started_before_ms` |
+| `search(WorkflowSearchQuery)` | `ListInstances`：`definition` / `status_filter` / `status_in[]` / `started_after_ms` / `started_before_ms`；seedj `RUNNING` 传 `["RUNNING","SUSPENDED"]`（审批挂起在 seedj 仍是 RUNNING），过滤与分页由服务端完成 |
 | `history(instanceId)` | `History`：`STEP_ENTERED` / `TASK_*` / `ROUND_*` / `INSTANCE_*` + `TASK_URGED` / `TASK_CC` / `TASK_WITHDRAWN` / `TASK_ASSIGNEE_REMOVED` / `TASK_ASSIGNMENT_SUSPENDED|RESUMED` / `TASK_ADD_ASSIGNEE_BEFORE|AFTER` / `TASK_AFTER_SPAWN_DISCARDED` / `DELEGATION_EXPIRED`；`actionId` 当前为空（派生任务用 `spawned_by_action_id`） |
 | `provider.now()` | 无独立时钟 RPC；响应时间戳均为 Unix ms，使用本地时钟即可 |
 | `capabilities` | 由适配器按本表声明；未实现项必须报 `false`（或回退本地 provider） |
@@ -82,8 +86,15 @@ SDK 而不是自行发 gRPC。`listTasks` 是管理面读（`coord:workflow:read
 
 - **引擎/契约面无未落地项**：#381 的剩余项（前后加签、assignment 读面、按 assignee 减签、
   委派到期、`WAITING` + `Resume`）已随 ADR-0013 D13 落地。
-- **SDK 未发版**：任务读面与任务级命令已在 `main` 落地，但尚未随 `coord-java-sdk` 发布
-  （Maven Central 最新为 `0.4.1`）；发版前适配器不得依赖这些方法。
+- **SDK 发版**：任务读面与任务级命令随 `coord-java-sdk` 0.4.4 发布；本表新增的
+  `status_in[]`、`withdraw(targetNode)` 与 task/round/assignment 时间戳在 `main` 可用，
+  随下一版本发布。适配器使用前按实际 SDK 版本核对。
 - `formData`：按 ADR-0013 D9 **不实现**，由 seedj 侧存储并在读视图合并（见 §2）。
-- `History.actionId` 仍为空；seedj `actionId` 只在加签派生任务上映射为
-  `spawned_by_action_id`。
+- `History.actionId` 只有命令携带 `idempotency_key` 时非空；系统动作（超时/到期）与
+  未提供键的命令为空。
+- 动态 `Transfer` / `Delegate` 不接受参与者组：seedj 的 `ParticipantSpec(ROLE/GROUP/
+  DEPARTMENT/EXPRESSION)` 由适配器 fail-closed。组/部门的展开只存在于 `approve` 节点的
+  `roles` / `pool`（§2）。
+- 无审批聚合的实例（纯 ACTIVITY / WAIT / LISTEN）：`Terminate` 回退到工作流 runtime，
+  `GetStatus.status=FAULTED` 且 `approval_status` 为空，`fault.title="terminated"`；
+  `History` 投影 `INSTANCE_STARTED` + `INSTANCE_TERMINATED`（不读审批聚合）。

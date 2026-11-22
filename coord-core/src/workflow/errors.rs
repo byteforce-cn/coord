@@ -31,6 +31,8 @@ pub mod kind {
     pub const NOT_FOUND: &str = "notfound";
     /// 状态冲突（conflict）—— 409
     pub const CONFLICT: &str = "conflict";
+    /// 管理终止（terminated）—— 409
+    pub const TERMINATED: &str = "terminated";
     /// 内部错误（internal）—— 500
     pub const INTERNAL: &str = "internal";
     /// 运行时错误（runtime）—— 500
@@ -49,6 +51,17 @@ impl WorkflowFault {
             r#type: error_type(kind::TIMEOUT),
             title: title.into(),
             status: 408,
+            detail: detail.into(),
+            instance: None,
+        }
+    }
+
+    /// 管理终止（409）—— 无审批聚合的实例被 `Terminate` 收口。
+    pub fn terminated(detail: impl Into<String>) -> Self {
+        Self {
+            r#type: error_type(kind::TERMINATED),
+            title: kind::TERMINATED.into(),
+            status: 409,
             detail: detail.into(),
             instance: None,
         }

@@ -311,6 +311,10 @@ pub struct SwRetry {
     pub limit: Option<Value>,
     #[serde(default)]
     pub jitter: Option<Value>,
+    #[serde(default)]
+    pub max_delay: Option<Value>,
+    #[serde(default)]
+    pub multiplier: Option<Value>,
 }
 
 /// 顶层错误定义
@@ -1186,12 +1190,16 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                         "backoff": r.backoff.clone().unwrap_or_else(|| serde_json::json!("constant")),
                         "limit": r.limit.clone().unwrap_or_else(|| serde_json::json!(3)),
                         "jitter": r.jitter.clone().unwrap_or_else(|| serde_json::json!({"factor": 0.0})),
+                        "maxDelay": r.max_delay.clone().unwrap_or(serde_json::Value::Null),
+                        "multiplier": r.multiplier.clone().unwrap_or(serde_json::Value::Null),
                     }))
                     .unwrap_or(RetryPolicy {
                         delay: "PT3S".to_string(),
                         backoff: None,
                         limit: 3,
                         jitter: None,
+                        max_delay: None,
+                        multiplier: None,
                     }),
                 );
             }

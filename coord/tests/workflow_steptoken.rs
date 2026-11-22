@@ -140,6 +140,8 @@ fn retry_definition() -> WorkflowDefinition {
                 backoff: None,
                 limit: 3,
                 jitter: None,
+                max_delay: None,
+                multiplier: None,
             }),
             ..Default::default()
         },

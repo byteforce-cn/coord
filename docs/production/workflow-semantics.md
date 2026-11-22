@@ -1,6 +1,6 @@
 # 工作流语义（补偿 / 重试 / 信号 / 保留）
 
-> Owner: maintainers ｜ Last verified: 2026-11-15
+> Owner: maintainers ｜ Last verified: 2026-11-22
 
 面向接入方的语义单一归属页（G-WF-1）。事实源：`coord.workflow.v1` 的 proto 声明
 （wire 字段）、`coord-core/src/workflow/`（sw 编译器 + runtime）与
@@ -35,8 +35,12 @@
 
 ## 2. 重试与超时
 
-- 重试由 `onErrors[].retry` / 任务级 retry 字段下线（编译器展开为 catch +
+- 重试由 `onErrors[].retry` / 任务级 retry 字段声明（编译器展开为 catch +
   转场/重试接线）；**副作用幂等责任同样在使用方**（`call` 派发不去重）。
+- 任务级 `retry` 形状：`delay`（ISO 8601）、`limit`（含首次）、
+  `backoff: constant|linear|exponential`、`maxDelay`（单次延迟上限，ISO 8601）、
+  `multiplier`（指数底数，缺省 2.0）、`jitter.factor`。指数退避为
+  `delay × multiplier^(attempt-1)`，先按 `maxDelay` 封顶再应用 jitter。
 - 超时（`timeout`，def 级 / 状态级）触发即走错误路径——可被 `onErrors` /
   `compensatedBy` 接住。
 - 挂起（wait / call / listen）**不计入**解释器步数保护（步数只计状态推进）。
@@ -247,7 +251,9 @@ auth:
   `BEFORE`/`AFTER` 必须给锚定 `task_id`；响应返回 `derived_task_ids`。`GetTask` /
   `GetInstanceDetail` 的 `ApprovalTask` 暴露 `origin`、`predecessor_task_id`、
   `successor_task_id`、`spawned_by_action_id` 与 `assignments`（pending/scheduled/
-  suspended/transferred/delegated/completed/rejected/cancelled/expired）。
+  suspended/transferred/delegated/completed/rejected/cancelled/expired）。task 带
+  `updated_at_ms` / `completed_at_ms`，round 带 `opened_at_ms` / `closed_at_ms`，
+  assignment 带 `assigned_at_ms` / `resolved_at_ms`（未终态为 0）。
   `RemoveSign` 可用 `assignees`（按 assignee）替代 `task_ids`，响应返回
   `removed_task_ids` 与重算后的 `round`。
 - **席位列 vs 轮次（读面口径）**：coord 的 `ApprovalTask` 是**席位级**（一个审批人一个
@@ -256,11 +262,17 @@ auth:
   给出同轮全部席位；`ListTasks` 保持席位级与按实例窗口分页（单页可能多于 `page_size`）。
   多值过滤 `statuses` / `candidate_groups` 任一命中即匹配；`PENDING` 需展开为
   `created|claimed|suspended|scheduled`。
-- **撤回 / 取消 / 终止**：`Withdraw`（发起人）→ 聚合 `CANCELLED`，History 投影
-  `INSTANCE_WITHDRAWN`；`Cancel`（控制面）→ 聚合 `CANCELLED`，投影 `INSTANCE_CANCELLED`
-  并带 `reason` / `compensate`；`Terminate`（`sign_admins`）→ 聚合 `TERMINATED`。
-  三者都写 `TASK_ASSIGNMENT_AUTO_CANCELLED`（逐 principal）。`compensate=true` 只是
+- **撤回 / 取消 / 终止**：`Withdraw`（发起人）→ 聚合 `CANCELLED`，活动席位落
+  `withdrawn`（assignment reason `WITHDRAWN`），History 投影 `TASK_WITHDRAWN` →
+  `INSTANCE_WITHDRAWN`；请求带 `target_node` 时同一条 CAS 写 `Cancellation` 并投影
+  `INSTANCE_ROLLED_BACK{from_node,to_node}`（空 = 不投影回退事件）。`Cancel`（控制面）→
+  聚合 `CANCELLED`，投影 `INSTANCE_CANCELLED` 并带 `reason` / `compensate`；`Terminate`
+  （`sign_admins`）→ 聚合 `TERMINATED`。取消/撤回/终止都写
+  `TASK_ASSIGNMENT_AUTO_CANCELLED`（逐 principal）。`compensate=true` 只是
   调用方的补偿声明——coord 没有业务逆动作模型，**不执行** Saga 逆序。
+  无审批聚合的实例（纯 ACTIVITY / WAIT / LISTEN）终止时回退到 runtime：工作流
+  `FAILED` + `terminated` fault，`approval_status` 为空，History 投影
+  `INSTANCE_TERMINATED`。
   `GetStatus.approval_status` 用于区分同为工作流 `FAULTED` 的「管理终止」
   （`TERMINATED`）与运行 fault。
 - **History 的 action id**：投票/审计记录持久化命令的 `idempotency_key`，投影为
@@ -329,10 +341,11 @@ auth:
   按 `instance_id` / `assignee` / `completed_by` / `candidate_group` / `node` / `status` /
   `due_before_ms` 过滤（未知 `status` fail-closed），分页口径与待办一致；`GetTask(task_id)`
   直取席位（含投票与实例状态）。`ListInstances` 支持 `definition`（定义名或 ID）、
-  `status_filter` 与 `started_after_ms` / `started_before_ms` 时间窗；过滤在服务端完成，
+  `status_filter` / `status_in[]`（任一命中，两者叠加为 OR）与
+  `started_after_ms` / `started_before_ms` 时间窗；过滤在服务端完成，
   `page_size` 是扫描批次而非严格返回上限（不跳过未消费实例）。`History(workflow_id)`
   从审批聚合快照投影出稳定的 task/round/step/instance 事件流（`event_id` 确定性、按
-  `occurred_at` 排序）；`GetDefinition` 支持 `workflow_id` 或 `(namespace,name,version)`
+  `occurred_at` 排序，同一毫秒内保持因果构造序）；`GetDefinition` 支持 `workflow_id` 或 `(namespace,name,version)`
   二选一，并返回内容哈希与结构化 JSON（`definition_hash` / `definition_json`）。
 - **Provider 时钟**：coord 不提供独立 `Now` RPC；所有响应时间戳均为 Unix ms。适配器
   `provider.now()` 使用本地时钟即可（与 coord 响应时间同单位），不存在服务器单调时钟

@@ -10,9 +10,9 @@ import java.util.Objects;
  * {@link WorkflowClient#getTask}).
  *
  * <p>Fields that only the read surface provides ({@code instanceId}, {@code node},
- * {@code origin}, {@code createdAtMs}, the task-graph links and {@code assignments})
- * stay empty for instance-detail tasks — the {@code GetInstanceDetail} wire message
- * does not carry them.</p>
+ * {@code origin} and the task-graph links) stay empty for instance-detail tasks — the
+ * {@code GetInstanceDetail} wire message does not carry them. Timestamps and
+ * {@code assignments} are populated by both surfaces.</p>
  */
 public final class ApprovalTask {
 
@@ -33,6 +33,8 @@ public final class ApprovalTask {
     private final String successorTaskId;
     private final String spawnedByActionId;
     private final List<ApprovalAssignment> assignments;
+    private final long updatedAtMs;
+    private final long completedAtMs;
 
     public ApprovalTask(String id, String branchId, String roundId, String kind,
                         String status, String assignee, List<String> candidates,
@@ -45,7 +47,7 @@ public final class ApprovalTask {
                         String status, String assignee, List<String> candidates,
                         long deadlineMs, List<ApprovalVote> votes) {
         this(id, branchId, roundId, kind, status, assignee, candidates, deadlineMs, votes,
-                "", "", "", 0L, "", "", "", Collections.emptyList());
+                "", "", "", 0L, "", "", "", Collections.emptyList(), 0L, 0L);
     }
 
     /**
@@ -63,6 +65,24 @@ public final class ApprovalTask {
                         String instanceId, String node, String origin, long createdAtMs,
                         String predecessorTaskId, String successorTaskId,
                         String spawnedByActionId, List<ApprovalAssignment> assignments) {
+        this(id, branchId, roundId, kind, status, assignee, candidates, deadlineMs, votes,
+                instanceId, node, origin, createdAtMs, predecessorTaskId, successorTaskId,
+                spawnedByActionId, assignments, 0L, 0L);
+    }
+
+    /**
+     * Full constructor including the read-surface timestamps.
+     *
+     * @param updatedAtMs   last state change (Unix ms); 0 when unknown
+     * @param completedAtMs terminal transition time (Unix ms); 0 while not terminal
+     */
+    public ApprovalTask(String id, String branchId, String roundId, String kind,
+                        String status, String assignee, List<String> candidates,
+                        long deadlineMs, List<ApprovalVote> votes,
+                        String instanceId, String node, String origin, long createdAtMs,
+                        String predecessorTaskId, String successorTaskId,
+                        String spawnedByActionId, List<ApprovalAssignment> assignments,
+                        long updatedAtMs, long completedAtMs) {
         this.id = id;
         this.branchId = branchId;
         this.roundId = roundId;
@@ -83,6 +103,8 @@ public final class ApprovalTask {
         this.spawnedByActionId = spawnedByActionId != null ? spawnedByActionId : "";
         this.assignments = assignments != null
                 ? Collections.unmodifiableList(assignments) : Collections.emptyList();
+        this.updatedAtMs = updatedAtMs;
+        this.completedAtMs = completedAtMs;
     }
 
     public String id() { return id; }
@@ -123,12 +145,20 @@ public final class ApprovalTask {
     /** Per-principal assignment view; empty for instance-detail tasks. */
     public List<ApprovalAssignment> assignments() { return assignments; }
 
+    /** Last state change (Unix milliseconds). */
+    public long updatedAtMs() { return updatedAtMs; }
+
+    /** Terminal transition time (Unix milliseconds); 0 while not terminal. */
+    public long completedAtMs() { return completedAtMs; }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (!(o instanceof ApprovalTask that)) return false;
         return deadlineMs == that.deadlineMs
                 && createdAtMs == that.createdAtMs
+                && updatedAtMs == that.updatedAtMs
+                && completedAtMs == that.completedAtMs
                 && Objects.equals(id, that.id)
                 && Objects.equals(branchId, that.branchId)
                 && Objects.equals(roundId, that.roundId)
@@ -150,7 +180,8 @@ public final class ApprovalTask {
     public int hashCode() {
         return Objects.hash(id, branchId, roundId, kind, status, assignee,
                 candidates, deadlineMs, votes, instanceId, node, origin, createdAtMs,
-                predecessorTaskId, successorTaskId, spawnedByActionId, assignments);
+                predecessorTaskId, successorTaskId, spawnedByActionId, assignments,
+                updatedAtMs, completedAtMs);
     }
 
     @Override
@@ -161,6 +192,7 @@ public final class ApprovalTask {
                 + ", instanceId='" + instanceId + "', node='" + node + "', origin='" + origin
                 + "', createdAtMs=" + createdAtMs + ", predecessorTaskId='" + predecessorTaskId
                 + "', successorTaskId='" + successorTaskId + "', spawnedByActionId='"
-                + spawnedByActionId + "', votes=" + votes + ", assignments=" + assignments + "}";
+                + spawnedByActionId + "', votes=" + votes + ", assignments=" + assignments
+                + ", updatedAtMs=" + updatedAtMs + ", completedAtMs=" + completedAtMs + "}";
     }
 }

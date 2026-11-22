@@ -48,6 +48,8 @@ pub struct RetryConfig {
     pub jitter_factor: f64,
     /// 单次延迟上限（毫秒），None 表示无上限
     pub max_delay_ms: Option<u64>,
+    /// 指数退避系数（`BackoffStrategy::Exponential` 生效）；1.0 = 不放大。
+    pub multiplier: f64,
 }
 
 impl Default for RetryConfig {
@@ -58,6 +60,7 @@ impl Default for RetryConfig {
             max_attempts: 3,
             jitter_factor: 0.0,
             max_delay_ms: None,
+            multiplier: 2.0,
         }
     }
 }
@@ -79,7 +82,9 @@ impl RetryConfig {
             backoff,
             max_attempts: policy.limit,
             jitter_factor: jitter,
-            max_delay_ms: None,
+            max_delay_ms: policy.max_delay.as_deref().and_then(parse_duration_ms),
+            // seedj 契约保证 multiplier >= 1.0；非法值退回 2.0（不在退避路径 panic）。
+            multiplier: policy.multiplier.filter(|m| *m >= 1.0).unwrap_or(2.0),
         }
     }
 }
@@ -123,9 +128,12 @@ impl RetryScheduler {
             RetryStrategy::Constant => self.config.delay_ms,
             RetryStrategy::Linear => self.config.delay_ms.saturating_mul(self.attempt as u64),
             RetryStrategy::Exponential => {
-                // delay_ms * 2^(attempt-1)
-                let exp = 2u64.saturating_pow(self.attempt.saturating_sub(1));
-                self.config.delay_ms.saturating_mul(exp)
+                // delay_ms * multiplier^(attempt-1)，缺省 multiplier=2 与旧口径一致。
+                let exp = self.attempt.saturating_sub(1);
+                let factor = self.config.multiplier.powi(exp as i32);
+                (self.config.delay_ms as f64 * factor)
+                    .round()
+                    .min(u64::MAX as f64) as u64
             }
         };
 
@@ -259,6 +267,7 @@ mod tests {
             max_attempts: 5,
             jitter_factor: 0.0,
             max_delay_ms: None,
+            multiplier: 2.0,
         };
         let mut scheduler = RetryScheduler::new(config);
 
@@ -296,6 +305,7 @@ mod tests {
             max_attempts: 2,
             jitter_factor: 0.0,
             max_delay_ms: None,
+            multiplier: 2.0,
         };
         let mut scheduler = RetryScheduler::new(config);
 
@@ -316,6 +326,7 @@ mod tests {
             max_attempts: 5,
             jitter_factor: 0.0,
             max_delay_ms: None,
+            multiplier: 2.0,
         };
         let mut scheduler = RetryScheduler::new(config);
 
@@ -341,6 +352,7 @@ mod tests {
             max_attempts: 6,
             jitter_factor: 0.0,
             max_delay_ms: None,
+            multiplier: 2.0,
         };
         let mut scheduler = RetryScheduler::new(config);
 
@@ -368,6 +380,7 @@ mod tests {
             max_attempts: 100,
             jitter_factor: 0.2,
             max_delay_ms: None,
+            multiplier: 2.0,
         };
         let mut scheduler = RetryScheduler::new(config);
 
@@ -393,6 +406,7 @@ mod tests {
             max_attempts: 10,
             jitter_factor: 0.0,
             max_delay_ms: Some(5000),
+            multiplier: 2.0,
         };
         let mut scheduler = RetryScheduler::new(config);
 
@@ -418,6 +432,7 @@ mod tests {
             max_attempts: 1,
             jitter_factor: 0.0,
             max_delay_ms: None,
+            multiplier: 2.0,
         };
         let scheduler = RetryScheduler::new(config);
         // max_attempts=1，首次执行即不可重试
@@ -432,6 +447,7 @@ mod tests {
             max_attempts: 3,
             jitter_factor: 0.0,
             max_delay_ms: None,
+            multiplier: 2.0,
         };
         let mut scheduler = RetryScheduler::new(config);
         assert!(scheduler.can_retry());
@@ -450,6 +466,8 @@ mod tests {
             backoff: Some(BackoffStrategy::Constant),
             limit: 3,
             jitter: None,
+            max_delay: None,
+            multiplier: None,
         };
         let config = RetryConfig::from_policy(&policy, None);
         assert_eq!(config.delay_ms, 5000);
@@ -465,12 +483,33 @@ mod tests {
             backoff: Some(BackoffStrategy::Exponential),
             limit: 5,
             jitter: Some(crate::workflow::model::JitterConfig { factor: 0.1 }),
+            max_delay: None,
+            multiplier: None,
         };
         let config = RetryConfig::from_policy(&policy, None);
         assert_eq!(config.delay_ms, 1000);
         assert_eq!(config.backoff, RetryStrategy::Exponential);
         assert_eq!(config.max_attempts, 5);
         assert_eq!(config.jitter_factor, 0.1);
+    }
+
+    /// seedj RetryPolicy 四字段：maxBackoff → maxDelay 封顶、multiplier 决定指数底数。
+    #[test]
+    fn retry_from_retry_policy_max_delay_and_multiplier() {
+        let policy = RetryPolicy {
+            delay: "PT1S".to_string(),
+            backoff: Some(BackoffStrategy::Exponential),
+            limit: 8,
+            jitter: None,
+            max_delay: Some("PT10S".to_string()),
+            multiplier: Some(1.5),
+        };
+        let config = RetryConfig::from_policy(&policy, None);
+        assert_eq!(config.multiplier, 1.5);
+        assert_eq!(config.max_delay_ms, Some(10_000));
+        let mut scheduler = RetryScheduler::new(config);
+        let delays: Vec<u64> = std::iter::from_fn(|| scheduler.next_delay_ms()).collect();
+        assert_eq!(delays, vec![1000, 1500, 2250, 3375, 5063, 7594, 10000]);
     }
 
     // ─── Default ───
@@ -483,6 +522,7 @@ mod tests {
         assert_eq!(config.max_attempts, 3);
         assert_eq!(config.jitter_factor, 0.0);
         assert_eq!(config.max_delay_ms, None);
+        assert_eq!(config.multiplier, 2.0);
     }
 
     // ─── Reset ───
@@ -495,6 +535,7 @@ mod tests {
             max_attempts: 5,
             jitter_factor: 0.0,
             max_delay_ms: None,
+            multiplier: 2.0,
         };
         let mut scheduler = RetryScheduler::new(config);
 

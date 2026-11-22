@@ -1065,15 +1065,15 @@ fn withdraw_only_by_initiator() {
         )
         .unwrap();
     let err = e
-        .withdraw(e.instance.revision, "lisi", tick(&mut t))
+        .withdraw(e.instance.revision, "lisi", None, None, tick(&mut t))
         .unwrap_err();
     assert!(matches!(err, ApprovalError::NotAuthorized(_)));
     let out = e
-        .withdraw(e.instance.revision, "zhangsan", tick(&mut t))
+        .withdraw(e.instance.revision, "zhangsan", None, None, tick(&mut t))
         .unwrap();
     assert_eq!(e.instance.status, InstanceStatus::Cancelled);
     assert_eq!(e.branches[&b].status, BranchStatus::Cancelled);
-    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Cancelled);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Withdrawn);
     assert!(has_event(&out, "com.china-workflow.instance.cancelled.v1"));
 }
 

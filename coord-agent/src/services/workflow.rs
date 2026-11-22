@@ -2529,11 +2529,12 @@ pub mod phase4 {
     }
 
     /// `ListInstances` 的状态 / 定义 / 启动时间窗过滤（空/0 = 不过滤）。
-    #[derive(Debug, Clone, Copy, Default)]
+    #[derive(Debug, Clone, Default)]
     pub struct InstanceQuery<'a> {
         pub namespace: Option<&'a str>,
         pub definition: Option<&'a str>,
-        pub status: Option<&'a str>,
+        /// 多值状态过滤：任一命中即算匹配；空 = 不过滤。
+        pub statuses: Vec<&'a str>,
         pub started_after_ms: i64,
         pub started_before_ms: i64,
     }
@@ -2579,6 +2580,63 @@ pub mod phase4 {
         pub attributes: Value,
     }
 
+    /// 工作流实例（无审批聚合）的历史投影：`INSTANCE_STARTED` + 终态事件。
+    ///
+    /// 管理终止以 `terminated` fault 标记，投影 `INSTANCE_TERMINATED`；其余 fault 为
+    /// `INSTANCE_FAULTED`（与审批聚合路径的 `INSTANCE_FAILED` 区分）。
+    fn history_from_instance(inst: &WorkflowInstance) -> Vec<HistoryEventView> {
+        let iid = inst.id.clone();
+        let mut events = vec![HistoryEventView {
+            event_id: format!("{iid}:instance:started"),
+            event_type: "INSTANCE_STARTED".into(),
+            instance_id: iid.clone(),
+            step_name: String::new(),
+            task_id: String::new(),
+            action_id: String::new(),
+            occurred_at: inst.created_at,
+            attributes: serde_json::json!({
+                "definition_ns": inst.definition_ns,
+                "definition_name": inst.definition_name,
+                "definition_version": inst.definition_version,
+                "definition_hash": inst.definition_hash,
+                "initiator": inst.initiator,
+                "acting_service": inst.initiator_acting_service,
+            }),
+        }];
+        let terminated = inst.fault.as_ref().is_some_and(|f| {
+            f.r#type
+                == coord_core::workflow::errors::error_type(
+                    coord_core::workflow::errors::kind::TERMINATED,
+                )
+        });
+        let event_type = match inst.status {
+            InstanceStatus::Completed => "INSTANCE_COMPLETED",
+            InstanceStatus::Cancelled => "INSTANCE_CANCELLED",
+            InstanceStatus::Failed if terminated => "INSTANCE_TERMINATED",
+            InstanceStatus::Failed => "INSTANCE_FAULTED",
+            InstanceStatus::Pending
+            | InstanceStatus::Running
+            | InstanceStatus::Waiting
+            | InstanceStatus::Suspended => {
+                return events;
+            }
+        };
+        events.push(HistoryEventView {
+            event_id: format!("{iid}:instance:terminal"),
+            event_type: event_type.into(),
+            instance_id: iid,
+            step_name: String::new(),
+            task_id: String::new(),
+            action_id: String::new(),
+            occurred_at: inst.updated_at,
+            attributes: serde_json::json!({
+                "status": json_label(&inst.status).to_uppercase(),
+                "reason": inst.fault.as_ref().map(|f| f.detail.clone()),
+            }),
+        });
+        events
+    }
+
     /// 审批实例详情（`GetInstanceDetail` 查询投影）。
     ///
     /// `status` 为大写实例状态；`branches`/`tasks`/`rounds` 为引擎快照的原始实体。
@@ -2611,10 +2669,11 @@ pub mod phase4 {
             "completed" => Ok(ApprovalTaskStatus::Completed),
             "rejected" => Ok(ApprovalTaskStatus::Rejected),
             "cancelled" => Ok(ApprovalTaskStatus::Cancelled),
+            "withdrawn" => Ok(ApprovalTaskStatus::Withdrawn),
             "expired" => Ok(ApprovalTaskStatus::Expired),
             other => Err(format!(
                 "unknown task status '{other}'; expected \
-                 created|claimed|suspended|scheduled|completed|rejected|cancelled|expired"
+                 created|claimed|suspended|scheduled|completed|rejected|cancelled|withdrawn|expired"
             )),
         }
     }
@@ -4234,14 +4293,19 @@ pub mod phase4 {
             &self,
             workflow_id: &str,
         ) -> Result<Vec<HistoryEventView>, BridgeError> {
-            let bridge = self.approval_bridge()?;
-            let engine = bridge
-                .store()
-                .load(workflow_id)
-                .await
-                .map_err(BridgeError::from)?
-                .map(|(engine, _rev)| engine)
-                .ok_or_else(|| BridgeError::NotFound(workflow_id.to_string()))?;
+            let engine = match self.approval_bridge() {
+                Ok(bridge) => bridge
+                    .store()
+                    .load(workflow_id)
+                    .await
+                    .map_err(BridgeError::from)?
+                    .map(|(engine, _rev)| engine),
+                // 无审批桥（未启用 durable 审批）时仍可从工作流实例投影终态历史。
+                Err(_) => None,
+            };
+            let Some(engine) = engine else {
+                return self.instance_history(workflow_id).await;
+            };
 
             let iid = engine.instance.id.clone();
             let mut events = Vec::new();
@@ -4352,7 +4416,10 @@ pub mod phase4 {
                 // 撤回/取消/回退造成的席位自动取消：assignment 级事件（seedj
                 // `TASK_ASSIGNMENT_AUTO_CANCELLED`）。逐 principal 投影，终态原因取
                 // assignment 的 `resolved_reason`（TASK_CANCELLED / DELEGATION_EXPIRED …）。
-                if task.status == ApprovalTaskStatus::Cancelled {
+                if matches!(
+                    task.status,
+                    ApprovalTaskStatus::Cancelled | ApprovalTaskStatus::Withdrawn
+                ) {
                     for (index, assignment) in task.assignments(task.updated_at).iter().enumerate()
                     {
                         events.push(HistoryEventView {
@@ -4370,6 +4437,23 @@ pub mod phase4 {
                             }),
                         });
                     }
+                }
+                if task.status == ApprovalTaskStatus::Withdrawn {
+                    // 实例撤回的活动席位：无条件投影（即便带记录，撤回仍是席位终点）。
+                    events.push(HistoryEventView {
+                        event_id: format!("{base}:withdrawn"),
+                        event_type: "TASK_WITHDRAWN".into(),
+                        instance_id: iid.clone(),
+                        step_name: node.clone(),
+                        task_id: task.id.clone(),
+                        action_id: String::new(),
+                        occurred_at: task.updated_at,
+                        attributes: serde_json::json!({
+                            "assignee": task.assignee,
+                            "kind": json_label(&task.kind),
+                            "assignments": task.assignments(task.updated_at),
+                        }),
+                    });
                 }
                 if task.votes.is_empty() {
                     let (event_type, suffix) = match task.status {
@@ -4570,13 +4654,33 @@ pub mod phase4 {
                             "revision": engine.instance.revision,
                             "reason": cancelled.and_then(|c| c.reason.clone()),
                             "compensate": cancelled.is_some_and(|c| c.compensate),
+                            "target_node": cancelled.and_then(|c| c.target_node.clone()),
                         }),
                     });
                 }
             }
 
-            events.sort_by(|a, b| (a.occurred_at, &a.event_id).cmp(&(b.occurred_at, &b.event_id)));
+            // 同一毫秒内保持构造顺序（因果序：席位先于轮次/回退/实例终态）。
+            // 不能用 event_id 做 tie-break：`instance:*` 字典序在 `task:*` 之前，
+            // 会把 INSTANCE_WITHDRAWN 排到 TASK_WITHDRAWN 前面。
+            events.sort_by_key(|e| e.occurred_at);
             Ok(events)
+        }
+
+        /// 无审批聚合实例的历史：只投影实例级生命周期（启动 + 终态）。
+        ///
+        /// 纯 ACTIVITY / WAIT / LISTEN 定义没有审批聚合；管理终止后 seedj 适配器仍需
+        /// `INSTANCE_TERMINATED`。有聚合的实例不走本路径（见 [`Self::history`]）。
+        async fn instance_history(
+            &self,
+            workflow_id: &str,
+        ) -> Result<Vec<HistoryEventView>, BridgeError> {
+            let inst = self
+                .get_instance(workflow_id)
+                .await
+                .map_err(BridgeError::Store)?
+                .ok_or_else(|| BridgeError::NotFound(workflow_id.to_string()))?;
+            Ok(history_from_instance(&inst))
         }
 
         /// 审批聚合状态（大写）；无聚合返回 `None`。
@@ -4640,6 +4744,63 @@ pub mod phase4 {
                 .map_err(WorkflowEngineError::from)
         }
 
+        /// 无审批聚合实例的管理终止（`Terminate` 回退路径）。
+        pub async fn terminate_instance(
+            &self,
+            instance_id: &str,
+            reason: &str,
+        ) -> Result<WorkflowInstance, WorkflowEngineError> {
+            self.runtime()?
+                .terminate_instance(instance_id, reason)
+                .await
+                .map_err(WorkflowEngineError::from)
+        }
+
+        /// `Terminate` 的完整入口：优先走审批聚合（`sign_admins` 守卫），聚合缺失
+        /// （含完全没有审批桥的装配）时回退到工作流 runtime。
+        pub async fn terminate_workflow(
+            &self,
+            workflow_id: &str,
+            actor: &str,
+            acting_service: Option<&str>,
+            reason: &str,
+            idempotency_key: Option<&str>,
+        ) -> Result<(String, String), BridgeError> {
+            if self.approval.is_none() {
+                return self.terminate_runtime(workflow_id, reason).await;
+            }
+            match self
+                .approval_command_with(
+                    workflow_id,
+                    actor,
+                    acting_service,
+                    ApprovalCommand::Terminate { reason },
+                    idempotency_key,
+                )
+                .await
+            {
+                Ok(done) => Ok(done),
+                Err(BridgeError::NotFound(_)) => self.terminate_runtime(workflow_id, reason).await,
+                Err(e) => Err(e),
+            }
+        }
+
+        /// 工作流 runtime 的终止收口（不经过审批聚合）。
+        async fn terminate_runtime(
+            &self,
+            workflow_id: &str,
+            reason: &str,
+        ) -> Result<(String, String), BridgeError> {
+            let runtime = self
+                .runtime()
+                .map_err(|_| BridgeError::InvalidTransition("runtime not initialized".into()))?;
+            let inst = runtime
+                .terminate_instance(workflow_id, reason)
+                .await
+                .map_err(map_runtime_to_bridge)?;
+            Ok((inst.id, "TERMINATED".to_string()))
+        }
+
         /// 列出工作流实例（过滤 + 分页）——契约见 [`WorkflowStore::list_instances`]。
         pub async fn list_instances(
             &self,
@@ -4670,7 +4831,11 @@ pub mod phase4 {
             } else {
                 page_size
             };
-            let status = query.status.map(parse_instance_status).transpose()?;
+            let statuses = query
+                .statuses
+                .iter()
+                .map(|raw| parse_instance_status(raw))
+                .collect::<Result<Vec<_>, _>>()?;
             let mut matched = Vec::new();
             let mut token = page_token.map(str::to_string);
             loop {
@@ -4680,7 +4845,7 @@ pub mod phase4 {
                     .await
                     .map_err(|e| format!("store error: {e}"))?;
                 for inst in page {
-                    if status.is_some_and(|want| inst.status != want) {
+                    if !statuses.is_empty() && !statuses.contains(&inst.status) {
                         continue;
                     }
                     if query.started_after_ms > 0 && inst.created_at < query.started_after_ms {
@@ -8151,10 +8316,10 @@ do:
         assert_eq!(task_event.step_name, "review");
         assert_eq!(task_event.attributes["actor"], serde_json::json!("alice"));
         assert_eq!(task_event.attributes["comment"], serde_json::json!("同意"));
-        // 顺序单调 + event_id 唯一 + 重复读取逐字一致。
+        // 时间单调 + event_id 唯一 + 重复读取逐字一致；同一毫秒内保持因果构造序。
         assert!(events
             .windows(2)
-            .all(|w| (w[0].occurred_at, &w[0].event_id) <= (w[1].occurred_at, &w[1].event_id)));
+            .all(|w| w[0].occurred_at <= w[1].occurred_at));
         let mut ids: Vec<&str> = events.iter().map(|e| e.event_id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -8277,9 +8442,17 @@ do:
             .await
             .unwrap();
         await_open_seat(&store, &inst.id, "alice").await;
-        svc.approval_command(&inst.id, "initor", ApprovalCommand::Withdraw, None)
-            .await
-            .unwrap();
+        svc.approval_command(
+            &inst.id,
+            "initor",
+            ApprovalCommand::Withdraw {
+                target_node: Some("review"),
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
         let events = svc.history(&inst.id).await.unwrap();
         let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
         assert!(types.contains(&"INSTANCE_WITHDRAWN"), "{types:?}");
@@ -8293,6 +8466,30 @@ do:
             .find(|e| e.event_type == "INSTANCE_WITHDRAWN")
             .unwrap();
         assert_eq!(withdrawn.attributes["compensate"], serde_json::json!(false));
+        assert_eq!(
+            withdrawn.attributes["target_node"],
+            serde_json::json!("review")
+        );
+        // seedj `WithdrawInstance`：TASK_WITHDRAWN 必须先于 INSTANCE_WITHDRAWN，
+        // 且 History 含撤回目标的 INSTANCE_ROLLED_BACK。
+        let task_at = types.iter().position(|t| *t == "TASK_WITHDRAWN");
+        let instance_at = types.iter().position(|t| *t == "INSTANCE_WITHDRAWN");
+        assert!(
+            task_at.is_some() && instance_at.is_some() && task_at < instance_at,
+            "TASK_WITHDRAWN 必须先于 INSTANCE_WITHDRAWN: {types:?}"
+        );
+        assert!(types.contains(&"INSTANCE_ROLLED_BACK"), "{types:?}");
+        let reloaded = store.load(&inst.id).await.unwrap().unwrap().0;
+        let withdrawn_task = reloaded
+            .tasks
+            .values()
+            .find(|t| t.status == coord_core::workflow::approval::model::TaskStatus::Withdrawn)
+            .expect("withdrawn seat");
+        assert!(withdrawn_task.completed_at.is_some());
+        assert!(withdrawn_task
+            .assignments(withdrawn_task.updated_at)
+            .iter()
+            .all(|a| a.resolved_reason.as_deref() == Some("WITHDRAWN")));
 
         // 控制面取消（带补偿声明）
         let (svc2, store2) = approve_service(HashMap::new());
@@ -8416,7 +8613,7 @@ do:
         assert!(by_def.iter().any(|i| i.id == inst.id));
 
         let by_status_query = InstanceQuery {
-            status: Some("COMPLETED"),
+            statuses: vec!["COMPLETED"],
             ..Default::default()
         };
         let (by_status, _) = svc
@@ -8448,10 +8645,118 @@ do:
             .unwrap();
         assert!(bounded.iter().any(|i| i.id == inst.id));
         let bogus = InstanceQuery {
-            status: Some("bogus"),
+            statuses: vec!["bogus"],
             ..Default::default()
         };
         assert!(svc.list_instances_filtered(&bogus, 10, None).await.is_err());
+    }
+
+    /// seedj `RUNNING` 同时命中 coord `RUNNING` 与审批挂起 `SUSPENDED`。
+    #[tokio::test]
+    async fn list_instances_status_in_matches_running_and_suspended() {
+        let (svc, store) = approve_service(HashMap::new());
+        let def_id = svc
+            .deploy_definition("test", &sample_approve_yaml("status-in-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &inst.id, "alice").await;
+
+        let both = InstanceQuery {
+            statuses: vec!["RUNNING", "SUSPENDED"],
+            ..Default::default()
+        };
+        let (hits, _) = svc.list_instances_filtered(&both, 10, None).await.unwrap();
+        assert!(hits.iter().any(|i| i.id == inst.id), "{hits:?}");
+
+        // 单值 RUNNING 不得命中挂起实例（SUSPENDED 是独立状态）。
+        let running_only = InstanceQuery {
+            statuses: vec!["RUNNING"],
+            ..Default::default()
+        };
+        let (hits, _) = svc
+            .list_instances_filtered(&running_only, 10, None)
+            .await
+            .unwrap();
+        assert!(!hits.iter().any(|i| i.id == inst.id), "{hits:?}");
+    }
+
+    /// #456：没有审批聚合的实例（纯 wait）也能终止，并在 History 投影
+    /// `INSTANCE_TERMINATED`（无 `approval_status`）。
+    #[tokio::test]
+    async fn terminate_without_approval_aggregate_falls_back_to_runtime() {
+        const WAIT_ONLY: &str = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: wait-only-terminate
+  version: "1.0"
+do:
+  - hold:
+      wait: PT1H
+"#;
+        // 有审批桥、但实例没有审批聚合（纯 wait 定义）：走 NotFound 回退分支。
+        let (svc, _approval_store) = approve_service(HashMap::new());
+        let def_id = svc.deploy_definition("test", WAIT_ONLY).await.unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            if cur.status == InstanceStatus::Waiting || cur.status == InstanceStatus::Suspended {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let (_, status) = svc
+            .terminate_workflow(&inst.id, "ops", None, "运维终止", None)
+            .await
+            .unwrap();
+        assert_eq!(status, "TERMINATED");
+        let terminated = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(terminated.status, InstanceStatus::Failed);
+        let fault = terminated.fault.as_ref().expect("fault");
+        assert_eq!(fault.title, "terminated");
+        assert_eq!(fault.detail, "运维终止");
+        assert!(svc.approval_status(&inst.id).await.is_none());
+
+        let events = svc.history(&inst.id).await.unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types.contains(&"INSTANCE_STARTED"), "{types:?}");
+        assert!(types.contains(&"INSTANCE_TERMINATED"), "{types:?}");
+        assert!(!types.contains(&"INSTANCE_FAULTED"), "{types:?}");
+
+        // 没有审批桥的装配：直接走 runtime 终止，不依赖 NotFound 探测。
+        let svc_no_bridge = WorkflowEngineService::new_for_test();
+        let def2 = svc_no_bridge
+            .deploy_definition("test", WAIT_ONLY)
+            .await
+            .unwrap();
+        let inst2 = svc_no_bridge
+            .start_instance_as(&def2, serde_json::json!({}), Some("initor"))
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            let cur = svc_no_bridge
+                .get_instance(&inst2.id)
+                .await
+                .unwrap()
+                .unwrap();
+            if cur.status == InstanceStatus::Waiting || cur.status == InstanceStatus::Suspended {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (_, status) = svc_no_bridge
+            .terminate_workflow(&inst2.id, "ops", None, "no bridge", None)
+            .await
+            .unwrap();
+        assert_eq!(status, "TERMINATED");
     }
 
     /// 催办 / 抄送：只写审计，不改审批状态机；任务级抄送受 `allowCc` 约束。
