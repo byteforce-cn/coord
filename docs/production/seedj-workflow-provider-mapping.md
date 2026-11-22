@@ -86,9 +86,9 @@ SDK 而不是自行发 gRPC。`listTasks` 是管理面读（`coord:workflow:read
 
 - **引擎/契约面无未落地项**：#381 的剩余项（前后加签、assignment 读面、按 assignee 减签、
   委派到期、`WAITING` + `Resume`）已随 ADR-0013 D13 落地。
-- **SDK 发版**：任务读面与任务级命令随 `coord-java-sdk` 0.4.4 发布；本表新增的
-  `status_in[]`、`withdraw(targetNode)` 与 task/round/assignment 时间戳在 `main` 可用，
-  随下一版本发布。适配器使用前按实际 SDK 版本核对。
+- **SDK 发版**：任务读面、任务级命令，以及 `status_in[]`、`withdraw(targetNode)` 与
+task/round/assignment 时间戳随 `coord-java-sdk` 0.4.5 源码发布。适配器使用前按实际 SDK
+版本核对。
 - `formData`：按 ADR-0013 D9 **不实现**，由 seedj 侧存储并在读视图合并（见 §2）。
 - `History.actionId` 只有命令携带 `idempotency_key` 时非空；系统动作（超时/到期）与
   未提供键的命令为空。
