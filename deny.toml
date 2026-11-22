@@ -38,8 +38,8 @@ ignore = [
 ]
 
 [licenses]
-# 私有 workspace 成员（`publish = false`，如冻结的 spike 证据工装）不参与许可证
-# 合规判定：它们不随发布物交付，清单也不要求声明 license（见 spike/2026-10/README.md）。
+# 私有 workspace 成员（`publish = false`，如测试用 guest 插件工装）不参与许可证
+# 合规判定：它们不随发布物交付，清单也不要求声明 license。
 private = { ignore = true }
 
 # 默认拒绝未明确列出的许可证；coord 依赖栈常用许可白名单

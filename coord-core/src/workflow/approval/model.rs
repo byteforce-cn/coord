@@ -1,7 +1,7 @@
 //! v2 审批实体与枚举。
 //!
-//! 字段清单与不变量见 `spike/2026-10/spike-1-state-model/docs/MODEL.md`，状态转换规则见
-//! 同目录的 `TRANSITIONS.md`；当前对外语义口径收敛在 `docs/production/workflow-semantics.md`。
+//! 字段清单与不变量由本文件定义，状态转换规则见 [`crate::workflow::approval::engine`]；
+//! 对外语义口径收敛在 `docs/production/workflow-semantics.md`。
 //! 本模块只定义数据：不读时钟、不生成 ID、不做 I/O——时间戳与标识由调用方注入。
 
 use serde::{Deserialize, Serialize};
@@ -772,8 +772,7 @@ pub enum Effect {
 
 /// v2 审批命令错误。
 ///
-/// 变体与 `Display` 文案是调用方与测试定位失败对象的锚点（命令路径不 panic），
-/// 逐字取自 Spike 1 状态模型（证据 `spike/2026-10/spike-1-state-model/`）。
+/// 变体与 `Display` 文案是调用方与测试定位失败对象的锚点（命令路径不 panic），不得随意改名。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalError {

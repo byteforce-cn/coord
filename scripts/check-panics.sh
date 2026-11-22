@@ -74,15 +74,11 @@ except FileNotFoundError:
     sys.exit(1)
 
 # 测试目录 / build.rs 直接剔除。
-# 证据目录（`spike/`）同样剔除：其中的 harness 是决策证据原型（`publish = false`，
-# 不随发布物交付、冻结只读），不是生产代码；生产 panic 口径不适用于它们。
 non_test = [
     s for s in spans
     if "/tests/" not in s[0]
     and not s[0].endswith("/build.rs")
     and "/target/" not in s[0]
-    and not s[0].startswith("spike/")
-    and "/spike/" not in s[0]
 ]
 
 # 为每个源文件计算测试代码的行区间：

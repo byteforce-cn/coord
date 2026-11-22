@@ -8,8 +8,8 @@
 //! - 一个分支同时最多一个 Open 轮次；
 //! - 阅签不计票；已取消/过期席位不计入 `total_count`。
 //!
-//! 转换规则与判定顺序见 `spike/2026-10/spike-1-state-model/docs/TRANSITIONS.md`，实体字段见
-//! 同目录的 `MODEL.md`（冻结证据）。本模块是纯计算：不读时钟、不做 I/O、不生成根标识——
+//! 转换规则与判定顺序由本文件的命令方法定义（实体字段见 [`crate::workflow::approval::model`]）。
+//! 本模块是纯计算：不读时钟、不做 I/O、不生成根标识——
 //! 时间戳与实例 id 由调用方注入，因此同输入必然同输出。
 
 use super::model::*;
@@ -1549,7 +1549,6 @@ impl Engine {
     /// 强制终止（管理路径）：与 `withdraw` 相同的级联取消，实例置 `Terminated`。
     ///
     /// 本模型层不做权限判定：只记录 `by` 与审计；授权的契约面归 M2-C（见 ADR-0013 D7）。
-    /// 缺口口径见 `spike/2026-10/spike-1-state-model/docs/GAPS.md`（Q6）。
     pub fn terminate(
         &mut self,
         expected: u64,

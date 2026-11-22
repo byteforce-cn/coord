@@ -22,9 +22,8 @@
 //!
 //! # 语义来源
 //!
-//! 当前对外口径见 `docs/production/workflow-semantics.md` 的「v2 审批模型与存储」小节与
-//! `docs/adr/0013-workflow-approval-v2.md`；字段清单与逐条状态转换表的冻结证据在
-//! `spike/2026-10/spike-1-state-model/`（只读）。
+//! 当前对外口径见 `docs/production/workflow-semantics.md` 的「v2 人工审批」小节与
+//! `docs/adr/0013-workflow-approval-v2.md`；字段清单与状态转换规则由 [`model`] / [`engine`] 定义。
 //!
 //! 能力面（proto/RPC）与运行时接线归 M2-C 后续任务；授权判定与事件映射已收敛到
 //! [`bridge`]。

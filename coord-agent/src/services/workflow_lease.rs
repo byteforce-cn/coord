@@ -8,8 +8,7 @@
 // 失去租约的驱动者在租约被撤销/重授后，epoch 不再匹配，其迟到写被 Txn 拒绝。
 //
 // 残余风险：若引擎在两次写之间已经产生了**外部副作用**（call 节点已发出请求），
-// fencing 只能拒绝状态写回，无法撤回副作用 —— 这需要 StepToken 去重兜底
-// （见 `spike/2026-10/spike-2-concurrency/STEPTOKEN.md`）。
+// fencing 只能拒绝状态写回，无法撤回副作用 —— 这需要 StepToken 去重兜底（ADR-0013 D3）。
 
 use std::sync::Arc;
 use std::time::Duration;
