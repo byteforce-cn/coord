@@ -3770,9 +3770,25 @@ where
                                     }
                                     _ => None,
                                 };
+                                // 步骤级审批预算（seedj `StepDefinition.timeout`）：
+                                // 与首轮 dueIn 分离，供 ResumeWorkflow 的时间预算校验。
+                                let step_budget_ms = definition
+                                    .task_meta
+                                    .get(node)
+                                    .and_then(|meta| meta.timeout.as_ref())
+                                    .and_then(|timeout| {
+                                        crate::workflow::engine::parse_iso8601_duration_ms(
+                                            &timeout.after,
+                                        )
+                                    });
                                 let opened = match (self.approval.as_ref(), approve_task) {
                                     (Some(bridge), Some(task)) => bridge
-                                        .ensure_node_open(&inst, node, task)
+                                        .ensure_node_open_with_budget(
+                                            &inst,
+                                            node,
+                                            task,
+                                            step_budget_ms,
+                                        )
                                         .await
                                         .map_err(|e| e.to_string()),
                                     (None, _) => Err(format!(
@@ -7701,6 +7717,42 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("approval deadline timer at {fire_at_ms} was never scheduled");
+    }
+
+    /// 恢复预算取步骤 timeout：首轮 deadline 短于步骤预算时，等待态到期后仍可恢复。
+    #[tokio::test]
+    async fn waiting_resume_uses_step_budget_not_first_round_deadline() {
+        use crate::workflow::approval::model::TimeoutPolicy;
+        use crate::workflow::model::{TaskMeta, TimeoutConfig};
+
+        let (rt, bridge, _approval_store, timers) = approval_deadline_runtime();
+        let mut def = approve_deadline_definition("approve-budget-wf", Some("PT1S"), &["alice"]);
+        if let Task::Approve(task) = &mut def.do_tasks[0].task {
+            task.timeout_policy = TimeoutPolicy::Waiting;
+        }
+        def.task_meta.insert(
+            "review".into(),
+            TaskMeta {
+                timeout: Some(TimeoutConfig {
+                    after: "PT1H".into(),
+                }),
+                ..Default::default()
+            },
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 2_000).await;
+        rt.clock.advance(1_000);
+        rt.fire_due_timers().await;
+        await_status(store_of(&rt), &started.id, InstanceStatus::Waiting).await;
+
+        // 已消耗 1s + 30s 新截止仍在 1h 步骤预算内；若预算取首轮 deadline(1s) 会被拒。
+        bridge
+            .resume_workflow(&started.id, "anonymous", None, 30_000, "extended", None)
+            .await
+            .unwrap();
     }
 
     /// 审批截止到期：过期席位，但工作流保持挂起（Q4 无自动判定）。

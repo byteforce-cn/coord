@@ -300,13 +300,30 @@ impl ApprovalBridge {
         node: &str,
         task: &ApproveTask,
     ) -> Result<(), BridgeError> {
+        self.ensure_node_open_with_budget(wf, node, task, None)
+            .await
+    }
+
+    /// 同 [`Self::ensure_node_open`]，但显式给出步骤级审批预算（seedj
+    /// `StepDefinition.timeout`）。
+    ///
+    /// `approve.deadline` 同时是首轮截止与缺省预算；当两者不同（首轮 dueIn 短、步骤
+    /// timeout 长）时，`ResumeWorkflow` 的时间预算必须用步骤 timeout，否则等待态到期后
+    /// 已消耗时间必然超出首轮截止，恢复永远失败。
+    pub async fn ensure_node_open_with_budget(
+        &self,
+        wf: &WorkflowInstance,
+        node: &str,
+        task: &ApproveTask,
+        budget_ms: Option<i64>,
+    ) -> Result<(), BridgeError> {
         let seats = self.resolve_seats(task, &wf.context)?;
         let policy = ApprovalPolicy {
             allow_self_approve: task.allow_self_approve,
             sign_admins: task.sign_admins.clone(),
             allow_cc: task.allow_cc,
             timeout_policy: task.timeout_policy,
-            timeout_ms: task.deadline_duration_ms(),
+            timeout_ms: budget_ms.or_else(|| task.deadline_duration_ms()),
         };
         let now = self.clock.now_ms();
         let deadline = task.deadline_ms(now);
@@ -2654,6 +2671,27 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BridgeError::InvalidTransition(_)), "{err:?}");
+    }
+
+    /// 恢复预算取步骤 timeout：首轮 deadline 短于步骤预算时，等待态到期后仍可恢复。
+    #[tokio::test]
+    async fn resume_workflow_uses_step_budget_over_first_round_deadline() {
+        let (bridge, _store) = build(None);
+        let mut task = approve_task(&["u1"]);
+        task.deadline = Some("PT1S".into());
+        task.timeout_policy = TimeoutPolicy::Waiting;
+        bridge
+            .ensure_node_open_with_budget(&wf(), "review", &task, Some(3_600_000))
+            .await
+            .unwrap();
+        let deadline = task.deadline_ms(T0).unwrap();
+        bridge.expire_due(ID, deadline).await.unwrap();
+
+        let outcome = bridge
+            .resume_workflow(ID, "zhangsan", None, 30_000, "extended", None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.response["status"], "RUNNING");
     }
 
     /// 委派到期：`next_open_deadline` 暴露委派截止，`expire_due` 撤销代理权。
