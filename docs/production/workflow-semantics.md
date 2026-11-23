@@ -287,7 +287,8 @@ auth:
   `none`（B-WF-5：只过期、不自动收口）；`fail` 到期置工作流 `FAULTED`
   （`TASK_OVERDUE`）；`waiting` 到期置 `WAITING`，由
   `ResumeWorkflow(workflow_id, new_due_in_ms, reason)` 按上一轮席位重建任务并重新挂起
-  （步骤 `timeout` 预算校验，超出 `INVALID_ARGUMENT` 且零副作用）。恢复后审批聚合回到
+  （预算取步骤级 `task_meta.timeout`，未声明时回退 `approve.deadline`；超出预算返回
+  `INVALID_ARGUMENT` 且零副作用）。恢复后审批聚合回到
   `RUNNING` 并重建席位；工作流实例仍为 `SUSPENDED`（审批挂起是 coord 的人工等待语义，
   seedj 适配器按 `RUNNING` 映射）。
 - **驳回判定（`reject` / `target_node`）**：`approve.reject` 声明 `anyReject`（缺省，等价

@@ -60,7 +60,7 @@ seedj 字段一律视为不支持**——适配器必须 fail-closed（拒绝注
 | `Cc` | `Cc` | ✅（任务级要求节点 `allowCc: true`；实例级限发起人/`sign_admins`） |
 | `AddAssignee(position)` | `AddSign` + `position`/`task_id`/`action_id` | ✅ `CURRENT` / `BEFORE` / `AFTER`；响应 `derived_task_ids`；BEFORE 挂起原席位、完成后恢复；AFTER 原轮次通过后执行、否决/回退时丢弃（`TASK_AFTER_SPAWN_DISCARDED`）。 |
 | `RemoveAssignee` | `RemoveSign` + `assignees`/`task_id` | ✅ 按 assignee 移除未决席位（候选池移除单个候选），响应 `removed_task_ids` + 重算后的 `round`。 |
-| `Resume(newDueIn)` | `ResumeWorkflow` | ✅ 仅 `WAITING` 有效；按上一轮席位重建任务并写新截止（`timeoutPolicy: waiting` 超时后）。coord 工作流仍为 `SUSPENDED`（审批挂起），审批聚合与 seedj `RUNNING` 对齐。 |
+| `Resume(newDueIn)` | `ResumeWorkflow` | ✅ 仅 `WAITING` 有效；按上一轮席位重建任务并写新截止（`timeoutPolicy: waiting` 超时后）。时间预算取步骤级 `task_meta.timeout`（seedj `StepDefinition.timeout`），未声明时回退 `approve.deadline`。coord 工作流仍为 `SUSPENDED`（审批挂起），审批聚合与 seedj `RUNNING` 对齐。 |
 | `Signal(name)` | `Signal` | ✅（`signal_name` 必须匹配挂起等待） |
 | `Cancel` / `Terminate` | `Cancel` / `Terminate` | ✅（终态不可再变更） |
 
