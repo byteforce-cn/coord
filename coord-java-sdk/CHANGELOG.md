@@ -3,6 +3,15 @@
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。版本号与 `pom.xml` 同步；未发布的
 改动记在 `Unreleased`，发版时整体归入对应版本。
 
+## [0.4.6] — 2026-11-23
+
+### Fixed — ResumeWorkflow 时间预算
+
+- `approve.deadline` 只表示首轮截止；`ResumeWorkflow` 的时间预算改为取节点
+  `task_meta.timeout`（seedj `StepDefinition.timeout`），未声明时回退 `approve.deadline`。
+  首轮 dueIn 短于步骤 timeout 时，等待态到期后不再恒被 `INVALID_ARGUMENT` 拒绝。
+- Java SDK 接口面不变。
+
 ## [Unreleased]
 
 ### Added — workflow seedj 适配器对齐（coord #451 / #452 / #453）
